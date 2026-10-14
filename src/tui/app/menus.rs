@@ -28,8 +28,6 @@ pub(super) const COMMANDS: &[&str] = &[
     "/goal",
     "/help",
     "/init",
-    "/lsp",
-    "/mcp",
     "/mode",
     "/models",
     "/new",
@@ -204,13 +202,8 @@ impl Default for ProviderDraft {
 #[derive(Clone)]
 #[allow(clippy::large_enum_variant)] // popup state is rebuilt per frame; form payloads are small in practice
 pub(super) enum Menu {
-    /// /settings: top-level settings hub
+    /// /config: unified searchable config list
     Settings,
-    /// /settings -> Appearance: organizer for visual settings
-    Appearance,
-    Mcp,
-    Lsp,
-    Skills,
     Providers,
     Models {
         provider: String,
@@ -219,14 +212,6 @@ pub(super) enum Menu {
     /// /debug: runtime toggles and diagnostics
     #[allow(dead_code)]
     Debug,
-    /// /settings -> Experimental: opt-in unfinished things (/test ...)
-    Experimental,
-    /// /settings -> Agent: plan, memory and compaction scalars
-    Agent,
-    /// /settings -> Safety: secrets globs and blocked patterns
-    Safety,
-    /// /settings -> Undo: checkpoint retention and shadow store
-    Undo,
     /// /help: help sections
     Help,
     /// /help -> controls: key combo reference
@@ -238,30 +223,6 @@ pub(super) enum Menu {
     CompactionSummary,
     /// picker for `[undo].shadow`
     UndoShadow,
-    /// single-field form appending one entry to a string list
-    AddListItem(ListSection),
-    /// pick an entry of a string list to delete
-    DeleteListItems(ListSection),
-    /// MCP server add (None) or edit (Some) form
-    EditMcpServer {
-        index: Option<usize>,
-    },
-    /// one MCP server: edit / enable-disable / delete
-    McpServer {
-        index: usize,
-    },
-    /// pick an MCP server to delete
-    DeleteMcpServer,
-    /// LSP server add (None) or edit (Some) form
-    EditLspServer {
-        index: Option<usize>,
-    },
-    /// one LSP server: edit / enable-disable / delete
-    LspServer {
-        index: usize,
-    },
-    /// pick an LSP server to delete
-    DeleteLspServer,
     /// single-field form to rename a session
     EditSessionTitle {
         id: String,
@@ -335,14 +296,7 @@ pub(super) enum MenuAction {
     None,
     Back,
     OpenModels(String),
-    OpenAppearance,
     OpenEffort,
-    OpenProviders,
-    OpenMcp,
-    OpenLsp,
-    OpenSkills,
-    OpenDebug,
-    OpenExperimental,
     /// The search row of a surface: activating it (Enter or a click) hands the
     /// caret to the field. The row is reachable by the arrows like any other.
     FocusSearch,
@@ -393,9 +347,6 @@ pub(super) enum MenuAction {
     AskNext,
     #[allow(dead_code)]
     AskPrev,
-    OpenAgent,
-    OpenSafety,
-    OpenUndo,
     /// approval: commit the selected option (select with 1/2/3, click or arrows)
     DecideApproval(crate::agent::loop_task::ApprovalDecision),
     #[allow(dead_code)]
@@ -407,21 +358,6 @@ pub(super) enum MenuAction {
     OpenUndoShadow,
     SetUndoShadow(crate::config::ShadowStore),
     ToggleSkillsAutoLoad,
-    AddMcpServer,
-    EditMcpServer(usize),
-    OpenMcpServer(usize),
-    ToggleMcpServer(usize),
-    DeleteMcpServerList,
-    DeleteMcpServer(usize),
-    AddLspServer,
-    EditLspServer(usize),
-    OpenLspServer(usize),
-    ToggleLspServer(usize),
-    DeleteLspServerList,
-    DeleteLspServer(usize),
-    AddListItem(ListSection),
-    DeleteListItems(ListSection),
-    DeleteListItem(ListSection, usize),
     EditScalar(ScalarSetting),
 }
 
@@ -566,77 +502,6 @@ impl ScalarSetting {
                 def.undo.shadow_max_bytes,
             ),
         }
-    }
-}
-
-/// A string list editable from /settings with add/remove rows.
-#[derive(Clone, Copy, PartialEq)]
-pub(super) enum ListSection {
-    SecretsExclude,
-    SafetyBlocked,
-    SkillsDirs,
-}
-
-impl ListSection {
-    pub(super) fn title(self) -> &'static str {
-        match self {
-            Self::SecretsExclude => "secret globs",
-            Self::SafetyBlocked => "blocked patterns",
-            Self::SkillsDirs => "skill directories",
-        }
-    }
-
-    pub(super) fn items(self, cfg: &Config) -> Vec<String> {
-        match self {
-            Self::SecretsExclude => cfg.secrets.exclude_globs.clone(),
-            Self::SafetyBlocked => cfg.safety.blocked_patterns.clone(),
-            Self::SkillsDirs => cfg
-                .skills
-                .dirs
-                .iter()
-                .map(|p| p.display().to_string())
-                .collect(),
-        }
-    }
-
-    pub(super) fn push(self, cfg: &mut Config, value: String) {
-        match self {
-            Self::SecretsExclude => cfg.secrets.exclude_globs.push(value),
-            Self::SafetyBlocked => cfg.safety.blocked_patterns.push(value),
-            Self::SkillsDirs => cfg.skills.dirs.push(value.into()),
-        }
-    }
-
-    pub(super) fn remove(self, cfg: &mut Config, index: usize) -> bool {
-        let len = match self {
-            Self::SecretsExclude => cfg.secrets.exclude_globs.len(),
-            Self::SafetyBlocked => cfg.safety.blocked_patterns.len(),
-            Self::SkillsDirs => cfg.skills.dirs.len(),
-        };
-        if index >= len {
-            return false;
-        }
-        match self {
-            Self::SecretsExclude => {
-                cfg.secrets.exclude_globs.remove(index);
-            }
-            Self::SafetyBlocked => {
-                cfg.safety.blocked_patterns.remove(index);
-            }
-            Self::SkillsDirs => {
-                cfg.skills.dirs.remove(index);
-            }
-        };
-        true
-    }
-}
-
-/// Capitalize the first letter for menu titles ("budget ratio" -> "Budget ratio").
-fn cap_first(s: &str) -> String {
-    let mut chars = s.chars();
-    match chars.next() {
-        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
-        None => String::new(),
     }
 }
 
@@ -1050,9 +915,6 @@ impl App {
                     | Menu::EditSessionTitle { .. }
                     | Menu::AskFree { .. }
                     | Menu::EditScalar(..)
-                    | Menu::AddListItem(..)
-                    | Menu::EditMcpServer { .. }
-                    | Menu::EditLspServer { .. }
             )
         )
     }
@@ -1423,7 +1285,6 @@ impl App {
             MenuAction::None => {}
             MenuAction::Back => self.menu_back(),
             MenuAction::DecideApproval(decision) => self.approval_decide(decision),
-            MenuAction::OpenAppearance => self.open_menu(Menu::Appearance),
             MenuAction::OpenEffort => self.open_menu(Menu::Effort { model: None }),
             MenuAction::OpenModelEffort(model) => self.open_menu(Menu::Effort { model }),
             MenuAction::OpenModelField(field) => {
@@ -1459,15 +1320,6 @@ impl App {
                     self.menu_back();
                 }
             }
-            MenuAction::OpenProviders => self.open_menu(Menu::Providers),
-            MenuAction::OpenMcp => self.open_menu(Menu::Mcp),
-            MenuAction::OpenLsp => self.open_menu(Menu::Lsp),
-            MenuAction::OpenSkills => self.open_menu(Menu::Skills),
-            MenuAction::OpenDebug => self.open_menu(Menu::Debug),
-            MenuAction::OpenExperimental => self.open_menu(Menu::Experimental),
-            MenuAction::OpenAgent => self.open_menu(Menu::Agent),
-            MenuAction::OpenSafety => self.open_menu(Menu::Safety),
-            MenuAction::OpenUndo => self.open_menu(Menu::Undo),
             MenuAction::OpenControls => self.open_menu(Menu::Controls),
             MenuAction::CycleCompactionSummary => {
                 let all = crate::config::CompactionSummary::ALL;
@@ -1526,89 +1378,6 @@ impl App {
                 let on = self.cfg.skills.auto_load;
                 self.status(&format!("skills auto-load: {}", on_off(on)), StatusKind::Ok);
                 self.build_menu_rows();
-            }
-            MenuAction::AddMcpServer => self.open_menu(Menu::EditMcpServer { index: None }),
-            MenuAction::EditMcpServer(index) => {
-                self.open_menu(Menu::EditMcpServer { index: Some(index) })
-            }
-            MenuAction::OpenMcpServer(index) => self.open_menu(Menu::McpServer { index }),
-            MenuAction::ToggleMcpServer(index) => {
-                let Some(server) = self.cfg.mcp.servers.get_mut(index) else {
-                    self.status("unknown MCP server", StatusKind::Err);
-                    return;
-                };
-                server.enabled = !server.enabled;
-                let state = if server.enabled {
-                    "enabled"
-                } else {
-                    "disabled"
-                };
-                let name = server.name.clone();
-                self.cfg.save().ok();
-                self.status(&format!("MCP server '{name}' {state}"), StatusKind::Ok);
-                self.build_menu_rows();
-            }
-            MenuAction::DeleteMcpServerList => self.open_menu(Menu::DeleteMcpServer),
-            MenuAction::DeleteMcpServer(index) => {
-                let name = self
-                    .cfg
-                    .mcp
-                    .servers
-                    .get(index)
-                    .map(|s| s.name.clone())
-                    .unwrap_or_default();
-                self.open_menu(Menu::ConfirmDelete {
-                    label: format!("delete MCP server '{name}'?"),
-                    action: MenuAction::DeleteMcpServer(index),
-                });
-            }
-            MenuAction::AddLspServer => self.open_menu(Menu::EditLspServer { index: None }),
-            MenuAction::EditLspServer(index) => {
-                self.open_menu(Menu::EditLspServer { index: Some(index) })
-            }
-            MenuAction::OpenLspServer(index) => self.open_menu(Menu::LspServer { index }),
-            MenuAction::ToggleLspServer(index) => {
-                let Some(server) = self.cfg.lsp.servers.get_mut(index) else {
-                    self.status("unknown LSP server", StatusKind::Err);
-                    return;
-                };
-                server.enabled = !server.enabled;
-                let state = if server.enabled {
-                    "enabled"
-                } else {
-                    "disabled"
-                };
-                let name = server.name.clone();
-                self.cfg.save().ok();
-                self.status(&format!("LSP server '{name}' {state}"), StatusKind::Ok);
-                self.build_menu_rows();
-            }
-            MenuAction::DeleteLspServerList => self.open_menu(Menu::DeleteLspServer),
-            MenuAction::DeleteLspServer(index) => {
-                let name = self
-                    .cfg
-                    .lsp
-                    .servers
-                    .get(index)
-                    .map(|s| s.name.clone())
-                    .unwrap_or_default();
-                self.open_menu(Menu::ConfirmDelete {
-                    label: format!("delete LSP server '{name}'?"),
-                    action: MenuAction::DeleteLspServer(index),
-                });
-            }
-            MenuAction::AddListItem(section) => self.open_menu(Menu::AddListItem(section)),
-            MenuAction::DeleteListItems(section) => self.open_menu(Menu::DeleteListItems(section)),
-            MenuAction::DeleteListItem(section, index) => {
-                let item = section
-                    .items(&self.cfg)
-                    .get(index)
-                    .cloned()
-                    .unwrap_or_default();
-                self.open_menu(Menu::ConfirmDelete {
-                    label: format!("delete {} '{item}'?", section.title()),
-                    action: MenuAction::DeleteListItem(section, index),
-                });
             }
             MenuAction::EditScalar(setting) => self.open_menu(Menu::EditScalar(setting)),
             MenuAction::OpenModels(p) => self.open_menu(Menu::Models { provider: p }),
@@ -1835,41 +1604,6 @@ impl App {
                         Err(e) => self.status(&format!("delete session: {e:#}"), StatusKind::Err),
                     }
                 }
-                if let MenuAction::DeleteMcpServer(index) = &inner {
-                    if *index < self.cfg.mcp.servers.len() {
-                        let removed = self.cfg.mcp.servers.remove(*index);
-                        self.cfg.save().ok();
-                        self.status(
-                            &format!("MCP server '{}' deleted", removed.name),
-                            StatusKind::Ok,
-                        );
-                    } else {
-                        self.status("unknown MCP server", StatusKind::Err);
-                    }
-                }
-                if let MenuAction::DeleteLspServer(index) = &inner {
-                    if *index < self.cfg.lsp.servers.len() {
-                        let removed = self.cfg.lsp.servers.remove(*index);
-                        self.cfg.save().ok();
-                        self.status(
-                            &format!("LSP server '{}' deleted", removed.name),
-                            StatusKind::Ok,
-                        );
-                    } else {
-                        self.status("unknown LSP server", StatusKind::Err);
-                    }
-                }
-                if let MenuAction::DeleteListItem(section, index) = &inner {
-                    if section.remove(&mut self.cfg, *index) {
-                        self.cfg.save().ok();
-                        self.status(
-                            &format!("{} entry deleted", section.title()),
-                            StatusKind::Ok,
-                        );
-                    } else {
-                        self.status("unknown entry", StatusKind::Err);
-                    }
-                }
                 if matches!(&inner, MenuAction::DeletePlan) {
                     // close the prompt first so the outcome toast is
                     // visible on the bare chat, not hidden behind a menu
@@ -1965,19 +1699,6 @@ impl App {
                         } else {
                             self.open_menu(Menu::Sessions);
                         }
-                    }
-                    // server gone: back to a fresh server list
-                    MenuAction::DeleteMcpServer(_) => {
-                        self.menu_home();
-                        self.open_menu(Menu::Mcp);
-                    }
-                    MenuAction::DeleteLspServer(_) => {
-                        self.menu_home();
-                        self.open_menu(Menu::Lsp);
-                    }
-                    // entry gone: back to the delete list (rebuilt) for the next one
-                    MenuAction::DeleteListItem(_, _) => {
-                        self.menu_back();
                     }
                     _ => {}
                 }
@@ -2128,10 +1849,6 @@ impl App {
             Some(Menu::Settings) => " Config ".into(),
             Some(Menu::CompactionSummary) => " Config · compaction summary ".into(),
             Some(Menu::UndoShadow) => " Config · undo shadow ".into(),
-            Some(Menu::Appearance) => " Appearance ".into(),
-            Some(Menu::Mcp) => " MCP servers ".into(),
-            Some(Menu::Lsp) => " LSP servers ".into(),
-            Some(Menu::Skills) => " Skills ".into(),
             Some(Menu::Providers) => " Providers ".into(),
             Some(Menu::Models { provider }) => format!(" Models · {provider} "),
             Some(Menu::EditProvider { name }) => match name {
@@ -2156,29 +1873,9 @@ impl App {
             }
             Some(Menu::Sessions) => " Sessions ".into(),
             Some(Menu::Debug) => " Debug ".into(),
-            Some(Menu::Experimental) => " Experimental ".into(),
-            Some(Menu::Agent) => " Agent ".into(),
-            Some(Menu::Safety) => " Safety ".into(),
-            Some(Menu::Undo) => " Undo ".into(),
             Some(Menu::Help) => " Help ".into(),
             Some(Menu::Controls) => " Controls ".into(),
             Some(Menu::EditScalar(setting)) => format!(" Config · {} ", setting.label()),
-            Some(Menu::AddListItem(section)) => format!(" Add {} ", cap_first(section.title())),
-            Some(Menu::DeleteListItems(section)) => {
-                format!(" Delete {} ", cap_first(section.title()))
-            }
-            Some(Menu::EditMcpServer { index }) => match index {
-                Some(_) => " Edit MCP server ".into(),
-                None => " New MCP server ".into(),
-            },
-            Some(Menu::McpServer { .. }) => " MCP server ".into(),
-            Some(Menu::DeleteMcpServer) => " Delete MCP server ".into(),
-            Some(Menu::EditLspServer { index }) => match index {
-                Some(_) => " Edit LSP server ".into(),
-                None => " New LSP server ".into(),
-            },
-            Some(Menu::LspServer { .. }) => " LSP server ".into(),
-            Some(Menu::DeleteLspServer) => " Delete LSP server ".into(),
             Some(Menu::EditSessionTitle { .. }) => " Rename session ".into(),
             Some(Menu::ConfirmDelete { .. }) => " Confirm ".into(),
             Some(Menu::Effort { model }) => match model {
@@ -2397,407 +2094,6 @@ impl App {
                     ));
                 }
                 self.menu_footer_text = Some("esc: close".into());
-            }
-            Menu::Mcp => {
-                self.menu_rows
-                    .push(row(Line::from("  MCP servers"), MenuAction::None));
-                if self.cfg.mcp.servers.is_empty() {
-                    self.menu_rows
-                        .push(row(Line::from("  no servers configured"), MenuAction::None));
-                } else {
-                    for (i, server) in self.cfg.mcp.servers.iter().enumerate() {
-                        self.menu_rows.push(row(
-                            Line::from(format!(
-                                "  {:<20} {}",
-                                server.name,
-                                if server.enabled {
-                                    "enabled"
-                                } else {
-                                    "disabled"
-                                }
-                            )),
-                            MenuAction::OpenMcpServer(i),
-                        ));
-                    }
-                }
-                self.menu_rows.push(row(
-                    Line::from(vec![Span::styled("  add server".to_string(), Theme::FG())]),
-                    MenuAction::AddMcpServer,
-                ));
-                self.menu_rows.push(row(
-                    Line::from(vec![Span::styled(
-                        "  delete server".to_string(),
-                        Theme::ERR(),
-                    )]),
-                    MenuAction::DeleteMcpServerList,
-                ));
-                self.menu_footer_text = Some("enter: open · esc: back".into());
-            }
-            Menu::McpServer { index } => {
-                let name = self
-                    .cfg
-                    .mcp
-                    .servers
-                    .get(index)
-                    .map(|s| s.name.clone())
-                    .unwrap_or_default();
-                let enabled = self.cfg.mcp.servers.get(index).is_some_and(|s| s.enabled);
-                self.menu_rows.push(row(
-                    Line::from(vec![Span::styled(" edit".to_string(), Theme::FG())]),
-                    MenuAction::EditMcpServer(index),
-                ));
-                self.menu_rows.push(row(
-                    Line::from(vec![Span::styled(
-                        if enabled { " disable" } else { " enable" }.to_string(),
-                        Theme::FG(),
-                    )]),
-                    MenuAction::ToggleMcpServer(index),
-                ));
-                self.menu_rows.push(row(
-                    Line::from(vec![Span::styled(" delete", Theme::ERR())]),
-                    MenuAction::DeleteMcpServer(index),
-                ));
-                self.menu_footer_text = Some(format!(" mcp server: {name} · esc: back "));
-            }
-            Menu::DeleteMcpServer => {
-                for (i, server) in self.cfg.mcp.servers.iter().enumerate() {
-                    self.menu_rows.push(row(
-                        Line::from(vec![
-                            Span::styled(format!(" {}", server.name), Theme::ERR()),
-                            Span::styled(
-                                format!(
-                                    "  {}",
-                                    if server.enabled {
-                                        "enabled"
-                                    } else {
-                                        "disabled"
-                                    }
-                                ),
-                                Theme::dim(),
-                            ),
-                        ]),
-                        MenuAction::DeleteMcpServer(i),
-                    ));
-                }
-                self.menu_footer_text = Some("enter: delete · esc: back".into());
-            }
-            Menu::Lsp => {
-                self.menu_rows
-                    .push(row(Line::from("  LSP servers"), MenuAction::None));
-                if self.cfg.lsp.servers.is_empty() {
-                    self.menu_rows
-                        .push(row(Line::from("  no servers configured"), MenuAction::None));
-                } else {
-                    for (i, server) in self.cfg.lsp.servers.iter().enumerate() {
-                        self.menu_rows.push(row(
-                            Line::from(format!(
-                                "  {:<20} {}",
-                                server.name,
-                                if server.enabled {
-                                    "enabled"
-                                } else {
-                                    "disabled"
-                                }
-                            )),
-                            MenuAction::OpenLspServer(i),
-                        ));
-                    }
-                }
-                self.menu_rows.push(row(
-                    Line::from(vec![Span::styled("  add server".to_string(), Theme::FG())]),
-                    MenuAction::AddLspServer,
-                ));
-                self.menu_rows.push(row(
-                    Line::from(vec![Span::styled(
-                        "  delete server".to_string(),
-                        Theme::ERR(),
-                    )]),
-                    MenuAction::DeleteLspServerList,
-                ));
-                self.menu_footer_text = Some("enter: open · esc: back".into());
-            }
-            Menu::LspServer { index } => {
-                let name = self
-                    .cfg
-                    .lsp
-                    .servers
-                    .get(index)
-                    .map(|s| s.name.clone())
-                    .unwrap_or_default();
-                let enabled = self.cfg.lsp.servers.get(index).is_some_and(|s| s.enabled);
-                self.menu_rows.push(row(
-                    Line::from(vec![Span::styled(" edit".to_string(), Theme::FG())]),
-                    MenuAction::EditLspServer(index),
-                ));
-                self.menu_rows.push(row(
-                    Line::from(vec![Span::styled(
-                        if enabled { " disable" } else { " enable" }.to_string(),
-                        Theme::FG(),
-                    )]),
-                    MenuAction::ToggleLspServer(index),
-                ));
-                self.menu_rows.push(row(
-                    Line::from(vec![Span::styled(" delete", Theme::ERR())]),
-                    MenuAction::DeleteLspServer(index),
-                ));
-                self.menu_footer_text = Some(format!(" lsp server: {name} · esc: back "));
-            }
-            Menu::DeleteLspServer => {
-                for (i, server) in self.cfg.lsp.servers.iter().enumerate() {
-                    self.menu_rows.push(row(
-                        Line::from(vec![
-                            Span::styled(format!(" {}", server.name), Theme::ERR()),
-                            Span::styled(
-                                format!(
-                                    "  {}",
-                                    if server.enabled {
-                                        "enabled"
-                                    } else {
-                                        "disabled"
-                                    }
-                                ),
-                                Theme::dim(),
-                            ),
-                        ]),
-                        MenuAction::DeleteLspServer(i),
-                    ));
-                }
-                self.menu_footer_text = Some("enter: delete · esc: back".into());
-            }
-            Menu::Skills => {
-                self.menu_rows.push(row(
-                    Line::from(vec![
-                        Span::styled(format!("  {:<18}", "auto-load"), Theme::FG()),
-                        Span::styled(on_off(self.cfg.skills.auto_load), Theme::dim()),
-                    ]),
-                    MenuAction::ToggleSkillsAutoLoad,
-                ));
-                self.menu_rows.push(row(
-                    Line::from(vec![Span::styled(
-                        "  Directories".to_string(),
-                        Theme::dim(),
-                    )]),
-                    MenuAction::None,
-                ));
-                if self.cfg.skills.dirs.is_empty() {
-                    self.menu_rows
-                        .push(row(Line::from("  (none)"), MenuAction::None));
-                }
-                for dir in &self.cfg.skills.dirs {
-                    self.menu_rows.push(row(
-                        Line::from(format!("  {}", dir.display())),
-                        MenuAction::None,
-                    ));
-                }
-                self.menu_rows.push(row(
-                    Line::from(vec![Span::styled(
-                        "  add directory".to_string(),
-                        Theme::FG(),
-                    )]),
-                    MenuAction::AddListItem(ListSection::SkillsDirs),
-                ));
-                self.menu_rows.push(row(
-                    Line::from(vec![Span::styled(
-                        "  delete directory".to_string(),
-                        Theme::ERR(),
-                    )]),
-                    MenuAction::DeleteListItems(ListSection::SkillsDirs),
-                ));
-                let root = self.project_root.clone();
-                let loaded = crate::prompts::skills::load(&self.cfg.skills, &root);
-                self.menu_rows
-                    .push(row(Line::from("  Loaded skills"), MenuAction::None));
-                if loaded.is_empty() {
-                    self.menu_rows
-                        .push(row(Line::from("  no skills found"), MenuAction::None));
-                } else {
-                    for skill in loaded {
-                        self.menu_rows.push(row(
-                            Line::from(format!("  {}", skill.name)),
-                            MenuAction::None,
-                        ));
-                    }
-                }
-                self.menu_footer_text = Some("/skill to activate · esc: back".into());
-            }
-
-            Menu::Appearance => {
-                let setting = |label: &str, detail: &str, action: MenuAction| {
-                    row(
-                        Line::from(vec![
-                            Span::styled(format!("  {label:<16}"), Theme::FG()),
-                            Span::styled(detail.to_string(), Theme::dim()),
-                        ]),
-                        action,
-                    )
-                };
-                self.menu_rows.push(setting(
-                    "Typewriter",
-                    on_off(self.cfg.ui.typewriter).as_str(),
-                    MenuAction::ToggleTypewriter,
-                ));
-                self.menu_footer_text = Some("enter: open/toggle · esc: back".into());
-            }
-            Menu::Agent => {
-                let header = |t: &str| {
-                    row(
-                        Line::from(vec![Span::styled(format!("  {t}"), Theme::dim())]),
-                        MenuAction::None,
-                    )
-                };
-                let scalar = |label: &str, val: String, s: ScalarSetting| {
-                    row(
-                        Line::from(vec![
-                            Span::styled(format!("  {label:<18}"), Theme::FG()),
-                            Span::styled(val, Theme::dim()),
-                        ]),
-                        MenuAction::EditScalar(s),
-                    )
-                };
-                self.menu_rows.push(header("plan"));
-                self.menu_rows.push(scalar(
-                    "budget ratio",
-                    ScalarSetting::PlanBudgetRatio.current(&self.cfg),
-                    ScalarSetting::PlanBudgetRatio,
-                ));
-                self.menu_rows.push(scalar(
-                    "max steps",
-                    ScalarSetting::PlanMaxSteps.current(&self.cfg),
-                    ScalarSetting::PlanMaxSteps,
-                ));
-                self.menu_rows.push(scalar(
-                    "nudge after",
-                    ScalarSetting::PlanNudgeAfter.current(&self.cfg),
-                    ScalarSetting::PlanNudgeAfter,
-                ));
-                self.menu_rows.push(header("memory"));
-                self.menu_rows.push(scalar(
-                    "load budget ratio",
-                    ScalarSetting::MemoryLoadBudgetRatio.current(&self.cfg),
-                    ScalarSetting::MemoryLoadBudgetRatio,
-                ));
-                self.menu_rows.push(scalar(
-                    "max tokens",
-                    ScalarSetting::MemoryMaxTokens.current(&self.cfg),
-                    ScalarSetting::MemoryMaxTokens,
-                ));
-                self.menu_rows.push(scalar(
-                    "max proposals",
-                    ScalarSetting::MemoryMaxProposals.current(&self.cfg),
-                    ScalarSetting::MemoryMaxProposals,
-                ));
-                self.menu_rows.push(header("compaction"));
-                self.menu_rows.push(scalar(
-                    "threshold",
-                    ScalarSetting::CompactionThreshold.current(&self.cfg),
-                    ScalarSetting::CompactionThreshold,
-                ));
-                self.menu_rows.push(scalar(
-                    "keep turns",
-                    ScalarSetting::CompactionKeepTurns.current(&self.cfg),
-                    ScalarSetting::CompactionKeepTurns,
-                ));
-                self.menu_rows.push(scalar(
-                    "anchor ratio",
-                    ScalarSetting::CompactionAnchorRatio.current(&self.cfg),
-                    ScalarSetting::CompactionAnchorRatio,
-                ));
-                self.menu_rows.push(row(
-                    Line::from(vec![
-                        Span::styled(format!("  {:<18}", "summary"), Theme::FG()),
-                        Span::styled(
-                            self.cfg.compaction.summary.as_str().to_string(),
-                            Theme::dim(),
-                        ),
-                    ]),
-                    MenuAction::CycleCompactionSummary,
-                ));
-                self.menu_footer_text = Some("enter: edit/cycle · esc: back".into());
-            }
-            Menu::Safety => {
-                let header = |t: &str| {
-                    row(
-                        Line::from(vec![Span::styled(format!("  {t}"), Theme::dim())]),
-                        MenuAction::None,
-                    )
-                };
-                for section in [ListSection::SecretsExclude, ListSection::SafetyBlocked] {
-                    self.menu_rows.push(header(section.title()));
-                    let items = section.items(&self.cfg);
-                    if items.is_empty() {
-                        self.menu_rows
-                            .push(row(Line::from("  (empty)"), MenuAction::None));
-                    }
-                    for item in items {
-                        self.menu_rows
-                            .push(row(Line::from(format!("  {item}")), MenuAction::None));
-                    }
-                    self.menu_rows.push(row(
-                        Line::from(vec![Span::styled("  add".to_string(), Theme::FG())]),
-                        MenuAction::AddListItem(section),
-                    ));
-                    self.menu_rows.push(row(
-                        Line::from(vec![Span::styled("  delete".to_string(), Theme::ERR())]),
-                        MenuAction::DeleteListItems(section),
-                    ));
-                }
-                self.menu_footer_text = Some("enter: open · esc: back".into());
-            }
-            Menu::Undo => {
-                let scalar = |label: &str, val: String, s: ScalarSetting| {
-                    row(
-                        Line::from(vec![
-                            Span::styled(format!("  {label:<18}"), Theme::FG()),
-                            Span::styled(val, Theme::dim()),
-                        ]),
-                        MenuAction::EditScalar(s),
-                    )
-                };
-                self.menu_rows.push(scalar(
-                    "keep per session",
-                    ScalarSetting::UndoKeepPerSession.current(&self.cfg),
-                    ScalarSetting::UndoKeepPerSession,
-                ));
-                self.menu_rows.push(scalar(
-                    "blob grace secs",
-                    ScalarSetting::UndoBlobGraceSecs.current(&self.cfg),
-                    ScalarSetting::UndoBlobGraceSecs,
-                ));
-                self.menu_rows.push(row(
-                    Line::from(vec![
-                        Span::styled(format!("  {:<18}", "shadow"), Theme::FG()),
-                        Span::styled(self.cfg.undo.shadow.as_str().to_string(), Theme::dim()),
-                    ]),
-                    MenuAction::CycleUndoShadow,
-                ));
-                self.menu_rows.push(scalar(
-                    "shadow max bytes",
-                    ScalarSetting::UndoShadowMaxBytes.current(&self.cfg),
-                    ScalarSetting::UndoShadowMaxBytes,
-                ));
-                self.menu_footer_text = Some("enter: edit/cycle · esc: back".into());
-            }
-            Menu::DeleteListItems(section) => {
-                for (i, item) in section.items(&self.cfg).iter().enumerate() {
-                    self.menu_rows.push(row(
-                        Line::from(vec![
-                            Span::styled(format!(" {item}"), Theme::ERR()),
-                            Span::styled(format!("  {}", section.title()), Theme::dim()),
-                        ]),
-                        MenuAction::DeleteListItem(section, i),
-                    ));
-                }
-                self.menu_footer_text = Some("enter: delete · esc: back".into());
-            }
-            Menu::Experimental => {
-                self.menu_rows.push(row(
-                    Line::from(vec![
-                        Span::styled(format!(" {:<18}", "test commands"), Theme::FG()),
-                        Span::styled(on_off(self.cfg.ui.experimental_test), Theme::dim()),
-                    ]),
-                    MenuAction::ToggleExperimentalTest,
-                ));
-                self.menu_footer_text = Some("enter: toggle value · esc: back".into());
             }
             Menu::Debug => {
                 let setting = |l: &str, val: String, a: MenuAction| {
@@ -3646,10 +2942,7 @@ impl App {
                 ));
                 self.menu_footer_text = Some("enter: confirm · esc: deny".into());
             }
-            Menu::AskFree { .. }
-            | Menu::AddListItem(..)
-            | Menu::EditMcpServer { .. }
-            | Menu::EditLspServer { .. } => {}
+            Menu::AskFree { .. } => {}
             Menu::Todo => {
                 self.menu_rows.push(row(
                     Line::from(vec![Span::styled(

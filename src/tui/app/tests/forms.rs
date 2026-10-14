@@ -827,9 +827,7 @@ fn provider_actions_live_in_commands_not_in_the_list() {
 #[test]
 fn info_rows_take_no_selection() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
-    // Skills carries section headers and empty-list notes as info rows between
-    // its actions
-    app.open_menu(Menu::Skills);
+    app.open_menu(Menu::Debug);
     let info = app
         .menu_rows
         .iter()
@@ -1114,32 +1112,6 @@ fn settings_cycles_and_toggles() {
 }
 
 #[test]
-fn settings_safety_list_add_and_remove() {
-    use super::super::menus::ListSection;
-    let mut app = test_app("http://127.0.0.1:9/v1".into());
-    app.open_menu(Menu::AddListItem(ListSection::SafetyBlocked));
-    app.form_fields[0] =
-        super::super::forms::FormField::text("blocked patterns", "rm -rf /".into());
-    app.form_save();
-    assert!(
-        app.cfg
-            .safety
-            .blocked_patterns
-            .contains(&"rm -rf /".to_string())
-    );
-
-    app.run_action(MenuAction::DeleteListItem(ListSection::SafetyBlocked, 0));
-    assert!(matches!(app.cur_menu(), Some(Menu::ConfirmDelete { .. })));
-    app.run_confirm_action();
-    assert!(
-        !app.cfg
-            .safety
-            .blocked_patterns
-            .contains(&"rm -rf /".to_string())
-    );
-}
-
-#[test]
 fn switching_model_records_last_model() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     let mut other = app.cfg.models["m"].clone();
@@ -1148,76 +1120,6 @@ fn switching_model_records_last_model() {
     app.run_action(MenuAction::UseModel("m2".into()));
     assert_eq!(app.session.model_key, "m2");
     assert_eq!(app.cfg.last_model, "m2");
-}
-
-#[test]
-fn settings_mcp_server_crud() {
-    let mut app = test_app("http://127.0.0.1:9/v1".into());
-    assert!(app.cfg.mcp.servers.is_empty());
-
-    // add (stdio)
-    app.open_menu(Menu::EditMcpServer { index: None });
-    let set = |app: &mut App, i: usize, v: &str| {
-        let label = app.form_fields[i].label().to_string();
-        app.form_fields[i] = super::super::forms::FormField::text(&label, v.into());
-    };
-    set(&mut app, 0, "files");
-    set(&mut app, 2, "mcp-files");
-    set(&mut app, 3, "--root /tmp");
-    set(&mut app, 4, "TOKEN=abc");
-    app.form_save();
-    assert_eq!(app.cfg.mcp.servers.len(), 1);
-    assert!(app.cfg.mcp.servers[0].enabled);
-
-    // toggle off via the server submenu
-    app.run_action(MenuAction::ToggleMcpServer(0));
-    assert!(!app.cfg.mcp.servers[0].enabled);
-
-    // edit keeps the toggle state
-    app.open_menu(Menu::EditMcpServer { index: Some(0) });
-    set(&mut app, 2, "mcp-files-v2");
-    app.form_save();
-    assert!(!app.cfg.mcp.servers[0].enabled);
-
-    // delete through the confirmation prompt
-    app.run_action(MenuAction::DeleteMcpServer(0));
-    assert!(matches!(app.cur_menu(), Some(Menu::ConfirmDelete { .. })));
-    app.run_confirm_action();
-    assert!(app.cfg.mcp.servers.is_empty());
-}
-
-#[test]
-fn settings_lsp_server_add_and_delete() {
-    let mut app = test_app("http://127.0.0.1:9/v1".into());
-    app.open_menu(Menu::EditLspServer { index: None });
-    let set = |app: &mut App, i: usize, v: &str| {
-        let label = app.form_fields[i].label().to_string();
-        app.form_fields[i] = super::super::forms::FormField::text(&label, v.into());
-    };
-    set(&mut app, 0, "rust");
-    set(&mut app, 1, "rust");
-    set(&mut app, 2, "rust-analyzer");
-    app.form_save();
-    assert_eq!(app.cfg.lsp.servers.len(), 1);
-    assert_eq!(app.cfg.lsp.servers[0].language, "rust");
-
-    app.run_action(MenuAction::DeleteLspServer(0));
-    app.run_confirm_action();
-    assert!(app.cfg.lsp.servers.is_empty());
-}
-
-#[test]
-fn settings_skills_dirs_add_and_remove() {
-    use super::super::menus::ListSection;
-    let mut app = test_app("http://127.0.0.1:9/v1".into());
-    app.open_menu(Menu::AddListItem(ListSection::SkillsDirs));
-    app.form_fields[0] = super::super::forms::FormField::text("skill directories", "/tmp/s".into());
-    app.form_save();
-    assert_eq!(app.cfg.skills.dirs.len(), 1);
-
-    app.run_action(MenuAction::DeleteListItem(ListSection::SkillsDirs, 0));
-    app.run_confirm_action();
-    assert!(app.cfg.skills.dirs.is_empty());
 }
 
 #[test]
@@ -1242,11 +1144,11 @@ fn ctrl_v_does_not_submit_following_enter() {
 #[test]
 fn appearance_toggles_ui_settings() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
-    app.open_menu(Menu::Appearance);
+    app.open_menu(Menu::Settings);
     let before = app.cfg.ui.typewriter;
     app.run_action(MenuAction::ToggleTypewriter);
     assert_eq!(app.cfg.ui.typewriter, !before);
-    assert!(matches!(app.cur_menu(), Some(Menu::Appearance)));
+    assert!(matches!(app.cur_menu(), Some(Menu::Settings)));
 }
 
 #[test]

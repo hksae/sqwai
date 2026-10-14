@@ -3005,9 +3005,6 @@ impl App {
                 | Some(Menu::EditModel { .. })
                 | Some(Menu::EditSessionTitle { .. })
                 | Some(Menu::EditScalar(..))
-                | Some(Menu::AddListItem(..))
-                | Some(Menu::EditMcpServer { .. })
-                | Some(Menu::EditLspServer { .. })
         );
         // chrome rows inside the panel: frozen table header + one air row
         // under the centered title (lists only; forms keep field geometry).
@@ -3305,9 +3302,6 @@ impl App {
                 Menu::EditModel { .. }
                     | Menu::EditSessionTitle { .. }
                     | Menu::EditScalar(..)
-                    | Menu::AddListItem(..)
-                    | Menu::EditMcpServer { .. }
-                    | Menu::EditLspServer { .. }
             )
         ) {
             block = block.title_bottom(

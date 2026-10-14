@@ -62,14 +62,6 @@ impl App {
                 }
             }
             "/debug" => self.open_menu(Menu::Debug),
-            "/mcp" => self.status(
-                "MCP settings are available from /settings (runtime coming in phase 4)",
-                StatusKind::Info,
-            ),
-            "/lsp" => self.status(
-                "LSP settings are available from /settings (runtime coming in phase 4)",
-                StatusKind::Info,
-            ),
             "/skill" => {
                 let query = rest.split_whitespace().nth(1);
                 let root = self.project_root.clone();
