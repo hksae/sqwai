@@ -824,16 +824,55 @@ fn pinned_session_frame_aligns_columns_and_respects_narrow_terminal() {
     use ratatui::layout::Rect;
 
     let mut app = test_app("http://127.0.0.1:9/v1".into());
-    let mut s = Session::new("m".into(), 1000);
-    s.push(Role::User, "тестовая сессия (wide / cyrillic) 🚀");
+    let mut s = Session::new("muse spark 1.3".into(), 1000);
+    s.push(
+        Role::User,
+        "очень длинное название сессии которое не должно занимать всю строку",
+    );
     s.pinned = true;
     app.sessions = vec![SessionHeader::from_session(&s)];
     app.open_menu(Menu::Sessions);
 
-    let area = Rect::new(0, 0, 40, 24);
+    // Narrow terminal: parenthesized tail does not fit whole, so it hides
+    // completely instead of leaving a broken "(10:29 · muse sp"
+    let area = Rect::new(0, 0, 44, 24);
     let mut buf = Buffer::empty(area);
     app.render_into(&mut buf, area);
     assert!(app.surface_open);
+    let rendered: String = (0..area.height)
+        .map(|y| {
+            (0..area.width)
+                .map(|x| buf[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !rendered.contains('('),
+        "parenthesized tail must hide whole when it cannot fit: {rendered}"
+    );
+    assert!(
+        rendered.contains("очень длинное н…"),
+        "title is capped proportionally to terminal width: {rendered}"
+    );
+
+    // Wide terminal: title is still capped at 48 columns so the parenthesized
+    // tail fits whole right next to it
+    let wide = Rect::new(0, 0, 120, 24);
+    let mut wbuf = Buffer::empty(wide);
+    app.render_into(&mut wbuf, wide);
+    let wrendered: String = (0..wide.height)
+        .map(|y| {
+            (0..wide.width)
+                .map(|x| wbuf[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        wrendered.contains(" · muse spark 1.3 · "),
+        "wide terminal shows full parenthesized metadata: {wrendered}"
+    );
 }
 
 #[test]

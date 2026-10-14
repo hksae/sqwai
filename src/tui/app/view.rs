@@ -4036,6 +4036,7 @@ impl App {
             } else if matches!(action, MenuAction::FocusSearch) {
                 paint_field(slf, buf, area, y, rail);
             } else {
+                let avail = area.width.saturating_sub(2 + rail) as usize;
                 let mut spans: Vec<Span> = Vec::new();
                 for mut sp in line.spans {
                     if cur {
@@ -4043,11 +4044,22 @@ impl App {
                     }
                     spans.push(sp);
                 }
+                if matches!(action, MenuAction::OpenSession(_)) && !spans.is_empty() {
+                    let title_cap = (avail / 2).clamp(16, 48).min(avail);
+                    spans[0].content =
+                        truncate_display_width(spans[0].content.as_ref(), title_cap).into();
+                }
+                if spans.len() == 2
+                    && spans[1].content.starts_with(" (")
+                    && cols(spans[0].content.as_ref()) + cols(spans[1].content.as_ref()) > avail
+                {
+                    spans.pop();
+                }
                 Paragraph::new(Line::from(spans)).render(
                     Rect {
                         x: area.x + 2,
                         y,
-                        width: area.width.saturating_sub(2 + rail),
+                        width: avail as u16,
                         height: 1,
                     },
                     buf,
