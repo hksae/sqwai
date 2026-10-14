@@ -2302,7 +2302,7 @@ impl App {
             | Some(Menu::EditModel { .. })
             | Some(Menu::Sessions)
             | Some(Menu::ConfirmDelete { .. }) => {
-                let (head, win, _) = self.list_shape();
+                let (head, win, _) = self.list_shape(area.height);
                 let body = self.menu_rows.len().saturating_sub(head);
                 let shown = body.min(win).max(1).max(self.list_hints().len());
                 (3 + head + shown + usize::from(body > shown) + 1) as u16
@@ -3728,21 +3728,27 @@ impl App {
     /// row), how many body rows fit the block, and the word the "+N" caption
     /// counts. The height math and the painter both read this, so they cannot
     /// disagree.
-    fn list_shape(&self) -> (usize, usize, &'static str) {
+    fn list_shape(&self, screen_h: u16) -> (usize, usize, &'static str) {
+        // An overflowing list surface adds 6 chrome rows around its body window
+        // (rule + title + air + search + "+N" caption + trailing row), so capping
+        // `win` at `screen_h / 2 - 6` (floored at 8) makes the whole surface
+        // take at most half the terminal while short lists stay as tall as
+        // their actual item count (`body.min(win)`).
+        let dyn_win = (screen_h as usize / 2).saturating_sub(6).max(8);
         match self.cur_menu() {
-            Some(Menu::Providers) => (1, 8, "providers"),
+            Some(Menu::Providers) => (1, dyn_win, "providers"),
             Some(Menu::EditProvider { .. }) => (0, 5, ""),
             Some(Menu::ProviderFormat { .. }) => (0, 3, ""),
-            Some(Menu::Models { .. }) => (1, 8, "models"),
+            Some(Menu::Models { .. }) => (1, dyn_win, "models"),
             Some(Menu::EditModel { .. }) => (0, 4, ""),
-            Some(Menu::Sessions) => (1, 8, "sessions"),
+            Some(Menu::Sessions) => (1, dyn_win, "sessions"),
             Some(Menu::ConfirmDelete { .. }) => (1, 2, ""),
             Some(
                 Menu::EditModelField { .. }
                 | Menu::EditProviderField { .. }
                 | Menu::EditSessionTitle { .. },
             ) => (0, 1, ""),
-            _ => (0, 12, ""),
+            _ => (0, dyn_win, ""),
         }
     }
 
@@ -3851,7 +3857,7 @@ impl App {
         off: u16,
         full_h: u16,
     ) {
-        let (head, win, more) = self.list_shape();
+        let (head, win, more) = self.list_shape(buf.area.height);
         let hints = self.list_hints();
         // The hint column stands on the right of the rows the block already
         // has, so the list stops short of it: a name never runs under a key.

@@ -888,7 +888,7 @@ fn providers_surface_leads_with_its_search_row() {
     use crate::config::{ProviderConfig, WireFormat};
     use ratatui::{Terminal, backend::TestBackend};
     let mut app = test_app("http://127.0.0.1:9/v1".into());
-    for i in 0..12 {
+    for i in 0..20 {
         app.cfg.providers.insert(
             format!("prov-{i:02}"),
             ProviderConfig {
@@ -935,12 +935,12 @@ fn providers_surface_leads_with_its_search_row() {
         !text.contains("update built-in"),
         "the two action rows are gone: {text}"
     );
-    let painted = (0..12)
+    let painted = (0..20)
         .filter(|i| text.contains(&format!("prov-{i:02}")))
         .count();
     assert!(
-        painted > 0 && painted < 12,
-        "a capped window paints a slice, not the whole list: {painted} of 12"
+        painted > 0 && painted < 20,
+        "a capped window paints a slice, not the whole list: {painted} of 20"
     );
     assert!(text.contains("… +"), "the hidden tail is captioned");
     assert!(
@@ -1804,5 +1804,66 @@ fn edit_provider_surface_custom_and_builtin_rows_and_format_picker() {
     assert_eq!(app.menu_rows.len(), 2);
     assert_eq!(app.menu_rows[0].0.spans[0].content.as_ref(), "api key");
     assert_eq!(app.menu_rows[1].0.spans[0].content.as_ref(), "key env var");
+}
+
+#[test]
+fn list_surface_scales_to_half_terminal_with_eight_minimum_and_stays_compact_for_short_lists() {
+    use crate::config::{ProviderConfig, WireFormat};
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.cfg.providers.clear();
+    for i in 0..9 {
+        app.cfg.providers.insert(
+            format!("prov-{i:02}"),
+            ProviderConfig {
+                format: WireFormat::Openai,
+                base_url: "https://api.example.com/v1".into(),
+                api_key: None,
+                api_key_env: None,
+                continuation: false,
+            },
+        );
+    }
+    app.open_menu(Menu::Providers);
+
+    // 1. Short terminal (height 24): minimum window is 8 items (+ 6 chrome = 14 rows)
+    let short = Rect::new(0, 0, 100, 24);
+    let mut sbuf = Buffer::empty(short);
+    app.render_into(&mut sbuf, short);
+    assert_eq!(app.surf_rows, 14, "short terminal keeps 8-item minimum window");
+
+    // 2. Tall terminal (height 44) with only 9 items: window can fit up to 16,
+    // but since there are only 9 items (no overflow), the surface stays compact
+    // at 3 + 1 (search) + 9 (items) + 1 = 14 rows instead of stretching to 22
+    let tall = Rect::new(0, 0, 100, 44);
+    let mut tbuf = Buffer::empty(tall);
+    app.render_into(&mut tbuf, tall);
+    assert_eq!(
+        app.surf_rows, 14,
+        "9 items on a 44-row terminal must not stretch to half screen"
+    );
+
+    // 3. Tall terminal (height 44) with 30 items: surface caps at half the
+    // terminal height (44 / 2 = 22 rows, showing 16 items)
+    for i in 9..30 {
+        app.cfg.providers.insert(
+            format!("prov-{i:02}"),
+            ProviderConfig {
+                format: WireFormat::Openai,
+                base_url: "https://api.example.com/v1".into(),
+                api_key: None,
+                api_key_env: None,
+                continuation: false,
+            },
+        );
+    }
+    app.open_menu(Menu::Providers);
+    app.render_into(&mut tbuf, tall);
+    assert_eq!(
+        app.surf_rows, 22,
+        "overflowing list on a 44-row terminal takes half the terminal"
+    );
 }
 
