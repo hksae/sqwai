@@ -1,0 +1,34 @@
+---
+source: src/tui/app/tests/settings.rs
+expression: s
+---
+
+ › Hello
+
+ Hi there!
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  Models · p
+
+› ⌕ Search
+  m (1k)
+                                                                                       ctrl+n: add
+                                                                                      ctrl+e: edit
+                                                                                      ctrl+t: test
+                                                                                    ctrl+d: delete
+                                                                                        enter: use
+                                                                                         esc: back

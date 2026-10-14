@@ -803,7 +803,7 @@ fn snap_chat_many_tools_flat() {
 }
 
 #[test]
-fn snap_chat_models_picker_popup() {
+fn snap_chat_models_surface() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.startup = false;
     app.push_segment(Segment::User("Hello".into()));
@@ -816,7 +816,7 @@ fn snap_chat_models_picker_popup() {
     });
     for w_h in [(100u16, 30u16), (70, 24)] {
         let s = render_to_string(&mut app, w_h.0, w_h.1);
-        snap!(format!("chat_models_popup_{}x{}", w_h.0, w_h.1), s);
+        snap!(format!("chat_models_surface_{}x{}", w_h.0, w_h.1), s);
     }
 }
 

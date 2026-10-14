@@ -14,23 +14,28 @@ fn press_enter(app: &mut App) {
 #[test]
 fn enter_confirms_provider_deletion() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
-    // models menu -> delete provider -> confirmation prompt
-    app.open_menu(Menu::Models {
-        provider: "p".into(),
-    });
+    // providers surface -> ctrl+d on the row -> confirmation prompt
+    app.open_menu(Menu::Providers);
     let del_idx = (0..app.menu_len())
         .position(|i| {
             matches!(
                 app.menu_row_at(i).map(|(_, a)| a),
-                Some(MenuAction::DeleteProvider(_))
+                Some(MenuAction::OpenModels(p)) if p == "p"
             )
         })
-        .expect("delete provider row");
+        .expect("the provider stands in the list");
     app.menu_sel = del_idx;
-    app.menu_activate();
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    let (tx, rx) = std::sync::mpsc::channel();
+    tx.send(Event::Key(KeyEvent::new(
+        KeyCode::Char('d'),
+        KeyModifiers::CONTROL,
+    )))
+    .unwrap();
+    app.poll_input(&rx).unwrap();
     assert!(
         matches!(app.cur_menu(), Some(Menu::ConfirmDelete { .. })),
-        "confirm prompt must be open"
+        "ctrl+d asks before it deletes"
     );
     assert_eq!(app.menu_sel, 1, "selection starts on the confirm row");
 

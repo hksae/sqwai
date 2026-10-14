@@ -241,7 +241,6 @@ pub(super) enum MenuAction {
     AddModel(String),
     EditModel(String, String),
     DeleteModel(String, String),
-    PickModelList(String),
     DeleteModelList(String),
     UseModel(String),
     OpenSession(String),
@@ -562,7 +561,10 @@ impl App {
         // it, so opening one brings the view back down to it.
         if matches!(
             self.cur_menu(),
-            Some(Menu::Effort { .. }) | Some(Menu::Context) | Some(Menu::Providers)
+            Some(Menu::Effort { .. })
+                | Some(Menu::Context)
+                | Some(Menu::Providers)
+                | Some(Menu::Models { .. })
         ) {
             self.follow = true;
         }
@@ -601,6 +603,10 @@ impl App {
             // user came to look at, and the caret waits for a click
             self.prov_search = Self::fresh_input(String::new());
             self.prov_focus = false;
+        }
+        if matches!(self.cur_menu(), Some(Menu::Models { .. })) {
+            self.model_search = Self::fresh_input(String::new());
+            self.model_focus = false;
         }
         self.prefill_form();
         // rows are ready immediately, not on the next frame
@@ -805,7 +811,7 @@ impl App {
         }
         // the arrows walk the list, so the search field gives the caret back as
         // soon as the cursor moves
-        self.prov_focus = false;
+        self.surf_set_focus(false);
         self.dirty = true;
     }
 
@@ -976,15 +982,61 @@ impl App {
         }
     }
 
-    /// Edit the providers search field and re-filter the list. The selection
+    /// The provider a surface is about: the one a Models list shows, or the one
+    /// the cursor stands on in the Providers list. The chords read the same
+    /// fact the rows carry, so a row and its key cannot disagree.
+    pub(super) fn surface_provider(&self) -> Option<String> {
+        match self.cur_menu() {
+            Some(Menu::Models { provider }) => Some(provider.clone()),
+            Some(Menu::Providers) => match self.menu_row_at(self.menu_sel) {
+                Some((_, MenuAction::OpenModels(p))) => Some(p.clone()),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// The model the cursor stands on in a Models surface.
+    pub(super) fn surface_model(&self) -> Option<String> {
+        match self.menu_row_at(self.menu_sel) {
+            Some((_, MenuAction::UseModel(k))) => Some(k.clone()),
+            _ => None,
+        }
+    }
+
+    /// The search field of whichever surface owns one. Providers and Models
+    /// keep separate queries: the provider name you filtered to is not a model
+    /// filter, and carrying it downstairs would hide the list you came for.
+    pub(super) fn surf_field(&mut self) -> &mut TextArea<'static> {
+        match self.cur_menu() {
+            Some(Menu::Models { .. }) => &mut self.model_search,
+            _ => &mut self.prov_search,
+        }
+    }
+
+    pub(super) fn surf_focused(&self) -> bool {
+        match self.cur_menu() {
+            Some(Menu::Models { .. }) => self.model_focus,
+            _ => self.prov_focus,
+        }
+    }
+
+    pub(super) fn surf_set_focus(&mut self, on: bool) {
+        match self.cur_menu() {
+            Some(Menu::Models { .. }) => self.model_focus = on,
+            _ => self.prov_focus = on,
+        }
+    }
+
+    /// Edit the surface's search field and re-filter the list. The selection
     /// stays on the field's own row — typing there must not throw the selector
     /// onto another row — while the window under it starts over. Erasing the
     /// last character gives the caret back to the list: an empty field with a
     /// cursor standing in it is a claim that someone is about to type.
-    pub(super) fn prov_search_key(&mut self, k: crossterm::event::KeyEvent) {
-        self.prov_search.input(k);
-        if self.prov_search.lines().join("").is_empty() {
-            self.prov_focus = false;
+    pub(super) fn surf_search_key(&mut self, k: crossterm::event::KeyEvent) {
+        self.surf_field().input(k);
+        if self.surf_field().lines().join("").is_empty() {
+            self.surf_set_focus(false);
         }
         self.menu_scroll = 0;
         self.surf_top = 0;
@@ -1293,7 +1345,7 @@ impl App {
             MenuAction::EditScalar(setting) => self.open_menu(Menu::EditScalar(setting)),
             MenuAction::OpenModels(p) => self.open_menu(Menu::Models { provider: p }),
             MenuAction::FocusSearch => {
-                self.prov_focus = true;
+                self.surf_set_focus(true);
                 self.dirty = true;
             }
             MenuAction::EditProvider(name) => {
@@ -1366,7 +1418,6 @@ impl App {
                     action: MenuAction::DeleteModel(p, k),
                 });
             }
-            MenuAction::PickModelList(p) => self.open_menu(Menu::PickModel { provider: p }),
             MenuAction::DeleteModelList(p) => self.open_menu(Menu::DeleteModelList { provider: p }),
             MenuAction::OpenSession(id) => {
                 if id == self.session.id.to_string() {
@@ -2600,98 +2651,56 @@ impl App {
                 }
             }
             Menu::Models { provider } => {
-                let is_builtin = self.cfg.is_builtin_provider(&provider);
-                let budget = table_budget(self.menu_rect.width);
-                // lead 1 + 2 gaps of 2; name flexes, context/effort fixed
-                let name_w = budget.saturating_sub(1 + 4 + 8 + 8).max(10);
-                self.table_built_w = budget as u16;
-                self.menu_table_header = Some(table_header(
-                    vec![
-                        tcell("NAME", name_w, false, Theme::dim()),
-                        tcell("CONTEXT", 8, true, Theme::dim()),
-                        tcell("EFFORT", 8, false, Theme::dim()),
-                    ],
-                    budget,
+                // A surface row list, not a table: the search field, then the
+                // model names. The column headers are gone; what a model has to
+                // say about itself rides its own row, in gray parentheses.
+                self.menu_rows.push(row(
+                    Line::from(vec![Span::styled("Search", Theme::dim())]),
+                    MenuAction::FocusSearch,
                 ));
+                let current = self.session.model_key.clone();
+                let q = self.model_search.lines().join("").to_lowercase();
                 for (k, m) in &self.cfg.models {
-                    if m.provider == provider && m.status.visible_in_picker() {
-                        let current = k == &self.session.model_key;
-                        // built-in models are user-owned for content: the
-                        // catalog seeds absent keys and never overwrites
-                        let action = MenuAction::EditModel(provider.clone(), k.clone());
-                        // each row reports what that model would actually do
-                        // with its level. The column header already says
-                        // EFFORT, so the "ef:" prefix is dropped here (the
-                        // status bar keeps it — there it has no header).
-                        let effort_label = crate::providers::effort::plan(
-                            m.effort,
-                            m.effort_support(
-                                self.cfg
-                                    .providers
-                                    .get(&m.provider)
-                                    .map(|p| p.format)
-                                    .unwrap_or(WireFormat::Openai),
-                            ),
-                        )
-                        .short_label();
-                        let effort = effort_label.strip_prefix("ef:").unwrap_or(&effort_label);
-                        let mut line = table_line(vec![
-                            tcell(k, name_w, false, Theme::FG()),
-                            tcell(&fmt_ctx(m.context), 8, true, Theme::meta()),
-                            tcell(effort, 8, false, Theme::base()),
-                        ]);
-                        if current && !line.spans.is_empty() {
-                            line.spans[0] = Span::styled("*".to_string(), Theme::accent());
-                        }
-                        self.menu_rows
-                            .push(row(fit_line_width(line, budget), action));
+                    if m.provider != *provider || !m.status.visible_in_picker() {
+                        continue;
                     }
-                }
-                // actions live in the sticky footer like the providers menu:
-                // always visible, navigable, never scrolled with the rows
-                self.menu_sticky_footer.push(row(
-                    Line::from(vec![Span::styled("  add model", Theme::FG())]),
-                    MenuAction::AddModel(provider.clone()),
-                ));
-                self.menu_sticky_footer.push(row(
-                    Line::from(vec![Span::styled("  switch active model", Theme::FG())]),
-                    MenuAction::PickModelList(provider.clone()),
-                ));
-                // Connection probe: lights green with the detail on success,
-                // red with the trimmed reason on failure.
-                let (check_text, check_style) = match self.provider_checks.get(provider.as_str()) {
-                    None => ("  check connection".to_string(), Theme::FG().into()),
-                    Some(ProviderCheck::Checking) => ("  checking…".to_string(), Theme::dim()),
-                    Some(ProviderCheck::Ok(detail)) => {
-                        (format!("  connection ok ({detail})"), Theme::ok())
+                    if !q.is_empty() && !k.to_lowercase().contains(&q) {
+                        continue;
                     }
-                    Some(ProviderCheck::Err(reason)) => {
-                        (format!("  connection failed: {reason}"), Theme::err())
-                    }
-                };
-                // keep narrow terminals usable: one line, bounded width
-                let shown: String = check_text.chars().take(64).collect();
-                let edit_label = if is_builtin {
-                    "  set api key"
-                } else {
-                    "  edit provider"
-                };
-                self.menu_sticky_footer.push(row(
-                    Line::from(vec![Span::styled(edit_label, Theme::FG())]),
-                    MenuAction::EditProvider(provider.clone()),
-                ));
-                self.menu_sticky_footer.push(row(
-                    Line::from(vec![Span::styled(shown, check_style)]),
-                    MenuAction::CheckProvider(provider.clone()),
-                ));
-                if !is_builtin {
-                    self.menu_sticky_footer.push(row(
-                        Line::from(vec![Span::styled("  delete model", Theme::ERR())]),
-                        MenuAction::DeleteModelList(provider.clone()),
-                    ));
-                    self.menu_sticky_footer.push(row(
-                        Line::from(vec![Span::styled("  delete provider", Theme::ERR())]),
-                        MenuAction::DeleteProvider(provider.clone()),
+                    // the level this model would actually run at. `off` is the
+                    // case most rows sit in, so it stays silent and the models
+                    // that think are the rows that read longer
+                    let label = crate::providers::effort::plan(
+                        m.effort,
+                        m.effort_support(
+                            self.cfg
+                                .providers
+                                .get(&m.provider)
+                                .map(|p| p.format)
+                                .unwrap_or(WireFormat::Openai),
+                        ),
+                    )
+                    .short_label();
+                    let effort = label.strip_prefix("ef:").unwrap_or(&label);
+                    let tail = if effort == "off" {
+                        format!(" ({})", fmt_ctx(m.context))
+                    } else {
+                        format!(" ({} · {effort})", fmt_ctx(m.context))
+                    };
+                    // the model the session runs on wears the brand ink: one row
+                    // says "this is what you are on", and the name keeps its own
+                    // first cell instead of spending it on a marker
+                    let style = if *k == current {
+                        Theme::brand_ink()
+                    } else {
+                        Style::new().fg(Theme::FG())
+                    };
+                    self.menu_rows.push(row(
+                        Line::from(vec![
+                            Span::styled(k.clone(), style),
+                            Span::styled(tail, Theme::dim()),
+                        ]),
+                        MenuAction::UseModel(k.clone()),
                     ));
                 }
             }

@@ -2291,19 +2291,24 @@ impl App {
             // rule + title + air + card rows + the close hint under them
             Some(Menu::Context) => self.menu_rows.len() as u16 + 4,
             // rule + title + air + the leading rows + the window + the "+N"
-            // caption when there is one + the hint row under them; the hint
-            // column rides rows the list already has
-            Some(Menu::Providers) => {
-                let (head, win, _, _) = self.list_shape();
+            // caption when there is one + the row under them. The hint column
+            // rides rows the list already has, but the block never gets shorter
+            // than the column: a one-model list still has to show its keys
+            // under its own rows rather than across the rule.
+            Some(Menu::Providers) | Some(Menu::Models { .. }) => {
+                let (head, win, _) = self.list_shape();
                 let body = self.menu_rows.len().saturating_sub(head);
-                let shown = body.min(win).max(1);
+                let shown = body.min(win).max(1).max(self.list_hints().len());
                 (3 + head + shown + usize::from(body > shown) + 1) as u16
             }
             _ => list_rows,
         };
         let surface = matches!(
             surf_menu,
-            Some(Menu::Effort { .. }) | Some(Menu::Context) | Some(Menu::Providers)
+            Some(Menu::Effort { .. })
+                | Some(Menu::Context)
+                | Some(Menu::Providers)
+                | Some(Menu::Models { .. })
         );
         // the block joins the document either way; only a menu surface also
         // claims the composer's own rows
@@ -2616,8 +2621,13 @@ impl App {
                         Some(Menu::Context) => {
                             self.draw_context_surface(buf, rect, skip, surf_full)
                         }
-                        Some(Menu::Providers) => self.draw_list_surface(buf, rect, skip, surf_full),
-                        _ => self.draw_effort_slider(buf, rect, skip, surf_full),
+                        Some(Menu::Providers) | Some(Menu::Models { .. }) => {
+                            self.draw_list_surface(buf, rect, skip, surf_full)
+                        }
+                        Some(Menu::Effort { .. }) => {
+                            self.draw_effort_slider(buf, rect, skip, surf_full)
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -2902,7 +2912,10 @@ impl App {
         // and the bar clamped to its 20-cell floor on a wide terminal.
         if matches!(
             menu,
-            Some(Menu::Effort { .. }) | Some(Menu::Context) | Some(Menu::Providers)
+            Some(Menu::Effort { .. })
+                | Some(Menu::Context)
+                | Some(Menu::Providers)
+                | Some(Menu::Models { .. })
         ) {
             return;
         }
@@ -3000,10 +3013,7 @@ impl App {
         // header from content.
         if matches!(
             menu,
-            Some(Menu::Sessions)
-                | Some(Menu::Models { .. })
-                | Some(Menu::PickModel { .. })
-                | Some(Menu::Providers)
+            Some(Menu::Sessions) | Some(Menu::PickModel { .. }) | Some(Menu::Providers)
         ) {
             let want = super::menus::table_budget(rect.width) as u16;
             if want != self.table_built_w {
@@ -3681,34 +3691,53 @@ impl App {
         }
     }
 
-    /// Shape of a list surface: how many leading rows never scroll (for
-    /// providers the search row), how many body rows fit, the word the "+N"
-    /// caption counts, and the hints — one per row, right-aligned on the last
-    /// rows the block already has, so the column costs no height and a name
-    /// stops short of it. The height math and the painter both read this, so
-    /// they cannot disagree.
-    fn list_shape(
-        &self,
-    ) -> (
-        usize,
-        usize,
-        &'static str,
-        &'static [(&'static str, &'static str)],
-    ) {
+    /// Shape of a list surface: how many leading rows never scroll (the search
+    /// row), how many body rows fit the block, and the word the "+N" caption
+    /// counts. The height math and the painter both read this, so they cannot
+    /// disagree.
+    fn list_shape(&self) -> (usize, usize, &'static str) {
         match self.cur_menu() {
-            // the search row, then a provider window of eight
-            Some(Menu::Providers) => (
-                1,
-                8,
-                "providers",
-                &[
-                    ("ctrl+n", "add"),
-                    ("ctrl+u", "update"),
-                    ("enter", "open"),
-                    ("esc", "back"),
-                ],
-            ),
-            _ => (0, 12, "", &[]),
+            Some(Menu::Providers) => (1, 8, "providers"),
+            Some(Menu::Models { .. }) => (1, 8, "models"),
+            _ => (0, 12, ""),
+        }
+    }
+
+    /// The hint column: one `key: what` pair per row, standing on the last rows
+    /// of the block. The verbs a surface binds are written here and nowhere
+    /// else, so a row cannot advertise a key that does not fire. The test line
+    /// carries the probe's answer because a surface hides the notice row that
+    /// would otherwise report it.
+    pub(super) fn list_hints(&self) -> Vec<(&'static str, String)> {
+        match self.cur_menu() {
+            Some(Menu::Providers) => vec![
+                ("ctrl+n", "add".to_string()),
+                ("ctrl+u", "update".to_string()),
+                ("ctrl+k", "key".to_string()),
+                ("ctrl+d", "delete".to_string()),
+                ("enter", "open".to_string()),
+                ("esc", "back".to_string()),
+            ],
+            Some(Menu::Models { provider }) => {
+                let test = match self.provider_checks.get(provider.as_str()) {
+                    None => "test".to_string(),
+                    Some(ProviderCheck::Checking) => "checking…".to_string(),
+                    Some(ProviderCheck::Ok(detail)) => format!("ok ({detail})"),
+                    Some(ProviderCheck::Err(reason)) => {
+                        let cut: String = reason.chars().take(28).collect();
+                        format!("refused: {cut}")
+                    }
+                };
+                vec![
+                    ("ctrl+n", "add".to_string()),
+                    ("ctrl+e", "edit".to_string()),
+                    ("ctrl+t", test),
+                    ("ctrl+d", "delete".to_string()),
+                    ("enter", "use".to_string()),
+                    ("esc", "back".to_string()),
+                ]
+            }
+            _ => vec![],
         }
     }
 
@@ -3724,7 +3753,8 @@ impl App {
         off: u16,
         full_h: u16,
     ) {
-        let (head, win, more, hints) = self.list_shape();
+        let (head, win, more) = self.list_shape();
+        let hints = self.list_hints();
         // The hint column stands on the right of the rows the block already
         // has, so the list stops short of it: a name never runs under a key.
         // `Theme::hints` pads each pair with a space on either side and puts
@@ -3789,7 +3819,7 @@ impl App {
         /// the caret lives there only while the field holds the focus — until
         /// Enter or a click takes it, the row reads as a label.
         fn paint_field(slf: &mut App, buf: &mut Buffer, area: Rect, y: u16, rail: u16) {
-            let q = slf.prov_search.lines().join("");
+            let q = slf.surf_field().lines().join("");
             buf.set_line(
                 area.x + 2,
                 y,
@@ -3802,7 +3832,7 @@ impl App {
                 width: area.width.saturating_sub(6 + rail),
                 height: 1,
             };
-            if !slf.prov_focus {
+            if !slf.surf_focused() {
                 Paragraph::new(Line::from(Span::styled(
                     if q.is_empty() {
                         "Search".to_string()
@@ -3822,7 +3852,7 @@ impl App {
                     area.width.saturating_sub(4 + rail),
                 );
             }
-            slf.prov_search.render(field, buf);
+            slf.surf_field().render(field, buf);
             // a terminal cursor lets the glyph through the block; the textarea
             // paints a space there, so the placeholder's first letter goes back
             // on top of it, under the cursor style
@@ -3907,7 +3937,7 @@ impl App {
         let n = hints.len() as u16;
         for (i, (key, what)) in hints.iter().enumerate() {
             if let Some(y) = row_y(full_h.saturating_sub(n - i as u16)) {
-                Paragraph::new(Theme::hints(&[(*key, *what)]).right_aligned()).render(
+                Paragraph::new(Theme::hints(&[(*key, what.as_str())]).right_aligned()).render(
                     Rect {
                         x: area.x,
                         y,

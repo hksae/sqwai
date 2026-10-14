@@ -528,6 +528,11 @@ pub struct App {
     /// a standing block cursor in a field nobody chose is the loudest thing on
     /// the surface.
     prov_focus: bool,
+    /// The models surface's own field and caret. Each surface keeps a separate
+    /// query: the provider name you filtered to is not a model filter, and
+    /// opening the list under it would hide every model you came to look at.
+    model_search: TextArea<'static>,
+    model_focus: bool,
     ef_click: Option<(u16, u16)>,
     /// Click range of the context readout in the status bar: opens the same
     /// menu `/context` opens.
@@ -774,6 +779,8 @@ impl App {
             sessions_filter: String::new(),
             prov_search: Self::fresh_input(String::new()),
             prov_focus: false,
+            model_search: Self::fresh_input(String::new()),
+            model_focus: false,
             ef_click: None,
             ctx_click: None,
             md_click: None,

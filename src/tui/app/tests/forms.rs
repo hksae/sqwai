@@ -1033,7 +1033,14 @@ fn providers_hints_stand_as_a_right_column() {
     };
     // the column shares the block's last rows with the list rather than
     // standing on rows of its own
-    let want = ["esc: back", "enter: open", "ctrl+u: update", "ctrl+n: add"];
+    let want = [
+        "esc: back",
+        "enter: open",
+        "ctrl+d: delete",
+        "ctrl+k: key",
+        "ctrl+u: update",
+        "ctrl+n: add",
+    ];
     let edges: Vec<usize> = want
         .iter()
         .enumerate()
@@ -1048,7 +1055,7 @@ fn providers_hints_stand_as_a_right_column() {
         edges.windows(2).all(|e| e[0] == e[1]),
         "one edge for the whole column: {edges:?}"
     );
-    let shared = row(bottom - 3);
+    let shared = row(bottom - 5);
     assert!(
         shared.contains("prov-"),
         "the column stands beside the names, not under them: {shared:?}"

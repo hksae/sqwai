@@ -321,48 +321,35 @@ fn provider_check_marks_checking_then_reports_refused() {
         "a refused connection lights red"
     );
 }
-/// The check row renders the outcome: green with the detail on success,
-/// red with the reason on failure, and stays a button for a re-check.
+/// The Models surface answers the probe in its own hint column. A surface
+/// hides the notice row a toast would otherwise use, so the outcome has to
+/// stand where the key is named.
 #[test]
-fn provider_check_row_lights_green_or_red() {
-    use crate::tui::theme::Theme;
-
+fn provider_check_rail_reports_the_outcome() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.open_menu(Menu::Models {
         provider: "p".into(),
     });
-    let row_style = |app: &App, needle: &str| {
-        (0..app.menu_len())
-            .filter_map(|i| app.menu_row_at(i))
-            .flat_map(|(line, _)| line.spans.iter())
-            .find(|span| span.content.contains(needle))
-            .map(|span| span.style)
+    let rail = |app: &App| {
+        app.list_hints()
+            .into_iter()
+            .find(|(k, _)| *k == "ctrl+t")
+            .map(|(_, w)| w)
+            .expect("the surface names its test key")
     };
+    assert_eq!(rail(&app), "test", "nothing has been probed yet");
 
     app.provider_checks
         .insert("p".into(), ProviderCheck::Ok("2 models".into()));
-    app.build_menu_rows();
-    assert_eq!(
-        row_style(&app, "connection ok"),
-        Some(Theme::ok()),
-        "success lights green"
-    );
+    assert_eq!(rail(&app), "ok (2 models)", "success reads in the column");
 
     app.provider_checks
         .insert("p".into(), ProviderCheck::Err("401 Unauthorized".into()));
-    app.build_menu_rows();
     assert_eq!(
-        row_style(&app, "connection failed"),
-        Some(Theme::err()),
-        "failure lights red"
+        rail(&app),
+        "refused: 401 Unauthorized",
+        "failure reads there too, and the same key re-probes"
     );
-
-    let still_button = (0..app.menu_len()).any(|i| {
-        let (line, action) = app.menu_row_at(i).expect("unified index space");
-        line.spans.iter().any(|s| s.content.contains("connection"))
-            && matches!(action, MenuAction::CheckProvider(_))
-    });
-    assert!(still_button, "the row stays clickable for a re-check");
 }
 /// `/undo step 3` used to parse as `/undo 1`: `nth(1)` yielded "step",
 /// `parse::<usize>()` failed and `unwrap_or(1)` reverted the most recent

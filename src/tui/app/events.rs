@@ -679,10 +679,9 @@ impl App {
                                 self.run_action(MenuAction::DeleteSession(id));
                             }
                         }
-                        // the providers surface keeps its verbs on Ctrl for the
-                        // same reason: plain letters are the search field's, so
-                        // a chord is the only room left. Both were list rows
-                        // until the surface became names-only.
+                        // A surface keeps its verbs on Ctrl: plain letters are
+                        // the search field's, so a chord is the only room left.
+                        // These were list rows until the surfaces became names.
                         KeyCode::Char('n')
                             if ctrl && matches!(self.cur_menu(), Some(Menu::Providers)) =>
                         {
@@ -693,23 +692,76 @@ impl App {
                         {
                             self.start_builtin_update(true);
                         }
-                        // the providers surface owns a real search field: keys
-                        // edit it there, and it filters the list as it types
-                        // the providers search field owns the keyboard only
-                        // after it was clicked: no caret, no typing
+                        // the api key belongs to the provider, so it is set
+                        // from the provider list rather than from each of its
+                        // model lists
+                        KeyCode::Char('k')
+                            if ctrl && matches!(self.cur_menu(), Some(Menu::Providers)) =>
+                        {
+                            if let Some(p) = self.surface_provider() {
+                                self.run_action(MenuAction::EditProvider(p));
+                            }
+                        }
+                        // both deletes ask first: the provider through the
+                        // confirm surface, the model through its own list
+                        KeyCode::Char('d')
+                            if ctrl && matches!(self.cur_menu(), Some(Menu::Providers)) =>
+                        {
+                            if let Some(p) = self.surface_provider() {
+                                self.run_action(MenuAction::DeleteProvider(p));
+                            }
+                        }
+                        KeyCode::Char('d')
+                            if ctrl && matches!(self.cur_menu(), Some(Menu::Models { .. })) =>
+                        {
+                            if let Some(p) = self.surface_provider() {
+                                self.run_action(MenuAction::DeleteModelList(p));
+                            }
+                        }
+                        KeyCode::Char('n')
+                            if ctrl && matches!(self.cur_menu(), Some(Menu::Models { .. })) =>
+                        {
+                            if let Some(p) = self.surface_provider() {
+                                self.run_action(MenuAction::AddModel(p));
+                            }
+                        }
+                        KeyCode::Char('e')
+                            if ctrl && matches!(self.cur_menu(), Some(Menu::Models { .. })) =>
+                        {
+                            if let (Some(p), Some(k)) =
+                                (self.surface_provider(), self.surface_model())
+                            {
+                                self.run_action(MenuAction::EditModel(p, k));
+                            }
+                        }
+                        KeyCode::Char('t')
+                            if ctrl && matches!(self.cur_menu(), Some(Menu::Models { .. })) =>
+                        {
+                            if let Some(p) = self.surface_provider() {
+                                self.run_action(MenuAction::CheckProvider(p));
+                            }
+                        }
+                        // a surface owns a real search field: keys edit it
+                        // there, and it filters the list as it types. The field
+                        // takes the keyboard only after it was chosen: no caret,
+                        // no typing.
                         KeyCode::Char(_)
-                            if matches!(self.cur_menu(), Some(Menu::Providers))
-                                && self.prov_focus
+                            if matches!(
+                                self.cur_menu(),
+                                Some(Menu::Providers | Menu::Models { .. })
+                            ) && self.surf_focused()
                                 && !ctrl
                                 && !alt =>
                         {
-                            self.prov_search_key(k);
+                            self.surf_search_key(k);
                         }
                         KeyCode::Backspace | KeyCode::Delete
-                            if matches!(self.cur_menu(), Some(Menu::Providers))
-                                && self.prov_focus =>
+                            if matches!(
+                                self.cur_menu(),
+                                Some(Menu::Providers | Menu::Models { .. })
+                            ) && self.surf_focused() =>
                         {
-                            self.prov_search_key(k);
+                            self.surf_search_key(k);
                         }
                         // type-to-filter in the sessions menu
                         KeyCode::Char(c) if matches!(self.cur_menu(), Some(Menu::Sessions)) => {
