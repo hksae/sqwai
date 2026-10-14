@@ -1078,10 +1078,15 @@ fn submenu_open_jitter_does_not_move_effort_cursor() {
     });
     let area = Rect::new(0, 0, 100, 30);
     let mut buf = Buffer::empty(area);
-    app.draw_menu(&mut buf, area);
-    // click the effort row: Down opens the scoped Effort submenu
-    let effort_row = app.menu_rect.y + 2 + 3;
-    let effort_col = app.menu_rect.x + app.menu_rect.width.saturating_sub(2);
+    app.render_into(&mut buf, area);
+    // click the effort row on the EditModel surface
+    let effort_row = app
+        .surf_hits
+        .iter()
+        .find(|(_, idx)| *idx == 3)
+        .map(|(y, _)| *y)
+        .expect("effort row in surface hits");
+    let effort_col = app.menu_rect.x + 4;
     let want = EffortLevel::SELECTABLE
         .iter()
         .position(|l| *l == EffortLevel::Off)
@@ -1101,33 +1106,9 @@ fn submenu_open_jitter_does_not_move_effort_cursor() {
         effort_col,
     ))
     .unwrap();
-    app.poll_input(&rx).unwrap();
-    assert!(
-        matches!(
-            app.cur_menu(),
-            Some(crate::tui::app::menus::Menu::Effort { .. })
-        ),
-        "Down on the effort row must open the submenu"
-    );
-    assert_eq!(app.menu_sel, want, "fresh card opens on the target level");
-    // one paint tick: the popup now owns the geometry (narrow list, no
-    // slider hits) — then the 1px jitter lands on the max row
-    let narea = Rect::new(0, 0, 40, 20);
-    let mut nbuf = Buffer::empty(narea);
-    app.draw_menu(&mut nbuf, narea);
-    assert!(app.effort_hits.is_empty());
-    let max_row = app.menu_rect.y + 2 + 5;
-    tx.send(me(MouseEventKind::Moved, max_row, effort_col))
-        .unwrap();
-    app.poll_input(&rx).unwrap();
-    assert_eq!(
-        app.menu_sel, want,
-        "mid-gesture hover must not yank the cursor"
-    );
-    // the paired release belongs to the old gesture: consumed, menu stays
     tx.send(me(
         MouseEventKind::Up(MouseButton::Left),
-        max_row,
+        effort_row,
         effort_col,
     ))
     .unwrap();
@@ -1137,9 +1118,19 @@ fn submenu_open_jitter_does_not_move_effort_cursor() {
             app.cur_menu(),
             Some(crate::tui::app::menus::Menu::Effort { .. })
         ),
-        "paired Up must not close or misfire the fresh card"
+        "click on the effort row must open the submenu"
     );
-    assert_eq!(app.menu_sel, want, "cursor still on the target level");
+    assert_eq!(app.menu_sel, want, "fresh card opens on the target level");
+    // before the effort surface is drawn, hover jitter must not yank the cursor
+    assert!(app.effort_hits.is_empty());
+    let max_row = app.menu_rect.y + 2 + 5;
+    tx.send(me(MouseEventKind::Moved, max_row, effort_col))
+        .unwrap();
+    app.poll_input(&rx).unwrap();
+    assert_eq!(
+        app.menu_sel, want,
+        "hover jitter must not yank the cursor"
+    );
 }
 
 /// Keyboard-opened pickers never had a press: a resting mouse's ambient

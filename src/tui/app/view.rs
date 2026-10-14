@@ -2295,7 +2295,9 @@ impl App {
             // rides rows the list already has, but the block never gets shorter
             // than the column: a one-model list still has to show its keys
             // under its own rows rather than across the rule.
-            Some(Menu::Providers) | Some(Menu::Models { .. }) => {
+            Some(Menu::Providers)
+            | Some(Menu::Models { .. })
+            | Some(Menu::EditModel { .. }) => {
                 let (head, win, _) = self.list_shape();
                 let body = self.menu_rows.len().saturating_sub(head);
                 let shown = body.min(win).max(1).max(self.list_hints().len());
@@ -2309,6 +2311,7 @@ impl App {
                 | Some(Menu::Context)
                 | Some(Menu::Providers)
                 | Some(Menu::Models { .. })
+                | Some(Menu::EditModel { .. })
         );
         // the block joins the document either way; only a menu surface also
         // claims the composer's own rows
@@ -2621,7 +2624,9 @@ impl App {
                         Some(Menu::Context) => {
                             self.draw_context_surface(buf, rect, skip, surf_full)
                         }
-                        Some(Menu::Providers) | Some(Menu::Models { .. }) => {
+                        Some(Menu::Providers)
+                        | Some(Menu::Models { .. })
+                        | Some(Menu::EditModel { .. }) => {
                             self.draw_list_surface(buf, rect, skip, surf_full)
                         }
                         Some(Menu::Effort { .. }) => {
@@ -2916,6 +2921,7 @@ impl App {
                 | Some(Menu::Context)
                 | Some(Menu::Providers)
                 | Some(Menu::Models { .. })
+                | Some(Menu::EditModel { .. })
         ) {
             return;
         }
@@ -3696,6 +3702,7 @@ impl App {
         match self.cur_menu() {
             Some(Menu::Providers) => (1, 8, "providers"),
             Some(Menu::Models { .. }) => (1, 8, "models"),
+            Some(Menu::EditModel { .. }) => (0, 4, ""),
             _ => (0, 12, ""),
         }
     }
@@ -3719,6 +3726,10 @@ impl App {
                 ("ctrl+t", "test".to_string()),
                 ("ctrl+d", "delete".to_string()),
                 ("enter", "use".to_string()),
+                ("esc", "back".to_string()),
+            ],
+            Some(Menu::EditModel { .. }) => vec![
+                ("enter", "edit".to_string()),
                 ("esc", "back".to_string()),
             ],
             _ => vec![],

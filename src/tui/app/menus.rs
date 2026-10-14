@@ -237,6 +237,8 @@ pub(super) enum MenuAction {
     CheckProvider(String),
     AddModel(String),
     EditModel(String, String),
+    EditModelField,
+    OpenModelEffort(Option<String>),
     DeleteModel(String, String),
     DeleteModelList(String),
     UseModel(String),
@@ -562,6 +564,7 @@ impl App {
                 | Some(Menu::Context)
                 | Some(Menu::Providers)
                 | Some(Menu::Models { .. })
+                | Some(Menu::EditModel { .. })
         ) {
             self.follow = true;
         }
@@ -836,7 +839,6 @@ impl App {
             self.cur_menu(),
             Some(
                 Menu::EditProvider { .. }
-                    | Menu::EditModel { .. }
                     | Menu::EditSessionTitle { .. }
                     | Menu::AskFree { .. }
                     | Menu::EditScalar(..)
@@ -872,19 +874,6 @@ impl App {
                 self.dirty = true;
             }
             return hit;
-        }
-        // model edit form only: hover lights the row, focus (typing)
-        // moves on click only. Other forms keep the old behavior.
-        if matches!(self.cur_menu(), Some(Menu::EditModel { .. })) {
-            let top = self.menu_rect.y.saturating_add(2);
-            let hov = (row >= top)
-                .then(|| (row - top) as usize)
-                .filter(|idx| *idx < self.form_fields.len());
-            if hov != self.form_hover_row {
-                self.form_hover_row = hov;
-                self.dirty = true;
-            }
-            return None;
         }
         if self.is_form_menu() {
             return None;
@@ -1214,6 +1203,8 @@ impl App {
             MenuAction::DecideApproval(decision) => self.approval_decide(decision),
             MenuAction::OpenAppearance => self.open_menu(Menu::Appearance),
             MenuAction::OpenEffort => self.open_menu(Menu::Effort { model: None }),
+            MenuAction::OpenModelEffort(model) => self.open_menu(Menu::Effort { model }),
+            MenuAction::EditModelField => {}
             MenuAction::OpenProviders => self.open_menu(Menu::Providers),
             MenuAction::OpenMcp => self.open_menu(Menu::Mcp),
             MenuAction::OpenLsp => self.open_menu(Menu::Lsp),
@@ -2706,6 +2697,41 @@ impl App {
                     ));
                 }
             }
+            Menu::EditModel { key, .. } => {
+                let (k_val, id_val, ctx_val, ef_val) =
+                    match key.as_ref().and_then(|k| self.cfg.models.get(k)) {
+                        Some(mc) => (
+                            key.clone().unwrap_or_default(),
+                            mc.id.clone(),
+                            mc.context.to_string(),
+                            mc.effort.as_str().to_string(),
+                        ),
+                        None => (
+                            key.clone().unwrap_or_default(),
+                            String::new(),
+                            "128000".to_string(),
+                            EffortLevel::Medium.as_str().to_string(),
+                        ),
+                    };
+                let field_row = |label: &'static str, val: String, action: MenuAction| {
+                    let mut spans = vec![Span::styled(label, Style::new().fg(Theme::FG()))];
+                    if !val.is_empty() {
+                        spans.push(Span::styled(format!(" {val}"), Theme::dim()));
+                    }
+                    row(Line::from(spans), action)
+                };
+                self.menu_rows
+                    .push(field_row("key", k_val, MenuAction::EditModelField));
+                self.menu_rows
+                    .push(field_row("request id", id_val, MenuAction::EditModelField));
+                self.menu_rows
+                    .push(field_row("context", ctx_val, MenuAction::EditModelField));
+                self.menu_rows.push(field_row(
+                    "effort",
+                    ef_val,
+                    MenuAction::OpenModelEffort(key),
+                ));
+            }
             Menu::DeleteModelList { provider } => {
                 for (k, m) in &self.cfg.models {
                     if m.provider == provider {
@@ -3189,7 +3215,6 @@ impl App {
                 self.menu_footer_text = Some("enter: confirm · esc: deny".into());
             }
             Menu::EditProvider { .. }
-            | Menu::EditModel { .. }
             | Menu::EditSessionTitle { .. }
             | Menu::AskFree { .. }
             | Menu::EditScalar(..)

@@ -1649,3 +1649,57 @@ fn undo_reopened_step_ids_matches_across_path_separators() {
     let reopened = reopened_step_ids(&active, &[record], "session", &["src/changed.rs".into()]);
     assert_eq!(reopened, vec!["1"]);
 }
+
+#[test]
+fn edit_model_is_a_four_row_surface_with_effort_on_enter() {
+    use crate::tui::theme::Theme;
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.open_menu(Menu::EditModel {
+        provider: "p".into(),
+        key: Some("m".into()),
+    });
+    assert!(!app.is_form_menu(), "EditModel is a surface list, not a modal form");
+    assert_eq!(app.menu_rows.len(), 4);
+    for (i, (label, val)) in [
+        ("key", "m"),
+        ("request id", "test-model"),
+        ("context", "1000"),
+        ("effort", "off"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let (line, _) = &app.menu_rows[i];
+        assert_eq!(line.spans[0].content.as_ref(), label);
+        assert_eq!(line.spans[1].content.as_ref(), format!(" {val}"));
+        assert_eq!(line.spans[1].style, Theme::dim());
+    }
+
+    let area = Rect::new(0, 0, 100, 30);
+    let mut buf = Buffer::empty(area);
+    app.render_into(&mut buf, area);
+    assert!(app.surface_open);
+    let row = |y: u16| -> String {
+        (0..area.width)
+            .map(|x| buf.cell((x, y)).unwrap().symbol())
+            .collect()
+    };
+    let bottom = area.bottom() - 1;
+    assert!(row(bottom).contains("esc: back"));
+    assert!(row(bottom - 1).contains("enter: edit"));
+    assert!(row(bottom - 1).contains("effort off"));
+
+    // Enter on key/request id/context stays in EditModel; Enter on effort opens Effort
+    app.menu_activate();
+    assert!(matches!(app.cur_menu(), Some(Menu::EditModel { .. })));
+    app.menu_sel = 3;
+    app.menu_activate();
+    assert!(matches!(
+        app.cur_menu(),
+        Some(Menu::Effort { model: Some(k) }) if k == "m"
+    ));
+}
+
