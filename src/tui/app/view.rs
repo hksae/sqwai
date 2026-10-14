@@ -2295,7 +2295,10 @@ impl App {
             // rides rows the list already has, but the block never gets shorter
             // than the column: a one-model list still has to show its keys
             // under its own rows rather than across the rule.
-            Some(Menu::Providers)
+            Some(Menu::Settings)
+            | Some(Menu::CompactionSummary)
+            | Some(Menu::UndoShadow)
+            | Some(Menu::Providers)
             | Some(Menu::EditProvider { .. })
             | Some(Menu::ProviderFormat { .. })
             | Some(Menu::Models { .. })
@@ -2310,7 +2313,8 @@ impl App {
             Some(
                 Menu::EditModelField { .. }
                 | Menu::EditProviderField { .. }
-                | Menu::EditSessionTitle { .. },
+                | Menu::EditSessionTitle { .. }
+                | Menu::EditScalar(..),
             ) => (3 + self.list_hints().len().max(2)) as u16,
             _ => list_rows,
         };
@@ -2318,6 +2322,10 @@ impl App {
             surf_menu,
             Some(Menu::Effort { .. })
                 | Some(Menu::Context)
+                | Some(Menu::Settings)
+                | Some(Menu::EditScalar(..))
+                | Some(Menu::CompactionSummary)
+                | Some(Menu::UndoShadow)
                 | Some(Menu::Providers)
                 | Some(Menu::EditProvider { .. })
                 | Some(Menu::EditProviderField { .. })
@@ -2640,7 +2648,11 @@ impl App {
                         Some(Menu::Context) => {
                             self.draw_context_surface(buf, rect, skip, surf_full)
                         }
-                        Some(Menu::Providers)
+                        Some(Menu::Settings)
+                        | Some(Menu::EditScalar(..))
+                        | Some(Menu::CompactionSummary)
+                        | Some(Menu::UndoShadow)
+                        | Some(Menu::Providers)
                         | Some(Menu::EditProvider { .. })
                         | Some(Menu::EditProviderField { .. })
                         | Some(Menu::ProviderFormat { .. })
@@ -2942,6 +2954,10 @@ impl App {
             menu,
             Some(Menu::Effort { .. })
                 | Some(Menu::Context)
+                | Some(Menu::Settings)
+                | Some(Menu::EditScalar(..))
+                | Some(Menu::CompactionSummary)
+                | Some(Menu::UndoShadow)
                 | Some(Menu::Providers)
                 | Some(Menu::EditProvider { .. })
                 | Some(Menu::EditProviderField { .. })
@@ -3736,6 +3752,9 @@ impl App {
         // their actual item count (`body.min(win)`).
         let dyn_win = (screen_h as usize / 2).saturating_sub(6).max(8);
         match self.cur_menu() {
+            Some(Menu::Settings) => (1, dyn_win, "settings"),
+            Some(Menu::CompactionSummary) => (0, 2, ""),
+            Some(Menu::UndoShadow) => (0, 3, ""),
             Some(Menu::Providers) => (1, dyn_win, "providers"),
             Some(Menu::EditProvider { .. }) => (0, 5, ""),
             Some(Menu::ProviderFormat { .. }) => (0, 3, ""),
@@ -3746,7 +3765,8 @@ impl App {
             Some(
                 Menu::EditModelField { .. }
                 | Menu::EditProviderField { .. }
-                | Menu::EditSessionTitle { .. },
+                | Menu::EditSessionTitle { .. }
+                | Menu::EditScalar(..),
             ) => (0, 1, ""),
             _ => (0, dyn_win, ""),
         }
@@ -3757,6 +3777,10 @@ impl App {
     /// else, so a row cannot advertise a key that does not fire.
     pub(super) fn list_hints(&self) -> Vec<(&'static str, String)> {
         match self.cur_menu() {
+            Some(Menu::Settings) => vec![
+                ("enter", "change".to_string()),
+                ("esc", "back".to_string()),
+            ],
             Some(Menu::Providers) => vec![
                 ("ctrl+n", "add".to_string()),
                 ("ctrl+u", "update".to_string()),
@@ -3784,7 +3808,11 @@ impl App {
                 ("enter", "edit".to_string()),
                 ("esc", "back".to_string()),
             ],
-            Some(Menu::ProviderFormat { .. }) => vec![
+            Some(
+                Menu::ProviderFormat { .. }
+                | Menu::CompactionSummary
+                | Menu::UndoShadow,
+            ) => vec![
                 ("enter", "use".to_string()),
                 ("esc", "back".to_string()),
             ],
@@ -3795,7 +3823,8 @@ impl App {
             Some(
                 Menu::EditModelField { .. }
                 | Menu::EditProviderField { .. }
-                | Menu::EditSessionTitle { .. },
+                | Menu::EditSessionTitle { .. }
+                | Menu::EditScalar(..),
             ) => vec![
                 ("enter", "save".to_string()),
                 ("esc", "back".to_string()),
@@ -4007,6 +4036,7 @@ impl App {
                     Menu::EditModelField { .. }
                         | Menu::EditProviderField { .. }
                         | Menu::EditSessionTitle { .. }
+                        | Menu::EditScalar(..)
                 )
             );
             let cur = (!info && slf.menu_sel == i) || is_field_surf;

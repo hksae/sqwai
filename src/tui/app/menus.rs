@@ -18,6 +18,7 @@ use crate::tui::theme::Theme;
 
 pub(super) const COMMANDS: &[&str] = &[
     "/compact",
+    "/config",
     "/constraints",
     "/context",
     "/debug",
@@ -35,7 +36,6 @@ pub(super) const COMMANDS: &[&str] = &[
     "/plan",
     "/providers",
     "/sessions",
-    "/settings",
     "/skill",
     "/skills",
     "/test",
@@ -234,6 +234,10 @@ pub(super) enum Menu {
     Controls,
     /// single-field form editing one numeric host setting
     EditScalar(ScalarSetting),
+    /// picker for `[compaction].summary`
+    CompactionSummary,
+    /// picker for `[undo].shadow`
+    UndoShadow,
     /// single-field form appending one entry to a string list
     AddListItem(ListSection),
     /// pick an entry of a string list to delete
@@ -397,7 +401,11 @@ pub(super) enum MenuAction {
     #[allow(dead_code)]
     OpenControls,
     CycleCompactionSummary,
+    OpenCompactionSummary,
+    SetCompactionSummary(crate::config::CompactionSummary),
     CycleUndoShadow,
+    OpenUndoShadow,
+    SetUndoShadow(crate::config::ShadowStore),
     ToggleSkillsAutoLoad,
     AddMcpServer,
     EditMcpServer(usize),
@@ -668,6 +676,10 @@ impl App {
             self.cur_menu(),
             Some(Menu::Effort { .. })
                 | Some(Menu::Context)
+                | Some(Menu::Settings)
+                | Some(Menu::EditScalar(..))
+                | Some(Menu::CompactionSummary)
+                | Some(Menu::UndoShadow)
                 | Some(Menu::Providers)
                 | Some(Menu::EditProvider { .. })
                 | Some(Menu::EditProviderField { .. })
@@ -680,6 +692,24 @@ impl App {
                 | Some(Menu::ConfirmDelete { .. })
         ) {
             self.follow = true;
+        }
+        if matches!(self.cur_menu(), Some(Menu::Settings)) {
+            self.config_search = Self::fresh_input(String::new());
+            self.config_focus = false;
+        }
+        if matches!(self.cur_menu(), Some(Menu::CompactionSummary)) {
+            let cur = self.cfg.compaction.summary;
+            self.menu_sel = crate::config::CompactionSummary::ALL
+                .iter()
+                .position(|s| s.as_str() == cur.as_str())
+                .unwrap_or(0);
+        }
+        if matches!(self.cur_menu(), Some(Menu::UndoShadow)) {
+            let cur = self.cfg.undo.shadow;
+            self.menu_sel = crate::config::ShadowStore::ALL
+                .iter()
+                .position(|s| *s == cur)
+                .unwrap_or(0);
         }
         if matches!(self.cur_menu(), Some(Menu::EditProvider { name: None })) {
             self.provider_draft = ProviderDraft::default();
@@ -798,7 +828,7 @@ impl App {
             _ => {}
         }
         let popped = self.menu_stack.pop();
-        self.menu_sel = match (popped, self.cur_menu()) {
+        self.menu_sel = match (&popped, self.cur_menu()) {
             (Some(Menu::EditModelField { field, .. }), Some(Menu::EditModel { .. })) => {
                 field.row_index()
             }
@@ -824,6 +854,25 @@ impl App {
         // typing: prefill rebuilds from config, the stash restores drafts
         self.restore_form_text();
         self.build_menu_rows();
+        if matches!(self.cur_menu(), Some(Menu::Settings)) {
+            let pos = match popped {
+                Some(Menu::EditScalar(s)) => self.menu_rows.iter().position(|(_, a)| {
+                    matches!(a, MenuAction::EditScalar(other) if other.label() == s.label())
+                }),
+                Some(Menu::CompactionSummary) => self
+                    .menu_rows
+                    .iter()
+                    .position(|(_, a)| matches!(a, MenuAction::OpenCompactionSummary)),
+                Some(Menu::UndoShadow) => self
+                    .menu_rows
+                    .iter()
+                    .position(|(_, a)| matches!(a, MenuAction::OpenUndoShadow)),
+                _ => None,
+            };
+            if let Some(idx) = pos {
+                self.menu_sel = idx;
+            }
+        }
         self.dirty = true;
     }
 
@@ -1175,6 +1224,7 @@ impl App {
         match self.cur_menu() {
             Some(Menu::Models { .. }) => &mut self.model_search,
             Some(Menu::Sessions) => &mut self.session_search,
+            Some(Menu::Settings) => &mut self.config_search,
             _ => &mut self.prov_search,
         }
     }
@@ -1183,6 +1233,7 @@ impl App {
         match self.cur_menu() {
             Some(Menu::Models { .. }) => self.model_focus,
             Some(Menu::Sessions) => self.session_focus,
+            Some(Menu::Settings) => self.config_focus,
             _ => self.prov_focus,
         }
     }
@@ -1191,6 +1242,7 @@ impl App {
         match self.cur_menu() {
             Some(Menu::Models { .. }) => self.model_focus = on,
             Some(Menu::Sessions) => self.session_focus = on,
+            Some(Menu::Settings) => self.config_focus = on,
             _ => self.prov_focus = on,
         }
     }
@@ -1434,6 +1486,16 @@ impl App {
                 );
                 self.build_menu_rows();
             }
+            MenuAction::OpenCompactionSummary => self.open_menu(Menu::CompactionSummary),
+            MenuAction::SetCompactionSummary(summary) => {
+                self.cfg.compaction.summary = summary;
+                self.cfg.save().ok();
+                self.status(
+                    &format!("compaction summary = {}", summary.as_str()),
+                    StatusKind::Ok,
+                );
+                self.menu_back();
+            }
             MenuAction::CycleUndoShadow => {
                 let all = crate::config::ShadowStore::ALL;
                 let cur = all
@@ -1447,6 +1509,16 @@ impl App {
                     StatusKind::Ok,
                 );
                 self.build_menu_rows();
+            }
+            MenuAction::OpenUndoShadow => self.open_menu(Menu::UndoShadow),
+            MenuAction::SetUndoShadow(shadow) => {
+                self.cfg.undo.shadow = shadow;
+                self.cfg.save().ok();
+                self.status(
+                    &format!("undo shadow = {}", shadow.as_str()),
+                    StatusKind::Ok,
+                );
+                self.menu_back();
             }
             MenuAction::ToggleSkillsAutoLoad => {
                 self.cfg.skills.auto_load = !self.cfg.skills.auto_load;
@@ -2053,7 +2125,9 @@ impl App {
 
     pub(super) fn menu_title(&self) -> String {
         match &self.cur_menu() {
-            Some(Menu::Settings) => " Settings ".into(),
+            Some(Menu::Settings) => " Config ".into(),
+            Some(Menu::CompactionSummary) => " Config · compaction summary ".into(),
+            Some(Menu::UndoShadow) => " Config · undo shadow ".into(),
             Some(Menu::Appearance) => " Appearance ".into(),
             Some(Menu::Mcp) => " MCP servers ".into(),
             Some(Menu::Lsp) => " LSP servers ".into(),
@@ -2088,7 +2162,7 @@ impl App {
             Some(Menu::Undo) => " Undo ".into(),
             Some(Menu::Help) => " Help ".into(),
             Some(Menu::Controls) => " Controls ".into(),
-            Some(Menu::EditScalar(setting)) => format!(" Edit {} ", cap_first(setting.label())),
+            Some(Menu::EditScalar(setting)) => format!(" Config · {} ", setting.label()),
             Some(Menu::AddListItem(section)) => format!(" Add {} ", cap_first(section.title())),
             Some(Menu::DeleteListItems(section)) => {
                 format!(" Delete {} ", cap_first(section.title()))
@@ -2136,28 +2210,159 @@ impl App {
         let row = |l: Line<'static>, a: MenuAction| (l, a);
         match menu {
             Menu::Settings => {
-                let section = |label: &str, action: MenuAction| {
-                    row(
-                        Line::from(vec![Span::styled(format!("  {label}"), Theme::FG())]),
+                self.menu_rows.push(row(
+                    Line::from(vec![Span::styled("Search", Theme::dim())]),
+                    MenuAction::FocusSearch,
+                ));
+                let q = self.config_search.lines().join("").to_lowercase();
+                let entries: Vec<(&str, String, MenuAction)> = vec![
+                    (
+                        "typewriter",
+                        on_off(self.cfg.ui.typewriter),
+                        MenuAction::ToggleTypewriter,
+                    ),
+                    (
+                        "http debug log",
+                        on_off(self.cfg.ui.http_log),
+                        MenuAction::ToggleHttpLog,
+                    ),
+                    (
+                        "perf frame log",
+                        on_off(self.perf.enabled()),
+                        MenuAction::TogglePerfLog,
+                    ),
+                    (
+                        "experimental test commands",
+                        on_off(self.cfg.ui.experimental_test),
+                        MenuAction::ToggleExperimentalTest,
+                    ),
+                    (
+                        "skills auto-load",
+                        on_off(self.cfg.skills.auto_load),
+                        MenuAction::ToggleSkillsAutoLoad,
+                    ),
+                    (
+                        "plan budget ratio",
+                        ScalarSetting::PlanBudgetRatio.current(&self.cfg),
+                        MenuAction::EditScalar(ScalarSetting::PlanBudgetRatio),
+                    ),
+                    (
+                        "plan max steps",
+                        ScalarSetting::PlanMaxSteps.current(&self.cfg),
+                        MenuAction::EditScalar(ScalarSetting::PlanMaxSteps),
+                    ),
+                    (
+                        "plan nudge after",
+                        ScalarSetting::PlanNudgeAfter.current(&self.cfg),
+                        MenuAction::EditScalar(ScalarSetting::PlanNudgeAfter),
+                    ),
+                    (
+                        "memory load budget ratio",
+                        ScalarSetting::MemoryLoadBudgetRatio.current(&self.cfg),
+                        MenuAction::EditScalar(ScalarSetting::MemoryLoadBudgetRatio),
+                    ),
+                    (
+                        "memory max tokens",
+                        ScalarSetting::MemoryMaxTokens.current(&self.cfg),
+                        MenuAction::EditScalar(ScalarSetting::MemoryMaxTokens),
+                    ),
+                    (
+                        "memory max proposals",
+                        ScalarSetting::MemoryMaxProposals.current(&self.cfg),
+                        MenuAction::EditScalar(ScalarSetting::MemoryMaxProposals),
+                    ),
+                    (
+                        "compaction threshold",
+                        ScalarSetting::CompactionThreshold.current(&self.cfg),
+                        MenuAction::EditScalar(ScalarSetting::CompactionThreshold),
+                    ),
+                    (
+                        "compaction keep turns",
+                        ScalarSetting::CompactionKeepTurns.current(&self.cfg),
+                        MenuAction::EditScalar(ScalarSetting::CompactionKeepTurns),
+                    ),
+                    (
+                        "compaction anchor ratio",
+                        ScalarSetting::CompactionAnchorRatio.current(&self.cfg),
+                        MenuAction::EditScalar(ScalarSetting::CompactionAnchorRatio),
+                    ),
+                    (
+                        "compaction summary",
+                        self.cfg.compaction.summary.as_str().to_string(),
+                        MenuAction::OpenCompactionSummary,
+                    ),
+                    (
+                        "undo keep per session",
+                        ScalarSetting::UndoKeepPerSession.current(&self.cfg),
+                        MenuAction::EditScalar(ScalarSetting::UndoKeepPerSession),
+                    ),
+                    (
+                        "undo blob grace secs",
+                        ScalarSetting::UndoBlobGraceSecs.current(&self.cfg),
+                        MenuAction::EditScalar(ScalarSetting::UndoBlobGraceSecs),
+                    ),
+                    (
+                        "undo shadow",
+                        self.cfg.undo.shadow.as_str().to_string(),
+                        MenuAction::OpenUndoShadow,
+                    ),
+                    (
+                        "undo shadow max bytes",
+                        ScalarSetting::UndoShadowMaxBytes.current(&self.cfg),
+                        MenuAction::EditScalar(ScalarSetting::UndoShadowMaxBytes),
+                    ),
+                ];
+                let sel_before = self.menu_sel;
+                for (label, val, action) in entries {
+                    if !q.is_empty()
+                        && !label.to_lowercase().contains(&q)
+                        && !val.to_lowercase().contains(&q)
+                    {
+                        continue;
+                    }
+                    self.menu_rows.push(row(
+                        Line::from(vec![
+                            Span::styled(
+                                format!("{label:<28}"),
+                                Style::new().fg(Theme::FG()),
+                            ),
+                            Span::styled(val, Theme::dim()),
+                        ]),
                         action,
-                    )
-                };
-                self.menu_rows
-                    .push(section("Appearance", MenuAction::OpenAppearance));
-                self.menu_rows
-                    .push(section("Providers", MenuAction::OpenProviders));
-                self.menu_rows.push(section("Agent", MenuAction::OpenAgent));
-                self.menu_rows
-                    .push(section("Safety", MenuAction::OpenSafety));
-                self.menu_rows.push(section("Undo", MenuAction::OpenUndo));
-                self.menu_rows.push(section("MCP", MenuAction::OpenMcp));
-                self.menu_rows.push(section("LSP", MenuAction::OpenLsp));
-                self.menu_rows
-                    .push(section("Skills", MenuAction::OpenSkills));
-                self.menu_rows
-                    .push(section("Experimental", MenuAction::OpenExperimental));
-                self.menu_rows.push(section("Debug", MenuAction::OpenDebug));
-                self.menu_footer_text = Some("enter: open · esc: close".into());
+                    ));
+                }
+                self.menu_sel = sel_before;
+            }
+            Menu::CompactionSummary => {
+                let current = self.cfg.compaction.summary.as_str();
+                for s in crate::config::CompactionSummary::ALL {
+                    let style = if s.as_str() == current {
+                        Theme::brand_ink()
+                    } else {
+                        Style::new().fg(Theme::FG())
+                    };
+                    self.menu_rows.push(row(
+                        Line::from(vec![Span::styled(s.as_str(), style)]),
+                        MenuAction::SetCompactionSummary(s),
+                    ));
+                }
+            }
+            Menu::UndoShadow => {
+                let current = self.cfg.undo.shadow;
+                for s in crate::config::ShadowStore::ALL {
+                    let style = if s == current {
+                        Theme::brand_ink()
+                    } else {
+                        Style::new().fg(Theme::FG())
+                    };
+                    self.menu_rows.push(row(
+                        Line::from(vec![Span::styled(s.as_str(), style)]),
+                        MenuAction::SetUndoShadow(s),
+                    ));
+                }
+            }
+            Menu::EditScalar(..) => {
+                self.menu_rows.push(row(Line::default(), MenuAction::None));
             }
             Menu::Help => {
                 self.menu_footer_text = Some("esc: close".into());
@@ -3442,7 +3647,6 @@ impl App {
                 self.menu_footer_text = Some("enter: confirm · esc: deny".into());
             }
             Menu::AskFree { .. }
-            | Menu::EditScalar(..)
             | Menu::AddListItem(..)
             | Menu::EditMcpServer { .. }
             | Menu::EditLspServer { .. } => {}

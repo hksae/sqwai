@@ -3,20 +3,16 @@ use super::*;
 #[test]
 fn experimental_section_sits_above_debug_and_toggles() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
-    app.open_menu(Menu::Settings);
-    let pos = |a: &MenuAction| {
-        app.menu_rows
-            .iter()
-            .position(|(_, act)| std::mem::discriminant(act) == std::mem::discriminant(a))
-    };
-    let exp = pos(&MenuAction::OpenExperimental).expect("experimental row");
-    let dbg = pos(&MenuAction::OpenDebug).expect("debug row");
-    assert!(exp + 1 == dbg, "experimental must sit right above debug");
-    // toggle flips the persisted flag and rebuilds the row
+    app.command("config");
+    assert!(matches!(app.cur_menu(), Some(Menu::Settings)));
+    let exp = app
+        .menu_rows
+        .iter()
+        .position(|(_, act)| matches!(act, MenuAction::ToggleExperimentalTest))
+        .expect("experimental test commands row in /config");
+    assert!(exp > 0);
     app.run_action(MenuAction::ToggleExperimentalTest);
     assert!(app.cfg.ui.experimental_test);
-    app.open_menu(Menu::Experimental);
-    assert_eq!(app.menu_rows.len(), 1, "one toggle row for now");
     app.run_action(MenuAction::ToggleExperimentalTest);
     assert!(!app.cfg.ui.experimental_test);
 }
@@ -764,36 +760,22 @@ fn settings_hub_reuses_existing_menus() {
                 .collect::<String>()
         })
         .collect();
-    assert!(labels.iter().any(|row| row.contains("Appearance")));
-    assert!(labels.iter().any(|row| row.contains("Providers")));
-    assert!(labels.iter().any(|row| row.contains("MCP")));
-    assert!(labels.iter().any(|row| row.contains("LSP")));
-    assert!(labels.iter().any(|row| row.contains("Skills")));
-
-    app.run_action(MenuAction::OpenAppearance);
-    assert!(matches!(app.cur_menu(), Some(Menu::Appearance)));
-    app.menu_back();
-    app.run_action(MenuAction::OpenProviders);
-    assert!(matches!(app.cur_menu(), Some(Menu::Providers)));
+    assert!(labels[0].contains("Search"));
+    assert!(labels.iter().any(|row| row.contains("typewriter")));
+    assert!(labels.iter().any(|row| row.contains("plan max steps")));
+    assert!(labels.iter().any(|row| row.contains("compaction summary")));
+    assert!(labels.iter().any(|row| row.contains("undo shadow")));
 }
 
 #[test]
 fn settings_hub_rows_have_no_hint_subtitles() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.open_menu(Menu::Settings);
-    let texts: Vec<String> = app
-        .menu_rows
-        .iter()
-        .map(|(line, _)| {
-            line.spans
-                .iter()
-                .map(|span| span.content.as_ref().to_string())
-                .collect::<String>()
-        })
-        .collect();
-    assert!(!texts.iter().any(|t| t.contains("themes and UI")));
-    assert!(!texts.iter().any(|t| t.contains("models and API")));
-    assert!(texts.iter().any(|t| t.contains("Appearance")));
+    // every config row (past Search) aligns its label to 28 columns before the value
+    for (line, _) in app.menu_rows.iter().skip(1) {
+        assert_eq!(line.spans.len(), 2);
+        assert_eq!(line.spans[0].content.chars().count(), 28);
+    }
 }
 
 #[test]
@@ -1071,28 +1053,23 @@ fn providers_hints_stand_as_a_right_column() {
 fn settings_hub_lists_agent_safety_undo_sections() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.open_menu(Menu::Settings);
-    let labels: Vec<String> = app
-        .menu_rows
-        .iter()
-        .map(|(line, _)| {
-            line.spans
-                .iter()
-                .map(|span| span.content.as_ref().to_string())
-                .collect::<String>()
-        })
-        .collect();
-    assert!(labels.iter().any(|row| row.contains("Agent")));
-    assert!(labels.iter().any(|row| row.contains("Safety")));
-    assert!(labels.iter().any(|row| row.contains("Undo")));
+    // CompactionSummary opens a 2-row surface picker and commits back to Config
+    app.run_action(MenuAction::OpenCompactionSummary);
+    assert!(matches!(app.cur_menu(), Some(Menu::CompactionSummary)));
+    assert_eq!(app.menu_rows.len(), 2);
+    app.menu_sel = 0; // off
+    app.menu_activate();
+    assert!(matches!(app.cur_menu(), Some(Menu::Settings)));
+    assert_eq!(app.cfg.compaction.summary.as_str(), "off");
 
-    app.run_action(MenuAction::OpenAgent);
-    assert!(matches!(app.cur_menu(), Some(Menu::Agent)));
-    app.menu_back();
-    app.run_action(MenuAction::OpenSafety);
-    assert!(matches!(app.cur_menu(), Some(Menu::Safety)));
-    app.menu_back();
-    app.run_action(MenuAction::OpenUndo);
-    assert!(matches!(app.cur_menu(), Some(Menu::Undo)));
+    // UndoShadow opens a 3-row surface picker and commits back to Config
+    app.run_action(MenuAction::OpenUndoShadow);
+    assert!(matches!(app.cur_menu(), Some(Menu::UndoShadow)));
+    assert_eq!(app.menu_rows.len(), 3);
+    app.menu_sel = 1; // user
+    app.menu_activate();
+    assert!(matches!(app.cur_menu(), Some(Menu::Settings)));
+    assert_eq!(app.cfg.undo.shadow.as_str(), "user");
 }
 
 #[test]
@@ -1452,32 +1429,18 @@ fn continuation_can_be_turned_off_per_provider() {
 fn every_settings_section_opens_a_menu_with_rows() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.open_menu(Menu::Settings);
-    let sections: Vec<(String, MenuAction)> = app
+    let actions: Vec<MenuAction> = app
         .menu_rows
         .iter()
-        .map(|(line, action)| {
-            (
-                line.spans
-                    .iter()
-                    .map(|s| s.content.as_ref())
-                    .collect::<String>(),
-                action.clone(),
-            )
-        })
+        .skip(1)
+        .map(|(_, a)| a.clone())
         .collect();
-    assert!(
-        sections.iter().any(|(label, _)| label.contains("Debug")),
-        "no way to reach the debug menu: {:?}",
-        sections.iter().map(|(l, _)| l).collect::<Vec<_>>()
-    );
-    for (label, action) in sections {
+    assert!(!actions.is_empty());
+    for action in actions {
         let mut app = test_app("http://127.0.0.1:9/v1".into());
         app.open_menu(Menu::Settings);
         app.run_action(action);
-        assert!(
-            !app.menu_rows.is_empty(),
-            "section {label:?} opened nothing"
-        );
+        assert!(!app.menu_rows.is_empty());
     }
 }
 
@@ -1488,13 +1451,6 @@ fn the_http_log_switch_is_reachable_from_settings() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     let before = app.cfg.ui.http_log;
     app.open_menu(Menu::Settings);
-    let open_debug = app
-        .menu_rows
-        .iter()
-        .find(|(line, _)| line.spans.iter().any(|s| s.content.contains("Debug")))
-        .map(|(_, action)| action.clone())
-        .expect("settings offers a debug section");
-    app.run_action(open_debug);
     let toggle = app
         .menu_rows
         .iter()
@@ -1504,7 +1460,7 @@ fn the_http_log_switch_is_reachable_from_settings() {
                 .any(|s| s.content.contains("http debug log"))
         })
         .map(|(_, action)| action.clone())
-        .expect("the debug menu offers the http log switch");
+        .expect("config offers the http log switch");
     app.run_action(toggle);
     assert_ne!(app.cfg.ui.http_log, before);
 }

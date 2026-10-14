@@ -528,6 +528,9 @@ pub struct App {
     /// The sessions surface's search field and caret focus.
     session_search: TextArea<'static>,
     session_focus: bool,
+    /// The `/config` surface's search field and caret focus.
+    config_search: TextArea<'static>,
+    config_focus: bool,
     /// The providers surface's search field: a real input with its own caret,
     /// focused while that surface is open, filtering the list as it is typed.
     prov_search: TextArea<'static>,
@@ -787,6 +790,8 @@ impl App {
             sessions: Vec::new(),
             session_search: Self::fresh_input(String::new()),
             session_focus: false,
+            config_search: Self::fresh_input(String::new()),
+            config_focus: false,
             prov_search: Self::fresh_input(String::new()),
             prov_focus: false,
             model_search: Self::fresh_input(String::new()),

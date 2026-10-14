@@ -737,7 +737,12 @@ impl App {
                         KeyCode::Char(_)
                             if matches!(
                                 self.cur_menu(),
-                                Some(Menu::Providers | Menu::Models { .. } | Menu::Sessions)
+                                Some(
+                                    Menu::Providers
+                                        | Menu::Models { .. }
+                                        | Menu::Sessions
+                                        | Menu::Settings
+                                )
                             ) && self.surf_focused()
                                 && !ctrl
                                 && !alt =>
@@ -747,7 +752,12 @@ impl App {
                         KeyCode::Backspace | KeyCode::Delete
                             if matches!(
                                 self.cur_menu(),
-                                Some(Menu::Providers | Menu::Models { .. } | Menu::Sessions)
+                                Some(
+                                    Menu::Providers
+                                        | Menu::Models { .. }
+                                        | Menu::Sessions
+                                        | Menu::Settings
+                                )
                             ) && self.surf_focused() =>
                         {
                             self.surf_search_key(k);

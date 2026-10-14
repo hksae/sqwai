@@ -273,8 +273,11 @@ impl App {
                 self.form_fields = vec![f];
             }
             Some(Menu::EditScalar(setting)) => {
-                self.form_fields =
-                    vec![FormField::text(setting.label(), setting.current(&self.cfg))];
+                let mut f = FormField::text(setting.label(), setting.current(&self.cfg));
+                if let FormField::Text { ta, .. } = &mut f {
+                    ta.move_cursor(tui_textarea::CursorMove::End);
+                }
+                self.form_fields = vec![f];
             }
             Some(Menu::AddListItem(section)) => {
                 self.form_fields = vec![FormField::text(section.title(), String::new())];
@@ -498,6 +501,7 @@ impl App {
                 Menu::EditModelField { .. }
                     | Menu::EditProviderField { .. }
                     | Menu::EditSessionTitle { .. }
+                    | Menu::EditScalar(..)
             )
         );
         // popup fields start past the title row and the air row under it;
@@ -568,6 +572,7 @@ impl App {
                 Menu::EditModelField { .. }
                     | Menu::EditProviderField { .. }
                     | Menu::EditSessionTitle { .. }
+                    | Menu::EditScalar(..)
             )
         );
         let label_w = self.form_label_w();
@@ -1035,12 +1040,7 @@ impl App {
                 let message = setting.apply(&mut self.cfg, &raw);
                 self.cfg.save().ok();
                 self.status(&message, StatusKind::Ok);
-                self.open_menu_replace(match setting {
-                    super::menus::ScalarSetting::UndoKeepPerSession
-                    | super::menus::ScalarSetting::UndoBlobGraceSecs
-                    | super::menus::ScalarSetting::UndoShadowMaxBytes => Menu::Undo,
-                    _ => Menu::Agent,
-                });
+                self.menu_back();
             }
             Some(Menu::AddListItem(section)) => {
                 let value = self

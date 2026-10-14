@@ -40,7 +40,7 @@ impl App {
             .unwrap_or("")
             .to_string();
         match name.as_str() {
-            "/settings" => self.open_menu(Menu::Settings),
+            "/config" | "/settings" => self.open_menu(Menu::Settings),
             "/test" => {
                 if !self.experimental_test() {
                     self.status("unknown command /test", StatusKind::Warn);
