@@ -37,9 +37,11 @@ fn enter_confirms_provider_deletion() {
         matches!(app.cur_menu(), Some(Menu::ConfirmDelete { .. })),
         "ctrl+d asks before it deletes"
     );
-    assert_eq!(app.menu_sel, 1, "selection starts on the confirm row");
+    assert_eq!(app.menu_sel, 1, "selection starts on the cancel row");
 
-    // plain enter on the prompt deletes the provider
+    // move down to delete and press enter to delete the provider
+    app.menu_nav(1);
+    assert_eq!(app.menu_sel, 2);
     press_enter(&mut app);
     assert!(!app.cfg.providers.contains_key("p"), "provider not deleted");
     assert!(
@@ -94,21 +96,19 @@ fn ctrl_d_on_model_opens_confirm_surface_directly() {
         matches!(app.cur_menu(), Some(Menu::ConfirmDelete { .. })),
         "ctrl+d on a model row opens ConfirmDelete directly without DeleteModelList"
     );
-    assert_eq!(app.menu_sel, 1, "starts on delete");
+    assert_eq!(app.menu_sel, 1, "starts on cancel");
 
     let area = Rect::new(0, 0, 100, 30);
     let mut buf = Buffer::empty(area);
     app.render_into(&mut buf, area);
     assert!(app.surface_open);
 
-    // Move down to cancel and press enter -> model survives and we return to Models
-    app.menu_nav(1);
-    assert_eq!(app.menu_sel, 2);
+    // Enter on cancel (default) keeps the model and returns to Models
     press_enter(&mut app);
     assert!(app.cfg.models.contains_key("m"));
     assert!(matches!(app.cur_menu(), Some(Menu::Models { .. })));
 
-    // Open confirm again and press enter on delete -> model is deleted
+    // Open confirm again, move down to delete, and press enter -> model is deleted
     app.menu_sel = 1;
     tx.send(Event::Key(KeyEvent::new(
         KeyCode::Char('d'),
@@ -116,6 +116,8 @@ fn ctrl_d_on_model_opens_confirm_surface_directly() {
     )))
     .unwrap();
     app.poll_input(&rx).unwrap();
+    app.menu_nav(1);
+    assert_eq!(app.menu_sel, 2);
     press_enter(&mut app);
     assert!(!app.cfg.models.contains_key("m"));
     assert!(matches!(app.cur_menu(), Some(Menu::Models { .. })));

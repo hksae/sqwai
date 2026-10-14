@@ -666,10 +666,6 @@ impl App {
             self.ask_focus = 0;
             self.ask_custom_focus = None;
         }
-        // confirmation prompts open with the confirm action highlighted
-        if matches!(self.cur_menu(), Some(Menu::ConfirmDelete { .. })) && self.menu_sel == 0 {
-            self.menu_sel = 1;
-        }
         // A surface is the tail of the history: it only exists at the end of
         // it, so opening one brings the view back down to it.
         if matches!(
@@ -3052,12 +3048,12 @@ impl App {
                     MenuAction::None,
                 ));
                 self.menu_rows.push(row(
-                    Line::from(vec![Span::styled("delete", Theme::ERR())]),
-                    MenuAction::Confirm(Box::new(action)),
-                ));
-                self.menu_rows.push(row(
                     Line::from(vec![Span::styled("cancel", Style::new().fg(Theme::FG()))]),
                     MenuAction::Back,
+                ));
+                self.menu_rows.push(row(
+                    Line::from(vec![Span::styled("delete", Theme::ERR())]),
+                    MenuAction::Confirm(Box::new(action)),
                 ));
             }
             Menu::Effort { model } => {
