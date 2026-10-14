@@ -3928,9 +3928,22 @@ impl App {
             let i = self.menu_sel - head;
             if i < top {
                 top = i;
+                // A section header (Pinned, Today, …) has MenuAction::None, so
+                // the cursor never lands on it directly: when pulling the window
+                // up to the first row under a header, pull its header in too.
+                while top > 0
+                    && matches!(
+                        self.menu_rows.get(head + top - 1).map(|(_, a)| a),
+                        Some(MenuAction::None)
+                    )
+                {
+                    top -= 1;
+                }
             } else if i >= top + shown {
                 top = i + 1 - shown;
             }
+        } else {
+            top = 0;
         }
         self.surf_top = top;
         /// The search row's content: `⌕` and a placeholder are its chrome, and

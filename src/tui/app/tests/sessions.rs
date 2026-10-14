@@ -730,6 +730,27 @@ fn menu_scrollbar_yields_to_drawn_frames() {
         .expect("Pinned divider row");
     let row = row_text(hy);
     assert!(row.contains("Pinned"), "divider must stay intact: {row:?}");
+
+    // Scroll all the way down, then back up to the first pinned session:
+    // the "Pinned" section header above it must come back into view too
+    for _ in 0..13 {
+        app.menu_nav(1);
+        app.render_into(&mut buf, area);
+    }
+    for _ in 0..12 {
+        app.menu_nav(-1);
+        app.render_into(&mut buf, area);
+    }
+    let has_pinned = (0..area.height).any(|y| {
+        (0..area.width)
+            .map(|x| buf[(x, y)].symbol())
+            .collect::<String>()
+            .contains("Pinned")
+    });
+    assert!(
+        has_pinned,
+        "Pinned header must stay visible when scrolling back up to the first pinned session"
+    );
 }
 
 #[test]
