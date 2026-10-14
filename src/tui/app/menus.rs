@@ -604,6 +604,12 @@ impl App {
         if matches!(self.cur_menu(), Some(Menu::Models { .. })) {
             self.model_search = Self::fresh_input(String::new());
             self.model_focus = false;
+            // the probe's answer belongs to the visit that asked for it: a
+            // stale `refused` standing in the hint column reads as a claim
+            // about right now
+            if let Some(Menu::Models { provider }) = self.cur_menu().cloned() {
+                self.provider_checks.remove(&provider);
+            }
         }
         self.prefill_form();
         // rows are ready immediately, not on the next frame

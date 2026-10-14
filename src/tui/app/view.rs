@@ -3721,7 +3721,23 @@ impl App {
                     Some(ProviderCheck::Checking) => "checking…".to_string(),
                     Some(ProviderCheck::Ok(detail)) => format!("ok ({detail})"),
                     Some(ProviderCheck::Err(reason)) => {
-                        let cut: String = reason.chars().take(28).collect();
+                        // the column is narrow and half a word reads as a bug,
+                        // so the reason keeps only the whole words that fit
+                        let mut cut = String::new();
+                        for w in reason.split_whitespace() {
+                            let next = if cut.is_empty() {
+                                w.to_string()
+                            } else {
+                                format!("{cut} {w}")
+                            };
+                            if next.chars().count() > 18 {
+                                break;
+                            }
+                            cut = next;
+                        }
+                        if cut.is_empty() {
+                            cut = reason.chars().take(18).collect();
+                        }
                         format!("refused: {cut}")
                     }
                 };

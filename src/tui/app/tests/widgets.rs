@@ -350,6 +350,13 @@ fn provider_check_rail_reports_the_outcome() {
         "refused: 401 Unauthorized",
         "failure reads there too, and the same key re-probes"
     );
+
+    // and the answer dies with the visit: the next one asks its own question
+    app.menu_home();
+    app.open_menu(Menu::Models {
+        provider: "p".into(),
+    });
+    assert_eq!(rail(&app), "test", "a stale answer is not a current one");
 }
 /// `/undo step 3` used to parse as `/undo 1`: `nth(1)` yielded "step",
 /// `parse::<usize>()` failed and `unwrap_or(1)` reverted the most recent
