@@ -635,7 +635,7 @@ impl App {
             self.open_menu(Menu::Context);
         } else if model {
             let provider = self.model_cfg.provider.clone();
-            self.open_menu(Menu::PickModel { provider });
+            self.open_menu(Menu::Models { provider });
         } else {
             self.open_menu(Menu::Effort { model: None });
         }
@@ -3011,10 +3011,7 @@ impl App {
         // Table menus bake the card width into every column: rebuild once
         // when the real card disagrees, so a stale rect never desyncs
         // header from content.
-        if matches!(
-            menu,
-            Some(Menu::Sessions) | Some(Menu::PickModel { .. }) | Some(Menu::Providers)
-        ) {
+        if matches!(menu, Some(Menu::Sessions) | Some(Menu::Providers)) {
             let want = super::menus::table_budget(rect.width) as u16;
             if want != self.table_built_w {
                 self.build_menu_rows();

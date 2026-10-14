@@ -112,9 +112,6 @@ pub(super) enum Menu {
     Models {
         provider: String,
     },
-    PickModel {
-        provider: String,
-    },
     Sessions,
     DeleteSessions,
     /// /debug: runtime toggles and diagnostics
@@ -1853,7 +1850,6 @@ impl App {
             Some(Menu::Skills) => " Skills ".into(),
             Some(Menu::Providers) => " Providers ".into(),
             Some(Menu::Models { provider }) => format!(" Models · {provider} "),
-            Some(Menu::PickModel { provider }) => format!(" Switch model · {provider} "),
             Some(Menu::DeleteModelList { provider }) => {
                 format!(" Delete model · {provider} ")
             }
@@ -2702,35 +2698,6 @@ impl App {
                         ]),
                         MenuAction::UseModel(k.clone()),
                     ));
-                }
-            }
-            Menu::PickModel { provider } => {
-                let budget = table_budget(self.menu_rect.width);
-                // lead 1 + 1 gap of 2; name flexes, context fixed
-                let name_w = budget.saturating_sub(1 + 2 + 8).max(10);
-                self.table_built_w = budget as u16;
-                self.menu_table_header = Some(table_header(
-                    vec![
-                        tcell("NAME", name_w, false, Theme::dim()),
-                        tcell("CONTEXT", 8, true, Theme::dim()),
-                    ],
-                    budget,
-                ));
-                for (k, m) in &self.cfg.models {
-                    if m.provider == provider && m.status.visible_in_picker() {
-                        let current = k == &self.session.model_key;
-                        let mut line = table_line(vec![
-                            tcell(k, name_w, false, Theme::FG()),
-                            tcell(&fmt_ctx(m.context), 8, true, Theme::meta()),
-                        ]);
-                        if current && !line.spans.is_empty() {
-                            line.spans[0] = Span::styled("*".to_string(), Theme::accent());
-                        }
-                        self.menu_rows.push(row(
-                            fit_line_width(line, budget),
-                            MenuAction::UseModel(k.clone()),
-                        ));
-                    }
                 }
             }
             Menu::DeleteModelList { provider } => {

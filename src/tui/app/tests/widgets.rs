@@ -79,7 +79,7 @@ fn clicking_the_model_name_opens_the_model_menu() {
     );
     app.mouse_up(10, (from + to) / 2);
     assert!(
-        matches!(app.cur_menu(), Some(Menu::PickModel { .. })),
+        matches!(app.cur_menu(), Some(Menu::Models { .. })),
         "a click on the model opens the model menu"
     );
 

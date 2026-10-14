@@ -653,7 +653,7 @@ impl App {
                         {
                             // quick switch: models of the current provider
                             let provider = self.model_cfg.provider.clone();
-                            self.open_menu(Menu::PickModel { provider });
+                            self.open_menu(Menu::Models { provider });
                         }
                         // Sessions actions live on Ctrl combos so plain letters
                         // (including r/p/d) always reach the type-to-filter
