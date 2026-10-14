@@ -3907,15 +3907,16 @@ impl App {
         let n = hints.len() as u16;
         for (i, (key, what)) in hints.iter().enumerate() {
             if let Some(y) = row_y(full_h.saturating_sub(n - i as u16)) {
-                Paragraph::new(Theme::hints(&[(*key, *what)]).right_aligned()).render(
-                    Rect {
-                        x: area.x,
-                        y,
-                        width: area.width.saturating_sub(1),
-                        height: 1,
-                    },
-                    buf,
-                );
+                Paragraph::new(Theme::hints_with(&[(*key, *what)], Theme::dim()).right_aligned())
+                    .render(
+                        Rect {
+                            x: area.x,
+                            y,
+                            width: area.width.saturating_sub(1),
+                            height: 1,
+                        },
+                        buf,
+                    );
             }
         }
     }

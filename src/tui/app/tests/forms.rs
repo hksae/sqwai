@@ -1053,6 +1053,16 @@ fn providers_hints_stand_as_a_right_column() {
         shared.contains("prov-"),
         "the column stands beside the names, not under them: {shared:?}"
     );
+    // one ink for the whole column: the key wears the same gray as its word
+    let y = bottom - 3;
+    let line = row(y);
+    let key_col = line.find("ctrl+n").expect("the key stands on the row");
+    let last = line.trim_end().chars().count() - 1;
+    assert_eq!(
+        buf[(key_col as u16, y)].fg,
+        buf[(last as u16, y)].fg,
+        "key and action in one ink"
+    );
 }
 
 #[test]
