@@ -1317,8 +1317,11 @@ fn sessions_filter_narrows_and_esc_clears() {
         app.poll_input(&rx).unwrap();
     };
 
+    // Enter on row 0 focuses the search row
+    send(&mut app, KeyCode::Enter);
+    assert!(app.surf_focused());
     send(&mut app, KeyCode::Char('b'));
-    assert_eq!(app.sessions_filter, "b");
+    assert_eq!(app.session_search.lines().join(""), "b");
     let open: Vec<_> = app
         .menu_rows
         .iter()
@@ -1329,12 +1332,8 @@ fn sessions_filter_narrows_and_esc_clears() {
         .collect();
     assert_eq!(open.len(), 1, "filter 'b' must leave one session");
 
-    // esc clears the filter first, only then closes the menu
     send(&mut app, KeyCode::Esc);
-    assert!(app.sessions_filter.is_empty());
-    assert!(matches!(app.cur_menu(), Some(Menu::Sessions)));
-    send(&mut app, KeyCode::Esc);
-    assert!(app.menu_stack.is_empty(), "second esc closes");
+    assert!(app.menu_stack.is_empty(), "esc closes the surface");
 }
 
 #[test]
@@ -1357,10 +1356,10 @@ fn sessions_first_keystroke_filters_instead_of_acting() {
         app.poll_input(&rx).unwrap();
     };
 
-    // 'p' with an empty filter must filter, not pin (the reported bug:
-    // searching names with p/d/r was impossible on the first keystroke)
+    // focus search and type 'p' — must filter, not pin
+    send(&mut app, KeyCode::Enter, KeyModifiers::empty());
     send(&mut app, KeyCode::Char('p'), KeyModifiers::empty());
-    assert_eq!(app.sessions_filter, "p");
+    assert_eq!(app.session_search.lines().join(""), "p");
     assert!(
         !app.sessions.iter().any(|s| s.pinned),
         "nothing must pin from typing"
@@ -1373,7 +1372,7 @@ fn sessions_first_keystroke_filters_instead_of_acting() {
         .expect("session row");
     app.menu_sel = row;
     send(&mut app, KeyCode::Char('p'), KeyModifiers::CONTROL);
-    assert_eq!(app.sessions_filter, "p");
+    assert_eq!(app.session_search.lines().join(""), "p");
     let pinned_id = match &app.menu_rows[row].1 {
         MenuAction::OpenSession(id) => id.clone(),
         _ => unreachable!(),

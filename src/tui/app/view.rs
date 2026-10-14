@@ -2300,15 +2300,18 @@ impl App {
             | Some(Menu::ProviderFormat { .. })
             | Some(Menu::Models { .. })
             | Some(Menu::EditModel { .. })
+            | Some(Menu::Sessions)
             | Some(Menu::ConfirmDelete { .. }) => {
                 let (head, win, _) = self.list_shape();
                 let body = self.menu_rows.len().saturating_sub(head);
                 let shown = body.min(win).max(1).max(self.list_hints().len());
                 (3 + head + shown + usize::from(body > shown) + 1) as u16
             }
-            Some(Menu::EditModelField { .. } | Menu::EditProviderField { .. }) => {
-                (3 + self.list_hints().len().max(2)) as u16
-            }
+            Some(
+                Menu::EditModelField { .. }
+                | Menu::EditProviderField { .. }
+                | Menu::EditSessionTitle { .. },
+            ) => (3 + self.list_hints().len().max(2)) as u16,
             _ => list_rows,
         };
         let surface = matches!(
@@ -2322,6 +2325,8 @@ impl App {
                 | Some(Menu::Models { .. })
                 | Some(Menu::EditModel { .. })
                 | Some(Menu::EditModelField { .. })
+                | Some(Menu::Sessions)
+                | Some(Menu::EditSessionTitle { .. })
                 | Some(Menu::ConfirmDelete { .. })
         );
         // the block joins the document either way; only a menu surface also
@@ -2642,6 +2647,8 @@ impl App {
                         | Some(Menu::Models { .. })
                         | Some(Menu::EditModel { .. })
                         | Some(Menu::EditModelField { .. })
+                        | Some(Menu::Sessions)
+                        | Some(Menu::EditSessionTitle { .. })
                         | Some(Menu::ConfirmDelete { .. }) => {
                             self.draw_list_surface(buf, rect, skip, surf_full)
                         }
@@ -2942,6 +2949,8 @@ impl App {
                 | Some(Menu::Models { .. })
                 | Some(Menu::EditModel { .. })
                 | Some(Menu::EditModelField { .. })
+                | Some(Menu::Sessions)
+                | Some(Menu::EditSessionTitle { .. })
                 | Some(Menu::ConfirmDelete { .. })
         ) {
             return;
@@ -3726,8 +3735,13 @@ impl App {
             Some(Menu::ProviderFormat { .. }) => (0, 3, ""),
             Some(Menu::Models { .. }) => (1, 8, "models"),
             Some(Menu::EditModel { .. }) => (0, 4, ""),
+            Some(Menu::Sessions) => (1, 8, "sessions"),
             Some(Menu::ConfirmDelete { .. }) => (1, 2, ""),
-            Some(Menu::EditModelField { .. } | Menu::EditProviderField { .. }) => (0, 1, ""),
+            Some(
+                Menu::EditModelField { .. }
+                | Menu::EditProviderField { .. }
+                | Menu::EditSessionTitle { .. },
+            ) => (0, 1, ""),
             _ => (0, 12, ""),
         }
     }
@@ -3753,6 +3767,13 @@ impl App {
                 ("enter", "use".to_string()),
                 ("esc", "back".to_string()),
             ],
+            Some(Menu::Sessions) => vec![
+                ("ctrl+r", "rename".to_string()),
+                ("ctrl+p", "pin".to_string()),
+                ("ctrl+d", "delete".to_string()),
+                ("enter", "open".to_string()),
+                ("esc", "back".to_string()),
+            ],
             Some(Menu::EditProvider { .. } | Menu::EditModel { .. }) => vec![
                 ("enter", "edit".to_string()),
                 ("esc", "back".to_string()),
@@ -3765,7 +3786,11 @@ impl App {
                 ("enter", "confirm".to_string()),
                 ("esc", "cancel".to_string()),
             ],
-            Some(Menu::EditModelField { .. } | Menu::EditProviderField { .. }) => vec![
+            Some(
+                Menu::EditModelField { .. }
+                | Menu::EditProviderField { .. }
+                | Menu::EditSessionTitle { .. },
+            ) => vec![
                 ("enter", "save".to_string()),
                 ("esc", "back".to_string()),
             ],
@@ -3959,7 +3984,11 @@ impl App {
             let info = matches!(action, MenuAction::None);
             let is_field_surf = matches!(
                 slf.cur_menu(),
-                Some(Menu::EditModelField { .. } | Menu::EditProviderField { .. })
+                Some(
+                    Menu::EditModelField { .. }
+                        | Menu::EditProviderField { .. }
+                        | Menu::EditSessionTitle { .. }
+                )
             );
             let cur = (!info && slf.menu_sel == i) || is_field_surf;
             buf.set_line(

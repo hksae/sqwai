@@ -266,7 +266,11 @@ impl App {
                     .find(|s| s.id.to_string() == *id)
                     .map(|s| s.title.clone())
                     .unwrap_or_default();
-                self.form_fields = vec![FormField::text("title", title)];
+                let mut f = FormField::text("title", title);
+                if let FormField::Text { ta, .. } = &mut f {
+                    ta.move_cursor(tui_textarea::CursorMove::End);
+                }
+                self.form_fields = vec![f];
             }
             Some(Menu::EditScalar(setting)) => {
                 self.form_fields =
@@ -490,7 +494,11 @@ impl App {
     pub(super) fn form_mouse_down(&mut self, row: u16, col: u16) {
         let is_surf_field = matches!(
             self.cur_menu(),
-            Some(Menu::EditModelField { .. } | Menu::EditProviderField { .. })
+            Some(
+                Menu::EditModelField { .. }
+                    | Menu::EditProviderField { .. }
+                    | Menu::EditSessionTitle { .. }
+            )
         );
         // popup fields start past the title row and the air row under it;
         // surface fields also have the top rule row above the title
@@ -556,7 +564,11 @@ impl App {
     pub(super) fn form_mouse_drag(&mut self, _row: u16, col: u16) {
         let is_surf_field = matches!(
             self.cur_menu(),
-            Some(Menu::EditModelField { .. } | Menu::EditProviderField { .. })
+            Some(
+                Menu::EditModelField { .. }
+                    | Menu::EditProviderField { .. }
+                    | Menu::EditSessionTitle { .. }
+            )
         );
         let label_w = self.form_label_w();
         if let Some(FormField::Text { ta, .. }) = self.form_fields.get_mut(self.form_focus)
@@ -615,7 +627,13 @@ impl App {
                     let _ = self.session.save();
                 }
                 if found || self.session.id.to_string() == id {
-                    self.open_menu_replace(Menu::Sessions);
+                    self.menu_stack.pop();
+                    if matches!(self.cur_menu(), Some(Menu::Sessions)) {
+                        self.build_menu_rows();
+                        self.dirty = true;
+                    } else {
+                        self.open_menu(Menu::Sessions);
+                    }
                     self.status("session renamed", StatusKind::Ok);
                 } else {
                     self.status("session not found", StatusKind::Err);

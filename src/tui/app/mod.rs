@@ -525,8 +525,9 @@ pub struct App {
     /// cached session list for the sessions menus (headers only — see
     /// `Session::list_visible_headers`)
     sessions: Vec<SessionHeader>,
-    /// live filter typed inside the sessions menu
-    sessions_filter: String,
+    /// The sessions surface's search field and caret focus.
+    session_search: TextArea<'static>,
+    session_focus: bool,
     /// The providers surface's search field: a real input with its own caret,
     /// focused while that surface is open, filtering the list as it is typed.
     prov_search: TextArea<'static>,
@@ -784,7 +785,8 @@ impl App {
             model_draft: menus::ModelDraft::default(),
             provider_draft: menus::ProviderDraft::default(),
             sessions: Vec::new(),
-            sessions_filter: String::new(),
+            session_search: Self::fresh_input(String::new()),
+            session_focus: false,
             prov_search: Self::fresh_input(String::new()),
             prov_focus: false,
             model_search: Self::fresh_input(String::new()),

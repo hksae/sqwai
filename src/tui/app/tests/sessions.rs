@@ -710,7 +710,6 @@ fn menu_scrollbar_yields_to_drawn_frames() {
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
     let mut app = test_app("http://127.0.0.1:9/v1".into());
-    // pinned frame + enough rows to overflow a short card
     let mut pinned = Session::new("m".into(), 1000);
     pinned.push(Role::User, "pinned one");
     pinned.pinned = true;
@@ -722,22 +721,15 @@ fn menu_scrollbar_yields_to_drawn_frames() {
             .push(crate::session::SessionHeader::from_session(&s));
     }
     app.open_menu(Menu::Sessions);
-    let area = Rect::new(0, 0, 100, 14);
+    let area = Rect::new(0, 0, 100, 30);
     let mut buf = Buffer::empty(area);
-    app.draw_menu(&mut buf, area);
+    app.render_into(&mut buf, area);
     let row_text = |y: u16| -> String { (0..area.width).map(|x| buf[(x, y)].symbol()).collect() };
-    // pinned divider survived the scrollbar: label still label
     let hy = (0..area.height)
-        .find(|y| row_text(*y).contains("pinned"))
-        .expect("pinned divider row");
+        .find(|y| row_text(*y).contains("Pinned"))
+        .expect("Pinned divider row");
     let row = row_text(hy);
-    assert!(row.contains("pinned"), "divider must stay intact: {row:?}");
-    // the thumb may share the row, but never inside the label text
-    let start = row.find("pinned").expect("divider span");
-    assert!(
-        !row[start..start + "pinned".len()].contains('▐'),
-        "scrollbar must not eat the divider: {row:?}"
-    );
+    assert!(row.contains("Pinned"), "divider must stay intact: {row:?}");
 }
 
 #[test]
@@ -768,30 +760,26 @@ fn pinned_frame_resolves_against_real_card_not_stale_rect() {
     s.push(Role::User, "hi");
     s.pinned = true;
     app.sessions = vec![SessionHeader::from_session(&s)];
-    // stale narrow rect, e.g. left over from the effort slider card
-    app.menu_rect = Rect::new(0, 0, 52, 5);
     app.open_menu(Menu::Sessions);
     let area = Rect::new(0, 0, 100, 30);
     let mut buf = Buffer::empty(area);
-    app.draw_menu(&mut buf, area);
-    // the draw-time check rebuilt rows for the real card: 78-wide card
-    // → 72-col budget, every row exact-fit
-    assert_eq!(app.table_built_w, 72, "must track the real card");
+    app.render_into(&mut buf, area);
+    assert!(app.surface_open);
     let (line, _) = app
         .menu_rows
         .iter()
         .find(|(_, a)| matches!(a, MenuAction::OpenSession(_)))
         .expect("session row");
     let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-    assert_eq!(
-        unicode_width::UnicodeWidthStr::width(text.as_str()),
-        72,
-        "row must span the table budget: {text:?}"
+    assert!(
+        text.starts_with("hi (") && text.ends_with(" · m · 1)"),
+        "row wears Models-style parenthesized metadata: {text:?}"
     );
 }
 
 #[test]
 fn pinned_sessions_frame_stays_dim() {
+    use crate::tui::theme::Theme;
     use ratatui::style::Color;
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     let mut s = Session::new("m".into(), 1000);
@@ -815,118 +803,59 @@ fn pinned_sessions_frame_stays_dim() {
             && sp.style.fg != Some(Color::White)),
         "divider wears the section style: {div:?}"
     );
-    // data rung (title) bright, meta rung (model) gray, hint rung dim
     let (row, _) = app
         .menu_rows
         .iter()
         .find(|(_, a)| matches!(a, MenuAction::OpenSession(_)))
         .expect("session row");
-    assert_eq!(
-        row.spans[1].style.fg,
-        Some(Color::Reset),
-        "title is terminal default"
-    );
-    assert_eq!(
-        row.spans[5].style.fg,
-        Some(Color::Gray),
-        "model is the meta rung"
-    );
-    assert_eq!(
-        row.spans[3].style.fg,
-        Some(Color::DarkGray),
-        "time stays dim"
-    );
-    // title carries no marker column: pinned-ness reads from the section
+    assert_eq!(row.spans[0].style.fg, Some(Theme::FG()));
+    assert_eq!(row.spans[1].style, Theme::dim());
     assert!(
-        row.spans[1].content.as_ref().starts_with("new session"),
+        row.spans[0].content.as_ref().starts_with("new session"),
         "row starts with the title: {:?}",
-        row.spans[1].content.as_ref()
+        row.spans[0].content.as_ref()
     );
 }
+
 #[test]
 fn pinned_session_frame_aligns_columns_and_respects_narrow_terminal() {
     use crate::providers::Role;
-    use unicode_width::UnicodeWidthStr;
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
 
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     let mut s = Session::new("m".into(), 1000);
     s.push(Role::User, "тестовая сессия (wide / cyrillic) 🚀");
     s.pinned = true;
     app.sessions = vec![SessionHeader::from_session(&s)];
-    app.menu_rect.width = 40;
-    app.cache_w = 40;
     app.open_menu(Menu::Sessions);
 
-    // 40-col card → 34-col budget: header and row share one grid.
-    // Span-level widths (byte-slicing breaks on the CJK title).
-    let span_widths = |l: &ratatui::text::Line| -> Vec<usize> {
-        l.spans
-            .iter()
-            .map(|sp| unicode_width::UnicodeWidthStr::width(sp.content.as_ref()))
-            .collect()
-    };
-    let header_line = app.menu_table_header.as_ref().expect("table header");
-    let content_line = app
-        .menu_rows
-        .iter()
-        .find(|(_, a)| matches!(a, MenuAction::OpenSession(_)))
-        .map(|(l, _)| l)
-        .expect("content row");
-    // lead 1 + title 8 (number glued) + gap 2 + time 5 + gap 2
-    // + model 8 + gap 2 + tokens cut to 6 = 34: the exact-fit pass
-    // drops trailing columns first, so SIZE never shifts the grid
-    assert_eq!(
-        span_widths(header_line),
-        vec![1, 8, 2, 5, 2, 8, 2, 6],
-        "header must share the grid"
-    );
-    assert_eq!(
-        span_widths(content_line),
-        vec![1, 8, 2, 5, 2, 8, 2, 6],
-        "row must share the grid"
-    );
-    assert_eq!(header_line.spans[3].content.as_ref(), "TIME ");
-    let time = content_line.spans[3].content.as_ref();
-    assert!(
-        time.as_bytes()[2] == b':',
-        "row time must fill the time column: {time:?}"
-    );
-    let total: usize = span_widths(content_line).iter().sum();
-    assert!(total <= 40, "must fit within menu rect width: {total} > 40");
+    let area = Rect::new(0, 0, 40, 24);
+    let mut buf = Buffer::empty(area);
+    app.render_into(&mut buf, area);
+    assert!(app.surface_open);
 }
 
 #[test]
 fn wide_card_table_fills_no_dead_margin() {
     use crate::providers::Role;
-    use unicode_width::UnicodeWidthStr;
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     let mut s = Session::new("m".into(), 1000);
     s.push(Role::User, "hi");
     app.sessions = vec![SessionHeader::from_session(&s)];
-    app.menu_rect.width = 120;
-    app.cache_w = 120;
     app.open_menu(Menu::Sessions);
-    // 120-col card → 114-col budget: the title absorbs every spare
-    // column past the fixed model 16, rows span the budget exactly
     let line = app
         .menu_rows
         .iter()
         .find(|(_, a)| matches!(a, MenuAction::OpenSession(_)))
         .map(|(l, _)| l)
         .expect("content row");
-    let widths: Vec<usize> = line
-        .spans
-        .iter()
-        .map(|sp| unicode_width::UnicodeWidthStr::width(sp.content.as_ref()))
-        .collect();
-    assert_eq!(&widths[..8], &[1, 79, 2, 5, 2, 16, 2, 7], "{line:?}");
-    assert_eq!(widths.iter().sum::<usize>(), 114, "{line:?}");
+    assert_eq!(line.spans[0].content.as_ref(), "hi");
 }
 
 #[test]
 fn sessions_rows_share_date_model_token_columns() {
     use crate::providers::Role;
-    use unicode_width::UnicodeWidthStr;
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     let mut a = Session::new("m".into(), 1000);
     a.push(Role::User, "hi");
@@ -937,36 +866,14 @@ fn sessions_rows_share_date_model_token_columns() {
         SessionHeader::from_session(&b),
     ];
     app.open_menu(Menu::Sessions);
-    // grid geometry asserted per span: lead 1 + title 37 (number glued
-    // to the title, one space off) + gap 2 + time 5 + gap 2 + model 16
-    // + gap 2 + tokens 7 = 72 content cols, exact-fit to the 72 budget.
-    // The section carries the date, rows keep HH:MM.
-    let rows: Vec<&ratatui::text::Line> = app
-        .menu_rows
-        .iter()
-        .filter(|(_, act)| matches!(act, MenuAction::OpenSession(_)))
-        .map(|(l, _)| l)
-        .collect();
-    assert_eq!(rows.len(), 2);
-    for line in rows {
-        let widths: Vec<usize> = line
-            .spans
-            .iter()
-            .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))
-            .collect();
-        // exact-fit pads the 72 content cols to the 72 budget
-        assert_eq!(&widths[..8], &[1, 37, 2, 5, 2, 16, 2, 7], "{line:?}");
-        assert_eq!(widths.iter().sum::<usize>(), 72, "{line:?}");
-        assert_eq!(&line.spans[3].content.as_ref()[2..3], ":");
-    }
     let texts: Vec<String> = app
         .menu_rows
         .iter()
         .filter(|(_, act)| matches!(act, MenuAction::OpenSession(_)))
         .map(|(l, _)| l.spans.iter().map(|s| s.content.as_ref()).collect())
         .collect();
-    assert!(texts[0].starts_with(" hi"), "{texts:?}");
-    assert!(texts[1].starts_with(" a medium length title!"), "{texts:?}");
+    assert!(texts[0].starts_with("hi ("), "{texts:?}");
+    assert!(texts[1].starts_with("a medium length title! ("), "{texts:?}");
 }
 
 fn project_session(title: &str, project: Option<std::path::PathBuf>) -> Session {

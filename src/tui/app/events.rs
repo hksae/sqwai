@@ -354,19 +354,7 @@ impl App {
                                     self.menu_back();
                                     continue;
                                 }
-                                // first esc clears an active sessions filter
-                                if matches!(self.cur_menu(), Some(Menu::Sessions))
-                                    && !self.sessions_filter.is_empty()
-                                {
-                                    self.sessions_filter.clear();
-                                    self.menu_sel = 0;
-                                    self.menu_scroll = 0;
-                                    self.menu_scroll = 0;
-                                    self.build_menu_rows();
-                                    self.dirty = true;
-                                } else {
-                                    self.menu_back();
-                                }
+                                self.menu_back();
                             } else if self.popup_visible() {
                                 self.popup_dismiss = true;
                                 self.hover = None;
@@ -749,7 +737,7 @@ impl App {
                         KeyCode::Char(_)
                             if matches!(
                                 self.cur_menu(),
-                                Some(Menu::Providers | Menu::Models { .. })
+                                Some(Menu::Providers | Menu::Models { .. } | Menu::Sessions)
                             ) && self.surf_focused()
                                 && !ctrl
                                 && !alt =>
@@ -759,25 +747,10 @@ impl App {
                         KeyCode::Backspace | KeyCode::Delete
                             if matches!(
                                 self.cur_menu(),
-                                Some(Menu::Providers | Menu::Models { .. })
+                                Some(Menu::Providers | Menu::Models { .. } | Menu::Sessions)
                             ) && self.surf_focused() =>
                         {
                             self.surf_search_key(k);
-                        }
-                        // type-to-filter in the sessions menu
-                        KeyCode::Char(c) if matches!(self.cur_menu(), Some(Menu::Sessions)) => {
-                            self.sessions_filter.push(c);
-                            self.menu_sel = 0;
-                            self.menu_scroll = 0;
-                            self.build_menu_rows();
-                            self.dirty = true;
-                        }
-                        KeyCode::Backspace if matches!(self.cur_menu(), Some(Menu::Sessions)) => {
-                            self.sessions_filter.pop();
-                            self.menu_sel = 0;
-                            self.menu_scroll = 0;
-                            self.build_menu_rows();
-                            self.dirty = true;
                         }
                         KeyCode::Char(_) | KeyCode::Backspace | KeyCode::Delete
                             if self.menu_stack.is_empty() && self.ask_custom_focus.is_some() =>

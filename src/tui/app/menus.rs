@@ -216,7 +216,6 @@ pub(super) enum Menu {
         provider: String,
     },
     Sessions,
-    DeleteSessions,
     /// /debug: runtime toggles and diagnostics
     #[allow(dead_code)]
     Debug,
@@ -359,9 +358,6 @@ pub(super) enum MenuAction {
     OpenSession(String),
     RenameSession(String),
     PinSession(String),
-    /// kept for future use; deletion now goes through the `d` key
-    #[allow(dead_code)]
-    DeleteSessionList,
     DeleteSession(String),
     ToggleTypewriter,
     ToggleHttpLog,
@@ -679,6 +675,8 @@ impl App {
                 | Some(Menu::Models { .. })
                 | Some(Menu::EditModel { .. })
                 | Some(Menu::EditModelField { .. })
+                | Some(Menu::Sessions)
+                | Some(Menu::EditSessionTitle { .. })
                 | Some(Menu::ConfirmDelete { .. })
         ) {
             self.follow = true;
@@ -733,13 +731,14 @@ impl App {
         }
         // unit tests inject the cache directly and never hit the disk
         #[cfg(not(test))]
-        if matches!(self.cur_menu(), Some(Menu::Sessions | Menu::DeleteSessions)) {
+        if matches!(self.cur_menu(), Some(Menu::Sessions)) {
             // The menu needs metadata only; defer loading full message histories
             // until the user actually opens a session.
             self.sessions = Session::list_visible_headers(40).unwrap_or_default();
         }
         if matches!(self.cur_menu(), Some(Menu::Sessions)) {
-            self.sessions_filter.clear();
+            self.session_search = Self::fresh_input(String::new());
+            self.session_focus = false;
         }
         if matches!(self.cur_menu(), Some(Menu::Providers)) {
             // every visit starts clean: a stale query would hide providers the
@@ -1175,6 +1174,7 @@ impl App {
     pub(super) fn surf_field(&mut self) -> &mut TextArea<'static> {
         match self.cur_menu() {
             Some(Menu::Models { .. }) => &mut self.model_search,
+            Some(Menu::Sessions) => &mut self.session_search,
             _ => &mut self.prov_search,
         }
     }
@@ -1182,6 +1182,7 @@ impl App {
     pub(super) fn surf_focused(&self) -> bool {
         match self.cur_menu() {
             Some(Menu::Models { .. }) => self.model_focus,
+            Some(Menu::Sessions) => self.session_focus,
             _ => self.prov_focus,
         }
     }
@@ -1189,6 +1190,7 @@ impl App {
     pub(super) fn surf_set_focus(&mut self, on: bool) {
         match self.cur_menu() {
             Some(Menu::Models { .. }) => self.model_focus = on,
+            Some(Menu::Sessions) => self.session_focus = on,
             _ => self.prov_focus = on,
         }
     }
@@ -1650,9 +1652,6 @@ impl App {
                 SessionHeader::sort_sessions(&mut self.sessions);
                 self.build_menu_rows();
             }
-            MenuAction::DeleteSessionList => {
-                self.open_menu(Menu::DeleteSessions);
-            }
             MenuAction::ToggleTypewriter => {
                 self.cfg.ui.typewriter = !self.cfg.ui.typewriter;
                 self.cfg.save().ok();
@@ -1888,7 +1887,12 @@ impl App {
                     // session gone: back to the sessions list
                     MenuAction::DeleteSession(_) => {
                         self.menu_stack.pop();
-                        self.open_menu(Menu::Sessions);
+                        if matches!(self.cur_menu(), Some(Menu::Sessions)) {
+                            self.build_menu_rows();
+                            self.dirty = true;
+                        } else {
+                            self.open_menu(Menu::Sessions);
+                        }
                     }
                     // server gone: back to a fresh server list
                     MenuAction::DeleteMcpServer(_) => {
@@ -2076,14 +2080,7 @@ impl App {
             }) => {
                 format!(" Model · {provider} · {} ", field.label())
             }
-            Some(Menu::Sessions) => {
-                if self.sessions_filter.is_empty() {
-                    " Sessions ".into()
-                } else {
-                    format!(" Sessions · filter '{}' ", self.sessions_filter)
-                }
-            }
-            Some(Menu::DeleteSessions) => " Delete session ".into(),
+            Some(Menu::Sessions) => " Sessions ".into(),
             Some(Menu::Debug) => " Debug ".into(),
             Some(Menu::Experimental) => " Experimental ".into(),
             Some(Menu::Agent) => " Agent ".into(),
@@ -2680,7 +2677,11 @@ impl App {
                 self.menu_footer_text = Some("enter: toggle value · esc: done".into());
             }
             Menu::Sessions => {
-                let q = self.sessions_filter.to_lowercase();
+                self.menu_rows.push(row(
+                    Line::from(vec![Span::styled("Search", Theme::dim())]),
+                    MenuAction::FocusSearch,
+                ));
+                let q = self.session_search.lines().join("").to_lowercase();
                 let visible: Vec<&SessionHeader> = self
                     .sessions
                     .iter()
@@ -2690,14 +2691,9 @@ impl App {
                             || s.model_key.to_lowercase().contains(&q)
                     })
                     .collect();
-                // new sessions start from `/new`: no dead action row here
-                // (it would only eat wheel steps and hover targets)
                 let cur_id = self.session.id.to_string();
                 let pinned: Vec<&SessionHeader> =
                     visible.iter().filter(|s| s.pinned).copied().collect();
-                // sessions born in another project live below their own
-                // divider: same rows, no column surgery, and opening one
-                // warns (see apply_session) instead of failing oddly
                 let (mine, foreign): (Vec<&&SessionHeader>, Vec<&&SessionHeader>) =
                     visible.iter().partition(|s| {
                         s.pinned
@@ -2706,25 +2702,6 @@ impl App {
                                 &self.project_root,
                             )
                     });
-                // grid geometry, shared by the header and every row: the
-                // title absorbs every spare column, the model keeps its 16
-                // whenever they fit, time/tokens are fixed.
-                // Resolved width travels in table_built_w: draw_menu rebuilds
-                // once on mismatch (also covers an empty pinned section).
-                let budget = table_budget(self.menu_rect.width);
-                self.table_built_w = budget as u16;
-                // lead 1 + 3 gaps of 2 + time 5 + tokens 7
-                let model_w = budget.saturating_sub(19 + 8).clamp(8, 16);
-                let title_w = budget.saturating_sub(19 + model_w).max(8);
-                self.menu_table_header = Some(table_header(
-                    vec![
-                        tcell("TITLE", title_w, false, Theme::dim()),
-                        tcell("TIME", 5, false, Theme::dim()),
-                        tcell("MODEL", model_w, false, Theme::dim()),
-                        tcell("SIZE", 7, true, Theme::dim()),
-                    ],
-                    budget,
-                ));
                 if !pinned.is_empty() {
                     self.menu_rows.push(row(
                         Line::from(vec![Span::styled(
@@ -2734,17 +2711,10 @@ impl App {
                         MenuAction::None,
                     ));
                     for s in &pinned {
-                        self.menu_rows.push(session_row(
-                            s,
-                            s.id.to_string() == cur_id,
-                            title_w,
-                            model_w,
-                            budget,
-                        ));
+                        self.menu_rows
+                            .push(session_row(s, s.id.to_string() == cur_id));
                     }
                 }
-                // mine, grouped by activity day (listing order within a day
-                // is preserved); the header carries the date, rows keep time
                 let mut day = String::new();
                 for s in mine {
                     if s.pinned {
@@ -2753,20 +2723,13 @@ impl App {
                     let section = day_section(s.last_activity());
                     if section != day {
                         day = section.clone();
-                        // flush left, past the rows' lead space: the header
-                        // stands apart instead of mimicking a row
                         self.menu_rows.push(row(
                             Line::from(vec![Span::styled(section, day_section_style())]),
                             MenuAction::None,
                         ));
                     }
-                    self.menu_rows.push(session_row(
-                        s,
-                        s.id.to_string() == cur_id,
-                        title_w,
-                        model_w,
-                        budget,
-                    ));
+                    self.menu_rows
+                        .push(session_row(s, s.id.to_string() == cur_id));
                 }
                 if !foreign.is_empty() {
                     self.menu_rows.push(row(
@@ -2777,57 +2740,24 @@ impl App {
                         MenuAction::None,
                     ));
                     for s in foreign {
-                        self.menu_rows.push(session_row(
-                            s,
-                            s.id.to_string() == cur_id,
-                            title_w,
-                            model_w,
-                            budget,
-                        ));
+                        self.menu_rows
+                            .push(session_row(s, s.id.to_string() == cur_id));
                     }
                 }
                 if visible.is_empty() {
                     let note = if q.is_empty() {
-                        " (no saved sessions yet)"
+                        "(no saved sessions yet)"
                     } else {
-                        " (no matches)"
+                        "(no matches)"
                     };
                     self.menu_rows.push(row(
                         Line::from(vec![Span::styled(note.to_string(), Theme::dim())]),
                         MenuAction::None,
                     ));
                 }
-                // no in-list key hint row: it would duplicate the
-                // title_bottom hint, and a dead selectable row eats wheel
-                // steps and hover targets
-                self.menu_footer_text = Some(if self.sessions_filter.is_empty() {
-                    "enter: open · ctrl+r: rename · ctrl+p: pin · ctrl+d: delete · type to filter"
-                        .into()
-                } else {
-                    "type: filter · backspace: erase · esc: clear filter".into()
-                });
             }
-            Menu::DeleteSessions => {
-                for (i, s) in self.sessions.iter().enumerate() {
-                    let date = fmt_date(s.last_activity());
-                    self.menu_rows.push(row(
-                        Line::from(vec![
-                            Span::styled(
-                                format!(" {}", truncate_chars(&s.title, 40)),
-                                Theme::ERR(),
-                            ),
-                            Span::styled(
-                                format!("  {date} · {}", truncate_chars(&s.model_key, 16)),
-                                Theme::dim(),
-                            ),
-                        ]),
-                        MenuAction::DeleteSession(self.sessions[i].id.to_string()),
-                    ));
-                }
-                self.menu_rows.push(row(
-                    Line::from(vec![Span::styled(" esc: back".to_string(), Theme::dim())]),
-                    MenuAction::Back,
-                ));
+            Menu::EditSessionTitle { .. } => {
+                self.menu_rows.push(row(Line::default(), MenuAction::None));
             }
             Menu::Providers => {
                 // A surface row list, not a table: the search field, then the
@@ -3511,8 +3441,7 @@ impl App {
                 ));
                 self.menu_footer_text = Some("enter: confirm · esc: deny".into());
             }
-            Menu::EditSessionTitle { .. }
-            | Menu::AskFree { .. }
+            Menu::AskFree { .. }
             | Menu::EditScalar(..)
             | Menu::AddListItem(..)
             | Menu::EditMcpServer { .. }
@@ -3706,32 +3635,28 @@ fn plan_rows(
     rows
 }
 
-/// One session row in the table grid. The section header carries the
-/// date, so the row keeps time-of-day only.
-fn session_row(
-    s: &SessionHeader,
-    is_current: bool,
-    title_w: usize,
-    model_w: usize,
-    pad_w: usize,
-) -> (Line<'static>, MenuAction) {
-    const TOK_W: usize = 7;
-    const TIME_W: usize = 5;
-    let action = MenuAction::OpenSession(s.id.to_string());
-    let mut line = table_line(vec![
-        tcell(&s.title, title_w, false, Theme::FG()),
-        tcell(&fmt_time(s.last_activity()), TIME_W, false, Theme::dim()),
-        tcell(&s.model_key, model_w, false, Theme::meta()),
-        tcell(&fmt_k(s.context_tokens), TOK_W, true, Theme::dim()),
-    ]);
-    // the current session marks the lead column instead of trailing the
-    // title: grid stays aligned, the eye lands on the left edge
-    if is_current && !line.spans.is_empty() {
-        line.spans[0] = Span::styled("*".to_string(), Theme::accent());
-    }
-    // exact fit: every row matches the header column-wise, narrow frames
-    // truncate (never shift) via fit_line_width
-    (fit_line_width(line, pad_w), action)
+/// One session row in the Sessions surface: the title in house foreground
+/// (brand ink for the active session) and the time, model and context size in
+/// gray parentheses, matching the Models surface.
+fn session_row(s: &SessionHeader, is_current: bool) -> (Line<'static>, MenuAction) {
+    let style = if is_current {
+        Theme::brand_ink()
+    } else {
+        Style::new().fg(Theme::FG())
+    };
+    let tail = format!(
+        " ({} · {} · {})",
+        fmt_time(s.last_activity()),
+        s.model_key,
+        fmt_k(s.context_tokens)
+    );
+    (
+        Line::from(vec![
+            Span::styled(s.title.clone(), style),
+            Span::styled(tail, Theme::dim()),
+        ]),
+        MenuAction::OpenSession(s.id.to_string()),
+    )
 }
 
 /// Section label for a session's activity day: Today, Yesterday, or the
