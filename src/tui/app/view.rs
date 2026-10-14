@@ -2295,8 +2295,8 @@ impl App {
             // rides rows the list already has, but the block never gets shorter
             // than the column: a one-model list still has to show its keys
             // under its own rows rather than across the rule.
-            Some(Menu::Settings)
-            | Some(Menu::CompactionSummary)
+            Some(Menu::Settings) => area.height,
+            Some(Menu::CompactionSummary)
             | Some(Menu::UndoShadow)
             | Some(Menu::Providers)
             | Some(Menu::EditProvider { .. })
@@ -3752,7 +3752,16 @@ impl App {
         // their actual item count (`body.min(win)`).
         let dyn_win = (screen_h as usize / 2).saturating_sub(6).max(8);
         match self.cur_menu() {
-            Some(Menu::Settings) => (1, dyn_win, "settings"),
+            Some(Menu::Settings) => {
+                let body = self.menu_rows.len().saturating_sub(1);
+                let fit = (screen_h as usize).saturating_sub(5);
+                let full_win = if body > fit {
+                    (screen_h as usize).saturating_sub(6).max(1)
+                } else {
+                    fit.max(1)
+                };
+                (1, full_win, "settings")
+            }
             Some(Menu::CompactionSummary) => (0, 2, ""),
             Some(Menu::UndoShadow) => (0, 3, ""),
             Some(Menu::Providers) => (1, dyn_win, "providers"),
