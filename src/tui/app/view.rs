@@ -2295,8 +2295,8 @@ impl App {
             // rides rows the list already has, but the block never gets shorter
             // than the column: a one-model list still has to show its keys
             // under its own rows rather than across the rule.
-            Some(Menu::Settings) => area.height,
-            Some(Menu::CompactionSummary)
+            Some(Menu::Settings)
+            | Some(Menu::CompactionSummary)
             | Some(Menu::UndoShadow)
             | Some(Menu::Providers)
             | Some(Menu::EditProvider { .. })
