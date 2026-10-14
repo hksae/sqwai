@@ -1692,14 +1692,67 @@ fn edit_model_is_a_four_row_surface_with_effort_on_enter() {
     assert!(row(bottom - 1).contains("enter: edit"));
     assert!(row(bottom - 1).contains("effort off"));
 
-    // Enter on key/request id/context stays in EditModel; Enter on effort opens Effort
+    // Enter on key/request id/context opens EditModelField; Enter on effort opens Effort
+    app.menu_sel = 1;
+    app.menu_activate();
+    assert!(matches!(
+        app.cur_menu(),
+        Some(Menu::EditModelField {
+            field: super::super::menus::ModelField::RequestId,
+            ..
+        })
+    ));
+    let mut fbuf = Buffer::empty(area);
+    app.render_into(&mut fbuf, area);
+    assert!(app.surface_open);
+    let frow = |y: u16| -> String {
+        (0..area.width)
+            .map(|x| fbuf.cell((x, y)).unwrap().symbol())
+            .collect()
+    };
+    assert!(frow(bottom - 3).contains("Model · p · request id"));
+    assert!(frow(bottom - 1).contains("› test-model"));
+    assert!(frow(bottom - 1).contains("enter: save"));
+    assert!(frow(bottom).contains("esc: back"));
+
+    // Editing and saving updates the model and returns to EditModel on the same row
+    app.form_fields[0] = super::super::forms::FormField::text("request id", "new-req-id".into());
     app.menu_activate();
     assert!(matches!(app.cur_menu(), Some(Menu::EditModel { .. })));
+    assert_eq!(app.menu_sel, 1);
+    assert_eq!(app.cfg.models["m"].id, "new-req-id");
+
     app.menu_sel = 3;
     app.menu_activate();
     assert!(matches!(
         app.cur_menu(),
         Some(Menu::Effort { model: Some(k) }) if k == "m"
+    ));
+}
+
+#[test]
+fn new_model_draft_commits_once_key_and_request_id_are_set() {
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.open_menu(Menu::EditModel {
+        provider: "p".into(),
+        key: None,
+    });
+    // Set key first
+    app.menu_sel = 0;
+    app.menu_activate();
+    app.form_fields[0] = super::super::forms::FormField::text("key", "brand-new".into());
+    app.menu_activate();
+    assert!(!app.cfg.models.contains_key("brand-new"));
+
+    // Set request id second -> commits to cfg.models and promotes EditModel key
+    app.menu_sel = 1;
+    app.menu_activate();
+    app.form_fields[0] = super::super::forms::FormField::text("request id", "brand-new-id".into());
+    app.menu_activate();
+    assert_eq!(app.cfg.models["brand-new"].id, "brand-new-id");
+    assert!(matches!(
+        app.cur_menu(),
+        Some(Menu::EditModel { key: Some(k), .. }) if k == "brand-new"
     ));
 }
 

@@ -214,6 +214,28 @@ impl App {
                     }
                 }
             }
+            Some(Menu::EditModelField { key, field, .. }) => {
+                use super::menus::ModelField;
+                let val = match key.as_ref().and_then(|k| self.cfg.models.get(k)) {
+                    Some(mc) => match field {
+                        ModelField::Key => key.clone().unwrap_or_default(),
+                        ModelField::RequestId => mc.id.clone(),
+                        ModelField::Context => mc.context.to_string(),
+                    },
+                    None => match field {
+                        ModelField::Key => key
+                            .clone()
+                            .unwrap_or_else(|| self.model_draft.key.clone()),
+                        ModelField::RequestId => self.model_draft.id.clone(),
+                        ModelField::Context => self.model_draft.context.to_string(),
+                    },
+                };
+                let mut f = FormField::text(field.label(), val);
+                if let FormField::Text { ta, .. } = &mut f {
+                    ta.move_cursor(tui_textarea::CursorMove::End);
+                }
+                self.form_fields = vec![f];
+            }
             Some(Menu::EditSessionTitle { id }) => {
                 let title = self
                     .sessions
@@ -443,8 +465,10 @@ impl App {
     }
 
     pub(super) fn form_mouse_down(&mut self, row: u16, col: u16) {
-        // fields start past the title row and the air row under it
-        let top_y = self.menu_rect.y + 2;
+        let is_surf_field = matches!(self.cur_menu(), Some(Menu::EditModelField { .. }));
+        // popup fields start past the title row and the air row under it;
+        // surface fields also have the top rule row above the title
+        let top_y = self.menu_rect.y + if is_surf_field { 3 } else { 2 };
         if row >= top_y {
             let idx = (row - top_y) as usize;
             if idx < self.form_fields.len() {
@@ -457,7 +481,11 @@ impl App {
                     self.form_focus = idx;
                 }
                 let label_w = self.form_label_w();
-                let text_x = self.menu_rect.x + 1 + label_w;
+                let text_x = if is_surf_field {
+                    self.menu_rect.x + 2
+                } else {
+                    self.menu_rect.x + 1 + label_w
+                };
                 // the effort row opens its menu instead of cycling (arrows
                 // would silently fight the menu as the source of truth).
                 // Decided before the field borrow below; new (unsaved)
@@ -500,11 +528,16 @@ impl App {
     }
 
     pub(super) fn form_mouse_drag(&mut self, _row: u16, col: u16) {
+        let is_surf_field = matches!(self.cur_menu(), Some(Menu::EditModelField { .. }));
         let label_w = self.form_label_w();
         if let Some(FormField::Text { ta, .. }) = self.form_fields.get_mut(self.form_focus)
             && ta.is_selecting()
         {
-            let text_x = self.menu_rect.x + 1 + label_w;
+            let text_x = if is_surf_field {
+                self.menu_rect.x + 2
+            } else {
+                self.menu_rect.x + 1 + label_w
+            };
             let char_col = (col.saturating_sub(text_x)) as usize;
             ta.move_cursor(tui_textarea::CursorMove::Jump(0, char_col as u16));
             self.dirty = true;
@@ -738,6 +771,105 @@ impl App {
                 self.cfg.save().ok();
                 self.open_menu_replace(Menu::Models { provider });
             }
+            Some(Menu::EditModelField {
+                provider,
+                key,
+                field,
+            }) => {
+                use super::menus::ModelField;
+                let raw = self
+                    .form_fields
+                    .first()
+                    .map(|f| f.trimmed())
+                    .unwrap_or_default();
+                match field {
+                    ModelField::Key => {
+                        if raw.is_empty() {
+                            self.status("key cannot be empty", StatusKind::Err);
+                            return;
+                        }
+                        if key.as_deref() != Some(raw.as_str())
+                            && self.cfg.models.contains_key(&raw)
+                        {
+                            self.status(
+                                &format!("model '{raw}' already exists"),
+                                StatusKind::Err,
+                            );
+                            return;
+                        }
+                        if key.as_deref().is_some_and(|k| self.cfg.is_builtin_model(k))
+                            && key.as_deref() != Some(raw.as_str())
+                        {
+                            self.status(
+                                "built-in model key cannot be renamed — it is the catalog identity",
+                                StatusKind::Err,
+                            );
+                            return;
+                        }
+                        if let Some(old) = &key {
+                            if *old != raw {
+                                if let Some(mc) = self.cfg.models.remove(old) {
+                                    self.cfg.models.insert(raw.clone(), mc);
+                                }
+                                if self.session.model_key == *old {
+                                    self.session.model_key = raw.clone();
+                                }
+                                self.rekey_parent_edit_model(&raw);
+                                self.cfg.save().ok();
+                            }
+                        } else {
+                            self.model_draft.key = raw;
+                            self.try_commit_model_draft(&provider);
+                        }
+                    }
+                    ModelField::RequestId => {
+                        if raw.is_empty() {
+                            self.status("request id cannot be empty", StatusKind::Err);
+                            return;
+                        }
+                        if let Some(k) = &key {
+                            if let Some(mc) = self.cfg.models.get_mut(k) {
+                                mc.id = raw;
+                                let updated = mc.clone();
+                                if self.session.model_key == *k {
+                                    self.model_cfg = updated;
+                                    self.session.last_response_id = None;
+                                    self.session.last_response_model = None;
+                                    self.rebuild_provider();
+                                }
+                                self.cfg.save().ok();
+                            }
+                        } else {
+                            self.model_draft.id = raw;
+                            self.try_commit_model_draft(&provider);
+                        }
+                    }
+                    ModelField::Context => {
+                        let Ok(context) = raw.parse::<u64>() else {
+                            self.status("context must be a number", StatusKind::Err);
+                            return;
+                        };
+                        if let Some(k) = &key {
+                            if let Some(mc) = self.cfg.models.get_mut(k) {
+                                mc.context = context;
+                                let updated = mc.clone();
+                                if self.session.model_key == *k {
+                                    self.model_cfg = updated;
+                                    self.session.context_limit = context;
+                                    self.session.last_response_id = None;
+                                    self.session.last_response_model = None;
+                                    self.rebuild_provider();
+                                }
+                                self.cfg.save().ok();
+                            }
+                        } else {
+                            self.model_draft.context = context;
+                            self.try_commit_model_draft(&provider);
+                        }
+                    }
+                }
+                self.menu_back();
+            }
             Some(Menu::AskFree { .. }) => {
                 let t = self
                     .form_fields
@@ -894,5 +1026,33 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    fn rekey_parent_edit_model(&mut self, new_key: &str) {
+        if let Some(idx) = self.menu_stack.len().checked_sub(2)
+            && let Some(Menu::EditModel { key, .. }) = self.menu_stack.get_mut(idx)
+        {
+            *key = Some(new_key.to_string());
+        }
+    }
+
+    fn try_commit_model_draft(&mut self, provider: &str) {
+        if self.model_draft.key.is_empty() || self.model_draft.id.is_empty() {
+            return;
+        }
+        let new_key = self.model_draft.key.clone();
+        let updated = ModelConfig {
+            provider: provider.to_string(),
+            id: self.model_draft.id.clone(),
+            context: self.model_draft.context,
+            effort: self.model_draft.effort,
+            effort_control: None,
+            effort_always_on: false,
+            fallback: None,
+            status: ModelStatus::Active,
+        };
+        self.cfg.models.insert(new_key.clone(), updated);
+        self.cfg.save().ok();
+        self.rekey_parent_edit_model(&new_key);
     }
 }

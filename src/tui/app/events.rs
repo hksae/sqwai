@@ -1012,8 +1012,12 @@ impl App {
                             self.press_menu_depth = None;
                             if self.is_form_menu() {
                                 if !self.in_menu_rect(m.row, m.column) {
-                                    self.sel = None;
-                                    self.menu_back();
+                                    if self.surface_open {
+                                        self.mouse_up(m.row, m.column);
+                                    } else {
+                                        self.sel = None;
+                                        self.menu_back();
+                                    }
                                 } else if self.form_is_selecting() {
                                     self.form_mouse_up();
                                 }

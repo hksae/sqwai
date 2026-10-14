@@ -98,6 +98,52 @@ fn trim_num(v: f64, prec: usize) -> String {
     s.trim_end_matches('0').trim_end_matches('.').to_string()
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ModelField {
+    Key,
+    RequestId,
+    Context,
+}
+
+impl ModelField {
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::Key => "key",
+            Self::RequestId => "request id",
+            Self::Context => "context",
+        }
+    }
+
+    pub(super) fn row_index(self) -> usize {
+        match self {
+            Self::Key => 0,
+            Self::RequestId => 1,
+            Self::Context => 2,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct ModelDraft {
+    pub provider: String,
+    pub key: String,
+    pub id: String,
+    pub context: u64,
+    pub effort: EffortLevel,
+}
+
+impl Default for ModelDraft {
+    fn default() -> Self {
+        Self {
+            provider: String::new(),
+            key: String::new(),
+            id: String::new(),
+            context: 128_000,
+            effort: EffortLevel::Medium,
+        }
+    }
+}
+
 #[derive(Clone)]
 #[allow(clippy::large_enum_variant)] // popup state is rebuilt per frame; form payloads are small in practice
 pub(super) enum Menu {
@@ -166,6 +212,11 @@ pub(super) enum Menu {
     EditModel {
         provider: String,
         key: Option<String>,
+    },
+    EditModelField {
+        provider: String,
+        key: Option<String>,
+        field: ModelField,
     },
     ConfirmDelete {
         label: String,
@@ -237,7 +288,7 @@ pub(super) enum MenuAction {
     CheckProvider(String),
     AddModel(String),
     EditModel(String, String),
-    EditModelField,
+    OpenModelField(ModelField),
     OpenModelEffort(Option<String>),
     DeleteModel(String, String),
     DeleteModelList(String),
@@ -565,8 +616,19 @@ impl App {
                 | Some(Menu::Providers)
                 | Some(Menu::Models { .. })
                 | Some(Menu::EditModel { .. })
+                | Some(Menu::EditModelField { .. })
         ) {
             self.follow = true;
+        }
+        if let Some(Menu::EditModel {
+            provider,
+            key: None,
+        }) = self.cur_menu().cloned()
+        {
+            self.model_draft = ModelDraft {
+                provider,
+                ..ModelDraft::default()
+            };
         }
         // effort slider opens on the target level, not on `off`
         let effort_scoped: Option<Option<String>> = match self.cur_menu() {
@@ -574,11 +636,15 @@ impl App {
             _ => None,
         };
         if let Some(model) = effort_scoped {
-            let want = model
-                .as_ref()
-                .and_then(|k| self.cfg.models.get(k))
-                .map(|m| m.effort)
-                .unwrap_or(self.model_cfg.effort);
+            let want = if model.is_none() && self.parent_is_new_edit_model() {
+                self.model_draft.effort
+            } else {
+                model
+                    .as_ref()
+                    .and_then(|k| self.cfg.models.get(k))
+                    .map(|m| m.effort)
+                    .unwrap_or(self.model_cfg.effort)
+            };
             self.menu_sel = EffortLevel::SELECTABLE
                 .iter()
                 .position(|l| *l == want)
@@ -655,8 +721,14 @@ impl App {
             }
             _ => {}
         }
-        self.menu_stack.pop();
-        self.menu_sel = 0;
+        let popped = self.menu_stack.pop();
+        self.menu_sel = match (popped, self.cur_menu()) {
+            (Some(Menu::EditModelField { field, .. }), Some(Menu::EditModel { .. })) => {
+                field.row_index()
+            }
+            (Some(Menu::Effort { .. }), Some(Menu::EditModel { .. })) => 3,
+            _ => 0,
+        };
         self.form_hover_row = None;
         self.form_fields.clear();
         self.form_focus = 0;
@@ -839,6 +911,7 @@ impl App {
             self.cur_menu(),
             Some(
                 Menu::EditProvider { .. }
+                    | Menu::EditModelField { .. }
                     | Menu::EditSessionTitle { .. }
                     | Menu::AskFree { .. }
                     | Menu::EditScalar(..)
@@ -939,13 +1012,26 @@ impl App {
     /// or the session model's when the picker is unscoped. The bottom surface
     /// shows it next to its title so "what will Enter write" is readable
     /// without leaving the surface.
+    pub(super) fn parent_is_new_edit_model(&self) -> bool {
+        self.menu_stack
+            .len()
+            .checked_sub(2)
+            .and_then(|i| self.menu_stack.get(i))
+            .is_some_and(|m| matches!(m, Menu::EditModel { key: None, .. }))
+    }
+
     pub(super) fn effort_committed(&self) -> crate::config::EffortLevel {
         match self.cur_menu() {
-            Some(Menu::Effort { model }) => model
-                .as_ref()
-                .and_then(|k| self.cfg.models.get(k))
-                .map(|m| m.effort)
-                .unwrap_or(self.model_cfg.effort),
+            Some(Menu::Effort { model }) => {
+                if model.is_none() && self.parent_is_new_edit_model() {
+                    return self.model_draft.effort;
+                }
+                model
+                    .as_ref()
+                    .and_then(|k| self.cfg.models.get(k))
+                    .map(|m| m.effort)
+                    .unwrap_or(self.model_cfg.effort)
+            }
             _ => self.model_cfg.effort,
         }
     }
@@ -1204,7 +1290,15 @@ impl App {
             MenuAction::OpenAppearance => self.open_menu(Menu::Appearance),
             MenuAction::OpenEffort => self.open_menu(Menu::Effort { model: None }),
             MenuAction::OpenModelEffort(model) => self.open_menu(Menu::Effort { model }),
-            MenuAction::EditModelField => {}
+            MenuAction::OpenModelField(field) => {
+                if let Some(Menu::EditModel { provider, key }) = self.cur_menu().cloned() {
+                    self.open_menu(Menu::EditModelField {
+                        provider,
+                        key,
+                        field,
+                    });
+                }
+            }
             MenuAction::OpenProviders => self.open_menu(Menu::Providers),
             MenuAction::OpenMcp => self.open_menu(Menu::Mcp),
             MenuAction::OpenLsp => self.open_menu(Menu::Lsp),
@@ -1706,6 +1800,11 @@ impl App {
                 self.run_action(MenuAction::Confirm(Box::new(MenuAction::DeletePlan)));
             }
             MenuAction::SetEffort(level) => {
+                if self.parent_is_new_edit_model() {
+                    self.model_draft.effort = level;
+                    self.menu_back();
+                    return;
+                }
                 let target = self.effort_target_key();
                 if let Some(m) = self.cfg.models.get_mut(&target) {
                     m.effort = level;
@@ -1856,6 +1955,11 @@ impl App {
             },
             Some(Menu::EditModel { provider, .. }) => {
                 format!(" Model · {provider} ")
+            }
+            Some(Menu::EditModelField {
+                provider, field, ..
+            }) => {
+                format!(" Model · {provider} · {} ", field.label())
             }
             Some(Menu::Sessions) => {
                 if self.sessions_filter.is_empty() {
@@ -2707,10 +2811,10 @@ impl App {
                             mc.effort.as_str().to_string(),
                         ),
                         None => (
-                            key.clone().unwrap_or_default(),
-                            String::new(),
-                            "128000".to_string(),
-                            EffortLevel::Medium.as_str().to_string(),
+                            key.clone().unwrap_or_else(|| self.model_draft.key.clone()),
+                            self.model_draft.id.clone(),
+                            self.model_draft.context.to_string(),
+                            self.model_draft.effort.as_str().to_string(),
                         ),
                     };
                 let field_row = |label: &'static str, val: String, action: MenuAction| {
@@ -2720,17 +2824,29 @@ impl App {
                     }
                     row(Line::from(spans), action)
                 };
-                self.menu_rows
-                    .push(field_row("key", k_val, MenuAction::EditModelField));
-                self.menu_rows
-                    .push(field_row("request id", id_val, MenuAction::EditModelField));
-                self.menu_rows
-                    .push(field_row("context", ctx_val, MenuAction::EditModelField));
+                self.menu_rows.push(field_row(
+                    "key",
+                    k_val,
+                    MenuAction::OpenModelField(ModelField::Key),
+                ));
+                self.menu_rows.push(field_row(
+                    "request id",
+                    id_val,
+                    MenuAction::OpenModelField(ModelField::RequestId),
+                ));
+                self.menu_rows.push(field_row(
+                    "context",
+                    ctx_val,
+                    MenuAction::OpenModelField(ModelField::Context),
+                ));
                 self.menu_rows.push(field_row(
                     "effort",
                     ef_val,
                     MenuAction::OpenModelEffort(key),
                 ));
+            }
+            Menu::EditModelField { .. } => {
+                self.menu_rows.push(row(Line::default(), MenuAction::None));
             }
             Menu::DeleteModelList { provider } => {
                 for (k, m) in &self.cfg.models {

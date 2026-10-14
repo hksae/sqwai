@@ -516,6 +516,9 @@ pub struct App {
     /// menu → back): prefill rebuilds fields from config, which would eat
     /// unsaved typing. Restored once on return, then cleared.
     form_draft: Vec<(String, String)>,
+    /// unsaved draft values for a brand-new model (`Menu::EditModel { key: None }`)
+    /// until both `key` and `request id` have been filled in
+    model_draft: menus::ModelDraft,
     /// cached session list for the sessions menus (headers only — see
     /// `Session::list_visible_headers`)
     sessions: Vec<SessionHeader>,
@@ -775,6 +778,7 @@ impl App {
             form_fields: Vec::new(),
             form_focus: 0,
             form_draft: Vec::new(),
+            model_draft: menus::ModelDraft::default(),
             sessions: Vec::new(),
             sessions_filter: String::new(),
             prov_search: Self::fresh_input(String::new()),

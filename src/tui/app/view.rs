@@ -2303,6 +2303,7 @@ impl App {
                 let shown = body.min(win).max(1).max(self.list_hints().len());
                 (3 + head + shown + usize::from(body > shown) + 1) as u16
             }
+            Some(Menu::EditModelField { .. }) => 5,
             _ => list_rows,
         };
         let surface = matches!(
@@ -2312,6 +2313,7 @@ impl App {
                 | Some(Menu::Providers)
                 | Some(Menu::Models { .. })
                 | Some(Menu::EditModel { .. })
+                | Some(Menu::EditModelField { .. })
         );
         // the block joins the document either way; only a menu surface also
         // claims the composer's own rows
@@ -2626,7 +2628,8 @@ impl App {
                         }
                         Some(Menu::Providers)
                         | Some(Menu::Models { .. })
-                        | Some(Menu::EditModel { .. }) => {
+                        | Some(Menu::EditModel { .. })
+                        | Some(Menu::EditModelField { .. }) => {
                             self.draw_list_surface(buf, rect, skip, surf_full)
                         }
                         Some(Menu::Effort { .. }) => {
@@ -2922,6 +2925,7 @@ impl App {
                 | Some(Menu::Providers)
                 | Some(Menu::Models { .. })
                 | Some(Menu::EditModel { .. })
+                | Some(Menu::EditModelField { .. })
         ) {
             return;
         }
@@ -3703,6 +3707,7 @@ impl App {
             Some(Menu::Providers) => (1, 8, "providers"),
             Some(Menu::Models { .. }) => (1, 8, "models"),
             Some(Menu::EditModel { .. }) => (0, 4, ""),
+            Some(Menu::EditModelField { .. }) => (0, 1, ""),
             _ => (0, 12, ""),
         }
     }
@@ -3730,6 +3735,10 @@ impl App {
             ],
             Some(Menu::EditModel { .. }) => vec![
                 ("enter", "edit".to_string()),
+                ("esc", "back".to_string()),
+            ],
+            Some(Menu::EditModelField { .. }) => vec![
+                ("enter", "save".to_string()),
                 ("esc", "back".to_string()),
             ],
             _ => vec![],
@@ -3920,7 +3929,8 @@ impl App {
                 return;
             };
             let info = matches!(action, MenuAction::None);
-            let cur = !info && slf.menu_sel == i;
+            let is_field_surf = matches!(slf.cur_menu(), Some(Menu::EditModelField { .. }));
+            let cur = (!info && slf.menu_sel == i) || is_field_surf;
             buf.set_line(
                 area.x,
                 y,
@@ -3934,7 +3944,19 @@ impl App {
                 )),
                 area.width,
             );
-            if matches!(action, MenuAction::FocusSearch) {
+            if is_field_surf {
+                if let Some(super::forms::FormField::Text { ta, .. }) = slf.form_fields.first() {
+                    ta.render(
+                        Rect {
+                            x: area.x + 2,
+                            y,
+                            width: area.width.saturating_sub(2 + rail),
+                            height: 1,
+                        },
+                        buf,
+                    );
+                }
+            } else if matches!(action, MenuAction::FocusSearch) {
                 paint_field(slf, buf, area, y, rail);
             } else {
                 let mut spans: Vec<Span> = Vec::new();
