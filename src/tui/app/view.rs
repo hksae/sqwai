@@ -3756,14 +3756,6 @@ impl App {
                 ("enter", "use".to_string()),
                 ("esc", "back".to_string()),
             ],
-            Some(Menu::EditProviderField {
-                field: super::menus::ProviderField::ApiKey,
-                ..
-            }) => vec![
-                ("ctrl+t", "key".to_string()),
-                ("enter", "save".to_string()),
-                ("esc", "back".to_string()),
-            ],
             Some(Menu::EditModelField { .. } | Menu::EditProviderField { .. }) => vec![
                 ("enter", "save".to_string()),
                 ("esc", "back".to_string()),

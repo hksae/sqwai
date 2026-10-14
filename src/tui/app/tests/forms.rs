@@ -420,6 +420,10 @@ fn ctrl_t_reveals_the_key_in_the_provider_form() {
         name: None,
         field: super::super::menus::ProviderField::ApiKey,
     });
+    app.form_fields = vec![super::super::forms::FormField::secret(
+        "api key",
+        "sk".into(),
+    )];
     let key_idx = 0;
     app.form_focus = key_idx;
     fn press(app: &mut App, c: char) {
@@ -455,28 +459,31 @@ fn ctrl_t_reveals_the_key_in_the_provider_form() {
 
 #[test]
 fn provider_form_renders_key_as_bullets_until_revealed() {
-    use super::super::forms::FormField;
     let mut app = test_app("http://127.0.0.1:9/v1".into());
-    app.open_menu(Menu::EditProviderField {
-        name: None,
-        field: super::super::menus::ProviderField::ApiKey,
+    app.cfg.providers.get_mut("p").unwrap().api_key = Some("sk-secret-value-12345".into());
+    app.open_menu(Menu::EditProvider {
+        name: Some("p".into()),
     });
-    let key_idx = 0;
-    if let Some(FormField::Text { ta, .. }) = app.form_fields.get_mut(key_idx) {
-        ta.insert_str("sk-secret-value");
-    }
-    app.form_focus = key_idx;
     let hidden = render_to_string(&mut app, 100, 30);
-    assert!(hidden.contains("••••"), "masked on screen: {hidden}");
     assert!(
-        !hidden.contains("sk-secret-value"),
-        "real key never painted: {hidden}"
+        hidden.contains("api key ••••••••••"),
+        "masked and capped at 10 bullets on the provider surface: {hidden}"
     );
-    app.toggle_secret_reveal();
+    assert!(
+        !hidden.contains("•••••••••••"),
+        "never more than 10 bullets: {hidden}"
+    );
+    assert!(
+        !hidden.contains("sk-secret-value-12345"),
+        "real key never painted on the list surface: {hidden}"
+    );
+    // opening the api key row reveals the real key for editing
+    app.menu_sel = 3;
+    app.menu_activate();
     let shown = render_to_string(&mut app, 100, 30);
     assert!(
-        shown.contains("sk-secret-value"),
-        "revealed on toggle: {shown}"
+        shown.contains("sk-secret-value-12345"),
+        "revealed when opened for editing: {shown}"
     );
 }
 

@@ -98,10 +98,9 @@ impl FormField {
         f
     }
 
-    /// bullets, one per char: widths match the real text, so the cursor
-    /// column maps 1:1 and the layout never shifts between states.
+    /// bullets, capped at 10 so a long key never stretches across the row
     pub(super) fn mask_value(value: &str) -> String {
-        value.chars().map(|_| '•').collect()
+        value.chars().take(10).map(|_| '•').collect()
     }
 
     pub(super) fn choice(label: &str, options: &'static [&'static str], sel: usize) -> Self {
@@ -254,11 +253,7 @@ impl App {
                         ProviderField::KeyEnvVar => self.provider_draft.api_key_env.clone(),
                     },
                 };
-                let mut f = if matches!(field, ProviderField::ApiKey) {
-                    FormField::secret(field.label(), val)
-                } else {
-                    FormField::text(field.label(), val)
-                };
+                let mut f = FormField::text(field.label(), val);
                 if let FormField::Text { ta, .. } = &mut f {
                     ta.move_cursor(tui_textarea::CursorMove::End);
                 }
