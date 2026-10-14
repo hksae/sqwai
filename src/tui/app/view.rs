@@ -2299,7 +2299,8 @@ impl App {
             | Some(Menu::EditProvider { .. })
             | Some(Menu::ProviderFormat { .. })
             | Some(Menu::Models { .. })
-            | Some(Menu::EditModel { .. }) => {
+            | Some(Menu::EditModel { .. })
+            | Some(Menu::ConfirmDelete { .. }) => {
                 let (head, win, _) = self.list_shape();
                 let body = self.menu_rows.len().saturating_sub(head);
                 let shown = body.min(win).max(1).max(self.list_hints().len());
@@ -2321,6 +2322,7 @@ impl App {
                 | Some(Menu::Models { .. })
                 | Some(Menu::EditModel { .. })
                 | Some(Menu::EditModelField { .. })
+                | Some(Menu::ConfirmDelete { .. })
         );
         // the block joins the document either way; only a menu surface also
         // claims the composer's own rows
@@ -2639,7 +2641,8 @@ impl App {
                         | Some(Menu::ProviderFormat { .. })
                         | Some(Menu::Models { .. })
                         | Some(Menu::EditModel { .. })
-                        | Some(Menu::EditModelField { .. }) => {
+                        | Some(Menu::EditModelField { .. })
+                        | Some(Menu::ConfirmDelete { .. }) => {
                             self.draw_list_surface(buf, rect, skip, surf_full)
                         }
                         Some(Menu::Effort { .. }) => {
@@ -2939,6 +2942,7 @@ impl App {
                 | Some(Menu::Models { .. })
                 | Some(Menu::EditModel { .. })
                 | Some(Menu::EditModelField { .. })
+                | Some(Menu::ConfirmDelete { .. })
         ) {
             return;
         }
@@ -3722,6 +3726,7 @@ impl App {
             Some(Menu::ProviderFormat { .. }) => (0, 3, ""),
             Some(Menu::Models { .. }) => (1, 8, "models"),
             Some(Menu::EditModel { .. }) => (0, 4, ""),
+            Some(Menu::ConfirmDelete { .. }) => (1, 2, ""),
             Some(Menu::EditModelField { .. } | Menu::EditProviderField { .. }) => (0, 1, ""),
             _ => (0, 12, ""),
         }
@@ -3755,6 +3760,10 @@ impl App {
             Some(Menu::ProviderFormat { .. }) => vec![
                 ("enter", "use".to_string()),
                 ("esc", "back".to_string()),
+            ],
+            Some(Menu::ConfirmDelete { .. }) => vec![
+                ("enter", "confirm".to_string()),
+                ("esc", "cancel".to_string()),
             ],
             Some(Menu::EditModelField { .. } | Menu::EditProviderField { .. }) => vec![
                 ("enter", "save".to_string()),

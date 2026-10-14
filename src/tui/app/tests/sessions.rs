@@ -72,6 +72,56 @@ fn esc_cancels_provider_deletion() {
 }
 
 #[test]
+fn ctrl_d_on_model_opens_confirm_surface_directly() {
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.open_menu(Menu::Models {
+        provider: "p".into(),
+    });
+    // row 0 is Search, row 1 is model "m"
+    app.menu_sel = 1;
+    let (tx, rx) = std::sync::mpsc::channel();
+    tx.send(Event::Key(KeyEvent::new(
+        KeyCode::Char('d'),
+        KeyModifiers::CONTROL,
+    )))
+    .unwrap();
+    app.poll_input(&rx).unwrap();
+    assert!(
+        matches!(app.cur_menu(), Some(Menu::ConfirmDelete { .. })),
+        "ctrl+d on a model row opens ConfirmDelete directly without DeleteModelList"
+    );
+    assert_eq!(app.menu_sel, 1, "starts on delete");
+
+    let area = Rect::new(0, 0, 100, 30);
+    let mut buf = Buffer::empty(area);
+    app.render_into(&mut buf, area);
+    assert!(app.surface_open);
+
+    // Move down to cancel and press enter -> model survives and we return to Models
+    app.menu_nav(1);
+    assert_eq!(app.menu_sel, 2);
+    press_enter(&mut app);
+    assert!(app.cfg.models.contains_key("m"));
+    assert!(matches!(app.cur_menu(), Some(Menu::Models { .. })));
+
+    // Open confirm again and press enter on delete -> model is deleted
+    app.menu_sel = 1;
+    tx.send(Event::Key(KeyEvent::new(
+        KeyCode::Char('d'),
+        KeyModifiers::CONTROL,
+    )))
+    .unwrap();
+    app.poll_input(&rx).unwrap();
+    press_enter(&mut app);
+    assert!(!app.cfg.models.contains_key("m"));
+    assert!(matches!(app.cur_menu(), Some(Menu::Models { .. })));
+}
+
+#[test]
 fn apply_session_renders_history_and_switches_model() {
     use crate::providers::Role;
     let mut app = test_app("http://127.0.0.1:9/v1".into());

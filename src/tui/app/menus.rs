@@ -286,9 +286,6 @@ pub(super) enum Menu {
         label: String,
         action: MenuAction,
     },
-    DeleteModelList {
-        provider: String,
-    },
     /// effort picker scoped to one model (`None` = the session model).
     /// Opened from the model form it writes back into that model;
     /// from anywhere else it acts on the session model.
@@ -358,7 +355,6 @@ pub(super) enum MenuAction {
     OpenModelField(ModelField),
     OpenModelEffort(Option<String>),
     DeleteModel(String, String),
-    DeleteModelList(String),
     UseModel(String),
     OpenSession(String),
     RenameSession(String),
@@ -687,6 +683,7 @@ impl App {
                 | Some(Menu::Models { .. })
                 | Some(Menu::EditModel { .. })
                 | Some(Menu::EditModelField { .. })
+                | Some(Menu::ConfirmDelete { .. })
         ) {
             self.follow = true;
         }
@@ -1287,11 +1284,6 @@ impl App {
             self.menu_back();
             return;
         }
-        // confirmation prompts: enter always confirms (esc cancels)
-        if let Some(Menu::ConfirmDelete { .. }) = self.cur_menu() {
-            self.run_confirm_action();
-            return;
-        }
         // ask_user: enter submits the selected option (or free text)
         if let Some(Menu::AskUser { .. }) = self.cur_menu() {
             if let Some((_, action)) = self.menu_row_at(self.menu_sel) {
@@ -1624,7 +1616,6 @@ impl App {
                     action: MenuAction::DeleteModel(p, k),
                 });
             }
-            MenuAction::DeleteModelList(p) => self.open_menu(Menu::DeleteModelList { provider: p }),
             MenuAction::OpenSession(id) => {
                 if id == self.session.id.to_string() {
                     self.menu_home();
@@ -1889,9 +1880,14 @@ impl App {
                     // model gone: back to its provider's model list
                     MenuAction::DeleteModel(p, _) => {
                         self.menu_stack.pop();
-                        self.open_menu(Menu::Models {
-                            provider: p.clone(),
-                        });
+                        if matches!(self.cur_menu(), Some(Menu::Models { .. })) {
+                            self.build_menu_rows();
+                            self.dirty = true;
+                        } else {
+                            self.open_menu(Menu::Models {
+                                provider: p.clone(),
+                            });
+                        }
                     }
                     // session gone: back to the sessions list
                     MenuAction::DeleteSession(_) => {
@@ -2064,9 +2060,6 @@ impl App {
             Some(Menu::Skills) => " Skills ".into(),
             Some(Menu::Providers) => " Providers ".into(),
             Some(Menu::Models { provider }) => format!(" Models · {provider} "),
-            Some(Menu::DeleteModelList { provider }) => {
-                format!(" Delete model · {provider} ")
-            }
             Some(Menu::EditProvider { name }) => match name {
                 Some(n) => format!(" Edit provider: {n} "),
                 None => " New provider ".into(),
@@ -3053,30 +3046,17 @@ impl App {
             Menu::EditModelField { .. } => {
                 self.menu_rows.push(row(Line::default(), MenuAction::None));
             }
-            Menu::DeleteModelList { provider } => {
-                for (k, m) in &self.cfg.models {
-                    if m.provider == provider {
-                        self.menu_rows.push(row(
-                            Line::from(vec![
-                                Span::styled(format!(" {k}"), Theme::ERR()),
-                                Span::styled(format!("  {}", m.id), Theme::dim()),
-                            ]),
-                            MenuAction::DeleteModel(provider.clone(), k.clone()),
-                        ));
-                    }
-                }
-            }
             Menu::ConfirmDelete { label, action } => {
                 self.menu_rows.push(row(
-                    Line::from(vec![Span::styled(format!(" {label}"), Theme::WARN())]),
+                    Line::from(vec![Span::styled(label, Theme::WARN())]),
                     MenuAction::None,
                 ));
                 self.menu_rows.push(row(
-                    Line::from(vec![Span::styled(" enter: confirm delete", Theme::ERR())]),
+                    Line::from(vec![Span::styled("delete", Theme::ERR())]),
                     MenuAction::Confirm(Box::new(action)),
                 ));
                 self.menu_rows.push(row(
-                    Line::from(vec![Span::styled(" esc: cancel", Theme::dim())]),
+                    Line::from(vec![Span::styled("cancel", Style::new().fg(Theme::FG()))]),
                     MenuAction::Back,
                 ));
             }

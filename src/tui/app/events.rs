@@ -713,8 +713,10 @@ impl App {
                         KeyCode::Char('d')
                             if ctrl && matches!(self.cur_menu(), Some(Menu::Models { .. })) =>
                         {
-                            if let Some(p) = self.surface_provider() {
-                                self.run_action(MenuAction::DeleteModelList(p));
+                            if let (Some(p), Some(k)) =
+                                (self.surface_provider(), self.surface_model())
+                            {
+                                self.run_action(MenuAction::DeleteModel(p, k));
                             }
                         }
                         KeyCode::Char('n')
