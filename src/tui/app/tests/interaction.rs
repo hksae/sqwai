@@ -1516,6 +1516,7 @@ fn test_subcommands_gated_behind_experimental_flag() {
         app.popup_items(),
         vec![
             "/test anim".to_string(),
+            "/test approval".to_string(),
             "/test art".to_string(),
             "/test churn".to_string(),
             "/test colors".to_string(),

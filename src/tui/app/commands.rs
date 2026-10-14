@@ -52,11 +52,17 @@ impl App {
                     self.open_menu(Menu::TestColors);
                 } else if rest.split_whitespace().nth(1) == Some("md") {
                     self.open_menu(Menu::TestMd);
+                } else if rest.split_whitespace().nth(1) == Some("approval") {
+                    self.open_menu(Menu::Approval {
+                        id: 0,
+                        command: "git reset --hard HEAD~1".into(),
+                        reason: "destructive git command".into(),
+                    });
                 } else if rest.split_whitespace().nth(1) == Some("churn") {
                     self.start_test_churn();
                 } else {
                     self.status(
-                        "/test takes: anim, art, churn, colors, md",
+                        "/test takes: anim, approval, art, churn, colors, md",
                         StatusKind::Warn,
                     );
                 }
