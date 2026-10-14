@@ -555,6 +555,7 @@ impl App {
                 | Some(Menu::Sessions)
                 | Some(Menu::EditSessionTitle { .. })
                 | Some(Menu::ConfirmDelete { .. })
+                | Some(Menu::Approval { .. })
         ) {
             self.follow = true;
         }
@@ -2899,46 +2900,26 @@ impl App {
                 command, reason, ..
             } => {
                 self.menu_rows.push(row(
-                    Line::from(vec![Span::styled(
-                        " The agent wants to run:",
-                        Theme::WARN(),
-                    )]),
+                    Line::from(vec![
+                        Span::styled(command, Theme::WARN()),
+                        Span::styled(format!(" ({reason})"), Theme::dim()),
+                    ]),
                     MenuAction::None,
                 ));
                 self.menu_rows.push(row(
-                    Line::from(vec![Span::styled(format!("  {command}"), Theme::base())]),
-                    MenuAction::None,
+                    Line::from(vec![Span::styled("deny".to_string(), Theme::ERR())]),
+                    MenuAction::DecideApproval(ApprovalDecision::Deny),
                 ));
                 self.menu_rows.push(row(
-                    Line::from(vec![Span::styled(
-                        format!("  reason: {reason}"),
-                        Theme::dim(),
-                    )]),
-                    MenuAction::None,
-                ));
-                // select-then-confirm: click/arrows/1-3 choose, Enter commits.
-                // Deny is preselected so a stray Enter refuses, not approves.
-                // The two granting options are plain text; red is the only
-                // colour in the card, and it sits on the refusal — a pink
-                // "run once" next to a pink "deny" made the safe row and the
-                // stopping row look like one kind of thing.
-                self.menu_rows.push(row(
-                    Line::from(vec![Span::styled(
-                        " 1: run once".to_string(),
-                        Theme::base(),
-                    )]),
+                    Line::from(vec![Span::styled("run once".to_string(), Theme::base())]),
                     MenuAction::DecideApproval(ApprovalDecision::RunOnce),
                 ));
                 self.menu_rows.push(row(
                     Line::from(vec![Span::styled(
-                        " 2: always allow this session".to_string(),
+                        "always allow this session".to_string(),
                         Theme::base(),
                     )]),
                     MenuAction::DecideApproval(ApprovalDecision::AlwaysSession),
-                ));
-                self.menu_rows.push(row(
-                    Line::from(vec![Span::styled(" 3: deny".to_string(), Theme::ERR())]),
-                    MenuAction::DecideApproval(ApprovalDecision::Deny),
                 ));
                 self.menu_footer_text = Some("enter: confirm · esc: deny".into());
             }

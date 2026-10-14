@@ -508,21 +508,22 @@ fn approval_enter_inside_grace_does_not_commit() {
 
 #[test]
 fn approval_click_selects_without_committing() {
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     open_test_approval(&mut app);
-    app.menu_rect = ratatui::layout::Rect {
-        x: 0,
-        y: 0,
-        width: 80,
-        height: 20,
-    };
-    // screen row 5 → row index 3 → the "run once" option
-    // (title + air row precede the items)
-    app.menu_click(5);
-    assert_eq!(
-        app.menu_sel,
-        approval_option_index(&app, ApprovalDecision::RunOnce)
-    );
+    let area = Rect::new(0, 0, 80, 20);
+    let mut buf = Buffer::empty(area);
+    app.render_into(&mut buf, area);
+    let want_idx = approval_option_index(&app, ApprovalDecision::RunOnce);
+    let screen_row = app
+        .surf_hits
+        .iter()
+        .find(|(_, idx)| *idx == want_idx)
+        .map(|(y, _)| *y)
+        .expect("run once row in surf_hits");
+    app.menu_click(screen_row);
+    assert_eq!(app.menu_sel, want_idx);
     assert!(
         matches!(app.cur_menu(), Some(Menu::Approval { .. })),
         "a click must never approve"
