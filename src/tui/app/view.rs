@@ -3702,9 +3702,7 @@ impl App {
 
     /// The hint column: one `key: what` pair per row, standing on the last rows
     /// of the block. The verbs a surface binds are written here and nowhere
-    /// else, so a row cannot advertise a key that does not fire. The test line
-    /// carries the probe's answer because a surface hides the notice row that
-    /// would otherwise report it.
+    /// else, so a row cannot advertise a key that does not fire.
     pub(super) fn list_hints(&self) -> Vec<(&'static str, String)> {
         match self.cur_menu() {
             Some(Menu::Providers) => vec![
@@ -3715,42 +3713,56 @@ impl App {
                 ("enter", "open".to_string()),
                 ("esc", "back".to_string()),
             ],
-            Some(Menu::Models { provider }) => {
-                let test = match self.provider_checks.get(provider.as_str()) {
-                    None => "test".to_string(),
-                    Some(ProviderCheck::Checking) => "checking…".to_string(),
-                    Some(ProviderCheck::Ok(detail)) => format!("ok ({detail})"),
-                    Some(ProviderCheck::Err(reason)) => {
-                        // the column is narrow and half a word reads as a bug,
-                        // so the reason keeps only the whole words that fit
-                        let mut cut = String::new();
-                        for w in reason.split_whitespace() {
-                            let next = if cut.is_empty() {
-                                w.to_string()
-                            } else {
-                                format!("{cut} {w}")
-                            };
-                            if next.chars().count() > 18 {
-                                break;
-                            }
-                            cut = next;
-                        }
-                        if cut.is_empty() {
-                            cut = reason.chars().take(18).collect();
-                        }
-                        format!("refused: {cut}")
-                    }
-                };
-                vec![
-                    ("ctrl+n", "add".to_string()),
-                    ("ctrl+e", "edit".to_string()),
-                    ("ctrl+t", test),
-                    ("ctrl+d", "delete".to_string()),
-                    ("enter", "use".to_string()),
-                    ("esc", "back".to_string()),
-                ]
-            }
+            Some(Menu::Models { .. }) => vec![
+                ("ctrl+n", "add".to_string()),
+                ("ctrl+e", "edit".to_string()),
+                ("ctrl+t", "test".to_string()),
+                ("ctrl+d", "delete".to_string()),
+                ("enter", "use".to_string()),
+                ("esc", "back".to_string()),
+            ],
             _ => vec![],
+        }
+    }
+
+    /// What the probe says about the provider this surface lists, worn on the
+    /// right of the title row. A surface hides the notice row a toast would
+    /// use, so the answer needs a place of its own — and the header has one,
+    /// while the hint column must keep its width for the names beside it.
+    pub(super) fn surface_badge(&self) -> Option<(String, Style)> {
+        let provider = match self.cur_menu()? {
+            Menu::Models { provider } => provider,
+            _ => return None,
+        };
+        match self.provider_checks.get(provider.as_str()) {
+            None => None,
+            Some(ProviderCheck::Checking) => Some(("checking…".to_string(), Theme::dim())),
+            Some(ProviderCheck::Ok(detail)) => Some((
+                format!("ok ({detail})"),
+                Theme::ok().add_modifier(Modifier::BOLD),
+            )),
+            Some(ProviderCheck::Err(reason)) => {
+                // half a word reads as a bug: keep the whole words that fit
+                let mut cut = String::new();
+                for w in reason.split_whitespace() {
+                    let next = if cut.is_empty() {
+                        w.to_string()
+                    } else {
+                        format!("{cut} {w}")
+                    };
+                    if next.chars().count() > 24 {
+                        break;
+                    }
+                    cut = next;
+                }
+                if cut.is_empty() {
+                    cut = reason.chars().take(24).collect();
+                }
+                Some((
+                    format!("refused: {cut}"),
+                    Theme::err().add_modifier(Modifier::BOLD),
+                ))
+            }
         }
     }
 
@@ -3804,15 +3816,29 @@ impl App {
             );
         }
         if let Some(y) = row_y(1) {
+            let title = format!(" {}", self.menu_title());
             buf.set_line(
                 area.x,
                 y,
-                &Line::from(Span::styled(
-                    format!(" {}", self.menu_title()),
-                    crate::tui::art::h2_style(),
-                )),
+                &Line::from(Span::styled(title.clone(), crate::tui::art::h2_style())),
                 area.width,
             );
+            // the probe answers on the right of the title row: the hint column
+            // must stay as narrow as the keys it names, and too narrow for both
+            // means the title wins
+            if let Some((badge, ink)) = self.surface_badge()
+                && (area.width as usize) >= title.chars().count() + badge.chars().count() + 3
+            {
+                Paragraph::new(Line::from(Span::styled(badge, ink)).right_aligned()).render(
+                    Rect {
+                        x: area.x,
+                        y,
+                        width: area.width.saturating_sub(1),
+                        height: 1,
+                    },
+                    buf,
+                );
+            }
         }
         let body = self.menu_rows.len().saturating_sub(head);
         let shown = body.min(win).max(1);

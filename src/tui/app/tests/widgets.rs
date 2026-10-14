@@ -321,34 +321,30 @@ fn provider_check_marks_checking_then_reports_refused() {
         "a refused connection lights red"
     );
 }
-/// The Models surface answers the probe in its own hint column. A surface
-/// hides the notice row a toast would otherwise use, so the outcome has to
-/// stand where the key is named.
+/// The Models surface answers the probe on its title row. A surface hides the
+/// notice row a toast would otherwise use, so the outcome needs a place of its
+/// own — and the hint column stays as narrow as the keys it names.
 #[test]
-fn provider_check_rail_reports_the_outcome() {
+fn provider_check_badge_reports_the_outcome() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.open_menu(Menu::Models {
         provider: "p".into(),
     });
-    let rail = |app: &App| {
-        app.list_hints()
-            .into_iter()
-            .find(|(k, _)| *k == "ctrl+t")
-            .map(|(_, w)| w)
-            .expect("the surface names its test key")
-    };
-    assert_eq!(rail(&app), "test", "nothing has been probed yet");
+    let badge = |app: &App| app.surface_badge().map(|(text, _)| text);
+    assert_eq!(badge(&app), None, "nothing has been probed yet");
 
     app.provider_checks
-        .insert("p".into(), ProviderCheck::Ok("2 models".into()));
-    assert_eq!(rail(&app), "ok (2 models)", "success reads in the column");
+        .insert("p".into(), ProviderCheck::Ok("48 models".into()));
+    assert_eq!(badge(&app).as_deref(), Some("ok (48 models)"));
 
-    app.provider_checks
-        .insert("p".into(), ProviderCheck::Err("401 Unauthorized".into()));
+    app.provider_checks.insert(
+        "p".into(),
+        ProviderCheck::Err("no API key configured for provider 'p'".into()),
+    );
     assert_eq!(
-        rail(&app),
-        "refused: 401 Unauthorized",
-        "failure reads there too, and the same key re-probes"
+        badge(&app).as_deref(),
+        Some("refused: no API key configured"),
+        "the reason keeps whole words, not a cut-off half"
     );
 
     // and the answer dies with the visit: the next one asks its own question
@@ -356,8 +352,9 @@ fn provider_check_rail_reports_the_outcome() {
     app.open_menu(Menu::Models {
         provider: "p".into(),
     });
-    assert_eq!(rail(&app), "test", "a stale answer is not a current one");
+    assert_eq!(badge(&app), None, "a stale answer is not a current one");
 }
+
 /// `/undo step 3` used to parse as `/undo 1`: `nth(1)` yielded "step",
 /// `parse::<usize>()` failed and `unwrap_or(1)` reverted the most recent
 /// checkpoint instead — a destructive command acting on the wrong target
