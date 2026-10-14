@@ -206,21 +206,16 @@ impl Theme {
             .bg(Self::SELECTION_BG())
             .add_modifier(Modifier::BOLD)
     }
-    /// Hint chips: `key: desc` pairs joined with a dim `·` — one visual
-    /// language for every footer. The key wears `key`; `hints` lights it in
-    /// muted white, while a surface that stands beside its own list keeps the
-    /// whole line at one weight.
+    /// Hint chips: `key` muted white + `desc` dim, joined with a dim `·`.
+    /// `(key, desc)` pairs keep one visual language for every footer.
     pub fn hints(pairs: &[(&str, &str)]) -> ratatui::text::Line<'static> {
-        Self::hints_with(pairs, Self::meta())
-    }
-    pub fn hints_with(pairs: &[(&str, &str)], key: Style) -> ratatui::text::Line<'static> {
         use ratatui::text::Span;
         let mut spans = vec![Span::styled(" ", Self::dim())];
-        for (i, (k, desc)) in pairs.iter().enumerate() {
+        for (i, (key, desc)) in pairs.iter().enumerate() {
             if i > 0 {
                 spans.push(Span::styled(" · ", Self::dim()));
             }
-            spans.push(Span::styled(k.to_string(), key));
+            spans.push(Span::styled(key.to_string(), Self::meta()));
             spans.push(Span::styled(format!(": {desc}"), Self::dim()));
         }
         spans.push(Span::styled(" ", Self::dim()));
