@@ -416,12 +416,11 @@ fn provider_key_field_is_secret_and_masked() {
 fn ctrl_t_reveals_the_key_in_the_provider_form() {
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     let mut app = test_app("http://127.0.0.1:9/v1".into());
-    app.open_menu(Menu::EditProvider { name: None });
-    let key_idx = app
-        .form_fields
-        .iter()
-        .position(|f| f.label() == "api key")
-        .expect("api key field");
+    app.open_menu(Menu::EditProviderField {
+        name: None,
+        field: super::super::menus::ProviderField::ApiKey,
+    });
+    let key_idx = 0;
     app.form_focus = key_idx;
     fn press(app: &mut App, c: char) {
         let (tx, rx) = std::sync::mpsc::channel();
@@ -458,12 +457,11 @@ fn ctrl_t_reveals_the_key_in_the_provider_form() {
 fn provider_form_renders_key_as_bullets_until_revealed() {
     use super::super::forms::FormField;
     let mut app = test_app("http://127.0.0.1:9/v1".into());
-    app.open_menu(Menu::EditProvider { name: None });
-    let key_idx = app
-        .form_fields
-        .iter()
-        .position(|f| f.label() == "api key")
-        .expect("api key field");
+    app.open_menu(Menu::EditProviderField {
+        name: None,
+        field: super::super::menus::ProviderField::ApiKey,
+    });
+    let key_idx = 0;
     if let Some(FormField::Text { ta, .. }) = app.form_fields.get_mut(key_idx) {
         ta.insert_str("sk-secret-value");
     }
@@ -1037,7 +1035,7 @@ fn providers_hints_stand_as_a_right_column() {
         "esc: back",
         "enter: open",
         "ctrl+d: delete",
-        "ctrl+k: key",
+        "ctrl+e: edit",
         "ctrl+u: update",
         "ctrl+n: add",
     ];
@@ -1754,5 +1752,51 @@ fn new_model_draft_commits_once_key_and_request_id_are_set() {
         app.cur_menu(),
         Some(Menu::EditModel { key: Some(k), .. }) if k == "brand-new"
     ));
+}
+
+#[test]
+fn edit_provider_surface_custom_and_builtin_rows_and_format_picker() {
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.cfg.providers.get_mut("p").unwrap().api_key = Some("sk-123".into());
+    app.open_menu(Menu::EditProvider {
+        name: Some("p".into()),
+    });
+    assert!(!app.is_form_menu());
+    assert_eq!(app.menu_rows.len(), 5);
+    assert_eq!(app.menu_rows[3].0.spans[0].content.as_ref(), "api key");
+    assert_eq!(app.menu_rows[3].0.spans[1].content.as_ref(), " ••••••");
+
+    // Enter on format opens the 3-row format surface picker
+    app.menu_sel = 1;
+    app.menu_activate();
+    assert!(matches!(app.cur_menu(), Some(Menu::ProviderFormat { .. })));
+    assert_eq!(app.menu_rows.len(), 3);
+    app.menu_sel = 1; // anthropic
+    app.menu_activate();
+    assert!(matches!(app.cur_menu(), Some(Menu::EditProvider { .. })));
+    assert_eq!(app.menu_sel, 1);
+    assert_eq!(
+        app.cfg.providers["p"].format,
+        crate::config::WireFormat::Anthropic
+    );
+
+    // Built-in provider has only 2 rows: api key and key env var
+    let builtin = crate::config::BuiltinCatalog::current()
+        .providers
+        .keys()
+        .next()
+        .unwrap()
+        .clone();
+    let bpc = crate::config::BuiltinCatalog::current()
+        .providers
+        .remove(&builtin)
+        .unwrap();
+    app.cfg.providers.insert(builtin.clone(), bpc);
+    app.open_menu(Menu::EditProvider {
+        name: Some(builtin),
+    });
+    assert_eq!(app.menu_rows.len(), 2);
+    assert_eq!(app.menu_rows[0].0.spans[0].content.as_ref(), "api key");
+    assert_eq!(app.menu_rows[1].0.spans[0].content.as_ref(), "key env var");
 }
 

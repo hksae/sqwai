@@ -2296,6 +2296,8 @@ impl App {
             // than the column: a one-model list still has to show its keys
             // under its own rows rather than across the rule.
             Some(Menu::Providers)
+            | Some(Menu::EditProvider { .. })
+            | Some(Menu::ProviderFormat { .. })
             | Some(Menu::Models { .. })
             | Some(Menu::EditModel { .. }) => {
                 let (head, win, _) = self.list_shape();
@@ -2303,7 +2305,9 @@ impl App {
                 let shown = body.min(win).max(1).max(self.list_hints().len());
                 (3 + head + shown + usize::from(body > shown) + 1) as u16
             }
-            Some(Menu::EditModelField { .. }) => 5,
+            Some(Menu::EditModelField { .. } | Menu::EditProviderField { .. }) => {
+                (3 + self.list_hints().len().max(2)) as u16
+            }
             _ => list_rows,
         };
         let surface = matches!(
@@ -2311,6 +2315,9 @@ impl App {
             Some(Menu::Effort { .. })
                 | Some(Menu::Context)
                 | Some(Menu::Providers)
+                | Some(Menu::EditProvider { .. })
+                | Some(Menu::EditProviderField { .. })
+                | Some(Menu::ProviderFormat { .. })
                 | Some(Menu::Models { .. })
                 | Some(Menu::EditModel { .. })
                 | Some(Menu::EditModelField { .. })
@@ -2627,6 +2634,9 @@ impl App {
                             self.draw_context_surface(buf, rect, skip, surf_full)
                         }
                         Some(Menu::Providers)
+                        | Some(Menu::EditProvider { .. })
+                        | Some(Menu::EditProviderField { .. })
+                        | Some(Menu::ProviderFormat { .. })
                         | Some(Menu::Models { .. })
                         | Some(Menu::EditModel { .. })
                         | Some(Menu::EditModelField { .. }) => {
@@ -2923,6 +2933,9 @@ impl App {
             Some(Menu::Effort { .. })
                 | Some(Menu::Context)
                 | Some(Menu::Providers)
+                | Some(Menu::EditProvider { .. })
+                | Some(Menu::EditProviderField { .. })
+                | Some(Menu::ProviderFormat { .. })
                 | Some(Menu::Models { .. })
                 | Some(Menu::EditModel { .. })
                 | Some(Menu::EditModelField { .. })
@@ -3705,9 +3718,11 @@ impl App {
     fn list_shape(&self) -> (usize, usize, &'static str) {
         match self.cur_menu() {
             Some(Menu::Providers) => (1, 8, "providers"),
+            Some(Menu::EditProvider { .. }) => (0, 5, ""),
+            Some(Menu::ProviderFormat { .. }) => (0, 3, ""),
             Some(Menu::Models { .. }) => (1, 8, "models"),
             Some(Menu::EditModel { .. }) => (0, 4, ""),
-            Some(Menu::EditModelField { .. }) => (0, 1, ""),
+            Some(Menu::EditModelField { .. } | Menu::EditProviderField { .. }) => (0, 1, ""),
             _ => (0, 12, ""),
         }
     }
@@ -3720,7 +3735,7 @@ impl App {
             Some(Menu::Providers) => vec![
                 ("ctrl+n", "add".to_string()),
                 ("ctrl+u", "update".to_string()),
-                ("ctrl+k", "key".to_string()),
+                ("ctrl+e", "edit".to_string()),
                 ("ctrl+d", "delete".to_string()),
                 ("enter", "open".to_string()),
                 ("esc", "back".to_string()),
@@ -3733,11 +3748,23 @@ impl App {
                 ("enter", "use".to_string()),
                 ("esc", "back".to_string()),
             ],
-            Some(Menu::EditModel { .. }) => vec![
+            Some(Menu::EditProvider { .. } | Menu::EditModel { .. }) => vec![
                 ("enter", "edit".to_string()),
                 ("esc", "back".to_string()),
             ],
-            Some(Menu::EditModelField { .. }) => vec![
+            Some(Menu::ProviderFormat { .. }) => vec![
+                ("enter", "use".to_string()),
+                ("esc", "back".to_string()),
+            ],
+            Some(Menu::EditProviderField {
+                field: super::menus::ProviderField::ApiKey,
+                ..
+            }) => vec![
+                ("ctrl+t", "key".to_string()),
+                ("enter", "save".to_string()),
+                ("esc", "back".to_string()),
+            ],
+            Some(Menu::EditModelField { .. } | Menu::EditProviderField { .. }) => vec![
                 ("enter", "save".to_string()),
                 ("esc", "back".to_string()),
             ],
@@ -3929,7 +3956,10 @@ impl App {
                 return;
             };
             let info = matches!(action, MenuAction::None);
-            let is_field_surf = matches!(slf.cur_menu(), Some(Menu::EditModelField { .. }));
+            let is_field_surf = matches!(
+                slf.cur_menu(),
+                Some(Menu::EditModelField { .. } | Menu::EditProviderField { .. })
+            );
             let cur = (!info && slf.menu_sel == i) || is_field_surf;
             buf.set_line(
                 area.x,
@@ -3945,16 +3975,33 @@ impl App {
                 area.width,
             );
             if is_field_surf {
-                if let Some(super::forms::FormField::Text { ta, .. }) = slf.form_fields.first() {
-                    ta.render(
-                        Rect {
-                            x: area.x + 2,
-                            y,
-                            width: area.width.saturating_sub(2 + rail),
-                            height: 1,
-                        },
-                        buf,
-                    );
+                if let Some(super::forms::FormField::Text {
+                    ta,
+                    secret,
+                    revealed,
+                    ..
+                }) = slf.form_fields.first()
+                {
+                    let field_rect = Rect {
+                        x: area.x + 2,
+                        y,
+                        width: area.width.saturating_sub(2 + rail),
+                        height: 1,
+                    };
+                    if *secret && !*revealed {
+                        let masked =
+                            super::forms::FormField::mask_value(&ta.lines().join(""));
+                        Paragraph::new(Line::from(Span::styled(masked, Theme::base())))
+                            .render(field_rect, buf);
+                        let col = (ta.cursor().1 as u16).min(field_rect.width.saturating_sub(1));
+                        if field_rect.width > 0
+                            && let Some(cell) = buf.cell_mut((field_rect.x + col, field_rect.y))
+                        {
+                            cell.set_style(Theme::cursor());
+                        }
+                    } else {
+                        ta.render(field_rect, buf);
+                    }
                 }
             } else if matches!(action, MenuAction::FocusSearch) {
                 paint_field(slf, buf, area, y, rail);

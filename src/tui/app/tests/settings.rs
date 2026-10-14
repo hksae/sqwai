@@ -279,8 +279,11 @@ fn form_paste_burst_undoes_completely() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     let (tx, rx) = std::sync::mpsc::channel();
 
-    // Open a form menu (e.g. EditProvider)
-    app.open_menu(Menu::EditProvider { name: None });
+    // Open a form menu (e.g. EditProviderField)
+    app.open_menu(Menu::EditProviderField {
+        name: None,
+        field: crate::tui::app::menus::ProviderField::Name,
+    });
     assert!(app.is_form_menu());
 
     // Simulate terminal injecting pasted characters into the focused text field

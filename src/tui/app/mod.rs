@@ -519,6 +519,9 @@ pub struct App {
     /// unsaved draft values for a brand-new model (`Menu::EditModel { key: None }`)
     /// until both `key` and `request id` have been filled in
     model_draft: menus::ModelDraft,
+    /// unsaved draft values for a brand-new provider (`Menu::EditProvider { name: None }`)
+    /// until both `name` and `base url` have been filled in
+    provider_draft: menus::ProviderDraft,
     /// cached session list for the sessions menus (headers only — see
     /// `Session::list_visible_headers`)
     sessions: Vec<SessionHeader>,
@@ -779,6 +782,7 @@ impl App {
             form_focus: 0,
             form_draft: Vec::new(),
             model_draft: menus::ModelDraft::default(),
+            provider_draft: menus::ProviderDraft::default(),
             sessions: Vec::new(),
             sessions_filter: String::new(),
             prov_search: Self::fresh_input(String::new()),

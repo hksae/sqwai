@@ -144,6 +144,63 @@ impl Default for ModelDraft {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ProviderField {
+    Name,
+    BaseUrl,
+    ApiKey,
+    KeyEnvVar,
+}
+
+impl ProviderField {
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::Name => "name",
+            Self::BaseUrl => "base url",
+            Self::ApiKey => "api key",
+            Self::KeyEnvVar => "key env var",
+        }
+    }
+
+    pub(super) fn row_index(self, is_builtin: bool) -> usize {
+        if is_builtin {
+            match self {
+                Self::ApiKey => 0,
+                Self::KeyEnvVar => 1,
+                _ => 0,
+            }
+        } else {
+            match self {
+                Self::Name => 0,
+                Self::BaseUrl => 2,
+                Self::ApiKey => 3,
+                Self::KeyEnvVar => 4,
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct ProviderDraft {
+    pub name: String,
+    pub format: WireFormat,
+    pub base_url: String,
+    pub api_key: String,
+    pub api_key_env: String,
+}
+
+impl Default for ProviderDraft {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            format: WireFormat::Openai,
+            base_url: String::new(),
+            api_key: String::new(),
+            api_key_env: String::new(),
+        }
+    }
+}
+
 #[derive(Clone)]
 #[allow(clippy::large_enum_variant)] // popup state is rebuilt per frame; form payloads are small in practice
 pub(super) enum Menu {
@@ -207,6 +264,13 @@ pub(super) enum Menu {
         id: String,
     },
     EditProvider {
+        name: Option<String>,
+    },
+    EditProviderField {
+        name: Option<String>,
+        field: ProviderField,
+    },
+    ProviderFormat {
         name: Option<String>,
     },
     EditModel {
@@ -283,6 +347,9 @@ pub(super) enum MenuAction {
     /// caret to the field. The row is reachable by the arrows like any other.
     FocusSearch,
     EditProvider(String),
+    OpenProviderField(ProviderField),
+    OpenProviderFormat,
+    SetProviderFormat(WireFormat),
     DeleteProvider(String),
     /// check that the provider answers with the configured credentials
     CheckProvider(String),
@@ -614,11 +681,28 @@ impl App {
             Some(Menu::Effort { .. })
                 | Some(Menu::Context)
                 | Some(Menu::Providers)
+                | Some(Menu::EditProvider { .. })
+                | Some(Menu::EditProviderField { .. })
+                | Some(Menu::ProviderFormat { .. })
                 | Some(Menu::Models { .. })
                 | Some(Menu::EditModel { .. })
                 | Some(Menu::EditModelField { .. })
         ) {
             self.follow = true;
+        }
+        if matches!(self.cur_menu(), Some(Menu::EditProvider { name: None })) {
+            self.provider_draft = ProviderDraft::default();
+        }
+        if let Some(Menu::ProviderFormat { name }) = self.cur_menu().cloned() {
+            let fmt = name
+                .as_ref()
+                .and_then(|n| self.cfg.providers.get(n))
+                .map(|pc| pc.format)
+                .unwrap_or(self.provider_draft.format);
+            self.menu_sel = WireFormat::ALL
+                .iter()
+                .position(|f| *f == fmt)
+                .unwrap_or(0);
         }
         if let Some(Menu::EditModel {
             provider,
@@ -727,6 +811,16 @@ impl App {
                 field.row_index()
             }
             (Some(Menu::Effort { .. }), Some(Menu::EditModel { .. })) => 3,
+            (
+                Some(Menu::EditProviderField { field, .. }),
+                Some(Menu::EditProvider { name }),
+            ) => {
+                let is_builtin = name
+                    .as_ref()
+                    .is_some_and(|n| self.cfg.is_builtin_provider(n));
+                field.row_index(is_builtin)
+            }
+            (Some(Menu::ProviderFormat { .. }), Some(Menu::EditProvider { .. })) => 1,
             _ => 0,
         };
         self.form_hover_row = None;
@@ -910,7 +1004,7 @@ impl App {
         matches!(
             self.cur_menu(),
             Some(
-                Menu::EditProvider { .. }
+                Menu::EditProviderField { .. }
                     | Menu::EditModelField { .. }
                     | Menu::EditSessionTitle { .. }
                     | Menu::AskFree { .. }
@@ -1297,6 +1391,30 @@ impl App {
                         key,
                         field,
                     });
+                }
+            }
+            MenuAction::OpenProviderField(field) => {
+                if let Some(Menu::EditProvider { name }) = self.cur_menu().cloned() {
+                    self.open_menu(Menu::EditProviderField { name, field });
+                }
+            }
+            MenuAction::OpenProviderFormat => {
+                if let Some(Menu::EditProvider { name }) = self.cur_menu().cloned() {
+                    self.open_menu(Menu::ProviderFormat { name });
+                }
+            }
+            MenuAction::SetProviderFormat(format) => {
+                if let Some(Menu::ProviderFormat { name }) = self.cur_menu().cloned() {
+                    if let Some(n) = &name {
+                        if let Some(pc) = self.cfg.providers.get_mut(n) {
+                            pc.format = format;
+                            self.cfg.save().ok();
+                        }
+                    } else {
+                        self.provider_draft.format = format;
+                        self.try_commit_provider_draft();
+                    }
+                    self.menu_back();
                 }
             }
             MenuAction::OpenProviders => self.open_menu(Menu::Providers),
@@ -1952,6 +2070,14 @@ impl App {
             Some(Menu::EditProvider { name }) => match name {
                 Some(n) => format!(" Edit provider: {n} "),
                 None => " New provider ".into(),
+            },
+            Some(Menu::EditProviderField { name, field }) => match name {
+                Some(n) => format!(" Provider · {n} · {} ", field.label()),
+                None => format!(" New provider · {} ", field.label()),
+            },
+            Some(Menu::ProviderFormat { name }) => match name {
+                Some(n) => format!(" Provider · {n} · format "),
+                None => " New provider · format ".into(),
             },
             Some(Menu::EditModel { provider, .. }) => {
                 format!(" Model · {provider} ")
@@ -2747,6 +2873,85 @@ impl App {
                     ));
                 }
             }
+            Menu::EditProvider { name } => {
+                let is_builtin = name
+                    .as_ref()
+                    .is_some_and(|n| self.cfg.is_builtin_provider(n));
+                let (name_val, fmt_val, url_val, key_val, env_val) =
+                    match name.as_ref().and_then(|n| self.cfg.providers.get(n)) {
+                        Some(pc) => (
+                            name.clone().unwrap_or_default(),
+                            pc.format.as_str().to_string(),
+                            pc.base_url.clone(),
+                            super::forms::FormField::mask_value(
+                                pc.api_key.as_deref().unwrap_or(""),
+                            ),
+                            pc.api_key_env.clone().unwrap_or_default(),
+                        ),
+                        None => (
+                            name.clone().unwrap_or_else(|| self.provider_draft.name.clone()),
+                            self.provider_draft.format.as_str().to_string(),
+                            self.provider_draft.base_url.clone(),
+                            super::forms::FormField::mask_value(&self.provider_draft.api_key),
+                            self.provider_draft.api_key_env.clone(),
+                        ),
+                    };
+                let field_row = |label: &'static str, val: String, action: MenuAction| {
+                    let mut spans = vec![Span::styled(label, Style::new().fg(Theme::FG()))];
+                    if !val.is_empty() {
+                        spans.push(Span::styled(format!(" {val}"), Theme::dim()));
+                    }
+                    row(Line::from(spans), action)
+                };
+                if !is_builtin {
+                    self.menu_rows.push(field_row(
+                        "name",
+                        name_val,
+                        MenuAction::OpenProviderField(ProviderField::Name),
+                    ));
+                    self.menu_rows.push(field_row(
+                        "format",
+                        fmt_val,
+                        MenuAction::OpenProviderFormat,
+                    ));
+                    self.menu_rows.push(field_row(
+                        "base url",
+                        url_val,
+                        MenuAction::OpenProviderField(ProviderField::BaseUrl),
+                    ));
+                }
+                self.menu_rows.push(field_row(
+                    "api key",
+                    key_val,
+                    MenuAction::OpenProviderField(ProviderField::ApiKey),
+                ));
+                self.menu_rows.push(field_row(
+                    "key env var",
+                    env_val,
+                    MenuAction::OpenProviderField(ProviderField::KeyEnvVar),
+                ));
+            }
+            Menu::EditProviderField { .. } => {
+                self.menu_rows.push(row(Line::default(), MenuAction::None));
+            }
+            Menu::ProviderFormat { name } => {
+                let current = name
+                    .as_ref()
+                    .and_then(|n| self.cfg.providers.get(n))
+                    .map(|pc| pc.format)
+                    .unwrap_or(self.provider_draft.format);
+                for fmt in WireFormat::ALL {
+                    let style = if fmt == current {
+                        Theme::brand_ink()
+                    } else {
+                        Style::new().fg(Theme::FG())
+                    };
+                    self.menu_rows.push(row(
+                        Line::from(vec![Span::styled(fmt.as_str(), style)]),
+                        MenuAction::SetProviderFormat(fmt),
+                    ));
+                }
+            }
             Menu::Models { provider } => {
                 // A surface row list, not a table: the search field, then the
                 // model names. The column headers are gone; what a model has to
@@ -3330,8 +3535,7 @@ impl App {
                 ));
                 self.menu_footer_text = Some("enter: confirm · esc: deny".into());
             }
-            Menu::EditProvider { .. }
-            | Menu::EditSessionTitle { .. }
+            Menu::EditSessionTitle { .. }
             | Menu::AskFree { .. }
             | Menu::EditScalar(..)
             | Menu::AddListItem(..)

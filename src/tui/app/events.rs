@@ -692,10 +692,9 @@ impl App {
                         {
                             self.start_builtin_update(true);
                         }
-                        // the api key belongs to the provider, so it is set
-                        // from the provider list rather than from each of its
-                        // model lists
-                        KeyCode::Char('k')
+                        // the provider's settings and api key are edited from
+                        // the provider list on the same chord Models uses
+                        KeyCode::Char('e')
                             if ctrl && matches!(self.cur_menu(), Some(Menu::Providers)) =>
                         {
                             if let Some(p) = self.surface_provider() {

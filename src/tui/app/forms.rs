@@ -236,6 +236,34 @@ impl App {
                 }
                 self.form_fields = vec![f];
             }
+            Some(Menu::EditProviderField { name, field }) => {
+                use super::menus::ProviderField;
+                let val = match name.as_ref().and_then(|n| self.cfg.providers.get(n)) {
+                    Some(pc) => match field {
+                        ProviderField::Name => name.clone().unwrap_or_default(),
+                        ProviderField::BaseUrl => pc.base_url.clone(),
+                        ProviderField::ApiKey => pc.api_key.clone().unwrap_or_default(),
+                        ProviderField::KeyEnvVar => pc.api_key_env.clone().unwrap_or_default(),
+                    },
+                    None => match field {
+                        ProviderField::Name => name
+                            .clone()
+                            .unwrap_or_else(|| self.provider_draft.name.clone()),
+                        ProviderField::BaseUrl => self.provider_draft.base_url.clone(),
+                        ProviderField::ApiKey => self.provider_draft.api_key.clone(),
+                        ProviderField::KeyEnvVar => self.provider_draft.api_key_env.clone(),
+                    },
+                };
+                let mut f = if matches!(field, ProviderField::ApiKey) {
+                    FormField::secret(field.label(), val)
+                } else {
+                    FormField::text(field.label(), val)
+                };
+                if let FormField::Text { ta, .. } = &mut f {
+                    ta.move_cursor(tui_textarea::CursorMove::End);
+                }
+                self.form_fields = vec![f];
+            }
             Some(Menu::EditSessionTitle { id }) => {
                 let title = self
                     .sessions
@@ -465,7 +493,10 @@ impl App {
     }
 
     pub(super) fn form_mouse_down(&mut self, row: u16, col: u16) {
-        let is_surf_field = matches!(self.cur_menu(), Some(Menu::EditModelField { .. }));
+        let is_surf_field = matches!(
+            self.cur_menu(),
+            Some(Menu::EditModelField { .. } | Menu::EditProviderField { .. })
+        );
         // popup fields start past the title row and the air row under it;
         // surface fields also have the top rule row above the title
         let top_y = self.menu_rect.y + if is_surf_field { 3 } else { 2 };
@@ -528,7 +559,10 @@ impl App {
     }
 
     pub(super) fn form_mouse_drag(&mut self, _row: u16, col: u16) {
-        let is_surf_field = matches!(self.cur_menu(), Some(Menu::EditModelField { .. }));
+        let is_surf_field = matches!(
+            self.cur_menu(),
+            Some(Menu::EditModelField { .. } | Menu::EditProviderField { .. })
+        );
         let label_w = self.form_label_w();
         if let Some(FormField::Text { ta, .. }) = self.form_fields.get_mut(self.form_focus)
             && ta.is_selecting()
@@ -870,6 +904,107 @@ impl App {
                 }
                 self.menu_back();
             }
+            Some(Menu::EditProviderField { name, field }) => {
+                use super::menus::ProviderField;
+                let raw = self
+                    .form_fields
+                    .first()
+                    .map(|f| f.trimmed())
+                    .unwrap_or_default();
+                match field {
+                    ProviderField::Name => {
+                        if raw.is_empty() {
+                            self.status("name cannot be empty", StatusKind::Err);
+                            return;
+                        }
+                        if name.as_deref() != Some(raw.as_str())
+                            && self.cfg.providers.contains_key(&raw)
+                        {
+                            self.status(
+                                &format!("provider '{raw}' already exists"),
+                                StatusKind::Err,
+                            );
+                            return;
+                        }
+                        if name.as_deref().is_some_and(|n| self.cfg.is_builtin_provider(n))
+                            && name.as_deref() != Some(raw.as_str())
+                        {
+                            self.status(
+                                "built-in provider cannot be renamed",
+                                StatusKind::Err,
+                            );
+                            return;
+                        }
+                        if let Some(old) = &name {
+                            if *old != raw {
+                                if let Some(pc) = self.cfg.providers.remove(old) {
+                                    for m in self.cfg.models.values_mut() {
+                                        if m.provider == *old {
+                                            m.provider = raw.clone();
+                                        }
+                                    }
+                                    self.cfg.providers.insert(raw.clone(), pc);
+                                }
+                                if self.model_cfg.provider == *old {
+                                    self.model_cfg.provider = raw.clone();
+                                }
+                                self.rekey_parent_edit_provider(&raw);
+                                self.cfg.save().ok();
+                            }
+                        } else {
+                            self.provider_draft.name = raw;
+                            self.try_commit_provider_draft();
+                        }
+                    }
+                    ProviderField::BaseUrl => {
+                        if raw.is_empty() {
+                            self.status("base url cannot be empty", StatusKind::Err);
+                            return;
+                        }
+                        if let Some(n) = &name {
+                            if let Some(pc) = self.cfg.providers.get_mut(n) {
+                                pc.base_url = raw;
+                                self.cfg.save().ok();
+                                if self.model_cfg.provider == *n {
+                                    self.rebuild_provider();
+                                }
+                            }
+                        } else {
+                            self.provider_draft.base_url = raw;
+                            self.try_commit_provider_draft();
+                        }
+                    }
+                    ProviderField::ApiKey => {
+                        if let Some(n) = &name {
+                            if let Some(pc) = self.cfg.providers.get_mut(n) {
+                                pc.api_key = (!raw.is_empty()).then_some(raw);
+                                self.cfg.save().ok();
+                                if self.model_cfg.provider == *n {
+                                    self.rebuild_provider();
+                                }
+                            }
+                        } else {
+                            self.provider_draft.api_key = raw;
+                            self.try_commit_provider_draft();
+                        }
+                    }
+                    ProviderField::KeyEnvVar => {
+                        if let Some(n) = &name {
+                            if let Some(pc) = self.cfg.providers.get_mut(n) {
+                                pc.api_key_env = (!raw.is_empty()).then_some(raw);
+                                self.cfg.save().ok();
+                                if self.model_cfg.provider == *n {
+                                    self.rebuild_provider();
+                                }
+                            }
+                        } else {
+                            self.provider_draft.api_key_env = raw;
+                            self.try_commit_provider_draft();
+                        }
+                    }
+                }
+                self.menu_back();
+            }
             Some(Menu::AskFree { .. }) => {
                 let t = self
                     .form_fields
@@ -1054,5 +1189,35 @@ impl App {
         self.cfg.models.insert(new_key.clone(), updated);
         self.cfg.save().ok();
         self.rekey_parent_edit_model(&new_key);
+    }
+
+    fn rekey_parent_edit_provider(&mut self, new_name: &str) {
+        if let Some(idx) = self.menu_stack.len().checked_sub(2)
+            && let Some(Menu::EditProvider { name }) = self.menu_stack.get_mut(idx)
+        {
+            *name = Some(new_name.to_string());
+        }
+    }
+
+    pub(super) fn try_commit_provider_draft(&mut self) {
+        if self.provider_draft.name.is_empty() || self.provider_draft.base_url.is_empty() {
+            return;
+        }
+        let new_name = self.provider_draft.name.clone();
+        if self.cfg.providers.contains_key(&new_name) {
+            return;
+        }
+        let pc = crate::config::ProviderConfig {
+            format: self.provider_draft.format,
+            base_url: self.provider_draft.base_url.clone(),
+            api_key: (!self.provider_draft.api_key.is_empty())
+                .then(|| self.provider_draft.api_key.clone()),
+            api_key_env: (!self.provider_draft.api_key_env.is_empty())
+                .then(|| self.provider_draft.api_key_env.clone()),
+            continuation: true,
+        };
+        self.cfg.providers.insert(new_name.clone(), pc);
+        self.cfg.save().ok();
+        self.rekey_parent_edit_provider(&new_name);
     }
 }
