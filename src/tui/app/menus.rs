@@ -21,6 +21,7 @@ pub(super) const COMMANDS: &[&str] = &[
     "/config",
     "/constraints",
     "/context",
+    "/context-view",
     "/debug",
     "/effort",
     "/exit",
@@ -261,6 +262,8 @@ pub(super) enum Menu {
     },
     /// /context: the context window's composition — one noise block per part
     Context,
+    /// /context-view: full assembled request context rendered as Markdown
+    ContextView,
     /// /test anim: every single-character frame set, spinning, for picking the
     /// live status marker
     TestAnim,
@@ -545,6 +548,7 @@ impl App {
             self.cur_menu(),
             Some(Menu::Effort { .. })
                 | Some(Menu::Context)
+                | Some(Menu::ContextView)
                 | Some(Menu::Settings)
                 | Some(Menu::EditScalar(..))
                 | Some(Menu::CompactionSummary)
@@ -812,6 +816,7 @@ impl App {
         !matches!(
             self.cur_menu(),
             Some(Menu::Context)
+                | Some(Menu::ContextView)
                 | Some(Menu::Plan)
                 | Some(Menu::TestAnim)
                 | Some(Menu::TestArt)
@@ -843,10 +848,26 @@ impl App {
     /// A read-only menu: no selection band, no cursor movement — every row is
     /// a painted fact, nothing in it is a button. Esc still closes it.
     pub(super) fn menu_is_dead(&self) -> bool {
-        matches!(self.cur_menu(), Some(Menu::Context | Menu::Plan))
+        matches!(
+            self.cur_menu(),
+            Some(Menu::Context | Menu::ContextView | Menu::Plan)
+        )
     }
 
     pub(super) fn menu_nav(&mut self, dir: i32) {
+        if matches!(self.cur_menu(), Some(Menu::ContextView | Menu::Plan)) {
+            let step = if dir.abs() > 1 { 10 } else { 1 };
+            if dir < 0 {
+                self.surf_top = self.surf_top.saturating_sub(step);
+            } else {
+                self.surf_top = self
+                    .surf_top
+                    .saturating_add(step)
+                    .min(self.menu_rows.len().saturating_sub(1));
+            }
+            self.dirty = true;
+            return;
+        }
         if self.menu_is_dead() {
             return;
         }
@@ -1196,6 +1217,7 @@ impl App {
         if matches!(
             self.cur_menu(),
             Some(Menu::Context)
+                | Some(Menu::ContextView)
                 | Some(Menu::Plan)
                 | Some(Menu::TestAnim)
                 | Some(Menu::TestArt)
@@ -1909,6 +1931,7 @@ impl App {
                 None => " Effort ".into(),
             },
             Some(Menu::Context) => " Context ".into(),
+            Some(Menu::ContextView) => " Context · view ".into(),
             Some(Menu::TestAnim) => " Anim ".into(),
             Some(Menu::TestArt) => " Art ".into(),
             Some(Menu::TestColors) => " Colors ".into(),
@@ -2873,6 +2896,13 @@ impl App {
                     self.menu_rows.push(row(line, MenuAction::None));
                 }
             }
+            Menu::ContextView => {
+                let md = self.context_view_markdown();
+                let w = self.menu_rect.width.saturating_sub(4).max(20);
+                for line in crate::tui::markdown::render(&md, w, &self.hl) {
+                    self.menu_rows.push(row(line, MenuAction::None));
+                }
+            }
             Menu::AskUser { questions, .. } => {
                 // Render each question with its options. The focused question is highlighted,
                 // and its options are selectable. Custom is inline per question.
@@ -3075,6 +3105,94 @@ impl App {
             log_path,
             cfg_dir,
         )
+    }
+
+    pub(super) fn context_view_markdown(&self) -> String {
+        let mut out = String::new();
+        out.push_str("# System\n\n");
+        for part in &self.stable_parts {
+            if !part.text.trim().is_empty() {
+                out.push_str(part.text.trim());
+                out.push_str("\n\n");
+            }
+        }
+        if !self.session_environment.trim().is_empty() {
+            out.push_str(self.session_environment.trim());
+            out.push_str("\n\n");
+        }
+
+        out.push_str("# Host Block\n\n");
+        out.push_str(&format!(
+            "Mode: {}\n\n",
+            match self.mode {
+                Mode::Plan => "plan",
+                Mode::Act => "act",
+            }
+        ));
+        let checks = crate::config::Config::project_verify_commands(&self.project_root);
+        if !checks.is_empty() {
+            out.push_str(&format!(
+                "Checks: {}\n\n",
+                checks
+                    .iter()
+                    .map(|(n, c)| format!("{n} = {c}"))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ));
+        }
+        let facts = crate::prompts::env::turn_facts(&self.project_root);
+        if !facts.trim().is_empty() {
+            out.push_str(facts.trim());
+            out.push_str("\n\n");
+        }
+        if let Some(block) = crate::prompts::plan_status_block(
+            &self.project_root,
+            Some(&self.session.id.to_string()),
+        ) {
+            out.push_str(&block);
+            out.push_str("\n\n");
+        }
+
+        out.push_str(&format!("# Messages ({})\n\n", self.session.messages.len()));
+        if let Some(summary) = &self.session.summary {
+            out.push_str("## Compaction Summary\n\n");
+            out.push_str(summary.trim());
+            out.push_str("\n\n");
+        }
+        if self.session.messages.is_empty() {
+            out.push_str("_(no messages in session yet)_\n\n");
+        } else {
+            for (i, msg) in self.session.messages.iter().enumerate() {
+                let role = match msg.role {
+                    Role::System => "system",
+                    Role::User => "user",
+                    Role::Assistant => "assistant",
+                    Role::Tool => "tool",
+                };
+                out.push_str(&format!("## [{}] {}\n\n", i + 1, role));
+                if !msg.thinking.trim().is_empty() {
+                    out.push_str(&format!("> **thinking:** {}\n\n", msg.thinking.trim()));
+                }
+                if !msg.content.trim().is_empty() {
+                    out.push_str(msg.content.trim());
+                    out.push_str("\n\n");
+                }
+                if !msg.tool_calls.is_empty() {
+                    for call in &msg.tool_calls {
+                        out.push_str(&format!("- `{}` `{}`\n", call.name, call.args));
+                    }
+                    out.push('\n');
+                }
+            }
+        }
+
+        let specs = crate::agent::tools::tool_specs(matches!(self.mode, Mode::Plan));
+        out.push_str(&format!("# Tools ({})\n\n", specs.len()));
+        for spec in specs {
+            let first_line = spec.description.lines().next().unwrap_or("");
+            out.push_str(&format!("- **{}** — {}\n", spec.name, first_line));
+        }
+        out
     }
 }
 

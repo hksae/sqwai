@@ -187,6 +187,7 @@ impl App {
             }
             "/compact" => self.start_compaction(),
             "/context" => self.open_menu(Menu::Context),
+            "/context-view" => self.open_menu(Menu::ContextView),
             "/effort" => self.open_menu(Menu::Effort { model: None }),
             "/undo" => {
                 if self.streaming {

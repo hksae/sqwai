@@ -1999,3 +1999,31 @@ fn queue_preview_renders_above_input() {
         lines[input_y - 1]
     );
 }
+
+#[test]
+fn context_view_renders_sections_and_scrolls_with_arrows() {
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.session.push(crate::providers::Role::User, "check the context");
+    app.command("context-view");
+    assert!(matches!(app.cur_menu(), Some(Menu::ContextView)));
+
+    let md = app.context_view_markdown();
+    assert!(md.contains("# System"));
+    assert!(md.contains("# Host Block"));
+    assert!(md.contains("# Messages (1)"));
+    assert!(md.contains("check the context"));
+    assert!(md.contains("# Tools ("));
+
+    let area = Rect::new(0, 0, 100, 30);
+    let mut buf = Buffer::empty(area);
+    app.render_into(&mut buf, area);
+    assert!(app.surface_open);
+    assert_eq!(app.surf_top, 0);
+
+    app.menu_nav(1);
+    app.render_into(&mut buf, area);
+    assert_eq!(app.surf_top, 1, "down arrow scrolls /context-view by one line");
+}

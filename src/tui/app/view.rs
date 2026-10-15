@@ -2298,6 +2298,7 @@ impl App {
             Some(Menu::Settings)
             | Some(Menu::Debug)
             | Some(Menu::Plan)
+            | Some(Menu::ContextView)
             | Some(Menu::CompactionSummary)
             | Some(Menu::UndoShadow)
             | Some(Menu::Providers)
@@ -2325,6 +2326,7 @@ impl App {
             surf_menu,
             Some(Menu::Effort { .. })
                 | Some(Menu::Context)
+                | Some(Menu::ContextView)
                 | Some(Menu::Settings)
                 | Some(Menu::Debug)
                 | Some(Menu::Plan)
@@ -2657,6 +2659,7 @@ impl App {
                         Some(Menu::Settings)
                         | Some(Menu::Debug)
                         | Some(Menu::Plan)
+                        | Some(Menu::ContextView)
                         | Some(Menu::EditScalar(..))
                         | Some(Menu::CompactionSummary)
                         | Some(Menu::UndoShadow)
@@ -2963,6 +2966,7 @@ impl App {
             menu,
             Some(Menu::Effort { .. })
                 | Some(Menu::Context)
+                | Some(Menu::ContextView)
                 | Some(Menu::Settings)
                 | Some(Menu::Debug)
                 | Some(Menu::Plan)
@@ -3773,7 +3777,7 @@ impl App {
                 };
                 (1, full_win, "settings")
             }
-            Some(Menu::Debug | Menu::Plan) => {
+            Some(Menu::Debug | Menu::Plan | Menu::ContextView) => {
                 let body = self.menu_rows.len();
                 let fit = (screen_h as usize).saturating_sub(4);
                 let full_win = if body > fit {
@@ -3781,7 +3785,7 @@ impl App {
                 } else {
                     fit.max(1)
                 };
-                (0, full_win, "")
+                (0, full_win, "lines")
             }
             Some(Menu::CompactionSummary) => (0, 2, ""),
             Some(Menu::UndoShadow) => (0, 3, ""),
@@ -3817,6 +3821,10 @@ impl App {
                 ("esc", "back".to_string()),
             ],
             Some(Menu::Plan) => vec![("esc", "close".to_string())],
+            Some(Menu::ContextView) => vec![
+                ("up/down", "scroll".to_string()),
+                ("esc", "close".to_string()),
+            ],
             Some(Menu::Providers) => vec![
                 ("ctrl+n", "add".to_string()),
                 ("ctrl+u", "update".to_string()),
@@ -3927,6 +3935,11 @@ impl App {
         full_h: u16,
     ) {
         let (head, win, more) = self.list_shape(buf.area.height);
+        if matches!(self.cur_menu(), Some(Menu::ContextView)) && self.md_built_w != area.width {
+            self.menu_rect = area;
+            self.build_menu_rows();
+            self.md_built_w = area.width;
+        }
         let hints = self.list_hints();
         // The hint column stands on the right of the rows the block already
         // has, so the list stops short of it: a name never runs under a key.
@@ -3993,26 +4006,28 @@ impl App {
         // the window follows the cursor through the body only; while the cursor
         // is on the pinned leading rows, the list under it does not move
         let mut top = self.surf_top.min(body.saturating_sub(shown));
-        if self.menu_sel >= head {
-            let i = self.menu_sel - head;
-            if i < top {
-                top = i;
-                // A section header (Pinned, Today, …) has MenuAction::None, so
-                // the cursor never lands on it directly: when pulling the window
-                // up to the first row under a header, pull its header in too.
-                while top > 0
-                    && matches!(
-                        self.menu_rows.get(head + top - 1).map(|(_, a)| a),
-                        Some(MenuAction::None)
-                    )
-                {
-                    top -= 1;
+        if !self.menu_is_dead() {
+            if self.menu_sel >= head {
+                let i = self.menu_sel - head;
+                if i < top {
+                    top = i;
+                    // A section header (Pinned, Today, …) has MenuAction::None, so
+                    // the cursor never lands on it directly: when pulling the window
+                    // up to the first row under a header, pull its header in too.
+                    while top > 0
+                        && matches!(
+                            self.menu_rows.get(head + top - 1).map(|(_, a)| a),
+                            Some(MenuAction::None)
+                        )
+                    {
+                        top -= 1;
+                    }
+                } else if i >= top + shown {
+                    top = i + 1 - shown;
                 }
-            } else if i >= top + shown {
-                top = i + 1 - shown;
+            } else {
+                top = 0;
             }
-        } else {
-            top = 0;
         }
         self.surf_top = top;
         /// The search row's content: `⌕` and a placeholder are its chrome, and
