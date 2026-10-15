@@ -3672,7 +3672,6 @@ impl App {
         // popup had and sits centered in the slot.
         const CARD_W: u16 = 78;
         let card_w = area.width.saturating_sub(2).min(CARD_W);
-        let card_x = area.x + area.width.saturating_sub(card_w) / 2;
         // The scale sizes its bands from the card width, and the numbers ride
         // the session: rebuild on a width the rows were not built for, or once
         // the popup's own refresh interval has passed.
@@ -3715,22 +3714,28 @@ impl App {
         }
         let first = (skip.saturating_sub(CARD0) as usize).min(self.menu_rows.len());
         if let Some(y) = row_y(CARD0 + first as u16) {
-            let lines: Vec<Line> = self
+            for (idx, (line, _)) in self
                 .menu_rows
                 .iter()
                 .skip(first)
                 .take((area.bottom() - y) as usize)
-                .map(|(l, _)| l.clone())
-                .collect();
-            Paragraph::new(lines).render(
-                Rect {
-                    x: card_x,
-                    y,
-                    width: card_w,
-                    height: area.bottom() - y,
-                },
-                buf,
-            );
+                .enumerate()
+            {
+                let w = (cols(&line_text(line)) as u16).min(area.width);
+                if w == 0 {
+                    continue;
+                }
+                let x = area.x + area.width.saturating_sub(w) / 2;
+                Paragraph::new(line.clone()).render(
+                    Rect {
+                        x,
+                        y: y + idx as u16,
+                        width: w,
+                        height: 1,
+                    },
+                    buf,
+                );
+            }
         }
         // one hint line, where the effort picker keeps its own
         if let Some(y) = row_y(full_h.saturating_sub(1)) {
