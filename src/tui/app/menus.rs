@@ -353,7 +353,7 @@ pub(super) enum MenuAction {
     AskNext,
     #[allow(dead_code)]
     AskPrev,
-    /// approval: commit the selected option (select with 1/2/3, click or arrows)
+    /// approval: commit the selected option (select with click or arrows)
     DecideApproval(crate::agent::loop_task::ApprovalDecision),
     #[allow(dead_code)]
     OpenControls,

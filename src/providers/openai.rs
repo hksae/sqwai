@@ -101,23 +101,24 @@ impl OpenAiProvider {
 
     pub fn build_body(req: &ChatRequest) -> Value {
         let mut msgs: Vec<Value> = Vec::new();
-        // stable prefix first and alone: the host block trails behind the
-        // history (see below), so a changed date or nudge never re-keys it.
+        // stable prefix first and alone: the host block sits immediately before
+        // the last user turn so the request always ends on the user's message
+        // (at turn start) or on the tool result (during a tool loop) — never
+        // with a trailing host block after a tool result.
         let system = super::stable_system_text(&req.system);
         if !system.trim().is_empty() {
             msgs.push(json!({"role": "system", "content": system}));
         }
-        msgs.extend(req.messages.iter().map(Self::message_json));
         let tail = super::volatile_system_text(&req.system);
-        if !tail.trim().is_empty() {
-            // system role, and one slot before the human's turn when the
-            // request ends on one: the model must answer the person, not the
-            // state block (§18.1)
-            let at = super::host_block_index(msgs.len(), &req.messages);
-            msgs.insert(
-                at,
-                json!({"role": "system", "content": super::host_tail(&tail)}),
-            );
+        let last_user = req.messages.iter().rposition(|m| m.role == Role::User);
+        if last_user.is_none() && !tail.trim().is_empty() {
+            msgs.push(json!({"role": "system", "content": super::host_tail(&tail)}));
+        }
+        for (i, m) in req.messages.iter().enumerate() {
+            if Some(i) == last_user && !tail.trim().is_empty() {
+                msgs.push(json!({"role": "system", "content": super::host_tail(&tail)}));
+            }
+            msgs.push(Self::message_json(m));
         }
         let mut body = json!({
             "model": req.model_id,

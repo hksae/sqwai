@@ -531,7 +531,8 @@ fn approval_click_selects_without_committing() {
 }
 
 #[test]
-fn approval_number_keys_select_without_committing() {
+fn approval_letter_selects_and_digits_are_ignored() {
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     open_test_approval(&mut app);
     app.approval_select(ApprovalDecision::AlwaysSession);
@@ -540,6 +541,27 @@ fn approval_number_keys_select_without_committing() {
         approval_option_index(&app, ApprovalDecision::AlwaysSession)
     );
     assert!(matches!(app.cur_menu(), Some(Menu::Approval { .. })));
+
+    // digits used to be shortcuts here; on the one dialog that runs a shell
+    // command they must be inert, whatever option they once named
+    let (tx, rx) = std::sync::mpsc::channel();
+    for digit in ['1', '2', '3'] {
+        tx.send(Event::Key(KeyEvent::new(
+            KeyCode::Char(digit),
+            KeyModifiers::empty(),
+        )))
+        .unwrap();
+        app.poll_input(&rx).unwrap();
+    }
+    assert_eq!(
+        app.menu_sel,
+        approval_option_index(&app, ApprovalDecision::AlwaysSession),
+        "a digit must not move the approval selection"
+    );
+    assert!(
+        matches!(app.cur_menu(), Some(Menu::Approval { .. })),
+        "a digit must not decide the approval"
+    );
 }
 
 #[test]

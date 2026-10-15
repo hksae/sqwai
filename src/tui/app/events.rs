@@ -588,22 +588,15 @@ impl App {
                                 self.menu_back();
                             }
                         }
-                        // command approval: 1/2/3 and a select an option,
-                        // enter commits it; d denies immediately (safe direction)
+                        // command approval: a selects an option, enter commits
+                        // it; d denies immediately (safe direction). No digit
+                        // shortcuts: the options are reached with arrows, click
+                        // or a, and a digit in the terminal is cheap to mistype
+                        // on the one dialog that runs a shell command.
                         KeyCode::Char('a')
                             if matches!(self.cur_menu(), Some(Menu::Approval { .. })) =>
                         {
                             self.approval_select(ApprovalDecision::AlwaysSession)
-                        }
-                        KeyCode::Char(c @ ('1' | '2' | '3'))
-                            if matches!(self.cur_menu(), Some(Menu::Approval { .. })) =>
-                        {
-                            let decision = match c {
-                                '1' => ApprovalDecision::RunOnce,
-                                '2' => ApprovalDecision::AlwaysSession,
-                                _ => ApprovalDecision::Deny,
-                            };
-                            self.approval_select(decision)
                         }
                         KeyCode::Char('d')
                             if matches!(self.cur_menu(), Some(Menu::Approval { .. })) =>
