@@ -14,6 +14,8 @@ impl App {
             None => format!("{cmd} "),
         };
         self.input = Self::fresh_input(new_text);
+        self.popup_walk = None;
+        self.popup_top = 0;
         self.hover = None;
         self.dirty = true;
     }
@@ -29,6 +31,8 @@ impl App {
             None => format!("{cmd} {sub} "),
         };
         self.input = Self::fresh_input(new_text);
+        self.popup_walk = None;
+        self.popup_top = 0;
         self.hover = None;
         self.dirty = true;
     }

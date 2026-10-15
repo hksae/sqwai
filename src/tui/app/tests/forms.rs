@@ -543,6 +543,15 @@ fn plan_subcommand_popup_filters_and_inserts() {
     app.input = App::fresh_input("/pl".into());
     assert!(app.popup_visible());
     assert_eq!(app.popup_items(), vec!["/plan".to_string()]);
+    // walking with arrows and accepting clears popup_walk so the next Enter submits
+    app.popup_move(1);
+    assert_eq!(app.popup_accepted().as_deref(), Some("/plan"));
+    app.apply_command_insert("/plan");
+    assert_eq!(app.popup_accepted(), None);
+    app.popup_move(1);
+    assert!(app.popup_accepted().is_some());
+    app.apply_subcommand_insert("/plan", "history");
+    assert_eq!(app.popup_accepted(), None, "subcommand insert clears focus so next Enter submits");
 }
 
 #[test]
