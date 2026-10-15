@@ -1478,11 +1478,17 @@ fn command_popup_contains_only_command_names() {
 }
 #[test]
 fn help_menu_is_empty() {
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     assert!(COMMANDS.contains(&"/help"));
     app.command("help");
     assert!(matches!(app.cur_menu(), Some(Menu::Help)));
-    assert!(app.menu_rows.is_empty());
+    assert!(!app.menu_rows.is_empty());
+    let area = Rect::new(0, 0, 100, 30);
+    let mut buf = Buffer::empty(area);
+    app.render_into(&mut buf, area);
+    assert!(app.surface_open);
 }
 
 #[test]

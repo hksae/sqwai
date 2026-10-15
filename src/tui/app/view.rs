@@ -2298,6 +2298,7 @@ impl App {
             Some(Menu::Settings)
             | Some(Menu::Debug)
             | Some(Menu::Plan)
+            | Some(Menu::Help)
             | Some(Menu::ContextView)
             | Some(Menu::TestAnim)
             | Some(Menu::TestArt)
@@ -2331,6 +2332,7 @@ impl App {
             Some(Menu::Effort { .. })
                 | Some(Menu::Context)
                 | Some(Menu::ContextView)
+                | Some(Menu::Help)
                 | Some(Menu::TestAnim)
                 | Some(Menu::TestArt)
                 | Some(Menu::TestColors)
@@ -2667,6 +2669,7 @@ impl App {
                         Some(Menu::Settings)
                         | Some(Menu::Debug)
                         | Some(Menu::Plan)
+                        | Some(Menu::Help)
                         | Some(Menu::ContextView)
                         | Some(Menu::TestAnim)
                         | Some(Menu::TestArt)
@@ -2979,6 +2982,7 @@ impl App {
             Some(Menu::Effort { .. })
                 | Some(Menu::Context)
                 | Some(Menu::ContextView)
+                | Some(Menu::Help)
                 | Some(Menu::TestAnim)
                 | Some(Menu::TestArt)
                 | Some(Menu::TestColors)
@@ -3796,6 +3800,7 @@ impl App {
             Some(
                 Menu::Debug
                 | Menu::Plan
+                | Menu::Help
                 | Menu::ContextView
                 | Menu::TestAnim
                 | Menu::TestArt
@@ -3844,7 +3849,7 @@ impl App {
                 ("enter", "run".to_string()),
                 ("esc", "back".to_string()),
             ],
-            Some(Menu::Plan) => vec![("esc", "close".to_string())],
+            Some(Menu::Plan | Menu::Help) => vec![("esc", "close".to_string())],
             Some(
                 Menu::ContextView
                 | Menu::TestAnim

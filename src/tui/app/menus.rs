@@ -566,6 +566,7 @@ impl App {
                 | Some(Menu::Approval { .. })
                 | Some(Menu::Debug)
                 | Some(Menu::Plan)
+                | Some(Menu::Help)
                 | Some(Menu::TestAnim)
                 | Some(Menu::TestArt)
                 | Some(Menu::TestColors)
@@ -825,6 +826,7 @@ impl App {
             Some(Menu::Context)
                 | Some(Menu::ContextView)
                 | Some(Menu::Plan)
+                | Some(Menu::Help)
                 | Some(Menu::TestAnim)
                 | Some(Menu::TestArt)
                 | Some(Menu::TestColors)
@@ -861,6 +863,7 @@ impl App {
                 Menu::Context
                     | Menu::ContextView
                     | Menu::Plan
+                    | Menu::Help
                     | Menu::TestAnim
                     | Menu::TestArt
                     | Menu::TestColors
@@ -875,6 +878,7 @@ impl App {
             Some(
                 Menu::ContextView
                     | Menu::Plan
+                    | Menu::Help
                     | Menu::TestAnim
                     | Menu::TestArt
                     | Menu::TestColors
@@ -1244,6 +1248,7 @@ impl App {
             Some(Menu::Context)
                 | Some(Menu::ContextView)
                 | Some(Menu::Plan)
+                | Some(Menu::Help)
                 | Some(Menu::TestAnim)
                 | Some(Menu::TestArt)
                 | Some(Menu::TestColors)
@@ -2147,7 +2152,32 @@ impl App {
                 self.menu_rows.push(row(Line::default(), MenuAction::None));
             }
             Menu::Help => {
-                self.menu_footer_text = Some("esc: close".into());
+                const SHORTCUTS: &[(&str, &str)] = &[
+                    ("enter", "send message"),
+                    ("ctrl+j", "newline"),
+                    ("tab", "switch plan / act mode"),
+                    ("esc", "stop active turn"),
+                    ("ctrl+c", "copy selection / stop turn"),
+                    ("ctrl+d", "exit when input is empty"),
+                    ("ctrl+g", "models"),
+                    ("ctrl+p", "providers"),
+                    ("ctrl+e", "reasoning effort"),
+                    ("ctrl+s", "sessions"),
+                    ("ctrl+l", "plan overview"),
+                    ("ctrl+o", "config"),
+                ];
+                for (combo, what) in SHORTCUTS {
+                    self.menu_rows.push(row(
+                        Line::from(vec![
+                            Span::styled(
+                                format!("{combo:<12}"),
+                                Style::new().fg(Theme::FG()),
+                            ),
+                            Span::styled((*what).to_string(), Theme::dim()),
+                        ]),
+                        MenuAction::None,
+                    ));
+                }
             }
             Menu::Controls => {
                 const CONTROLS: &[(&str, &str)] = &[
