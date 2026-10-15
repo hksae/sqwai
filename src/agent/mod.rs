@@ -17,4 +17,5 @@ pub mod tool_output;
 pub mod tools;
 pub mod trust;
 pub mod undo_guard;
+#[cfg(test)]
 pub mod why;

@@ -27,7 +27,6 @@ pub(super) const COMMANDS: &[&str] = &[
     "/export",
     "/help",
     "/init",
-    "/mode",
     "/models",
     "/new",
     "/plan",
@@ -37,7 +36,6 @@ pub(super) const COMMANDS: &[&str] = &[
     "/skills",
     "/test",
     "/undo",
-    "/why",
 ];
 
 /// Second-level completions: (command, subcommands), in the same order as
@@ -45,15 +43,12 @@ pub(super) const COMMANDS: &[&str] = &[
 /// (the popup hides after the first space).
 pub(super) const SUBCOMMANDS: &[(&str, &[&str])] = &[
     ("/plan", &["delete"]),
-    ("/undo", &["step"]),
     (
         "/test",
         &[
             "anim", "approval", "art", "ask", "churn", "colors", "md", "plan",
         ],
     ),
-    ("/providers", &["add", "update"]),
-    ("/mode", &["plan", "act"]),
 ];
 
 /// Subcommand list for a top-level command, if it has second-level completions.

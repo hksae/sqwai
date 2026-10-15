@@ -160,21 +160,11 @@ impl App {
                 }
             }
             "/plan" => self.plan_command(rest),
-            "/mode" => self.mode_command(rest),
             "/new" => {
                 self.start_new_session();
             }
             "/sessions" => self.open_menu(Menu::Sessions),
-            "/providers" => {
-                let arg = rest.split_whitespace().nth(1);
-                if arg == Some("update") {
-                    self.start_builtin_update(true);
-                } else if arg == Some("add") {
-                    self.open_menu(Menu::EditProvider { name: None });
-                } else {
-                    self.open_menu(Menu::Providers);
-                }
-            }
+            "/providers" => self.open_menu(Menu::Providers),
             "/models" => self.open_menu(Menu::Models {
                 provider: self.model_cfg.provider.clone(),
             }),
@@ -193,22 +183,15 @@ impl App {
                 if self.streaming {
                     self.show_busy_status();
                 } else {
-                    let mut args = rest.split_whitespace().skip(1);
-                    match (args.next(), args.next()) {
-                        (None, _) => self.undo(1),
-                        // `/undo step 3` — revert one plan step through the
-                        // layer-1 pre-images (§2.5), not the last checkpoint
-                        (Some("step"), Some(id)) => self.undo_step(id),
-                        (Some("step"), None) => self
-                            .status("/undo step needs a step id: /undo step 3", StatusKind::Warn),
-                        (Some(arg), _) => match arg.parse::<usize>() {
+                    match rest.split_whitespace().nth(1) {
+                        None => self.undo(1),
+                        Some(arg) => match arg.parse::<usize>() {
                             Ok(n) => self.undo(n),
                             // Never guess: this used to parse as `/undo 1` and
                             // revert the last checkpoint, reported as success.
                             Err(_) => self.status(
                                 &format!(
-                                    "/undo takes a count or a step: /undo, /undo 3, \
-                                     /undo step 3. Cannot undo {arg:?}."
+                                    "/undo takes a count: /undo or /undo 3. Cannot undo {arg:?}."
                                 ),
                                 StatusKind::Warn,
                             ),
@@ -221,21 +204,6 @@ impl App {
                     self.status("/export takes no arguments", StatusKind::Warn);
                 } else {
                     self.export_session();
-                }
-            }
-            "/why" => {
-                let question = rest.strip_prefix("why").unwrap_or("").trim();
-                if question.is_empty() {
-                    self.status(
-                        "/why needs a question: /why why did the tests fail",
-                        StatusKind::Warn,
-                    );
-                } else if self.streaming {
-                    self.show_busy_status();
-                } else if self.why_rx.is_some() {
-                    self.status("a why-answer is already running", StatusKind::Warn);
-                } else {
-                    self.start_why(question.to_string());
                 }
             }
             other if COMMANDS.contains(&other) => {
@@ -311,20 +279,6 @@ impl App {
             Some(other) => format!("unknown /plan action '{other}'"),
         };
         self.status(&result, StatusKind::Info);
-    }
-
-    pub(super) fn mode_command(&mut self, rest: &str) {
-        match rest.split_whitespace().nth(1) {
-            Some("plan") => {
-                self.set_mode(Mode::Plan);
-                self.status("mode: PLAN", StatusKind::Info);
-            }
-            Some("act") => {
-                self.set_mode(Mode::Act);
-                self.status("mode: ACT", StatusKind::Info);
-            }
-            _ => self.status("usage: /mode plan|act", StatusKind::Warn),
-        }
     }
 
     /// Switch ACT/PLAN through one funnel: arms the chip color sweep from

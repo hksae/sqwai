@@ -419,22 +419,13 @@ fn undo_refuses_an_argument_that_is_not_a_count() {
             .unwrap_or_default()
     };
 
-    // An argument that is neither a count nor a step is refused with the
-    // forms that do work, rather than silently reverting the last
-    // checkpoint and reporting success.
+    // An argument that is not a count is refused with the forms that do work,
+    // rather than silently reverting the last checkpoint and reporting success.
     app.command("undo yesterday");
     let status = last_status(&app);
     assert!(
-        status.contains("takes a count or a step") && status.contains("yesterday"),
+        status.contains("takes a count") && status.contains("yesterday"),
         "must explain instead of undoing the wrong thing: {status:?}"
-    );
-
-    // `step` without an id is refused too, not read as `/undo 1`
-    app.command("undo step");
-    assert!(
-        last_status(&app).contains("needs a step id"),
-        "{:?}",
-        last_status(&app)
     );
 
     assert_eq!(

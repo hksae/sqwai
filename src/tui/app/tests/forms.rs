@@ -510,25 +510,12 @@ fn plan_subcommand_popup_filters_and_inserts() {
     app.input = App::fresh_input("/plan delete 2".into());
     app.apply_subcommand_insert("/plan", "delete");
     assert_eq!(app.input_text(), "/plan delete 2");
-    // other level-2 commands behave the same way
-    app.input = App::fresh_input("/mode ".into());
-    assert!(app.popup_visible());
-    assert_eq!(
-        app.popup_items(),
-        vec!["/mode plan".to_string(), "/mode act".to_string()]
-    );
-    app.input = App::fresh_input("/undo s".into());
-    assert_eq!(app.popup_items(), vec!["/undo step".to_string()]);
-    app.input = App::fresh_input("/providers ".into());
-    assert_eq!(
-        app.popup_items(),
-        vec![
-            "/providers add".to_string(),
-            "/providers update".to_string()
-        ]
-    );
     // commands without subcommands keep level-1-only behavior
     app.input = App::fresh_input("/skill ".into());
+    assert!(!app.popup_visible());
+    app.input = App::fresh_input("/providers ".into());
+    assert!(!app.popup_visible());
+    app.input = App::fresh_input("/undo ".into());
     assert!(!app.popup_visible());
     // level 1 untouched
     app.input = App::fresh_input("/pl".into());

@@ -392,19 +392,8 @@ impl App {
     /// Revert one plan step (§2.5, `/undo step N`).
     ///
     /// Only layer 1 is involved: the journal knows which `file_diff` records
-    /// belong to the step and the blob store holds their pre-images. A file a
-    /// later step has since written is refused by name rather than reverted,
-    /// because putting the old bytes back would undo that later step too.
-    pub(super) fn undo_step(&mut self, step: &str) {
-        let root = self.project_root.clone();
-        self.undo_step_in(&root, step);
-    }
-
-    /// `undo_step` against an explicit root. Production passes the project
-    /// root; tests pass a temp dir — the scan walks every journal under the
-    /// root, so running it against the repo while an agent session is active
-    /// could revert (or delete!) that session's live files. Hermetic by
-    /// construction, never ambient.
+    /// `undo_step` against an explicit root.
+    #[cfg(test)]
     pub(super) fn undo_step_in(&mut self, root: &std::path::Path, step: &str) {
         // Step numbers restart per plan, so "3" names nothing without one — and
         // the reopen half of this command cannot run at all, which would leave

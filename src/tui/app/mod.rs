@@ -65,14 +65,6 @@ fn reopened_step_ids(
         .collect()
 }
 
-/// Outcome of a background `/why` narration (AB), rendered by
-/// [`App::poll_why`]. Everything in here is owned and `Send`: the task
-/// boundary demands both.
-enum WhyOutcome {
-    Answered { text: String },
-    Failed(String),
-}
-
 mod commands;
 mod events;
 mod forms;
@@ -253,9 +245,6 @@ pub struct App {
     streaming: bool,
     aborted: bool,
     agent: Option<AgentHandle>,
-    /// background `/why` answer (AB): collection end of a oneshot
-    /// the task sends its answer through. `Some` while it flies.
-    why_rx: Option<tokio::sync::oneshot::Receiver<WhyOutcome>>,
     /// derived visible steps from the active structured plan
     todos: Vec<String>,
     /// tracked child agents shown in the overview
@@ -688,7 +677,6 @@ impl App {
             aborted: false,
             agent: None,
             test_churn: None,
-            why_rx: None,
             todos: Vec::new(),
             subagents: Vec::new(),
             subagent_chats: std::collections::BTreeMap::new(),
@@ -965,7 +953,6 @@ impl App {
             }
             self.poll_input(&ev_rx)?;
             self.poll_agent();
-            self.poll_why();
             self.poll_provider_check();
             self.poll_builtin_update();
             self.poll_maintain();
@@ -3929,75 +3916,6 @@ impl App {
                 StatusKind::Ok,
             ),
             Err(error) => self.status(&format!("export failed: {error:#}"), StatusKind::Err),
-        }
-        self.dirty = true;
-    }
-
-    /// AB `/why`: answer a why-question from journal evidence, narrated by
-    /// the model. Gather is synchronous (no evidence → status, no call);
-    /// narration flies in a background task, polled per tick.
-    fn start_why(&mut self, question: String) {
-        let root = self.project_root.clone();
-        let session = self.session.id.to_string();
-        let evidence = crate::agent::why::gather(&root, &session, &question);
-        if evidence.is_empty() {
-            self.status(
-                "no evidence for that question in this session",
-                StatusKind::Warn,
-            );
-            return;
-        }
-        let prompt = crate::agent::why::render_prompt(&evidence, &question);
-        let model_id = self.model_cfg.id.clone();
-        let provider = self.provider.clone();
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        tokio::spawn(async move {
-            let outcome = match crate::agent::why::micro_call(
-                &provider,
-                &model_id,
-                crate::agent::why::NARRATOR_SYSTEM,
-                &prompt,
-                crate::agent::why::NARRATOR_MAX_TOKENS,
-                crate::agent::why::NARRATOR_TIMEOUT_SECS,
-            )
-            .await
-            {
-                Ok(answer) => WhyOutcome::Answered { text: answer },
-                Err(error) => WhyOutcome::Failed(format!("{error:#}")),
-            };
-            let _ = tx.send(outcome);
-        });
-        self.why_rx = Some(rx);
-        self.status("answering from session evidence…", StatusKind::Info);
-        self.dirty = true;
-    }
-
-    /// Collect a finished `/why` answer: one durable row plus status.
-    fn poll_why(&mut self) {
-        let outcome = match self.why_rx.as_mut() {
-            None => return,
-            Some(rx) => match rx.try_recv() {
-                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => return,
-                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
-                    self.why_rx = None;
-                    self.status("why-answer task died", StatusKind::Err);
-                    self.dirty = true;
-                    return;
-                }
-                Ok(outcome) => {
-                    self.why_rx = None;
-                    outcome
-                }
-            },
-        };
-        match outcome {
-            WhyOutcome::Answered { text } => {
-                self.push_segment(Segment::Assistant { text, live: false });
-                self.status("answered from session evidence", StatusKind::Ok);
-            }
-            WhyOutcome::Failed(error) => {
-                self.status(&format!("why-answer failed: {error}"), StatusKind::Err);
-            }
         }
         self.dirty = true;
     }

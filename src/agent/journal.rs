@@ -766,6 +766,7 @@ impl Journal {
     }
 
     /// Record a per-step revert (§2.2.2's `undo` kind, `step` variant).
+    #[cfg(test)]
     pub fn append_undo_step(
         &mut self,
         step: &str,
