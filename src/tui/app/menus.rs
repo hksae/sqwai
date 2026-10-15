@@ -19,14 +19,12 @@ use crate::tui::theme::Theme;
 pub(super) const COMMANDS: &[&str] = &[
     "/compact",
     "/config",
-    "/constraints",
     "/context",
     "/context-view",
     "/debug",
     "/effort",
     "/exit",
     "/export",
-    "/goal",
     "/help",
     "/init",
     "/mode",
@@ -55,7 +53,6 @@ pub(super) const SUBCOMMANDS: &[(&str, &[&str])] = &[
         ],
     ),
     ("/providers", &["add", "update"]),
-    ("/constraints", &["add", "remove"]),
     ("/mode", &["plan", "act"]),
 ];
 

@@ -196,18 +196,6 @@ fn completed_linked_plan_refuses_tui_mutations() {
         "waive is retired outright: {}",
         last_status(&app)
     );
-    app.goal_command("/goal a new direction");
-    assert!(
-        last_status(&app).contains("completed") && last_status(&app).contains("read-only"),
-        "goal must refuse: {}",
-        last_status(&app)
-    );
-    app.constraints_command("/constraints add something");
-    assert!(
-        last_status(&app).contains("read-only"),
-        "constraints must refuse: {}",
-        last_status(&app)
-    );
 
     let after: plan::Plan = serde_json::from_str(
         &std::fs::read_to_string(plan::plans_dir(&temp_dir).join(format!("{}.json", finished.id)))
@@ -351,19 +339,6 @@ fn tui_commands_operate_on_session_plan_not_newest_global() {
 
     // resolver prefers the linked plan over the newest global one
     assert_eq!(app.session_plan().map(|p| p.id), Some(plan_a.id.clone()));
-
-    // /goal and /constraints mutate linked plan A, leave B alone
-    app.goal_command("/goal updated session A goal");
-    let a_updated = plan::open(&temp_dir, &plan_a.id).unwrap();
-    assert_eq!(a_updated.goal.text, "updated session A goal");
-    let b_after_goal = plan::open(&temp_dir, &plan_b.id).unwrap();
-    assert_eq!(b_after_goal.goal.text, "other goal");
-
-    app.constraints_command("/constraints add keep B untouched");
-    let a_constrained = plan::open(&temp_dir, &plan_a.id).unwrap();
-    assert_eq!(a_constrained.constraints, vec!["keep B untouched".to_string()]);
-    let b_still_active = plan::open(&temp_dir, &plan_b.id).unwrap();
-    assert!(b_still_active.constraints.is_empty());
 
     app.session.plan_id = Some(plan_a.id.clone());
     // Menu::Plan renders the session's plan, not the newest global one

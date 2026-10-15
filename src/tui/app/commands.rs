@@ -160,8 +160,6 @@ impl App {
                 }
             }
             "/plan" => self.plan_command(rest),
-            "/goal" => self.goal_command(rest),
-            "/constraints" => self.constraints_command(rest),
             "/mode" => self.mode_command(rest),
             "/new" => {
                 self.start_new_session();
@@ -269,26 +267,6 @@ impl App {
             .flatten()
     }
 
-    /// The linked plan if it is still workable, i.e. active. A linked
-    /// completed/abandoned plan is read-only history (§2.1.1, defect A):
-    /// mutations must refuse it explicitly instead of silently rewriting a
-    /// finished plan the agent itself can no longer touch.
-    pub(super) fn workable_plan(&self) -> Result<plan::Plan, String> {
-        match self.session_plan() {
-            Some(plan) if plan.status == plan::PlanStatus::Active => Ok(plan),
-            Some(plan) => Err(format!(
-                "plan is {} (read-only); create a new plan to continue",
-                match plan.status {
-                    plan::PlanStatus::Completed => "completed",
-                    plan::PlanStatus::Abandoned => "abandoned",
-                    plan::PlanStatus::Blocked => "blocked",
-                    plan::PlanStatus::Active => "active",
-                }
-            )),
-            None => Err("no active plan".to_string()),
-        }
-    }
-
     /// Plan id `/plan delete` would remove: the session's own plan while its
     /// file is still on disk, otherwise the most recent active plan.
     /// One shared resolver so the command gate and the confirmed action can
@@ -333,71 +311,6 @@ impl App {
             Some(other) => format!("unknown /plan action '{other}'"),
         };
         self.status(&result, StatusKind::Info);
-    }
-
-    pub(super) fn goal_command(&mut self, rest: &str) {
-        let root = self.project_root.clone();
-        let text = rest
-            .split_once(' ')
-            .map(|(_, value)| value.trim())
-            .unwrap_or_default();
-        if text.is_empty() {
-            self.status("usage: /goal <text>", StatusKind::Warn);
-            return;
-        }
-        match self.workable_plan() {
-            Ok(mut active) => {
-                plan::set_goal(
-                    &mut active,
-                    text.to_string(),
-                    "user",
-                    Some("user: /goal".to_string()),
-                );
-                let args = serde_json::json!({
-                    "text": text,
-                    "source": "user",
-                    "reason": "user: /goal",
-                });
-                let sid = self.session.id.to_string();
-                match plan::commit(&root, &sid, &mut active, "set_goal", "user", true, args) {
-                    Ok(_) => self.status("goal updated; pending steps are stale", StatusKind::Ok),
-                    Err(e) => self.status(&format!("goal update failed: {e:#}"), StatusKind::Err),
-                }
-            }
-            Err(message) => self.status(&message, StatusKind::Warn),
-        }
-    }
-
-    pub(super) fn constraints_command(&mut self, rest: &str) {
-        let root = self.project_root.clone();
-        let mut parts = rest.splitn(3, ' ');
-        let _ = parts.next();
-        let action = parts.next().unwrap_or_default();
-        let text = parts.next().unwrap_or_default().trim();
-        if text.is_empty() || !matches!(action, "add" | "remove") {
-            self.status("usage: /constraints add|remove <text>", StatusKind::Warn);
-            return;
-        }
-        match self.workable_plan() {
-            Ok(mut active) => {
-                if action == "add" {
-                    active.constraints.push(text.to_string());
-                } else if let Some(index) = active.constraints.iter().position(|c| c == text) {
-                    active.constraints.remove(index);
-                }
-                active.revision += 1;
-                let args = serde_json::json!({"action": action, "text": text});
-                let sid = self.session.id.to_string();
-                match plan::commit(&root, &sid, &mut active, "constraints", "user", true, args) {
-                    Ok(_) => self.status("constraints updated", StatusKind::Ok),
-                    Err(e) => self.status(
-                        &format!("constraints update failed: {e:#}"),
-                        StatusKind::Err,
-                    ),
-                }
-            }
-            Err(message) => self.status(&message, StatusKind::Warn),
-        }
     }
 
     pub(super) fn mode_command(&mut self, rest: &str) {

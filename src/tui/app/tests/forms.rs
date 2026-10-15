@@ -519,8 +519,6 @@ fn plan_subcommand_popup_filters_and_inserts() {
     );
     app.input = App::fresh_input("/undo s".into());
     assert_eq!(app.popup_items(), vec!["/undo step".to_string()]);
-    app.input = App::fresh_input("/constraints a".into());
-    assert_eq!(app.popup_items(), vec!["/constraints add".to_string()]);
     app.input = App::fresh_input("/providers ".into());
     assert_eq!(
         app.popup_items(),
@@ -530,8 +528,6 @@ fn plan_subcommand_popup_filters_and_inserts() {
         ]
     );
     // commands without subcommands keep level-1-only behavior
-    app.input = App::fresh_input("/goal ".into());
-    assert!(!app.popup_visible());
     app.input = App::fresh_input("/skill ".into());
     assert!(!app.popup_visible());
     // level 1 untouched
