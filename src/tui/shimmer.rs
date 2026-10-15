@@ -137,10 +137,31 @@ pub fn shimmer_brand_spans(text: &str, tick: usize) -> Vec<Span<'static>> {
     if has_truecolor() {
         shimmer_rgb_tint(text, tick, crate::tui::art::CORAL_START, CREST_RGB)
     } else {
-        vec![Span::styled(
-            text.to_string(),
-            Theme::brand_ink().add_modifier(Modifier::BOLD),
-        )]
+        let chars: Vec<char> = text.chars().collect();
+        if chars.is_empty() {
+            return Vec::new();
+        }
+        let widths: Vec<f64> = chars
+            .iter()
+            .map(|c| UnicodeWidthChar::width(*c).unwrap_or(0) as f64)
+            .collect();
+        let total: f64 = widths.iter().sum();
+        let mut column = 0.0;
+        chars
+            .into_iter()
+            .zip(widths)
+            .map(|(ch, w)| {
+                let center = column + w / 2.0;
+                column += w;
+                let t = wave_t(tick, center, total);
+                let style = if t >= 0.6 {
+                    Style::new().fg(Color::White).add_modifier(Modifier::BOLD)
+                } else {
+                    Theme::brand_ink().add_modifier(Modifier::BOLD)
+                };
+                Span::styled(ch.to_string(), style)
+            })
+            .collect()
     }
 }
 

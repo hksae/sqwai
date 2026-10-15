@@ -3438,6 +3438,7 @@ impl App {
         // while visible on screen with nothing else running
         let brand = self.last_chat.height > 1
             && self.active_subagent.is_none()
+            && self.segments.is_empty()
             && self.chat_top(self.last_chat.height) <= 1;
         let gallery = brand
             || matches!(

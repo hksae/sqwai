@@ -557,6 +557,27 @@ fn empty_mark_lines_cover_mcp_plan_and_plain_states() {
     assert_eq!(lines.len(), 2, "two-line transcript header: {lines:?}");
     assert!(lines[0].contains("sqwai v"), "{lines:?}");
     assert_eq!(lines[1], " ~/sqwai");
+    assert!(
+        app.empty_mark_lines()[0].spans.len() > 3,
+        "empty session shimmers sqwai character-by-character"
+    );
+
+    let _ = render_to_string(&mut app, 80, 24);
+    assert!(
+        app.animating_terms().0,
+        "empty session with visible header animates"
+    );
+
+    app.push_segment(Segment::User("hello".into()));
+    assert_eq!(
+        app.empty_mark_lines()[0].spans.len(),
+        3,
+        "non-empty session renders sqwai as a single static brand span"
+    );
+    assert!(
+        !app.animating_terms().0,
+        "non-empty session stops shimmering sqwai"
+    );
 
     // Fits narrow terminals without changing shape
     let mut narrow = test_app("http://127.0.0.1:9/v1".into());
