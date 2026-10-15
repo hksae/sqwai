@@ -298,12 +298,14 @@ pub fn volatile_system_text(system: &[SystemPart]) -> String {
 /// call must not have anything wedged between a `function_call` and the
 /// `function_call_output` that completes it — there the block stays last, but
 /// with `system` role, which is what stops it reading as a new request (§18).
+#[cfg(test)]
 pub fn host_block_trails(messages: &[Message]) -> bool {
     !messages.last().is_some_and(|m| m.role == Role::User)
 }
 
 /// Map [`host_block_trails`] onto a built item list whose last item was pushed
 /// by the last message.
+#[cfg(test)]
 pub fn host_block_index(items_len: usize, messages: &[Message]) -> usize {
     if host_block_trails(messages) {
         items_len

@@ -126,7 +126,6 @@ impl ModelField {
 
 #[derive(Clone, Debug)]
 pub(super) struct ModelDraft {
-    pub provider: String,
     pub key: String,
     pub id: String,
     pub context: u64,
@@ -136,7 +135,6 @@ pub(super) struct ModelDraft {
 impl Default for ModelDraft {
     fn default() -> Self {
         Self {
-            provider: String::new(),
             key: String::new(),
             id: String::new(),
             context: 128_000,
@@ -299,7 +297,6 @@ pub(super) enum MenuAction {
     None,
     Back,
     OpenModels(String),
-    OpenEffort,
     /// The search row of a surface: activating it (Enter or a click) hands the
     /// caret to the field. The row is reachable by the arrows like any other.
     FocusSearch,
@@ -327,8 +324,6 @@ pub(super) enum MenuAction {
     ClearDebugLog,
     CopyDiagnostics,
     UpdateCatalog,
-    ToggleMode,
-    OpenSessions,
     Confirm(Box<MenuAction>),
     DeletePlan,
     SetEffort(EffortLevel),
@@ -357,9 +352,11 @@ pub(super) enum MenuAction {
     DecideApproval(crate::agent::loop_task::ApprovalDecision),
     #[allow(dead_code)]
     OpenControls,
+    #[allow(dead_code)]
     CycleCompactionSummary,
     OpenCompactionSummary,
     SetCompactionSummary(crate::config::CompactionSummary),
+    #[allow(dead_code)]
     CycleUndoShadow,
     OpenUndoShadow,
     SetUndoShadow(crate::config::ShadowStore),
@@ -609,14 +606,11 @@ impl App {
                 .unwrap_or(0);
         }
         if let Some(Menu::EditModel {
-            provider,
             key: None,
+            ..
         }) = self.cur_menu().cloned()
         {
-            self.model_draft = ModelDraft {
-                provider,
-                ..ModelDraft::default()
-            };
+            self.model_draft = ModelDraft::default();
         }
         // effort slider opens on the target level, not on `off`
         let effort_scoped: Option<Option<String>> = match self.cur_menu() {
@@ -1345,7 +1339,6 @@ impl App {
             MenuAction::None => {}
             MenuAction::Back => self.menu_back(),
             MenuAction::DecideApproval(decision) => self.approval_decide(decision),
-            MenuAction::OpenEffort => self.open_menu(Menu::Effort { model: None }),
             MenuAction::OpenModelEffort(model) => self.open_menu(Menu::Effort { model }),
             MenuAction::OpenModelField(field) => {
                 if let Some(Menu::EditModel { provider, key }) = self.cur_menu().cloned() {
@@ -1606,14 +1599,6 @@ impl App {
             MenuAction::UpdateCatalog => {
                 self.start_builtin_update(true);
                 self.build_menu_rows();
-            }
-            MenuAction::ToggleMode => {
-                let next = self.mode.toggle();
-                self.set_mode(next);
-                self.status(&format!("mode: {}", self.mode.label()), StatusKind::Info);
-            }
-            MenuAction::OpenSessions => {
-                self.open_menu(Menu::Sessions);
             }
             MenuAction::DeleteSession(id) => {
                 let title = self
@@ -3398,38 +3383,6 @@ fn day_section_style() -> Style {
     crate::tui::art::h2_style()
 }
 
-/// One grid cell: truncated/padded, left- or right-aligned.
-fn tcell(text: &str, w: usize, right: bool, style: impl Into<Style>) -> Span<'static> {
-    let t = super::view::truncate_display_width(text, w);
-    let fill = " ".repeat(w.saturating_sub(super::view::cols(&t)));
-    Span::styled(
-        if right {
-            format!("{fill}{t}")
-        } else {
-            format!("{t}{fill}")
-        },
-        style,
-    )
-}
-
-/// Frozen column header: same grid as the rows, exact-fit to the budget
-/// (a narrow header must not outgrow its columns).
-fn table_header(cells: Vec<Span<'static>>, budget: usize) -> Line<'static> {
-    fit_line_width(table_line(cells), budget)
-}
-/// One table row: lead space + 2-column gaps, every cell grid-aligned.
-/// Headers use the same builder with dim labels, so columns can never drift.
-fn table_line(cells: Vec<Span<'static>>) -> Line<'static> {
-    let mut spans = vec![Span::styled(" ".to_string(), Theme::base())];
-    for (i, c) in cells.into_iter().enumerate() {
-        if i > 0 {
-            spans.push(Span::styled("  ".to_string(), Theme::dim()));
-        }
-        spans.push(c);
-    }
-    Line::from(spans)
-}
-
 /// Content width for table menus: the card minus chrome, floored so
 /// narrow terminals shrink columns instead of clipping rows. No ceiling:
 /// the elastic column of every table absorbs the slack, so wide cards
@@ -3441,36 +3394,4 @@ pub(super) fn table_budget(menu_rect_w: u16) -> usize {
         return 72;
     }
     (menu_rect_w as usize).saturating_sub(6).max(30)
-}
-
-/// cut or pad a styled line to exactly `width` display columns, keeping
-/// span styles on the surviving fragments
-pub(super) fn fit_line_width(line: Line<'static>, width: usize) -> Line<'static> {
-    let mut out = Vec::new();
-    let mut used = 0usize;
-    for s in line.spans {
-        let w = unicode_width::UnicodeWidthStr::width(s.content.as_ref());
-        if used + w <= width {
-            used += w;
-            out.push(s);
-        } else {
-            let mut kept = String::new();
-            let mut cw = 0usize;
-            for ch in s.content.chars() {
-                let chw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-                if used + cw + chw > width {
-                    break;
-                }
-                kept.push(ch);
-                cw += chw;
-            }
-            used += cw;
-            out.push(Span::styled(kept, s.style));
-            break;
-        }
-    }
-    if used < width {
-        out.push(Span::styled(" ".repeat(width - used), Style::new()));
-    }
-    Line::from(out)
 }

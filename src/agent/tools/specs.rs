@@ -43,18 +43,19 @@ fn bash_description() -> &'static str {
     TEXT.get_or_init(|| {
         let guidance = match crate::agent::shell::ShellKind::detect() {
             crate::agent::shell::ShellKind::PowerShell => {
-                "The shell here is PowerShell: no POSIX coreutils — trim with \
-`| Select-Object -First/Last N`, search with `Select-String`, or use the read/grep tools on files."
+                "The shell here is PowerShell: no POSIX coreutils — do not use it to read or \
+search files (`cat`, `sed`, `grep`, `Select-String`); use the dedicated `read`, `grep`, `glob`, \
+and `outline` tools instead."
             }
             crate::agent::shell::ShellKind::Cmd => {
                 "The shell here is cmd.exe: no POSIX coreutils and no PowerShell cmdlets — \
-`head`, `tail`, `grep`, `sed` and `Select-Object` do not exist here. Trim with `more +N` if you \
-must, and use the read/grep tools for anything inside files."
+do not use it to read or search files; use the dedicated `read`, `grep`, `glob`, and `outline` \
+tools instead."
             }
             crate::agent::shell::ShellKind::Bash | crate::agent::shell::ShellKind::Sh => {
-                "The shell here is bash: `head`, `tail`, `grep`, `sed` and `|` pipes work, and \
-PowerShell cmdlets like `Select-Object` do not. The read/grep tools are still the cheaper way to \
-look at files."
+                "The shell here is bash: pipes work, and PowerShell cmdlets like `Select-Object` \
+do not. Do not use `bash` (`sed`, `cat`, `head`, `tail`, `grep`, `find`) to read or search files \
+— use the dedicated `read`, `grep`, `glob`, and `outline` tools instead."
             }
         };
         format!(
@@ -76,7 +77,8 @@ fn defs() -> Vec<ToolDef> {
             name: "read",
             kind: Kind::ReadOnly,
             description: "Read a file from the project. Returns numbered lines \
-with totals (use offset/limit windows for the rest; truncated output spills \
+with totals (use offset/limit windows of 200–500 lines rather than tiny 30–50 \
+line slices across multiple calls; truncated output spills \
 to a file — grep it instead of re-reading). Must be called once before \
 replace_all edits and overwrites of existing files — one read per session \
 is enough: the host tracks freshness and refuses the edit with a stale \

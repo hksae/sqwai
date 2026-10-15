@@ -4108,12 +4108,6 @@ fn short_id(s: &Session) -> String {
     s.id.to_string()[..8].to_string()
 }
 
-fn fmt_date(t: chrono::DateTime<chrono::Utc>) -> String {
-    t.with_timezone(&chrono::Local)
-        .format("%d.%m %H:%M")
-        .to_string()
-}
-
 /// time of day for grouped session rows (the section header carries
 /// the date, so the column keeps HH:MM only)
 fn fmt_time(t: chrono::DateTime<chrono::Utc>) -> String {

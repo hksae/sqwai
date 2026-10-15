@@ -2,7 +2,7 @@
 
 ## Build and test
 - Use `cargo check` for a fast compile check (pinned toolchain via rust-toolchain.toml).
-- Use `cargo test` for the full test suite when requested or when verifying a completed change.
+- Use targeted `cargo test <filter>` when verifying a completed change; run the full `cargo test` suite only when explicitly requested or when changing cross-cutting core modules.
 - Do not build a release executable automatically unless explicitly asked (the user builds it); run only tests.
 
 ## Git and workflow

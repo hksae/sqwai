@@ -10,11 +10,13 @@ use crate::tui::theme::Theme;
 
 /// Pixel wordmark source (block font with ░ anti-aliased edges),
 /// embedded from assets at compile time. Uniform rows (verified below).
+#[cfg(test)]
 pub const SQWAI_TEXT: &str = include_str!("../../assets/ascii-sqwai.txt");
 
 /// Compact wordmark for narrow terminals (quadrant-block font, 4 rows).
 /// Source rows may be ragged on the right (editors eat trailing spaces);
 /// `gradient_block` normalizes, so the file can never break the render.
+#[cfg(test)]
 pub const SQWAI_COMPACT_TEXT: &str = include_str!("../../assets/ascii-sqwai-compact.txt");
 
 /// Ramp ends: top-left `#de2f66` → bottom-right `#753a88`, berry into plum.
@@ -57,11 +59,13 @@ pub fn coral_at(x: usize, width: usize) -> (u8, u8, u8) {
 /// (gemini-cli style) — every row uses its column's color, so the gradient
 /// reads as one. Spaces stay unpainted; without truecolor the block falls
 /// back to one solid brand color, never unstyled.
+#[cfg(test)]
 pub fn sqwai_gradient_lines() -> Vec<Line<'static>> {
     gradient_block(SQWAI_TEXT)
 }
 
 /// Same ramp over the compact wordmark for narrow terminals.
+#[cfg(test)]
 pub fn sqwai_compact_lines() -> Vec<Line<'static>> {
     gradient_block(SQWAI_COMPACT_TEXT)
 }
@@ -70,6 +74,7 @@ pub fn sqwai_compact_lines() -> Vec<Line<'static>> {
 /// right-normalized first (trim + pad to the widest), so ragged asset
 /// lines — editors love eating trailing spaces — can never skew the ramp
 /// or the layout.
+#[cfg(test)]
 fn gradient_block(text: &str) -> Vec<Line<'static>> {
     let trimmed: Vec<String> = text.lines().map(|l| l.trim_end().to_string()).collect();
     let width = trimmed.iter().map(|l| l.chars().count()).max().unwrap_or(0);
@@ -124,6 +129,7 @@ fn gradient_block(text: &str) -> Vec<Line<'static>> {
         .collect()
 }
 
+#[cfg(test)]
 fn push_span(spans: &mut Vec<Span>, buf: &mut String, buf_style: &mut Option<Style>) {
     if !buf.is_empty() {
         spans.push(Span::styled(

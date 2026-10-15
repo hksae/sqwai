@@ -86,6 +86,7 @@ impl PerfLog {
         self.out.is_some()
     }
 
+    #[cfg(test)]
     pub fn path(&self) -> &str {
         &self.path
     }

@@ -90,6 +90,7 @@ fn clearable(message: &Message) -> bool {
 }
 
 /// Indices of the tool results to replace, oldest first.
+#[cfg(test)]
 pub fn cleared_indices(messages: &[Message]) -> Vec<usize> {
     cleared_indices_with_limit(messages, 0)
 }
@@ -139,6 +140,7 @@ pub fn cleared_indices_with_limit(messages: &[Message], context_limit: u64) -> V
 }
 
 /// Replace the old results with stubs, in place.
+#[cfg(test)]
 pub fn trim_for_wire(messages: &mut [Message]) {
     trim_for_wire_with_limit(messages, 0);
 }
@@ -174,6 +176,7 @@ pub fn trim_for_wire_with_limit(messages: &mut [Message], context_limit: u64) {
 /// over the stored transcript and anything it does not name is still visible —
 /// and `recall_result` must not pretend otherwise, or it becomes a way to double the
 /// context the model already has.
+#[cfg(test)]
 pub fn is_cleared(messages: &[Message], call_id: &str) -> bool {
     is_cleared_with_limit(messages, call_id, 0)
 }
@@ -195,6 +198,7 @@ pub fn is_cleared_with_limit(messages: &[Message], call_id: &str, context_limit:
 /// the live conversation, not the disk: the store is written once per iteration
 /// and can lag a call behind, and a tool that reads files would have to be
 /// told which session file is currently true.
+#[cfg(test)]
 pub fn recall(messages: &[Message], call_id: &str) -> crate::agent::tools::Outcome {
     recall_with_limit(messages, call_id, 0)
 }

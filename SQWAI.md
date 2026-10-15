@@ -15,5 +15,5 @@ Instructions, not facts — memories live in MEMORY.md/diary.
   IMPL_PLAN.local.md, notes/ or journals.
 - UI changes: mock in chat first, implement after approval. Review
   insta snapshots by hand, never blind-accept. Narrow terminals count.
-- `cargo check` for speed, full `cargo test` before commit. Zero warnings.
+- `cargo check` for speed, targeted `cargo test <filter>` before commit (run the full `cargo test` suite only when asked or when touching cross-cutting core modules). Zero warnings.
 - When wrong, say so plainly and fix the process, not just the code.
