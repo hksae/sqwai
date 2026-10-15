@@ -37,11 +37,11 @@ fn enter_confirms_provider_deletion() {
         matches!(app.cur_menu(), Some(Menu::ConfirmDelete { .. })),
         "ctrl+d asks before it deletes"
     );
-    assert_eq!(app.menu_sel, 1, "selection starts on the cancel row");
+    assert_eq!(app.menu_sel, 2, "selection starts on the cancel row");
 
     // move down to delete and press enter to delete the provider
     app.menu_nav(1);
-    assert_eq!(app.menu_sel, 2);
+    assert_eq!(app.menu_sel, 3);
     press_enter(&mut app);
     assert!(!app.cfg.providers.contains_key("p"), "provider not deleted");
     assert!(
@@ -96,7 +96,7 @@ fn ctrl_d_on_model_opens_confirm_surface_directly() {
         matches!(app.cur_menu(), Some(Menu::ConfirmDelete { .. })),
         "ctrl+d on a model row opens ConfirmDelete directly without DeleteModelList"
     );
-    assert_eq!(app.menu_sel, 1, "starts on cancel");
+    assert_eq!(app.menu_sel, 2, "starts on cancel");
 
     let area = Rect::new(0, 0, 100, 30);
     let mut buf = Buffer::empty(area);
@@ -117,7 +117,7 @@ fn ctrl_d_on_model_opens_confirm_surface_directly() {
     .unwrap();
     app.poll_input(&rx).unwrap();
     app.menu_nav(1);
-    assert_eq!(app.menu_sel, 2);
+    assert_eq!(app.menu_sel, 3);
     press_enter(&mut app);
     assert!(!app.cfg.models.contains_key("m"));
     assert!(matches!(app.cur_menu(), Some(Menu::Models { .. })));

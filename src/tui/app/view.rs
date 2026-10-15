@@ -3768,7 +3768,7 @@ impl App {
             Some(Menu::Models { .. }) => (1, dyn_win, "models"),
             Some(Menu::EditModel { .. }) => (0, 4, ""),
             Some(Menu::Sessions) => (1, dyn_win, "sessions"),
-            Some(Menu::ConfirmDelete { .. }) => (1, 2, ""),
+            Some(Menu::ConfirmDelete { .. }) => (2, 2, ""),
             Some(Menu::Approval { .. }) => (2, 3, ""),
             Some(
                 Menu::EditModelField { .. }
@@ -4107,6 +4107,10 @@ impl App {
                         crate::tui::shimmer::shimmer_warn_spans(command, slf.spinner_tick);
                     s.push(Span::styled(format!(" ({reason})"), Theme::dim()));
                     s
+                } else if i == 0
+                    && let Some(Menu::ConfirmDelete { label, .. }) = slf.cur_menu()
+                {
+                    crate::tui::shimmer::shimmer_warn_spans(label, slf.spinner_tick)
                 } else {
                     let mut s = Vec::new();
                     for mut sp in line.spans {

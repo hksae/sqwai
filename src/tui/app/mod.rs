@@ -3393,9 +3393,12 @@ impl App {
     fn animating_terms(&self) -> (bool, u32) {
         let stream = self.streaming;
         let tools = self.tool_running();
-        // the animation gallery and the approval command shimmer *are* their
+        // the animation gallery and the approval/confirm shimmers *are* their
         // frames: they must keep their 20 FPS with nothing else running
-        let gallery = matches!(self.cur_menu(), Some(Menu::TestAnim | Menu::Approval { .. }));
+        let gallery = matches!(
+            self.cur_menu(),
+            Some(Menu::TestAnim | Menu::Approval { .. } | Menu::ConfirmDelete { .. })
+        );
         // a live chip sweep gets its 250ms even past streaming end, or the chip
         // would freeze mid-blend on the toggle
         let mode = self

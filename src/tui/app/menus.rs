@@ -2479,6 +2479,7 @@ impl App {
                     Line::from(vec![Span::styled(label, Theme::WARN())]),
                     MenuAction::None,
                 ));
+                self.menu_rows.push(row(Line::default(), MenuAction::None));
                 self.menu_rows.push(row(
                     Line::from(vec![Span::styled("cancel", Style::new().fg(Theme::FG()))]),
                     MenuAction::Back,
