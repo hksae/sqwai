@@ -199,7 +199,6 @@ pub(crate) fn compaction_request(
         return standalone();
     }
     let mut messages = history.to_vec();
-    crate::agent::tool_output::trim_for_wire(&mut messages);
     messages.push(Message::new(
         Role::User,
         context::summary_short_prompt(previous, plan_hint, retry),
@@ -277,10 +276,15 @@ pub(crate) async fn compact_history(
         );
     }
     if !older.is_empty() && policy.summary_enabled {
+        let mut wire_history = messages.clone();
+        crate::agent::tool_output::trim_for_wire_with_limit(
+            &mut wire_history,
+            policy.context_limit,
+        );
         let (request, cache_aware) = compaction_request(
             prefix,
             &older,
-            messages,
+            &wire_history,
             summary.as_deref(),
             plan_hint,
             model_id,
@@ -305,7 +309,7 @@ pub(crate) async fn compact_history(
             let (retry_request, _) = compaction_request(
                 prefix,
                 &older,
-                messages,
+                &wire_history,
                 summary.as_deref(),
                 plan_hint,
                 model_id,

@@ -30,7 +30,7 @@ use loop_subagent::{
     SUBAGENT_TIMEOUT_SECS, adopt_in_progress_step, run_subagent, run_subagent_batch,
 };
 pub(crate) use loop_turn::TurnOutcome;
-use loop_turn::{request_messages, run_turn, turn_transport};
+use loop_turn::{request_messages_with_limit, run_turn, turn_transport};
 
 mod loop_ask;
 mod loop_compact;
@@ -395,7 +395,17 @@ enum RepeatVerdict {
 /// `completion=204 reasoning=146` — a note attached to 18,846 repeating bytes is
 /// not a brake, the bytes are the fuel. Withholding them ends the loop on the
 /// third look no matter how degenerately the model decodes.
+#[cfg(test)]
 fn repeat_verdict(messages: &[Message], call: &ToolCallReq, output: &str) -> RepeatVerdict {
+    repeat_verdict_with_limit(messages, call, output, 0)
+}
+
+fn repeat_verdict_with_limit(
+    messages: &[Message],
+    call: &ToolCallReq,
+    output: &str,
+    context_limit: u64,
+) -> RepeatVerdict {
     // Repeating is the mechanism here: polling a job and waiting are supposed
     // to be called again.
     if matches!(call.name.as_str(), "bash_output" | "sleep") {
@@ -405,8 +415,10 @@ fn repeat_verdict(messages: &[Message], call: &ToolCallReq, output: &str) -> Rep
     if key.is_empty() || output.is_empty() {
         return RepeatVerdict::Fresh;
     }
+    let cleared = crate::agent::tool_output::cleared_indices_with_limit(messages, context_limit);
     // (call key, output) pairs in order; the current call has no result yet,
-    // so everything collected here is older
+    // so everything collected here is older. Only results still visible on the
+    // wire count: never tell the model "see above" for output that was cleared.
     let mut matches = 0usize;
     for message in messages {
         if message.role != Role::Assistant {
@@ -421,8 +433,13 @@ fn repeat_verdict(messages: &[Message], call: &ToolCallReq, output: &str) -> Rep
             }
             let out = messages
                 .iter()
-                .find(|m| m.role == Role::Tool && m.tool_call_id.as_deref() == Some(&tc.id))
-                .map(|m| strip_host_repeat_marks(&m.content))
+                .enumerate()
+                .find(|(idx, m)| {
+                    m.role == Role::Tool
+                        && m.tool_call_id.as_deref() == Some(&tc.id)
+                        && !cleared.contains(idx)
+                })
+                .map(|(_, m)| strip_host_repeat_marks(&m.content))
                 .unwrap_or("");
             if out == output {
                 matches += 1;
@@ -954,7 +971,7 @@ async fn run_agent(
             &messages,
             continuation_usable,
         );
-        let request_messages = request_messages(&messages, transport);
+        let request_messages = request_messages_with_limit(&messages, transport, context_limit);
         let breakdown = RequestBreakdown::from_request(&ChatRequest {
             model_id: model_id.clone(),
             system: turn_system.clone(),
@@ -1448,9 +1465,10 @@ async fn run_agent(
                                 }
                             }
                         }
-                        "recall_result" => crate::agent::tool_output::recall(
+                        "recall_result" => crate::agent::tool_output::recall_with_limit(
                             &messages,
                             call.args["call_id"].as_str().unwrap_or_default(),
+                            context_limit,
                         ),
                         "plan" => {
                             let mut args = call.args.clone();
@@ -1494,7 +1512,28 @@ async fn run_agent(
                                 Err(e) => tools::Outcome::err(format!("MCP call failed: {e:#}")),
                             }
                         }
-                        other => run_tool_blocking(&mut ctx, other, &call.args).await,
+                        other => {
+                            if other == "read" {
+                                let cleared =
+                                    crate::agent::tool_output::cleared_indices_with_limit(
+                                        &messages,
+                                        context_limit,
+                                    );
+                                let visible_ids: std::collections::HashSet<String> = messages
+                                    .iter()
+                                    .enumerate()
+                                    .filter(|(idx, m)| {
+                                        m.role == Role::Tool && !cleared.contains(idx)
+                                    })
+                                    .filter_map(|(_, m)| m.tool_call_id.clone())
+                                    .collect();
+                                ctx.retain_visible_read_windows(&visible_ids);
+                            }
+                            ctx.current_call_id = Some(call.id.clone());
+                            let out = run_tool_blocking(&mut ctx, other, &call.args).await;
+                            ctx.current_call_id = None;
+                            out
+                        }
                     }
                 };
 
@@ -1826,7 +1865,8 @@ async fn run_agent(
                 // alone did not stop a live session from calling the same
                 // `git_diff` five times over the same 18KB.
                 if outcome.ok {
-                    match repeat_verdict(&messages, call, &outcome.output) {
+                    match repeat_verdict_with_limit(&messages, call, &outcome.output, context_limit)
+                    {
                         RepeatVerdict::Fresh => {}
                         RepeatVerdict::Note(note) => outcome.output.push_str(&note),
                         RepeatVerdict::Withheld(stub) => outcome.output = stub,

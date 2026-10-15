@@ -61,7 +61,16 @@ pub(crate) fn turn_transport(
     crate::providers::select_transport(caps, previous_response_id)
 }
 
+#[cfg(test)]
 pub(crate) fn request_messages(messages: &[Message], transport: ContextTransport) -> Vec<Message> {
+    request_messages_with_limit(messages, transport, 0)
+}
+
+pub(crate) fn request_messages_with_limit(
+    messages: &[Message],
+    transport: ContextTransport,
+    context_limit: u64,
+) -> Vec<Message> {
     let mut out = if transport != ContextTransport::PreviousResponse {
         messages.to_vec()
     } else {
@@ -75,7 +84,7 @@ pub(crate) fn request_messages(messages: &[Message], transport: ContextTransport
     // Old tool output is trimmed here, on the way to the wire — never in the
     // session, where every result stays whole and can be handed back by
     // `recall`. The store and the request are different objects on purpose.
-    crate::agent::tool_output::trim_for_wire(&mut out);
+    crate::agent::tool_output::trim_for_wire_with_limit(&mut out, context_limit);
     out
 }
 

@@ -15,13 +15,49 @@
 use crate::providers::{Message, Role};
 use std::collections::HashMap;
 
-/// Clearing begins once the clearable tool output on the wire passes this.
+/// Fallback trigger when `context_limit` is unset (`0`).
 pub const TRIGGER_BYTES: usize = 128 * 1024;
-/// The newest this much output is always left intact: it is what the model is
-/// still reasoning over.
+/// Fallback fresh window when `context_limit` is unset (`0`).
 pub const KEEP_BYTES: usize = 40 * 1024;
-/// A pass that would free less than this is not worth re-keying the cache.
+/// Fallback minimum clear step when `context_limit` is unset (`0`).
 pub const MIN_CLEAR_BYTES: usize = 20 * 1024;
+
+/// Minimum trigger floor (96k tokens ≈ 384 KB) when scaling from a model's context window.
+pub const WINDOW_TRIGGER_FLOOR_BYTES: usize = 384 * 1024;
+/// Minimum fresh-window floor (56k tokens ≈ 224 KB) when scaling from a model's context window.
+pub const WINDOW_KEEP_FLOOR_BYTES: usize = 224 * 1024;
+/// Minimum quantization step floor (16k tokens ≈ 64 KB) when scaling from a model's context window.
+pub const WINDOW_STEP_FLOOR_BYTES: usize = 64 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WireBudget {
+    pub trigger_bytes: usize,
+    pub keep_bytes: usize,
+    pub min_clear_bytes: usize,
+}
+
+impl WireBudget {
+    /// Derive byte thresholds from the model's context window (at ~4 bytes/token):
+    /// - trigger: 60% of window (floor: 384 KB / 96k tok)
+    /// - keep:    35% of window (floor: 224 KB / 56k tok)
+    /// - step:    10% of window (floor: 64 KB / 16k tok)
+    /// When `context_limit == 0`, falls back to the baseline constants.
+    pub fn for_context_limit(context_limit: u64) -> Self {
+        if context_limit == 0 {
+            return Self {
+                trigger_bytes: TRIGGER_BYTES,
+                keep_bytes: KEEP_BYTES,
+                min_clear_bytes: MIN_CLEAR_BYTES,
+            };
+        }
+        let window_bytes = (context_limit as usize).saturating_mul(4);
+        Self {
+            trigger_bytes: (window_bytes * 60 / 100).max(WINDOW_TRIGGER_FLOOR_BYTES),
+            keep_bytes: (window_bytes * 35 / 100).max(WINDOW_KEEP_FLOOR_BYTES),
+            min_clear_bytes: (window_bytes * 10 / 100).max(WINDOW_STEP_FLOOR_BYTES),
+        }
+    }
+}
 
 /// What a cleared result is replaced with. The prefix is the marker
 /// [`is_stub`] recognises, so a second pass never counts a stub as output.
@@ -55,6 +91,12 @@ fn clearable(message: &Message) -> bool {
 
 /// Indices of the tool results to replace, oldest first.
 pub fn cleared_indices(messages: &[Message]) -> Vec<usize> {
+    cleared_indices_with_limit(messages, 0)
+}
+
+/// Indices of the tool results to replace, scaled to `context_limit` tokens.
+pub fn cleared_indices_with_limit(messages: &[Message], context_limit: u64) -> Vec<usize> {
+    let budget = WireBudget::for_context_limit(context_limit);
     let pool: Vec<(usize, usize)> = messages
         .iter()
         .enumerate()
@@ -62,7 +104,7 @@ pub fn cleared_indices(messages: &[Message]) -> Vec<usize> {
         .map(|(i, m)| (i, m.content.len()))
         .collect();
     let total: usize = pool.iter().map(|(_, bytes)| bytes).sum();
-    if total <= TRIGGER_BYTES {
+    if total <= budget.trigger_bytes {
         return Vec::new();
     }
     // walk back from the newest until the fresh window is full
@@ -71,21 +113,21 @@ pub fn cleared_indices(messages: &[Message]) -> Vec<usize> {
     for k in (0..pool.len()).rev() {
         kept += pool[k].1;
         keep_from = k;
-        if kept >= KEEP_BYTES {
+        if kept >= budget.keep_bytes {
             break;
         }
     }
-    // Quantize the clear boundary in steps of MIN_CLEAR_BYTES from the front
+    // Quantize the clear boundary in steps of `min_clear_bytes` from the front
     // of `pool`: because `messages` in the session store is never mutated by
     // `trim_for_wire`, advancing `keep_from` by one tool result on every turn
-    // would rewrite a message 40 KB back and re-key the last 40 KB of cached
-    // history on every single tool call. Stepping only when at least
-    // `MIN_CLEAR_BYTES` more can be freed keeps the boundary frozen between steps.
+    // would rewrite a message at the boundary and re-key the cached history
+    // behind it on every single tool call. Stepping only when at least
+    // `min_clear_bytes` more can be freed keeps the boundary frozen between steps.
     let mut committed = 0usize;
     let mut step_bytes = 0usize;
     for (idx, &(_, bytes)) in pool[..keep_from].iter().enumerate() {
         step_bytes += bytes;
-        if step_bytes >= MIN_CLEAR_BYTES {
+        if step_bytes >= budget.min_clear_bytes {
             committed = idx + 1;
             step_bytes = 0;
         }
@@ -98,6 +140,11 @@ pub fn cleared_indices(messages: &[Message]) -> Vec<usize> {
 
 /// Replace the old results with stubs, in place.
 pub fn trim_for_wire(messages: &mut [Message]) {
+    trim_for_wire_with_limit(messages, 0);
+}
+
+/// Replace the old results with stubs, scaled to `context_limit` tokens.
+pub fn trim_for_wire_with_limit(messages: &mut [Message], context_limit: u64) {
     let mut calls: HashMap<String, (String, String)> = HashMap::new();
     for message in messages.iter() {
         for call in &message.tool_calls {
@@ -110,7 +157,7 @@ pub fn trim_for_wire(messages: &mut [Message]) {
             );
         }
     }
-    for index in cleared_indices(messages) {
+    for index in cleared_indices_with_limit(messages, context_limit) {
         let message = &messages[index];
         let call_id = message.tool_call_id.clone().unwrap_or_default();
         let (name, target) = calls
@@ -128,12 +175,18 @@ pub fn trim_for_wire(messages: &mut [Message]) {
 /// and `recall_result` must not pretend otherwise, or it becomes a way to double the
 /// context the model already has.
 pub fn is_cleared(messages: &[Message], call_id: &str) -> bool {
-    cleared_indices(messages).iter().any(|i| {
-        messages
-            .get(*i)
-            .and_then(|m| m.tool_call_id.as_deref())
-            .is_some_and(|id| id == call_id)
-    })
+    is_cleared_with_limit(messages, call_id, 0)
+}
+
+pub fn is_cleared_with_limit(messages: &[Message], call_id: &str, context_limit: u64) -> bool {
+    cleared_indices_with_limit(messages, context_limit)
+        .iter()
+        .any(|i| {
+            messages
+                .get(*i)
+                .and_then(|m| m.tool_call_id.as_deref())
+                .is_some_and(|id| id == call_id)
+        })
 }
 
 /// The `recall_result` tool, served from the transcript the loop is holding.
@@ -143,6 +196,14 @@ pub fn is_cleared(messages: &[Message], call_id: &str) -> bool {
 /// and can lag a call behind, and a tool that reads files would have to be
 /// told which session file is currently true.
 pub fn recall(messages: &[Message], call_id: &str) -> crate::agent::tools::Outcome {
+    recall_with_limit(messages, call_id, 0)
+}
+
+pub fn recall_with_limit(
+    messages: &[Message],
+    call_id: &str,
+    context_limit: u64,
+) -> crate::agent::tools::Outcome {
     use crate::agent::tools::Outcome;
     let call_id = call_id.trim();
     if call_id.is_empty() {
@@ -157,7 +218,7 @@ pub fn recall(messages: &[Message], call_id: &str) -> crate::agent::tools::Outco
              or it belongs to another session"
         ));
     };
-    if !is_cleared(messages, call_id) {
+    if !is_cleared_with_limit(messages, call_id, context_limit) {
         return Outcome::err(format!(
             "{call_id} is still in your context above — recall_result answers only for output \
              that was cleared from the request"
@@ -305,5 +366,27 @@ mod tests {
         assert!(!unknown.ok && unknown.output.contains("no stored result"));
         let blank = recall(&messages, "   ");
         assert!(!blank.ok && blank.output.contains("call_id"));
+    }
+
+    #[test]
+    fn wire_budget_scales_to_60_35_10_percent_of_context_window() {
+        let b1m = WireBudget::for_context_limit(1_000_000);
+        // 1M tokens * 4 bytes = 4,000,000 bytes: 60% = 2.4 MB, 35% = 1.4 MB, 10% = 400 KB
+        assert_eq!(b1m.trigger_bytes, 2_400_000);
+        assert_eq!(b1m.keep_bytes, 1_400_000);
+        assert_eq!(b1m.min_clear_bytes, 400_000);
+
+        let b200k = WireBudget::for_context_limit(200_000);
+        // 200k tokens * 4 bytes = 800,000 bytes: 60% = 480 KB, 35% = 280 KB, 10% = 80 KB
+        assert_eq!(b200k.trigger_bytes, 480_000);
+        assert_eq!(b200k.keep_bytes, 280_000);
+        assert_eq!(b200k.min_clear_bytes, 80_000);
+
+        // 320 KB of tool outputs (40 * 8 KB) is untouched on a 1M or 200k window
+        let body = "w".repeat(8 * 1024);
+        let many: Vec<String> = (0..40).map(|_| body.clone()).collect();
+        let messages = exchange(&many);
+        assert!(cleared_indices_with_limit(&messages, 1_000_000).is_empty());
+        assert!(cleared_indices_with_limit(&messages, 200_000).is_empty());
     }
 }

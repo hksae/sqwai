@@ -85,6 +85,10 @@ pub struct ToolCtx {
     /// Set by the interactive loop; tests and headless runs keep the
     /// synchronous capture so results stay deterministic.
     pub background_baselines: bool,
+    /// `call_id` of the tool call currently executing, used to attribute read
+    /// windows so windows whose `tool_result` was later cleared from the wire
+    /// can be evicted before answering "already cover X–Y, see above".
+    pub current_call_id: Option<String>,
 }
 
 impl ToolCtx {
@@ -116,6 +120,7 @@ impl ToolCtx {
             subagent_write_paths: None,
             parent_session: None,
             background_baselines: false,
+            current_call_id: None,
         }
     }
 
@@ -314,23 +319,36 @@ impl ToolCtx {
     /// touching ranges so the map cannot grow with every window.
     pub(crate) fn note_read_window(&mut self, p: &Path, from: usize, to: usize, hash: String) {
         let key = Self::read_key(p);
+        let call_id = self.current_call_id.clone();
         let served = self.read_windows.entry(key).or_insert_with(Served::new);
         if served.hash != hash {
             served.hash = hash;
             served.ranges.clear();
+            served.windows.clear();
+            served.served = 0;
         }
         served.served += 1;
-        served.ranges.push((from, to));
-        served.ranges.sort_unstable();
-        let mut merged: Vec<(usize, usize)> = Vec::with_capacity(served.ranges.len());
-        for (a, b) in served.ranges.drain(..) {
-            match merged.last_mut() {
-                // touching ranges count as contiguous: 1–80 then 81–120 is 1–120
-                Some(last) if a <= last.1.saturating_add(1) => last.1 = last.1.max(b),
-                _ => merged.push((a, b)),
+        served.windows.push((from, to, call_id));
+        served.rebuild_ranges();
+    }
+
+    /// Evict read windows whose `tool_result` is no longer visible on the wire
+    /// (either cleared by `tool_output::trim_for_wire` or dropped by compaction),
+    /// so `fs::read` never claims "see above" for output the model cannot see.
+    pub(crate) fn retain_visible_read_windows(
+        &mut self,
+        visible_call_ids: &std::collections::HashSet<String>,
+    ) {
+        for served in self.read_windows.values_mut() {
+            let before = served.windows.len();
+            served
+                .windows
+                .retain(|(_, _, cid)| cid.as_ref().is_none_or(|id| visible_call_ids.contains(id)));
+            if served.windows.len() != before {
+                served.served = served.windows.len();
+                served.rebuild_ranges();
             }
         }
-        served.ranges = merged;
     }
 
     /// How many windows of this file the model has been served from identical
@@ -350,6 +368,7 @@ impl ToolCtx {
 pub struct Served {
     pub hash: String,
     pub ranges: Vec<(usize, usize)>,
+    pub windows: Vec<(usize, usize, Option<String>)>,
     pub served: usize,
 }
 
@@ -358,8 +377,23 @@ impl Served {
         Self {
             hash: String::new(),
             ranges: Vec::new(),
+            windows: Vec::new(),
             served: 0,
         }
+    }
+
+    fn rebuild_ranges(&mut self) {
+        let mut raw: Vec<(usize, usize)> = self.windows.iter().map(|(a, b, _)| (*a, *b)).collect();
+        raw.sort_unstable();
+        let mut merged: Vec<(usize, usize)> = Vec::with_capacity(raw.len());
+        for (a, b) in raw {
+            match merged.last_mut() {
+                // touching ranges count as contiguous: 1–80 then 81–120 is 1–120
+                Some(last) if a <= last.1.saturating_add(1) => last.1 = last.1.max(b),
+                _ => merged.push((a, b)),
+            }
+        }
+        self.ranges = merged;
     }
 }
 /// What the read guard knows about a file the model wants to edit.

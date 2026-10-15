@@ -692,6 +692,62 @@ fn repeat_verdict_covers_argument_free_tools() {
     ));
 }
 
+#[test]
+fn repeat_verdict_and_read_windows_ignore_outputs_cleared_from_wire() {
+    use crate::providers::ToolCallReq;
+    let diff = |id: &str| ToolCallReq::new(id, "git_diff", serde_json::json!({}));
+    let big = "x".repeat(8 * 1024);
+    let mut messages = vec![
+        Message::new(Role::User, "start"),
+        Message::new(Role::Assistant, "").with_tool_calls(vec![diff("old_1")]),
+        Message::tool_result("old_1", &big, false),
+        Message::new(Role::Assistant, "").with_tool_calls(vec![diff("old_2")]),
+        Message::tool_result("old_2", &big, false),
+    ];
+    // Push enough other tool outputs (>128 KB fallback trigger) so old_1 and old_2
+    // are cleared on the wire.
+    for i in 0..38 {
+        let id = format!("fill_{i}");
+        messages.push(
+            Message::new(Role::Assistant, "").with_tool_calls(vec![ToolCallReq::new(
+                id.clone(),
+                "read",
+                serde_json::json!({"file_path": format!("f{i}.rs")}),
+            )]),
+        );
+        messages.push(Message::tool_result(id, "y".repeat(8 * 1024), false));
+    }
+    assert!(crate::agent::tool_output::is_cleared(&messages, "old_1"));
+    assert!(crate::agent::tool_output::is_cleared(&messages, "old_2"));
+    assert!(
+        matches!(repeat_verdict(&messages, &diff("new_1"), &big), RepeatVerdict::Fresh),
+        "cleared results are no longer visible on the wire, so re-running must be Fresh"
+    );
+
+    // Likewise, a read window attributed to a cleared call_id is evicted by
+    // retain_visible_read_windows so fs::read serves the file again.
+    let mut ctx = crate::agent::tools::ToolCtx::new(std::env::temp_dir());
+    let path = std::env::temp_dir().join("sqwai_test_read_evict.rs");
+    ctx.current_call_id = Some("old_1".into());
+    ctx.note_read_window(&path, 1, 100, "hash1".into());
+    ctx.current_call_id = None;
+    assert_eq!(ctx.read_range_served(&path, "hash1", 1, 50), Some((1, 100)));
+
+    let cleared = crate::agent::tool_output::cleared_indices(&messages);
+    let visible: std::collections::HashSet<String> = messages
+        .iter()
+        .enumerate()
+        .filter(|(idx, m)| m.role == Role::Tool && !cleared.contains(idx))
+        .filter_map(|(_, m)| m.tool_call_id.clone())
+        .collect();
+    ctx.retain_visible_read_windows(&visible);
+    assert_eq!(
+        ctx.read_range_served(&path, "hash1", 1, 50),
+        None,
+        "cleared read window must be evicted so read serves the file fresh"
+    );
+}
+
 /// the turn, with progress events bracketing each run.
 fn parent_prefix<'a>(
     system: &'a [crate::providers::SystemPart],
