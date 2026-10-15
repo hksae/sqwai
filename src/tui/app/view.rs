@@ -3934,22 +3934,24 @@ impl App {
         off: u16,
         full_h: u16,
     ) {
-        let (head, win, more) = self.list_shape(buf.area.height);
-        if matches!(self.cur_menu(), Some(Menu::ContextView)) && self.md_built_w != area.width {
-            self.menu_rect = area;
-            self.build_menu_rows();
-            self.md_built_w = area.width;
-        }
         let hints = self.list_hints();
-        // The hint column stands on the right of the rows the block already
-        // has, so the list stops short of it: a name never runs under a key.
-        // `Theme::hints` pads each pair with a space on either side and puts
-        // `: ` between the two.
-        let rail = hints
-            .iter()
-            .map(|(key, what)| key.chars().count() + what.chars().count() + 5)
-            .max()
-            .unwrap_or(0) as u16;
+        let hint_start = full_h.saturating_sub(hints.len() as u16);
+        let row_rail_at = |k: u16| -> u16 {
+            if k >= hint_start {
+                hints
+                    .get((k - hint_start) as usize)
+                    .map(|(key, what)| (key.chars().count() + what.chars().count() + 5) as u16)
+                    .unwrap_or(0)
+            } else {
+                0
+            }
+        };
+        let avail_w = area.width.saturating_sub(4).max(20);
+        if matches!(self.cur_menu(), Some(Menu::ContextView)) && self.md_built_w != avail_w {
+            self.md_built_w = avail_w;
+            self.build_menu_rows();
+        }
+        let (head, win, more) = self.list_shape(buf.area.height);
         self.menu_rect = area;
         self.effort_hits.clear();
         self.surf_hits.clear();
@@ -4084,6 +4086,7 @@ impl App {
             let Some((line, action)) = slf.menu_rows.get(i).cloned() else {
                 return;
             };
+            let rail = row_rail_at(k);
             let info = matches!(action, MenuAction::None);
             let is_field_surf = matches!(
                 slf.cur_menu(),
@@ -4201,10 +4204,12 @@ impl App {
         }
         // what the window still hides, in the same gray the transcripts use
         let below = body.saturating_sub(top + shown);
+        let cap_k = body0 + shown as u16;
         if below > 0
             && !more.is_empty()
-            && let Some(y) = row_y(body0 + shown as u16)
+            && let Some(y) = row_y(cap_k)
         {
+            let rail = row_rail_at(cap_k);
             buf.set_line(
                 area.x + 2,
                 y,

@@ -573,6 +573,9 @@ impl App {
             self.config_search = Self::fresh_input(String::new());
             self.config_focus = false;
         }
+        if matches!(self.cur_menu(), Some(Menu::ContextView | Menu::TestMd)) {
+            self.md_built_w = 0;
+        }
         if matches!(self.cur_menu(), Some(Menu::CompactionSummary)) {
             let cur = self.cfg.compaction.summary;
             self.menu_sel = crate::config::CompactionSummary::ALL
@@ -2898,7 +2901,7 @@ impl App {
             }
             Menu::ContextView => {
                 let md = self.context_view_markdown();
-                let w = self.menu_rect.width.saturating_sub(4).max(20);
+                let w = self.md_built_w.max(20);
                 for line in crate::tui::markdown::render(&md, w, &self.hl) {
                     self.menu_rows.push(row(line, MenuAction::None));
                 }
