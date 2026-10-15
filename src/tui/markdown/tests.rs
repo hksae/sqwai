@@ -962,6 +962,20 @@ fn tables_align_pipes_and_escapes() {
             "{l:?}"
         );
     }
+
+    // Pipes inside inline code spans (e.g. `area.width < 20 || height < 6`)
+    // must not split the cell into phantom empty columns.
+    let code_md = "| Критерий | Балл | Основание |\n|---|---|---|\n| Узкие | 80 | проверка `area.width < 20 || height < 6` в коде |\n";
+    let code_lines = render(code_md, 80, &hl);
+    for l in &code_lines {
+        if line_text_pub(l).contains('│') {
+            assert_eq!(
+                line_text_pub(l).chars().filter(|c| *c == '│').count(),
+                4,
+                "3 columns (4 rails) even with `||` inside backticks: {l:?}"
+            );
+        }
+    }
 }
 
 #[test]

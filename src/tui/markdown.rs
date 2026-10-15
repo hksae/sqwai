@@ -629,7 +629,8 @@ fn parse_table_align(sep: &str) -> Vec<Align> {
 }
 
 fn parse_table_row(l: &str) -> Vec<String> {
-    // Split on unescaped pipes: `\|` is a literal pipe inside the cell.
+    // Split on unescaped pipes outside inline code spans: `\|` or a pipe inside
+    // `` `a || b` `` is literal content inside the cell, not a column boundary.
     let t = l.trim();
     let mut cells: Vec<String> = Vec::new();
     let mut cur = String::new();
@@ -645,6 +646,37 @@ fn parse_table_row(l: &str) -> Vec<String> {
     while let Some(ch) = chars.next() {
         if ch == '\\' && matches!(chars.peek(), Some('|') | Some('\\')) {
             cur.push(chars.next().unwrap());
+        } else if ch == '`' {
+            let mut ticks = 1usize;
+            while chars.peek() == Some(&'`') {
+                chars.next();
+                ticks += 1;
+            }
+            for _ in 0..ticks {
+                cur.push('`');
+            }
+            // Check if a matching closing backtick run exists on this line
+            let rest: String = chars.clone().collect();
+            let needle = "`".repeat(ticks);
+            if rest.contains(&needle) {
+                while let Some(c) = chars.next() {
+                    if c == '`' {
+                        let mut close = 1usize;
+                        while chars.peek() == Some(&'`') {
+                            chars.next();
+                            close += 1;
+                        }
+                        for _ in 0..close {
+                            cur.push('`');
+                        }
+                        if close == ticks {
+                            break;
+                        }
+                    } else {
+                        cur.push(c);
+                    }
+                }
+            }
         } else if ch == '|' {
             cells.push(cur.trim().to_string());
             cur = String::new();
