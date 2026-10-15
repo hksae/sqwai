@@ -531,6 +531,8 @@ pub struct App {
     /// The `/config` surface's search field and caret focus.
     config_search: TextArea<'static>,
     config_focus: bool,
+    /// In-memory sample plan created by `/test plan` for previewing the Plan surface.
+    test_plan: Option<crate::plan::Plan>,
     /// The providers surface's search field: a real input with its own caret,
     /// focused while that surface is open, filtering the list as it is typed.
     prov_search: TextArea<'static>,
@@ -792,6 +794,7 @@ impl App {
             session_focus: false,
             config_search: Self::fresh_input(String::new()),
             config_focus: false,
+            test_plan: None,
             prov_search: Self::fresh_input(String::new()),
             prov_focus: false,
             model_search: Self::fresh_input(String::new()),

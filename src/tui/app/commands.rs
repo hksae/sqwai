@@ -56,6 +56,9 @@ impl App {
                     self.open_menu(Menu::TestColors);
                 } else if rest.split_whitespace().nth(1) == Some("md") {
                     self.open_menu(Menu::TestMd);
+                } else if rest.split_whitespace().nth(1) == Some("plan") {
+                    self.test_plan = Some(Self::sample_test_plan());
+                    self.open_menu(Menu::Plan);
                 } else if rest.split_whitespace().nth(1) == Some("approval") {
                     self.open_menu(Menu::Approval {
                         id: 0,
@@ -66,7 +69,7 @@ impl App {
                     self.start_test_churn();
                 } else {
                     self.status(
-                        "/test takes: anim, approval, art, churn, colors, md",
+                        "/test takes: anim, approval, art, churn, colors, md, plan",
                         StatusKind::Warn,
                     );
                 }
@@ -249,6 +252,9 @@ impl App {
     /// "the plan" goes through here so two sessions never operate on each
     /// other's plans.
     pub(super) fn session_plan(&self) -> Option<plan::Plan> {
+        if let Some(p) = &self.test_plan {
+            return Some(p.clone());
+        }
         let root = &self.project_root;
         if let Some(id) = &self.session.plan_id
             && let Some(plan) = plan::read_plan_file(root, id)
@@ -496,5 +502,48 @@ impl App {
         self.mode = mode;
         self.mode_blend = Some((from, Instant::now()));
         self.dirty = true;
+    }
+
+    fn sample_test_plan() -> plan::Plan {
+        let mut p = plan::create(
+            "Migrate TUI menus to the bottom surface".into(),
+            vec![
+                "keep narrow terminals usable".into(),
+                "preserve keyboard and mouse behavior".into(),
+            ],
+            vec![
+                "all menus render as bottom surfaces".into(),
+                "cargo test passes cleanly".into(),
+            ],
+            vec![
+                plan::NewStep {
+                    title: "Convert Models and Providers to searchable surfaces".into(),
+                },
+                plan::NewStep {
+                    title: "Convert Sessions and /config to two-column surfaces".into(),
+                },
+                plan::NewStep {
+                    title: "Migrate /plan overview to the bottom surface".into(),
+                },
+                plan::NewStep {
+                    title: "Verify legacy modal code is retired".into(),
+                },
+                plan::NewStep {
+                    title: "Keep old floating todo popup".into(),
+                },
+            ],
+            4096,
+            &plan::Limits::default(),
+        )
+        .unwrap();
+        p.steps[0].status = plan::StepStatus::Done;
+        p.steps[0].summary = Some("Models and Providers now share draw_list_surface".into());
+        p.steps[1].status = plan::StepStatus::Done;
+        p.steps[1].summary = Some("Added search row, day headers, and 2-column /config".into());
+        p.steps[2].status = plan::StepStatus::InProgress;
+        p.steps[3].status = plan::StepStatus::Pending;
+        p.steps[4].status = plan::StepStatus::Cancelled;
+        p.steps[4].reason = Some("unified into /plan instead".into());
+        p
     }
 }
