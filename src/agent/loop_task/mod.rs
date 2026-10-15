@@ -548,7 +548,7 @@ async fn run_agent(
         mut effort,
         mut effort_support,
         max_tokens,
-        system,
+        mut system,
         mut messages,
         root,
         session_id,
@@ -650,6 +650,21 @@ async fn run_agent(
     // honour it; the first request that proves otherwise turns it off for the
     // rest of the session.
     let mut continuation_usable = true;
+
+    if !compact_only && !system.iter().any(|p| p.text.contains("<turn_environment>")) {
+        let probe_root = root.clone();
+        if let Ok(facts) =
+            tokio::task::spawn_blocking(move || crate::prompts::env::turn_facts(&probe_root)).await
+        {
+            let pos = system
+                .iter()
+                .position(|p| {
+                    !p.cacheable && (p.text.starts_with("ANCHOR ") || p.text.starts_with("Note: "))
+                })
+                .unwrap_or(system.len());
+            system.insert(pos, crate::providers::SystemPart::volatile(facts));
+        }
+    }
 
     // `/compact` — run the policy and hand the transcript back without a chat
     // turn. It used to write a mandatory diary entry first; the entry was the

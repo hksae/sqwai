@@ -811,11 +811,17 @@ pub fn opencode_session_value(base_url: &str) -> Option<String> {
 
 /// Stable per-session cache-routing key for wires that document one
 /// (OpenAI `prompt_cache_key`; Codex sends the session id, subagents
-/// `{source}:{parent}`). Same value and host scoping as the gateway session
-/// header above: a stable key routes repeated prefixes at the same worker.
-/// Unknown fields are ignored where unsupported, so sending it is safe.
+/// `{source}:{parent}`). Scoped to OpenAI and OpenCode hosts that document
+/// `prompt_cache_key`: a stable key routes repeated prefixes at the same worker.
 pub fn prompt_cache_key(base_url: &str) -> Option<String> {
-    opencode_session_value(base_url)
+    if !base_url.contains("opencode.ai") && !base_url.contains("api.openai.com") {
+        return None;
+    }
+    CONVERSATION_ID
+        .read()
+        .ok()
+        .and_then(|g| g.clone())
+        .filter(|id| !id.is_empty())
 }
 
 /// attach `x-opencode-session` to a request builder when applicable
@@ -1076,9 +1082,14 @@ mod connection_tests {
             prompt_cache_key("https://opencode.ai/zen/go/v1"),
             Some("sess-7".to_string())
         );
-        assert_eq!(prompt_cache_key("https://api.openai.com/v1"), None);
+        assert_eq!(
+            prompt_cache_key("https://api.openai.com/v1"),
+            Some("sess-7".to_string())
+        );
+        assert_eq!(prompt_cache_key("http://127.0.0.1:11434/v1"), None);
         set_conversation_id("");
         assert_eq!(prompt_cache_key("https://opencode.ai/zen/go/v1"), None);
+        assert_eq!(prompt_cache_key("https://api.openai.com/v1"), None);
         assert_eq!(
             opencode_session_value("https://opencode.ai/zen/go/v1"),
             None

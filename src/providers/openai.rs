@@ -43,9 +43,14 @@ impl OpenAiProvider {
             completion_tokens: u["completion_tokens"].as_u64().unwrap_or(0),
             cached_tokens: u
                 .pointer("/prompt_tokens_details/cached_tokens")
+                .or_else(|| u.get("prompt_cache_hit_tokens"))
+                .or_else(|| u.get("cache_read_input_tokens"))
                 .and_then(|c| c.as_u64()),
-            // Chat Completions reports no cache-creation counter
-            cache_write_tokens: None,
+            cache_write_tokens: u
+                .pointer("/prompt_tokens_details/cache_write_tokens")
+                .or_else(|| u.get("cache_creation_input_tokens"))
+                .and_then(|c| c.as_u64())
+                .filter(|&c| c > 0),
             reasoning_tokens: u
                 .pointer("/completion_tokens_details/reasoning_tokens")
                 .and_then(|c| c.as_u64()),

@@ -75,11 +75,25 @@ pub fn cleared_indices(messages: &[Message]) -> Vec<usize> {
             break;
         }
     }
-    let freed: usize = pool[..keep_from].iter().map(|(_, bytes)| bytes).sum();
-    if freed < MIN_CLEAR_BYTES {
+    // Quantize the clear boundary in steps of MIN_CLEAR_BYTES from the front
+    // of `pool`: because `messages` in the session store is never mutated by
+    // `trim_for_wire`, advancing `keep_from` by one tool result on every turn
+    // would rewrite a message 40 KB back and re-key the last 40 KB of cached
+    // history on every single tool call. Stepping only when at least
+    // `MIN_CLEAR_BYTES` more can be freed keeps the boundary frozen between steps.
+    let mut committed = 0usize;
+    let mut step_bytes = 0usize;
+    for (idx, &(_, bytes)) in pool[..keep_from].iter().enumerate() {
+        step_bytes += bytes;
+        if step_bytes >= MIN_CLEAR_BYTES {
+            committed = idx + 1;
+            step_bytes = 0;
+        }
+    }
+    if committed == 0 {
         return Vec::new();
     }
-    pool[..keep_from].iter().map(|(i, _)| *i).collect()
+    pool[..committed].iter().map(|(i, _)| *i).collect()
 }
 
 /// Replace the old results with stubs, in place.
@@ -225,6 +239,22 @@ mod tests {
         let once = contents(&messages);
         trim_for_wire(&mut messages);
         assert_eq!(once, contents(&messages));
+    }
+
+    #[test]
+    fn clear_boundary_is_quantized_to_preserve_prefix_cache() {
+        let body = "q".repeat(8 * 1024);
+        let mut many: Vec<String> = (0..38).map(|_| body.clone()).collect();
+        let base = cleared_indices(&exchange(&many));
+        assert!(!base.is_empty());
+        // Adding one more 8 KB result (< MIN_CLEAR_BYTES = 20 KB) must not
+        // advance the clear boundary and re-key the last 40 KB of history.
+        many.push(body);
+        let next = cleared_indices(&exchange(&many));
+        assert_eq!(
+            base, next,
+            "clear boundary must stay frozen until a full MIN_CLEAR_BYTES step accumulates"
+        );
     }
 
     /// An error is not filler: the reason it failed is the content.

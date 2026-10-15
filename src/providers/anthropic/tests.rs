@@ -253,34 +253,33 @@ fn body_has_cache_control_and_thinking() {
     };
     let b = build_body(&req, 8192, true);
     assert_eq!(b["model"], "claude-x");
-    // stable system keeps its trailing marker, the host block rides after it
-    // unmarked, and the last history message carries the third marker
+    // stable system keeps its trailing marker; when messages are non-empty,
+    // the volatile host block rides unmarked after the last history message's
+    // breakpoint so `system` ahead of `messages` stays byte-identical
     let system = b["system"].as_array().unwrap();
-    assert_eq!(system.len(), 2);
+    assert_eq!(system.len(), 1);
     assert_eq!(system[0]["cache_control"]["type"], "ephemeral");
     assert_eq!(system[0]["text"], "stable prefix");
-    assert!(system[1].get("cache_control").is_none());
+    let msgs = b["messages"].as_array().unwrap();
+    assert_eq!(msgs.len(), 1);
+    assert_eq!(msgs[0]["role"], "user");
+    assert_eq!(msgs[0]["content"].as_array().unwrap().len(), 2);
+    assert_eq!(msgs[0]["content"][0]["cache_control"]["type"], "ephemeral");
+    assert_eq!(msgs[0]["content"][0]["text"], "hi");
+    assert!(msgs[0]["content"][1].get("cache_control").is_none());
     assert!(
-        system[1]["text"]
+        msgs[0]["content"][1]["text"]
             .as_str()
             .unwrap()
             .contains("git: on branch main")
     );
-    let msgs = b["messages"].as_array().unwrap();
-    // the human's turn is the whole conversation: no host block merged into
-    // it, no extra user turn invented for it (§18.1.1)
-    assert_eq!(msgs.len(), 1);
-    assert_eq!(msgs[0]["role"], "user");
-    assert_eq!(msgs[0]["content"].as_array().unwrap().len(), 1);
-    assert_eq!(msgs[0]["content"][0]["cache_control"]["type"], "ephemeral");
-    assert_eq!(msgs[0]["content"][0]["text"], "hi");
     assert_eq!(b["thinking"]["budget_tokens"], 16384);
     assert_eq!(b["max_tokens"], 8192 + 16384);
 }
 
 /// The cache bug in one assertion: a changed host block must not move a
-/// single byte of the cached prefix. Tools, the stable system block and the
-/// history are identical; only the unmarked block after the marker differs.
+/// single byte of the cached prefix (`tools -> system -> messages[..breakpoint]`).
+/// Only the unmarked trailing block after the history breakpoint differs.
 #[test]
 fn volatile_change_keeps_the_prefix_bytes() {
     let body_for = |volatile: &str| {
@@ -305,9 +304,15 @@ fn volatile_change_keeps_the_prefix_bytes() {
     };
     let before = body_for("git: on branch main");
     let after = body_for("git: on branch other");
-    assert_eq!(before["system"][0], after["system"][0]);
-    assert_eq!(before["messages"], after["messages"]);
-    assert_ne!(before["system"][1], after["system"][1]);
+    assert_eq!(before["system"], after["system"]);
+    assert_eq!(
+        before["messages"][0]["content"][0],
+        after["messages"][0]["content"][0]
+    );
+    assert_ne!(
+        before["messages"][0]["content"][1],
+        after["messages"][0]["content"][1]
+    );
 }
 
 #[test]

@@ -109,15 +109,6 @@ pub fn build_body(req: &ChatRequest, default_max_tokens: u32, cache_breakpoints:
         let last = system.len() - 1;
         system[last]["cache_control"] = json!({"type": "ephemeral"});
     }
-    // The host block rides here too, and deliberately AFTER the breakpoint: the
-    // cached prefix ends with the stable text, so a changed date or plan tail
-    // re-reads only this block. It is not allowed to ride a user turn — a host
-    // block wearing the human's role is what the model then answers, instead of
-    // the request (§18.1.1).
-    let tail = super::volatile_system_text(&req.system);
-    if !tail.trim().is_empty() {
-        system.push(json!({"type": "text", "text": super::host_tail(&tail)}));
-    }
     let mut msgs: Vec<Value> = Vec::new();
     for m in &req.messages {
         if m.role == Role::System
@@ -176,7 +167,35 @@ pub fn build_body(req: &ChatRequest, default_max_tokens: u32, cache_breakpoints:
             block["cache_control"] = json!({"type": "ephemeral"});
         }
     }
-    // the volatile host block already rode out with `system` above (§18.1.1)
+    // In Anthropic's `/v1/messages`, prefix hashing is cumulative across
+    // `tools -> system -> messages`. Placing volatile host state inside
+    // `system` when `messages` is non-empty would sit ahead of `messages`
+    // and invalidate both history breakpoints on every clock/git/plan update.
+    // Instead, when `msgs` is non-empty, the host block rides unmarked after
+    // the final history breakpoint inside the trailing user turn.
+    let tail = super::volatile_system_text(&req.system);
+    if !tail.trim().is_empty() {
+        let tail_block = json!({"type": "text", "text": super::host_tail(&tail)});
+        if msgs.is_empty() {
+            system.push(tail_block);
+        } else if msgs
+            .last()
+            .and_then(|p| p.get("role"))
+            .and_then(|r| r.as_str())
+            == Some("user")
+            && let Some(arr) = msgs
+                .last_mut()
+                .and_then(|p| p.get_mut("content"))
+                .and_then(|c| c.as_array_mut())
+        {
+            arr.push(tail_block);
+        } else {
+            msgs.push(json!({
+                "role": "user",
+                "content": [tail_block],
+            }));
+        }
+    }
 
     let mut body = json!({
         "model": req.model_id,

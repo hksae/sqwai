@@ -71,10 +71,9 @@ impl App {
                     .join("; ")
             )));
         }
-        // What is true of the project as of this turn: the clock, git state, the
-        // directory map. These used to ride in the cached session block, where
-        // any commit re-keyed the prefix and the whole conversation behind it.
-        parts.push(SystemPart::volatile(crate::prompts::env::turn_facts(&root)));
+        // `turn_facts` (clock, git status, directory tree) is populated off the
+        // UI thread at the start of `run_agent` so pressing Enter never blocks
+        // on git subprocesses.
         // The anchor is host-generated from this session's journal, and it
         // rides only where the transcript has actually lost detail: once a
         // compaction has dropped messages. Rebuilt fresh each turn so

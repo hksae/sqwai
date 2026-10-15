@@ -199,6 +199,7 @@ pub(crate) fn compaction_request(
         return standalone();
     }
     let mut messages = history.to_vec();
+    crate::agent::tool_output::trim_for_wire(&mut messages);
     messages.push(Message::new(
         Role::User,
         context::summary_short_prompt(previous, plan_hint, retry),
