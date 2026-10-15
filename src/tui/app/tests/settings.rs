@@ -838,7 +838,7 @@ fn snap_chat_plan_panel_open() {
         text: "See the plan panel.".into(),
         live: false,
     });
-    app.open_menu(Menu::Todo);
+    app.open_menu(Menu::Plan);
     for w_h in [(100u16, 30u16), (70, 24)] {
         let s = render_to_string(&mut app, w_h.0, w_h.1);
         snap!(format!("chat_plan_panel_{}x{}", w_h.0, w_h.1), s);

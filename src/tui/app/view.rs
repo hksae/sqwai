@@ -2297,6 +2297,7 @@ impl App {
             // under its own rows rather than across the rule.
             Some(Menu::Settings)
             | Some(Menu::Debug)
+            | Some(Menu::Plan)
             | Some(Menu::CompactionSummary)
             | Some(Menu::UndoShadow)
             | Some(Menu::Providers)
@@ -2326,6 +2327,7 @@ impl App {
                 | Some(Menu::Context)
                 | Some(Menu::Settings)
                 | Some(Menu::Debug)
+                | Some(Menu::Plan)
                 | Some(Menu::EditScalar(..))
                 | Some(Menu::CompactionSummary)
                 | Some(Menu::UndoShadow)
@@ -2654,6 +2656,7 @@ impl App {
                         }
                         Some(Menu::Settings)
                         | Some(Menu::Debug)
+                        | Some(Menu::Plan)
                         | Some(Menu::EditScalar(..))
                         | Some(Menu::CompactionSummary)
                         | Some(Menu::UndoShadow)
@@ -2962,6 +2965,7 @@ impl App {
                 | Some(Menu::Context)
                 | Some(Menu::Settings)
                 | Some(Menu::Debug)
+                | Some(Menu::Plan)
                 | Some(Menu::EditScalar(..))
                 | Some(Menu::CompactionSummary)
                 | Some(Menu::UndoShadow)
@@ -3764,7 +3768,7 @@ impl App {
                 };
                 (1, full_win, "settings")
             }
-            Some(Menu::Debug) => {
+            Some(Menu::Debug | Menu::Plan) => {
                 let body = self.menu_rows.len();
                 let fit = (screen_h as usize).saturating_sub(4);
                 let full_win = if body > fit {
@@ -3807,6 +3811,7 @@ impl App {
                 ("enter", "run".to_string()),
                 ("esc", "back".to_string()),
             ],
+            Some(Menu::Plan) => vec![("esc", "close".to_string())],
             Some(Menu::Providers) => vec![
                 ("ctrl+n", "add".to_string()),
                 ("ctrl+u", "update".to_string()),

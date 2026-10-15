@@ -614,7 +614,7 @@ impl App {
                             self.open_menu(Menu::Sessions)
                         }
                         KeyCode::Char('t') if ctrl && self.menu_stack.is_empty() => {
-                            self.open_menu(Menu::Todo)
+                            self.open_menu(Menu::Plan)
                         }
                         KeyCode::Char('p') | KeyCode::Char('P')
                             if ctrl && self.menu_stack.is_empty() =>

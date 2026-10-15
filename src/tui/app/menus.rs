@@ -285,9 +285,7 @@ pub(super) enum Menu {
     AskFree {
         id: u64,
     },
-    /// the active plan's visible steps, opened with Ctrl+T
-    Todo,
-    /// full plan overview, opened with /plan
+    /// full plan overview, opened with /plan, Ctrl+L or Ctrl+T
     Plan,
 }
 
@@ -560,6 +558,7 @@ impl App {
                 | Some(Menu::ConfirmDelete { .. })
                 | Some(Menu::Approval { .. })
                 | Some(Menu::Debug)
+                | Some(Menu::Plan)
         ) {
             self.follow = true;
         }
@@ -810,6 +809,7 @@ impl App {
         !matches!(
             self.cur_menu(),
             Some(Menu::Context)
+                | Some(Menu::Plan)
                 | Some(Menu::TestAnim)
                 | Some(Menu::TestArt)
                 | Some(Menu::TestColors)
@@ -840,7 +840,7 @@ impl App {
     /// A read-only menu: no selection band, no cursor movement — every row is
     /// a painted fact, nothing in it is a button. Esc still closes it.
     pub(super) fn menu_is_dead(&self) -> bool {
-        matches!(self.cur_menu(), Some(Menu::Context))
+        matches!(self.cur_menu(), Some(Menu::Context | Menu::Plan))
     }
 
     pub(super) fn menu_nav(&mut self, dir: i32) {
@@ -1189,10 +1189,11 @@ impl App {
             self.form_save();
             return;
         }
-        // galleries are showcases: any commit just closes them
+        // galleries and read-only cards: any commit just closes them
         if matches!(
             self.cur_menu(),
             Some(Menu::Context)
+                | Some(Menu::Plan)
                 | Some(Menu::TestAnim)
                 | Some(Menu::TestArt)
                 | Some(Menu::TestColors)
@@ -1912,8 +1913,19 @@ impl App {
             Some(Menu::AskUser { .. }) => " Ask ".into(),
             Some(Menu::Approval { .. }) => " Confirm command ".into(),
             Some(Menu::AskFree { .. }) => " Answer ".into(),
-            Some(Menu::Todo) => " To-do ".into(),
-            Some(Menu::Plan) => " Plan ".into(),
+            Some(Menu::Plan) => match self.session_plan() {
+                Some(plan) => {
+                    let status = match plan.status {
+                        plan::PlanStatus::Active => "active",
+                        plan::PlanStatus::Completed => "completed",
+                        plan::PlanStatus::Abandoned => "abandoned",
+                        plan::PlanStatus::Blocked => "blocked",
+                    };
+                    let c = plan.counts();
+                    format!(" Plan · {status} ({}/{} done) ", c.done, plan.steps.len())
+                }
+                None => " Plan ".into(),
+            },
             None => String::new(),
         }
     }
@@ -3015,58 +3027,25 @@ impl App {
                 self.menu_footer_text = Some("enter: confirm · esc: deny".into());
             }
             Menu::AskFree { .. } => {}
-            Menu::Todo => {
-                self.menu_rows.push(row(
-                    Line::from(vec![Span::styled(
-                        " agent to-do list",
-                        Theme::accent_bold(),
-                    )]),
-                    MenuAction::None,
-                ));
-                if self.todos.is_empty() {
-                    self.menu_rows.push(row(
-                        Line::from(vec![Span::styled(
-                            "  (no active plan steps yet)",
-                            Theme::dim(),
-                        )]),
-                        MenuAction::None,
-                    ));
-                } else {
+            Menu::Plan => {
+                if let Some(plan) = self.session_plan() {
+                    self.menu_rows.extend(plan_rows(&plan));
+                } else if !self.todos.is_empty() {
                     for (i, item) in self.todos.iter().enumerate() {
                         self.menu_rows.push(row(
                             Line::from(vec![
-                                Span::styled(format!("  {}. ", i + 1), Theme::marker()),
+                                Span::styled(format!("[ ] {}  ", i + 1), Theme::dim()),
                                 Span::styled(item.clone(), Theme::base()),
                             ]),
                             MenuAction::None,
                         ));
                     }
-                }
-                self.menu_footer_text = Some("esc: close · ctrl+t: toggle".into());
-            }
-            Menu::Plan => {
-                let Some(plan) = self.session_plan() else {
+                } else {
                     self.menu_rows.push(row(
-                        Line::from(vec![Span::styled("  no active plan", Theme::dim())]),
+                        Line::from(vec![Span::styled("no active plan", Theme::dim())]),
                         MenuAction::None,
                     ));
-                    self.menu_footer_text = Some("esc: close".into());
-                    // fall through to sel clamp
-                    self.menu_sel = self.menu_sel.min(self.menu_len().saturating_sub(1));
-                    return;
-                };
-                let status = match plan.status {
-                    plan::PlanStatus::Active => "active",
-                    plan::PlanStatus::Completed => "completed",
-                    plan::PlanStatus::Abandoned => "abandoned",
-                    plan::PlanStatus::Blocked => "blocked",
-                };
-                self.menu_rows.extend(plan_rows(
-                    &plan,
-                    format!("  plan {}", plan.id),
-                    format!(" · {status}"),
-                ));
-                self.menu_footer_text = Some("up/down: scroll · esc: close".into());
+                }
             }
         }
         if self.menu_sel >= self.menu_len() {
@@ -3096,18 +3075,11 @@ impl App {
     }
 }
 
-/// Render the session's plan as /plan menu rows.
-fn plan_rows(
-    plan: &crate::plan::Plan,
-    heading_main: String,
-    heading_suffix: String,
-) -> Vec<(Line<'static>, MenuAction)> {
+/// Render the session's plan as /plan surface rows.
+fn plan_rows(plan: &crate::plan::Plan) -> Vec<(Line<'static>, MenuAction)> {
     let row = |l: Line<'static>, a: MenuAction| (l, a);
     let mut rows: Vec<(Line<'static>, MenuAction)> = Vec::new();
-    // Wrap width for plan text: menu inner is w-4, w is 78 max
-    // so 68 is safe for wide, still reasonable for narrow (will
-    // be truncated to w, but far better than cutting at 78).
-    const WRAP: usize = 68;
+    const WRAP: usize = 72;
     let push_wrapped = |rows: &mut Vec<(Line<'static>, MenuAction)>,
                         prefix: &str,
                         text: &str,
@@ -3148,19 +3120,16 @@ fn plan_rows(
             ));
         }
     };
-    let c = plan.counts();
     rows.push(row(
         Line::from(vec![
-            Span::styled(heading_main, Theme::accent_bold()),
-            Span::styled(heading_suffix, Theme::dim()),
+            Span::styled("plan         ", Theme::dim()),
+            Span::styled(plan.id.clone(), Theme::dim()),
         ]),
         MenuAction::None,
     ));
-    // goal: may be long, wrap it
-    let goal_prefix = format!("  goal [{} criteria]: ", plan.criteria.len());
     push_wrapped(
         &mut rows,
-        &goal_prefix,
+        "goal         ",
         &plan.goal.text,
         Theme::dim(),
         Theme::base(),
@@ -3168,58 +3137,43 @@ fn plan_rows(
     if !plan.constraints.is_empty() {
         push_wrapped(
             &mut rows,
-            "  constraints: ",
+            "constraints  ",
             &plan.constraints.join(" · "),
             Theme::dim(),
             Theme::dim(),
         );
     }
     if !plan.criteria.is_empty() {
-        rows.push(row(
-            Line::from(vec![Span::styled("  criteria:", Theme::dim())]),
-            MenuAction::None,
-        ));
-        // done-criteria are the agent's own plain-text notes; the host runs
-        // nothing and certifies nothing, so they render without status colors.
-        for note in &plan.criteria {
-            push_wrapped(&mut rows, "    · ", note, Theme::dim(), Theme::base());
-        }
-    }
-    rows.push(row(
-        Line::from(vec![Span::styled(
-            format!(
-                "  steps: {} done · {} in progress · {} blocked · {} pending · {} cancelled",
-                c.done, c.in_progress, c.blocked, c.pending, c.cancelled
-            ),
+        push_wrapped(
+            &mut rows,
+            "criteria     ",
+            &plan.criteria.join(" · "),
+            Theme::dim(),
             Theme::base(),
-        )]),
-        MenuAction::None,
-    ));
+        );
+    }
+    if !plan.steps.is_empty() {
+        rows.push(row(Line::default(), MenuAction::None));
+    }
     for s in &plan.steps {
         let (marker, style) = match s.status {
             plan::StepStatus::Done => ("[x]", Theme::ok()),
-            plan::StepStatus::InProgress => ("[>]", Theme::accent()),
+            plan::StepStatus::InProgress => ("[>]", Theme::brand_ink()),
             plan::StepStatus::Blocked => ("[!]", Theme::err()),
             plan::StepStatus::Cancelled => ("[-]", Theme::dim()),
             plan::StepStatus::Pending | plan::StepStatus::Reopened => ("[ ]", Theme::dim()),
         };
-        let prefix = format!("  {marker} {} ", s.id);
+        let prefix = format!("{marker} {:<2} ", s.id);
         let mut title = s.title.clone();
         if s.stale_goal == Some(true) {
             title.push_str("  [stale goal]");
         }
         push_wrapped(&mut rows, &prefix, &title, style, style);
         if let Some(reason) = &s.reason {
-            push_wrapped(
-                &mut rows,
-                "      reason: ",
-                reason,
-                Theme::dim(),
-                Theme::dim(),
-            );
+            push_wrapped(&mut rows, "       reason: ", reason, Theme::dim(), Theme::dim());
         }
         if let Some(summary) = &s.summary {
-            push_wrapped(&mut rows, "      ", summary, Theme::dim(), Theme::dim());
+            push_wrapped(&mut rows, "       ", summary, Theme::dim(), Theme::dim());
         }
     }
     rows
