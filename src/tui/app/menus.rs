@@ -2906,6 +2906,7 @@ impl App {
                     ]),
                     MenuAction::None,
                 ));
+                self.menu_rows.push(row(Line::default(), MenuAction::None));
                 self.menu_rows.push(row(
                     Line::from(vec![Span::styled("deny".to_string(), Theme::ERR())]),
                     MenuAction::DecideApproval(ApprovalDecision::Deny),

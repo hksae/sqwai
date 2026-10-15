@@ -121,6 +121,16 @@ pub fn shimmer_spans(text: &str, tick: usize) -> Vec<Span<'static>> {
     }
 }
 
+/// Render `text` in `Theme::WARN_RGB` with a bright white crest sweeping
+/// across it for the given tick (used on the approval command line).
+pub fn shimmer_warn_spans(text: &str, tick: usize) -> Vec<Span<'static>> {
+    if has_truecolor() {
+        shimmer_rgb_tint(text, tick, Theme::WARN_RGB, CREST_RGB)
+    } else {
+        shimmer_ansi(text, tick)
+    }
+}
+
 /// Truecolor path: every char BOLD, fg blended gray → white by the wave.
 fn shimmer_rgb(text: &str, tick: usize) -> Vec<Span<'static>> {
     shimmer_rgb_tint(text, tick, BASE_RGB, CREST_RGB)

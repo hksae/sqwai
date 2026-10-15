@@ -3769,7 +3769,7 @@ impl App {
             Some(Menu::EditModel { .. }) => (0, 4, ""),
             Some(Menu::Sessions) => (1, dyn_win, "sessions"),
             Some(Menu::ConfirmDelete { .. }) => (1, 2, ""),
-            Some(Menu::Approval { .. }) => (1, 3, ""),
+            Some(Menu::Approval { .. }) => (2, 3, ""),
             Some(
                 Menu::EditModelField { .. }
                 | Menu::EditProviderField { .. }
@@ -4098,13 +4098,25 @@ impl App {
                 paint_field(slf, buf, area, y, rail);
             } else {
                 let avail = area.width.saturating_sub(2 + rail) as usize;
-                let mut spans: Vec<Span> = Vec::new();
-                for mut sp in line.spans {
-                    if cur {
-                        sp.style = sp.style.add_modifier(Modifier::BOLD);
+                let mut spans: Vec<Span> = if i == 0
+                    && let Some(Menu::Approval {
+                        command, reason, ..
+                    }) = slf.cur_menu()
+                {
+                    let mut s =
+                        crate::tui::shimmer::shimmer_warn_spans(command, slf.spinner_tick);
+                    s.push(Span::styled(format!(" ({reason})"), Theme::dim()));
+                    s
+                } else {
+                    let mut s = Vec::new();
+                    for mut sp in line.spans {
+                        if cur {
+                            sp.style = sp.style.add_modifier(Modifier::BOLD);
+                        }
+                        s.push(sp);
                     }
-                    spans.push(sp);
-                }
+                    s
+                };
                 if matches!(action, MenuAction::OpenSession(_)) && !spans.is_empty() {
                     let title_cap = (avail / 2).clamp(16, 48).min(avail);
                     spans[0].content =
