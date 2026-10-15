@@ -1,10 +1,9 @@
 use super::*;
 
 #[test]
-
 fn debug_enter_updates_visible_value() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
-    app.open_menu(Menu::Debug);
+    app.open_menu(Menu::Settings);
     let idx = app
         .menu_rows
         .iter()
@@ -27,7 +26,7 @@ fn debug_enter_updates_visible_value() {
 #[test]
 fn debug_perf_log_toggle_writes_frame_lines_to_temp_file() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
-    app.open_menu(Menu::Debug);
+    app.open_menu(Menu::Settings);
     let find_toggle = |app: &App| {
         app.menu_rows
             .iter()

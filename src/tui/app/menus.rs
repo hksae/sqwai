@@ -321,6 +321,9 @@ pub(super) enum MenuAction {
     ToggleHttpLog,
     ToggleExperimentalTest,
     TogglePerfLog,
+    ClearDebugLog,
+    CopyDiagnostics,
+    UpdateCatalog,
     ToggleMode,
     OpenSessions,
     Confirm(Box<MenuAction>),
@@ -556,6 +559,7 @@ impl App {
                 | Some(Menu::EditSessionTitle { .. })
                 | Some(Menu::ConfirmDelete { .. })
                 | Some(Menu::Approval { .. })
+                | Some(Menu::Debug)
         ) {
             self.follow = true;
         }
@@ -1531,6 +1535,23 @@ impl App {
                 }
                 self.build_menu_rows();
             }
+            MenuAction::ClearDebugLog => {
+                if let Ok(dir) = crate::config::data_dir() {
+                    let path = dir.join("debug.log");
+                    let _ = std::fs::write(&path, b"");
+                }
+                self.status("debug log cleared", StatusKind::Ok);
+                self.build_menu_rows();
+            }
+            MenuAction::CopyDiagnostics => {
+                let report = self.diagnostics_summary();
+                let _ = super::clip_set(&report);
+                self.status("diagnostics copied to clipboard", StatusKind::Ok);
+            }
+            MenuAction::UpdateCatalog => {
+                self.start_builtin_update(true);
+                self.build_menu_rows();
+            }
             MenuAction::ToggleMode => {
                 let next = self.mode.toggle();
                 self.set_mode(next);
@@ -2097,67 +2118,70 @@ impl App {
                 self.menu_footer_text = Some("esc: close".into());
             }
             Menu::Debug => {
-                let setting = |l: &str, val: String, a: MenuAction| {
+                let act = |l: &str, val: String, a: MenuAction| {
                     row(
                         Line::from(vec![
-                            Span::styled(format!(" {l:<18}"), Theme::FG()),
+                            Span::styled(
+                                format!("{l:<24}"),
+                                Style::new().fg(Theme::FG()),
+                            ),
                             Span::styled(val, Theme::dim()),
                         ]),
                         a,
                     )
                 };
-                let info = |l: &str, v: &str| {
+                let info = |l: &str, v: String| {
                     row(
                         Line::from(vec![
-                            Span::styled(format!(" {l:<18}"), Theme::dim()),
-                            Span::styled(v.to_string(), Theme::base()),
+                            Span::styled(format!("{l:<24}"), Theme::dim()),
+                            Span::styled(v, Theme::base()),
                         ]),
                         MenuAction::None,
                     )
                 };
-                let log_path = crate::config::data_dir()
-                    .map(|d| d.join("debug.log").display().to_string())
-                    .unwrap_or_else(|_| "debug.log".into());
-                let cfg_dir = crate::config::config_path()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_default();
-                self.menu_rows.push(setting(
-                    "typewriter",
-                    on_off(self.cfg.ui.typewriter),
-                    MenuAction::ToggleTypewriter,
+                let log_path_buf = crate::config::data_dir()
+                    .map(|d| d.join("debug.log"))
+                    .ok();
+                let log_size = log_path_buf
+                    .as_ref()
+                    .and_then(|p| std::fs::metadata(p).ok())
+                    .map(|m| m.len())
+                    .unwrap_or(0);
+                let log_size_str = if log_size == 0 {
+                    "empty".to_string()
+                } else {
+                    format!("{} B", log_size)
+                };
+                let cat = crate::config::BuiltinCatalog::current();
+                let cat_date = cat
+                    .updated_at
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("undated");
+                self.menu_rows.push(act(
+                    "clear debug log",
+                    log_size_str,
+                    MenuAction::ClearDebugLog,
                 ));
-                self.menu_rows.push(setting(
-                    "http debug log",
-                    on_off(self.cfg.ui.http_log),
-                    MenuAction::ToggleHttpLog,
+                self.menu_rows.push(act(
+                    "copy diagnostics",
+                    "to clipboard".to_string(),
+                    MenuAction::CopyDiagnostics,
                 ));
-                self.menu_rows.push(setting(
-                    "perf frame log",
-                    if self.perf.enabled() {
-                        self.perf.path().to_string()
-                    } else {
-                        on_off(false)
-                    },
-                    MenuAction::TogglePerfLog,
+                self.menu_rows.push(act(
+                    "check catalog update",
+                    format!("#{} · {cat_date}", cat.serial),
+                    MenuAction::UpdateCatalog,
                 ));
-                self.menu_rows.push(setting(
-                    "effort",
-                    self.model_cfg.effort.as_str().to_string(),
-                    MenuAction::OpenEffort,
-                ));
-                self.menu_rows.push(setting(
-                    "mode",
-                    self.mode.label().to_string(),
-                    MenuAction::ToggleMode,
-                ));
-                self.menu_rows.push(setting(
-                    "sessions",
-                    format!("{} saved", self.sessions.len()),
-                    MenuAction::OpenSessions,
-                ));
-                self.menu_rows.push(info("model", &self.model_cfg.id));
-                self.menu_rows
-                    .push(info("provider", &self.model_cfg.provider));
+                self.menu_rows.push(row(Line::default(), MenuAction::None));
+
+                let wire = self
+                    .cfg
+                    .providers
+                    .get(&self.model_cfg.provider)
+                    .map(|p| p.format)
+                    .unwrap_or(WireFormat::Openai);
+                let support = self.model_cfg.effort_support(wire);
                 let key_state = self
                     .cfg
                     .providers
@@ -2169,14 +2193,79 @@ impl App {
                                 pc.api_key
                                     .as_deref()
                                     .is_some_and(|k| !k.is_empty())
-                                    .then(|| "set".to_string())
+                                    .then(|| "inline".to_string())
                             })
                     })
                     .unwrap_or_else(|| "none".into());
-                self.menu_rows.push(info("api key", &key_state));
-                self.menu_rows.push(info("log file", &log_path));
-                self.menu_rows.push(info("config", &cfg_dir));
-                self.menu_footer_text = Some("enter: toggle value · esc: done".into());
+                let cont_state = if !self.continuation_enabled() {
+                    "off".to_string()
+                } else if let Some(prev) = &self.session.last_response_id {
+                    let short: String = prev.chars().take(16).collect();
+                    format!("on ({short}…)")
+                } else {
+                    "on (no response id yet)".to_string()
+                };
+                let pct = self.session.context_percent();
+                let cache_note = if self.session.cache_confirmed {
+                    "cache confirmed"
+                } else {
+                    "no cache hits yet"
+                };
+                let ctx_info = format!(
+                    "{} / {} ({pct}%) · {cache_note}",
+                    fmt_k(self.session.context_tokens_used()),
+                    fmt_ctx(self.session.context_limit),
+                );
+                let undo_info = format!(
+                    "shadow {} · {} checkpoints",
+                    self.cfg.undo.shadow.as_str(),
+                    self.session.checkpoints.len()
+                );
+                let data_dir = crate::config::data_dir()
+                    .map(|d| d.display().to_string())
+                    .unwrap_or_else(|_| "unknown".into());
+                let log_path = log_path_buf
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "debug.log".into());
+                let cfg_dir = crate::config::config_path()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default();
+
+                self.menu_rows.push(info(
+                    "session",
+                    format!(
+                        "{} ({} msgs)",
+                        self.session.id,
+                        self.session.messages.len(),
+                    ),
+                ));
+                self.menu_rows.push(info(
+                    "model",
+                    format!(
+                        "{} (id: {} · effort: {})",
+                        self.session.model_key,
+                        self.model_cfg.id,
+                        self.model_cfg.effort.as_str()
+                    ),
+                ));
+                self.menu_rows.push(info(
+                    "provider",
+                    format!(
+                        "{} ({} · control: {})",
+                        self.model_cfg.provider,
+                        wire.as_str(),
+                        support.control.as_str()
+                    ),
+                ));
+                self.menu_rows.push(info("api key", key_state));
+                self.menu_rows.push(info("continuation", cont_state));
+                self.menu_rows.push(info("context", ctx_info));
+                self.menu_rows.push(info("undo", undo_info));
+                self.menu_rows
+                    .push(info("project root", self.project_root.display().to_string()));
+                self.menu_rows.push(info("data dir", data_dir));
+                self.menu_rows.push(info("log file", log_path));
+                self.menu_rows.push(info("config", cfg_dir));
             }
             Menu::Sessions => {
                 self.menu_rows.push(row(
@@ -2983,6 +3072,27 @@ impl App {
         if self.menu_sel >= self.menu_len() {
             self.menu_sel = self.menu_len().saturating_sub(1);
         }
+    }
+
+    pub(super) fn diagnostics_summary(&self) -> String {
+        let log_path = crate::config::data_dir()
+            .map(|d| d.join("debug.log").display().to_string())
+            .unwrap_or_else(|_| "debug.log".into());
+        let cfg_dir = crate::config::config_path()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
+        format!(
+            "session: {}\nmodel: {} ({})\nprovider: {}\ncontext: {} / {}\nproject: {}\nlog: {}\nconfig: {}",
+            self.session.id,
+            self.session.model_key,
+            self.model_cfg.id,
+            self.model_cfg.provider,
+            self.session.context_tokens_used(),
+            self.session.context_limit,
+            self.project_root.display(),
+            log_path,
+            cfg_dir,
+        )
     }
 }
 

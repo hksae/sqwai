@@ -2296,6 +2296,7 @@ impl App {
             // than the column: a one-model list still has to show its keys
             // under its own rows rather than across the rule.
             Some(Menu::Settings)
+            | Some(Menu::Debug)
             | Some(Menu::CompactionSummary)
             | Some(Menu::UndoShadow)
             | Some(Menu::Providers)
@@ -2324,6 +2325,7 @@ impl App {
             Some(Menu::Effort { .. })
                 | Some(Menu::Context)
                 | Some(Menu::Settings)
+                | Some(Menu::Debug)
                 | Some(Menu::EditScalar(..))
                 | Some(Menu::CompactionSummary)
                 | Some(Menu::UndoShadow)
@@ -2651,6 +2653,7 @@ impl App {
                             self.draw_context_surface(buf, rect, skip, surf_full)
                         }
                         Some(Menu::Settings)
+                        | Some(Menu::Debug)
                         | Some(Menu::EditScalar(..))
                         | Some(Menu::CompactionSummary)
                         | Some(Menu::UndoShadow)
@@ -2958,6 +2961,7 @@ impl App {
             Some(Menu::Effort { .. })
                 | Some(Menu::Context)
                 | Some(Menu::Settings)
+                | Some(Menu::Debug)
                 | Some(Menu::EditScalar(..))
                 | Some(Menu::CompactionSummary)
                 | Some(Menu::UndoShadow)
@@ -3760,6 +3764,16 @@ impl App {
                 };
                 (1, full_win, "settings")
             }
+            Some(Menu::Debug) => {
+                let body = self.menu_rows.len();
+                let fit = (screen_h as usize).saturating_sub(4);
+                let full_win = if body > fit {
+                    (screen_h as usize).saturating_sub(5).max(1)
+                } else {
+                    fit.max(1)
+                };
+                (0, full_win, "")
+            }
             Some(Menu::CompactionSummary) => (0, 2, ""),
             Some(Menu::UndoShadow) => (0, 3, ""),
             Some(Menu::Providers) => (1, dyn_win, "providers"),
@@ -3787,6 +3801,10 @@ impl App {
         match self.cur_menu() {
             Some(Menu::Settings) => vec![
                 ("enter", "change".to_string()),
+                ("esc", "back".to_string()),
+            ],
+            Some(Menu::Debug) => vec![
+                ("enter", "run".to_string()),
                 ("esc", "back".to_string()),
             ],
             Some(Menu::Providers) => vec![
