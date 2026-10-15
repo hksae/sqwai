@@ -1611,7 +1611,8 @@ fn test_galleries_open_with_content() {
     // draws without panic at both widths
     for (w, h) in [(100u16, 30u16), (70, 24)] {
         let mut buf = Buffer::empty(Rect::new(0, 0, w, h));
-        app.draw_menu(&mut buf, Rect::new(0, 0, w, h));
+        app.render_into(&mut buf, Rect::new(0, 0, w, h));
+        assert!(app.surface_open);
     }
 }
 

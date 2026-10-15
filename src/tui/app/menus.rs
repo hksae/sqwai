@@ -566,6 +566,10 @@ impl App {
                 | Some(Menu::Approval { .. })
                 | Some(Menu::Debug)
                 | Some(Menu::Plan)
+                | Some(Menu::TestAnim)
+                | Some(Menu::TestArt)
+                | Some(Menu::TestColors)
+                | Some(Menu::TestMd)
         ) {
             self.follow = true;
         }
@@ -853,12 +857,30 @@ impl App {
     pub(super) fn menu_is_dead(&self) -> bool {
         matches!(
             self.cur_menu(),
-            Some(Menu::Context | Menu::ContextView | Menu::Plan)
+            Some(
+                Menu::Context
+                    | Menu::ContextView
+                    | Menu::Plan
+                    | Menu::TestAnim
+                    | Menu::TestArt
+                    | Menu::TestColors
+                    | Menu::TestMd
+            )
         )
     }
 
     pub(super) fn menu_nav(&mut self, dir: i32) {
-        if matches!(self.cur_menu(), Some(Menu::ContextView | Menu::Plan)) {
+        if matches!(
+            self.cur_menu(),
+            Some(
+                Menu::ContextView
+                    | Menu::Plan
+                    | Menu::TestAnim
+                    | Menu::TestArt
+                    | Menu::TestColors
+                    | Menu::TestMd
+            )
+        ) {
             let step = if dir.abs() > 1 { 10 } else { 1 };
             if dir < 0 {
                 self.surf_top = self.surf_top.saturating_sub(step);
@@ -2893,7 +2915,7 @@ impl App {
                 // Static rows afterwards (no streaming here to re-render).
                 for line in crate::tui::markdown::render(
                     crate::tui::markdown::SHOWCASE,
-                    self.menu_rect.width.max(20),
+                    self.md_built_w.max(20),
                     &self.hl,
                 ) {
                     self.menu_rows.push(row(line, MenuAction::None));

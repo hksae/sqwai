@@ -2299,6 +2299,10 @@ impl App {
             | Some(Menu::Debug)
             | Some(Menu::Plan)
             | Some(Menu::ContextView)
+            | Some(Menu::TestAnim)
+            | Some(Menu::TestArt)
+            | Some(Menu::TestColors)
+            | Some(Menu::TestMd)
             | Some(Menu::CompactionSummary)
             | Some(Menu::UndoShadow)
             | Some(Menu::Providers)
@@ -2327,6 +2331,10 @@ impl App {
             Some(Menu::Effort { .. })
                 | Some(Menu::Context)
                 | Some(Menu::ContextView)
+                | Some(Menu::TestAnim)
+                | Some(Menu::TestArt)
+                | Some(Menu::TestColors)
+                | Some(Menu::TestMd)
                 | Some(Menu::Settings)
                 | Some(Menu::Debug)
                 | Some(Menu::Plan)
@@ -2660,6 +2668,10 @@ impl App {
                         | Some(Menu::Debug)
                         | Some(Menu::Plan)
                         | Some(Menu::ContextView)
+                        | Some(Menu::TestAnim)
+                        | Some(Menu::TestArt)
+                        | Some(Menu::TestColors)
+                        | Some(Menu::TestMd)
                         | Some(Menu::EditScalar(..))
                         | Some(Menu::CompactionSummary)
                         | Some(Menu::UndoShadow)
@@ -2967,6 +2979,10 @@ impl App {
             Some(Menu::Effort { .. })
                 | Some(Menu::Context)
                 | Some(Menu::ContextView)
+                | Some(Menu::TestAnim)
+                | Some(Menu::TestArt)
+                | Some(Menu::TestColors)
+                | Some(Menu::TestMd)
                 | Some(Menu::Settings)
                 | Some(Menu::Debug)
                 | Some(Menu::Plan)
@@ -3777,7 +3793,15 @@ impl App {
                 };
                 (1, full_win, "settings")
             }
-            Some(Menu::Debug | Menu::Plan | Menu::ContextView) => {
+            Some(
+                Menu::Debug
+                | Menu::Plan
+                | Menu::ContextView
+                | Menu::TestAnim
+                | Menu::TestArt
+                | Menu::TestColors
+                | Menu::TestMd,
+            ) => {
                 let body = self.menu_rows.len();
                 let fit = (screen_h as usize).saturating_sub(4);
                 let full_win = if body > fit {
@@ -3821,7 +3845,13 @@ impl App {
                 ("esc", "back".to_string()),
             ],
             Some(Menu::Plan) => vec![("esc", "close".to_string())],
-            Some(Menu::ContextView) => vec![
+            Some(
+                Menu::ContextView
+                | Menu::TestAnim
+                | Menu::TestArt
+                | Menu::TestColors
+                | Menu::TestMd,
+            ) => vec![
                 ("up/down", "scroll".to_string()),
                 ("esc", "close".to_string()),
             ],
@@ -3947,7 +3977,9 @@ impl App {
             }
         };
         let avail_w = area.width.saturating_sub(4).max(20);
-        if matches!(self.cur_menu(), Some(Menu::ContextView)) && self.md_built_w != avail_w {
+        if matches!(self.cur_menu(), Some(Menu::ContextView | Menu::TestMd))
+            && self.md_built_w != avail_w
+        {
             self.md_built_w = avail_w;
             self.build_menu_rows();
         }

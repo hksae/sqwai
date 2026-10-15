@@ -233,13 +233,9 @@ fn wheel_test_app() -> (crate::tui::app::App, usize) {
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
     let mut app = test_app("http://127.0.0.1:9/v1".into());
-    app.cfg.ui.experimental_test = true;
-    // the art gallery is the longest experimental list now that the spinner
-    // showcase is gone: rows must overflow one window for the wheel to have
-    // something to scroll
-    app.command("test art");
+    app.open_menu(Menu::Controls);
     // one draw so the wheel knows the window height
-    let area = Rect::new(0, 0, 80, 24);
+    let area = Rect::new(0, 0, 80, 14);
     let mut buf = Buffer::empty(area);
     app.draw_menu(&mut buf, area);
     let vis = app.menu_visible_rows;
@@ -282,7 +278,7 @@ fn menu_wheel_may_scroll_selection_out_of_view_and_draw_keeps_it() {
     );
     // redraw must not snap the view back to the selection
     let scroll = app.menu_scroll;
-    let area = Rect::new(0, 0, 80, 24);
+    let area = Rect::new(0, 0, 80, 14);
     let mut buf = Buffer::empty(area);
     app.draw_menu(&mut buf, area);
     assert_eq!(app.menu_scroll, scroll, "draw must keep free scroll");
