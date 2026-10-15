@@ -1533,12 +1533,19 @@ impl App {
         let Some(seg) = self.active_ask_seg() else {
             return;
         };
-        let id = match self.segments.get(seg) {
-            Some(Segment::Tool { ask: Some(ask), .. }) => ask.id,
+        let (id, call_id) = match self.segments.get(seg) {
+            Some(Segment::Tool {
+                ask: Some(ask),
+                call_id,
+                ..
+            }) => (ask.id, call_id.clone()),
             _ => return,
         };
         self.close_ask_segment(seg, Some(text.clone()));
-        if let Some(agent) = &self.agent {
+        if call_id.as_deref().is_some_and(|c| c.starts_with("test-ask-")) {
+            let ok = text != "(no answer)";
+            self.handle_tool_notice("ask_user".into(), text, ok, None, call_id);
+        } else if let Some(agent) = &self.agent {
             let _ = agent.control.try_send(ControlMsg::AskAnswer { id, text });
         }
         self.active_ask_id = None;

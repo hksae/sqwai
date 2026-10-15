@@ -2035,3 +2035,49 @@ fn context_view_renders_sections_and_scrolls_with_arrows() {
     app.render_into(&mut buf, area);
     assert_eq!(app.surf_top, 1, "down arrow scrolls /context-view by one line");
 }
+
+#[test]
+fn test_ask_settles_tool_row_on_confirm_and_on_skip() {
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.cfg.ui.experimental_test = true;
+    app.command("test ask");
+    assert!(app.tool_running(), "/test ask starts an open tool row");
+
+    // Answer all 3 questions and confirm each step
+    app.inline_ask_select(0, 0);
+    app.inline_ask_confirm();
+    assert!(app.tool_running(), "still open after Q1");
+
+    app.inline_ask_select(1, 0);
+    app.inline_ask_confirm();
+    assert!(app.tool_running(), "still open after Q2");
+
+    app.inline_ask_select(2, 0);
+    app.inline_ask_confirm();
+    assert!(
+        !app.tool_running(),
+        "/test ask must settle the tool row once all questions are confirmed"
+    );
+    assert!(matches!(
+        app.segments.last(),
+        Some(Segment::Tool {
+            ok: Some(true),
+            ask: None,
+            ..
+        })
+    ));
+
+    // Skipping via Esc also settles the tool row with ok: Some(false)
+    app.command("test ask");
+    assert!(app.tool_running());
+    app.inline_ask_skip();
+    assert!(!app.tool_running(), "skipping /test ask must settle the tool row");
+    assert!(matches!(
+        app.segments.last(),
+        Some(Segment::Tool {
+            ok: Some(false),
+            ask: None,
+            ..
+        })
+    ));
+}

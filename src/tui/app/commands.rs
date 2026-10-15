@@ -552,6 +552,10 @@ impl App {
 
     fn start_test_ask(&mut self) {
         use crate::agent::loop_task::{AskOption, AskQuestion};
+        if self.active_ask_id.is_some() {
+            self.ask_custom_focus = None;
+            self.inline_ask_skip();
+        }
         let questions = vec![
             AskQuestion {
                 header: "Storage".into(),
