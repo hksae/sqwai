@@ -871,6 +871,23 @@ async fn run_agent(
     // consecutive turns that asked for effort and came back with no reasoning
     let mut zero_reasoning_turns: u32 = 0;
 
+    let build_turn_system = |base: &[SystemPart], root: &std::path::Path, session_id: &str| {
+        let mut ts = base.to_vec();
+        if let Ok(Some(nudge)) =
+            crate::agent::journal::Journal::nudge(root, Some(session_id), plan_limits.nudge_after)
+        {
+            ts.push(crate::providers::SystemPart::volatile(nudge));
+        }
+        if let Some(plan) = crate::prompts::plan_block(root, Some(session_id)) {
+            ts.push(crate::providers::SystemPart::volatile(plan));
+        }
+        if let Some(status) = crate::prompts::plan_status_block(root, Some(session_id)) {
+            ts.push(crate::providers::SystemPart::volatile(status));
+        }
+        ts
+    };
+    let mut turn_system = build_turn_system(&system, &root, &session_id);
+
     loop {
         // Transcript sync for hard-abort survival (main agent only — a
         // child's transcript must never overwrite its parent's): every
@@ -925,6 +942,7 @@ async fn run_agent(
             // owns has changed, so the provider's copy of it is no longer the
             // context this turn is about (§3.3).
             previous_response_id = None;
+            turn_system = build_turn_system(&system, &root, &session_id);
             let _ = tx
                 .send(AgentEvent::Compaction {
                     summarized,
@@ -932,26 +950,6 @@ async fn run_agent(
                     after,
                 })
                 .await;
-        }
-
-        let mut turn_system = system.clone();
-        if let Ok(Some(nudge)) =
-            crate::agent::journal::Journal::nudge(&root, Some(&session_id), plan_limits.nudge_after)
-        {
-            turn_system.push(crate::providers::SystemPart::volatile(nudge));
-        }
-        // The plan is the model's only plan source, rebuilt live on every
-        // request: a turn-start snapshot would predate this turn's plan
-        // mutations. Both halves ride the volatile tail. The goal used to be a
-        // cached part on the theory that it churns only on rewrite — but
-        // `create` and `complete` are rewrites of a kind, and each one
-        // re-keyed the whole cached prefix: measured at ±531 B per plan
-        // lifecycle, and behind that key sits the entire conversation.
-        if let Some(plan) = crate::prompts::plan_block(&root, Some(&session_id)) {
-            turn_system.push(crate::providers::SystemPart::volatile(plan));
-        }
-        if let Some(status) = crate::prompts::plan_status_block(&root, Some(&session_id)) {
-            turn_system.push(crate::providers::SystemPart::volatile(status));
         }
         // No active plan: the host says nothing about plans. The convention
         // "no plan block means no plan, do not reconstruct one from history" is
@@ -990,7 +988,7 @@ async fn run_agent(
             &provider,
             &ChatRequest {
                 model_id: model_id.clone(),
-                system: turn_system,
+                system: turn_system.clone(),
                 messages: request_messages,
                 effort,
                 effort_support,

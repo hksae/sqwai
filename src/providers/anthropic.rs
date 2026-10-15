@@ -109,8 +109,13 @@ pub fn build_body(req: &ChatRequest, default_max_tokens: u32, cache_breakpoints:
         let last = system.len() - 1;
         system[last]["cache_control"] = json!({"type": "ephemeral"});
     }
+    let tail = super::volatile_system_text(&req.system);
+    let last_user = req.messages.iter().rposition(|m| m.role == Role::User);
+    if last_user.is_none() && !tail.trim().is_empty() {
+        system.push(json!({"type": "text", "text": super::host_tail(&tail)}));
+    }
     let mut msgs: Vec<Value> = Vec::new();
-    for m in &req.messages {
+    for (i, m) in req.messages.iter().enumerate() {
         if m.role == Role::System
             || (m.content.is_empty() && m.tool_calls.is_empty() && m.role != Role::Tool)
         {
@@ -121,6 +126,10 @@ pub fn build_body(req: &ChatRequest, default_max_tokens: u32, cache_breakpoints:
             Role::Assistant => "assistant",
             Role::System => unreachable!(),
         };
+        let mut m_blocks = content_blocks(m, thinking_on);
+        if Some(i) == last_user && !tail.trim().is_empty() {
+            m_blocks.insert(0, json!({"type": "text", "text": super::host_tail(&tail)}));
+        }
         // merge consecutive same-role turns (API requires alternation);
         // tool results must land in a user turn right after the assistant
         let same_role = msgs
@@ -137,12 +146,16 @@ pub fn build_body(req: &ChatRequest, default_max_tokens: u32, cache_breakpoints:
             // thinking-first survives the merge: saved thinking goes ahead
             // of the combined content, the rest extends it as before.
             arr.splice(..0, thinking_blocks(m, thinking_on));
-            arr.extend(content_blocks(m, false));
+            let mut rest = content_blocks(m, false);
+            if Some(i) == last_user && !tail.trim().is_empty() {
+                rest.insert(0, json!({"type": "text", "text": super::host_tail(&tail)}));
+            }
+            arr.extend(rest);
             continue;
         }
         msgs.push(json!({
             "role": role,
-            "content": content_blocks(m, thinking_on),
+            "content": m_blocks,
         }));
     }
     // breakpoint on the last history message: everything before it —
@@ -165,35 +178,6 @@ pub fn build_body(req: &ChatRequest, default_max_tokens: u32, cache_breakpoints:
             && let Some(block) = arr.last_mut()
         {
             block["cache_control"] = json!({"type": "ephemeral"});
-        }
-    }
-    // In Anthropic's `/v1/messages`, prefix hashing is cumulative across
-    // `tools -> system -> messages`. Placing volatile host state inside
-    // `system` when `messages` is non-empty would sit ahead of `messages`
-    // and invalidate both history breakpoints on every clock/git/plan update.
-    // Instead, when `msgs` is non-empty, the host block rides unmarked after
-    // the final history breakpoint inside the trailing user turn.
-    let tail = super::volatile_system_text(&req.system);
-    if !tail.trim().is_empty() {
-        let tail_block = json!({"type": "text", "text": super::host_tail(&tail)});
-        if msgs.is_empty() {
-            system.push(tail_block);
-        } else if msgs
-            .last()
-            .and_then(|p| p.get("role"))
-            .and_then(|r| r.as_str())
-            == Some("user")
-            && let Some(arr) = msgs
-                .last_mut()
-                .and_then(|p| p.get_mut("content"))
-                .and_then(|c| c.as_array_mut())
-        {
-            arr.push(tail_block);
-        } else {
-            msgs.push(json!({
-                "role": "user",
-                "content": [tail_block],
-            }));
         }
     }
 

@@ -254,8 +254,8 @@ fn body_has_cache_control_and_thinking() {
     let b = build_body(&req, 8192, true);
     assert_eq!(b["model"], "claude-x");
     // stable system keeps its trailing marker; when messages are non-empty,
-    // the volatile host block rides unmarked after the last history message's
-    // breakpoint so `system` ahead of `messages` stays byte-identical
+    // the volatile host block sits immediately before the last user turn's
+    // text block so the request ends on the user's words (or tool result)
     let system = b["system"].as_array().unwrap();
     assert_eq!(system.len(), 1);
     assert_eq!(system[0]["cache_control"]["type"], "ephemeral");
@@ -264,22 +264,21 @@ fn body_has_cache_control_and_thinking() {
     assert_eq!(msgs.len(), 1);
     assert_eq!(msgs[0]["role"], "user");
     assert_eq!(msgs[0]["content"].as_array().unwrap().len(), 2);
-    assert_eq!(msgs[0]["content"][0]["cache_control"]["type"], "ephemeral");
-    assert_eq!(msgs[0]["content"][0]["text"], "hi");
-    assert!(msgs[0]["content"][1].get("cache_control").is_none());
+    assert!(msgs[0]["content"][0].get("cache_control").is_none());
     assert!(
-        msgs[0]["content"][1]["text"]
+        msgs[0]["content"][0]["text"]
             .as_str()
             .unwrap()
             .contains("git: on branch main")
     );
+    assert_eq!(msgs[0]["content"][1]["cache_control"]["type"], "ephemeral");
+    assert_eq!(msgs[0]["content"][1]["text"], "hi");
     assert_eq!(b["thinking"]["budget_tokens"], 16384);
     assert_eq!(b["max_tokens"], 8192 + 16384);
 }
 
 /// The cache bug in one assertion: a changed host block must not move a
-/// single byte of the cached prefix (`tools -> system -> messages[..breakpoint]`).
-/// Only the unmarked trailing block after the history breakpoint differs.
+/// single byte of the cached prefix (`tools -> system -> earlier turns`).
 #[test]
 fn volatile_change_keeps_the_prefix_bytes() {
     let body_for = |volatile: &str| {
@@ -290,7 +289,11 @@ fn volatile_change_keeps_the_prefix_bytes() {
                     crate::providers::SystemPart::cached("stable prefix"),
                     crate::providers::SystemPart::volatile(volatile),
                 ],
-                messages: vec![Message::new(Role::User, "hi")],
+                messages: vec![
+                    Message::new(Role::User, "turn 1"),
+                    Message::new(Role::Assistant, "ans 1"),
+                    Message::new(Role::User, "hi"),
+                ],
                 effort: None,
                 effort_support: Default::default(),
                 max_tokens: None,
@@ -305,13 +308,15 @@ fn volatile_change_keeps_the_prefix_bytes() {
     let before = body_for("git: on branch main");
     let after = body_for("git: on branch other");
     assert_eq!(before["system"], after["system"]);
-    assert_eq!(
-        before["messages"][0]["content"][0],
-        after["messages"][0]["content"][0]
-    );
+    assert_eq!(before["messages"][0], after["messages"][0]);
+    assert_eq!(before["messages"][1], after["messages"][1]);
     assert_ne!(
-        before["messages"][0]["content"][1],
-        after["messages"][0]["content"][1]
+        before["messages"][2]["content"][0],
+        after["messages"][2]["content"][0]
+    );
+    assert_eq!(
+        before["messages"][2]["content"][1],
+        after["messages"][2]["content"][1]
     );
 }
 

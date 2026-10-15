@@ -32,7 +32,21 @@ fn input_items(req: &ChatRequest) -> Vec<Value> {
         .map(|part| json!({"role": "system", "content": part.text}))
         .collect();
 
-    for m in &req.messages {
+    let tail = crate::providers::volatile_system_text(&req.system);
+    let last_user = req.messages.iter().rposition(|m| m.role == Role::User);
+    if last_user.is_none() && !tail.trim().is_empty() {
+        input.push(json!({
+            "role": "system",
+            "content": crate::providers::host_tail(&tail),
+        }));
+    }
+    for (i, m) in req.messages.iter().enumerate() {
+        if Some(i) == last_user && !tail.trim().is_empty() {
+            input.push(json!({
+                "role": "system",
+                "content": crate::providers::host_tail(&tail),
+            }));
+        }
         match m.role {
             // legacy: a persisted system message would still map correctly
             Role::System => input.push(json!({"role": "system", "content": m.content})),
@@ -80,20 +94,6 @@ fn input_items(req: &ChatRequest) -> Vec<Value> {
                 "output": m.content,
             })),
         }
-    }
-    let tail = crate::providers::volatile_system_text(&req.system);
-    if !tail.trim().is_empty() {
-        // `system` role, one slot before the trailing user item: the last thing
-        // in the request must be the human's turn or the tool result answering
-        // a call, never a host block claiming the user's role (§18.1.1)
-        let at = crate::providers::host_block_index(input.len(), &req.messages);
-        input.insert(
-            at,
-            json!({
-                "role": "system",
-                "content": crate::providers::host_tail(&tail),
-            }),
-        );
     }
     input
 }

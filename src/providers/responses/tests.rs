@@ -202,14 +202,16 @@ fn host_block_stays_last_behind_tool_results() {
         context_transport: crate::providers::ContextTransport::Stateless,
     };
     let input = build_body(&req)["input"].as_array().unwrap().clone();
-    // the call and its output stay adjacent, and the host block is last
+    // the host block stays anchored before the turn's user message, and the
+    // tool call and its output stay adjacent at the very end
+    assert_eq!(input[1]["role"], "system");
+    assert_eq!(input[2]["role"], "user");
     let at = input
         .iter()
         .position(|item| item["type"] == "function_call_output")
         .unwrap();
     assert_eq!(input[at - 1]["type"], "function_call");
-    assert_eq!(input[at + 1]["role"], "system");
-    assert_eq!(input.len(), at + 2);
+    assert_eq!(input.len(), at + 1);
 }
 
 /// The round trip that #47 was about: a call the model made and the result

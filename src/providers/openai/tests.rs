@@ -521,9 +521,10 @@ fn system_block_precedes_history_and_host_state_is_not_a_user_turn() {
     assert_eq!(msgs.last().unwrap()["content"], "hi");
 }
 
-/// Inside a tool loop the request ends on a tool result, and nothing may be
-/// wedged between a call and the output that answers it: there the host
-/// block stays last, and what defuses it is its role, not its position.
+/// Inside a tool loop the request must end on the tool result itself (never on
+/// a trailing host block after the tool result, which models/relays misread as
+/// a new turn interrupting the loop), while the host block stays anchored
+/// immediately before the turn's user message.
 #[test]
 fn host_block_follows_tool_results_but_never_wears_user() {
     let body = OpenAiProvider::build_body(&ChatRequest {
@@ -547,23 +548,18 @@ fn host_block_follows_tool_results_but_never_wears_user() {
         context_transport: crate::providers::ContextTransport::Stateless,
     });
     let msgs = body["messages"].as_array().unwrap();
-    // The block trails the tool result: nothing may be wedged between a call
-    // and the output that answers it, so position is not the lever here —
-    // the `system` role is.
-    assert_eq!(msgs.last().unwrap()["role"], "system");
-    assert!(
-        msgs.last().unwrap()["content"]
-            .as_str()
-            .unwrap()
-            .contains('B')
-    );
+    assert_eq!(msgs[0]["role"], "system");
+    assert_eq!(msgs[0]["content"], "A");
+    assert_eq!(msgs[1]["role"], "system");
+    assert!(msgs[1]["content"].as_str().unwrap().contains('B'));
+    assert_eq!(msgs[2]["role"], "user");
+    assert_eq!(msgs[2]["content"], "hi");
+    assert_eq!(msgs[3]["role"], "assistant");
     assert_eq!(
-        msgs[msgs.len() - 2]["role"],
+        msgs.last().unwrap()["role"],
         "tool",
-        "the tool result stays directly above the block: {}",
-        msgs[msgs.len() - 2]
+        "the tool result must be the very last message in a tool loop"
     );
-    assert_eq!(msgs[msgs.len() - 3]["role"], "assistant");
     assert!(
         !msgs.iter().any(|m| m["role"] == "user"
             && m["content"]
