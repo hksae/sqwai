@@ -3,6 +3,8 @@ source: src/tui/app/tests/settings.rs
 expression: s
 ---
 
+  sqwai v0.1.0
+  [CWD]
  › Run the tests.
 
  ◜ bash ({"cmd":"cargo test"})
@@ -21,8 +23,5 @@ expression: s
 
 
 
-
-
-
 ›
- ACT                                               0% (0) m off [CWD]
+ ACT                                                     0% (0) m off

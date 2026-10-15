@@ -3,12 +3,11 @@ source: src/tui/app/tests/settings.rs
 expression: s
 ---
 
+  sqwai v0.1.0
+  [CWD]
  › Hello
 
  Hi there!
-
-
-
 
 
 

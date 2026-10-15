@@ -3,26 +3,7 @@ source: src/tui/app/tests/settings.rs
 expression: s
 ---
 
- ▗█▀█▖▗█▀█▖▐▌    ▐▌▗█▀█▖▝▜▛▘
- ▝▙▄▄ ▐▌ ▐▌▐▌ ▐▌ ▐▌▐▙▄▟▌ ▐▌
- ▗▄ ▟▌▐▙ ▟▙▝█▄▛▜▄█▘▐▌ ▐▌ ▐▌
-  ▀▀▀  ▀▀▀▝▘▝▀  ▀▘ ▝▘ ▝▘▝▀▀▘
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+  sqwai v0.1.0
+  [CWD]
 ›
- ACT                                               0% (0) m off [CWD]
+ ACT                                                     0% (0) m off

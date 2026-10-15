@@ -131,6 +131,19 @@ pub fn shimmer_warn_spans(text: &str, tick: usize) -> Vec<Span<'static>> {
     }
 }
 
+/// Render `text` in the brand accent (`CORAL_START`) with a bright white crest
+/// sweeping across it for the given tick (used on the transcript header `sqwai`).
+pub fn shimmer_brand_spans(text: &str, tick: usize) -> Vec<Span<'static>> {
+    if has_truecolor() {
+        shimmer_rgb_tint(text, tick, crate::tui::art::CORAL_START, CREST_RGB)
+    } else {
+        vec![Span::styled(
+            text.to_string(),
+            Theme::brand_ink().add_modifier(Modifier::BOLD),
+        )]
+    }
+}
+
 /// Truecolor path: every char BOLD, fg blended gray → white by the wave.
 fn shimmer_rgb(text: &str, tick: usize) -> Vec<Span<'static>> {
     shimmer_rgb_tint(text, tick, BASE_RGB, CREST_RGB)

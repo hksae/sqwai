@@ -3426,12 +3426,17 @@ impl App {
     fn animating_terms(&self) -> (bool, u32) {
         let stream = self.streaming;
         let tools = self.tool_running();
-        // the animation gallery and the approval/confirm shimmers *are* their
-        // frames: they must keep their 20 FPS with nothing else running
-        let gallery = matches!(
-            self.cur_menu(),
-            Some(Menu::TestAnim | Menu::Approval { .. } | Menu::ConfirmDelete { .. })
-        );
+        // the animation gallery, the approval/confirm shimmers, and the top-of-chat
+        // `sqwai` brand wordmark *are* their frames: they must keep their 20 FPS
+        // while visible on screen with nothing else running
+        let brand = self.last_chat.height > 1
+            && self.active_subagent.is_none()
+            && self.chat_top(self.last_chat.height) <= 1;
+        let gallery = brand
+            || matches!(
+                self.cur_menu(),
+                Some(Menu::TestAnim | Menu::Approval { .. } | Menu::ConfirmDelete { .. })
+            );
         // a live chip sweep gets its 250ms even past streaming end, or the chip
         // would freeze mid-blend on the toggle
         let mode = self

@@ -1851,6 +1851,12 @@ impl App {
                 struct_ord += 1;
             }};
         }
+        if self.active_subagent.is_none() {
+            struct_row!(blank(), None);
+            for l in self.empty_mark_lines() {
+                struct_row!(l, None);
+            }
+        }
         // Flat transcript (Claude-style): every segment renders its own
         // rows, newest last, no collapsing. Groups still exist as data
         // (session summaries re-attach through them), but the view never
@@ -2226,47 +2232,25 @@ impl App {
         }
     }
 
-    /// Empty-session mark: gradient wordmark + MCP count + next action.
-    /// Everything here is already in memory (binary version, loaded
-    /// config, linked plan id) — no background collection, ever.
-    /// Too narrow for the banner: plain dim line instead (same responsive
-    /// rule as gemini-cli).
+    /// Transcript header at the top of the session history:
+    /// ` sqwai v<version>` (with brand shimmer on `sqwai` and dim version)
+    /// followed by ` <cwd>` in dim gray. Fits even the narrowest terminal.
     pub(super) fn empty_mark_lines(&self) -> Vec<Line<'static>> {
-        let mcp = self.cfg.mcp.servers.iter().filter(|s| s.enabled).count();
-        let mut out = if self.last_chat.width >= 69 {
-            crate::tui::art::sqwai_gradient_lines()
-        } else if self.last_chat.width >= 34 {
-            // narrow terminal: the compact quadrant wordmark instead of
-            // the pixel banner (same responsive rule as gemini-cli)
-            crate::tui::art::sqwai_compact_lines()
-        } else {
-            vec![Line::from(Span::styled(
-                format!("  sqwai v{}", env!("CARGO_PKG_VERSION")),
-                Theme::dim(),
-            ))]
-        };
-        let mut second = vec![Span::styled("  ".to_string(), Theme::base())];
-        if mcp > 0 {
-            second.push(Span::styled(format!("{mcp} MCP"), Theme::meta()));
-            second.push(Span::styled(" · ".to_string(), Theme::dim()));
-        }
-        if self.session.plan_id.is_some() {
-            second.push(Span::styled(
-                "enter".to_string(),
-                Theme::base().add_modifier(Modifier::BOLD),
-            ));
-            second.push(Span::styled(
-                ": continue next plan step".to_string(),
-                Theme::dim(),
-            ));
-            out.push(Line::from(second));
-        } else if mcp > 0 {
-            // no plan hint ("type to start" is obvious); MCP alone still
-            // earns its row
-            out.push(Line::from(second));
-        }
-        // logo + version always; the hint row only when it says something
-        out
+        let mut spans = vec![Span::styled(" ".to_string(), Theme::base())];
+        spans.extend(crate::tui::shimmer::shimmer_brand_spans(
+            "sqwai",
+            self.spinner_tick,
+        ));
+        spans.push(Span::styled(
+            format!(" v{}", env!("CARGO_PKG_VERSION")),
+            Theme::dim(),
+        ));
+        let w = self.last_chat.width.max(self.cache_w).max(20) as usize;
+        let cwd = truncate_display_width(&self.cwd_label, w.saturating_sub(1));
+        vec![
+            Line::from(spans),
+            Line::from(Span::styled(format!(" {cwd}"), Theme::dim())),
+        ]
     }
 
     /// Test/compat entry: production renders via [`Self::render_into`]
@@ -2531,7 +2515,7 @@ impl App {
                 }
             }
             let sel = self.sel;
-            let visible: Vec<Line> = self
+            let mut visible: Vec<Line> = self
                 .cache_lines
                 .iter()
                 .enumerate()
@@ -2566,26 +2550,17 @@ impl App {
                     _ => l.clone(),
                 })
                 .collect();
+            if self.active_subagent.is_none() && sel.is_none() && top <= 1 {
+                let idx = 1 - top;
+                if idx < visible.len()
+                    && let Some(first_mark) = self.empty_mark_lines().into_iter().next()
+                {
+                    visible[idx] = first_mark;
+                }
+            }
             // Lines carry their own styles. Do not apply the base background at
             // widget level: it would override INPUT_BG on user-strip rows.
             Paragraph::new(visible).render(chat, buf);
-            // Empty session mark: logo at the top of the chat area.
-            if self.segments.is_empty() && !self.streaming {
-                let mark = self.empty_mark_lines();
-                // the mark is taller than a short viewport: clip, never panic
-                let h = (mark.len() as u16).min(chat.bottom().saturating_sub(chat.y + 1));
-                if h > 0 {
-                    Paragraph::new(mark).render(
-                        Rect {
-                            x: chat.x,
-                            y: chat.y + 1,
-                            width: chat.width,
-                            height: h,
-                        },
-                        buf,
-                    );
-                }
-            }
             // The transcript widget repaints its own rectangle, so apply the
             // full-width fill again afterwards to restore the two outer gutters.
             for (screen_row, abs_row) in (top..top + chat.height as usize).enumerate() {
@@ -4451,9 +4426,8 @@ impl App {
         // transient messages (retry, toast, checkpoint) live in the notice
         // row above the composer now; the bar keeps metrics only, so nothing
         // here is ever squeezed or cut. Right side, single-space rhythm:
-        // `6% (62k) cache 37% model effort ~/dir` — context first, details
-        // in parens, model and dir in quiet white.
-        let dir = self.cwd_label.clone();
+        // `6% (62k) cache 37% model effort` — context first, details
+        // in parens, model in quiet white.
 
         let context_used = self.session.context_tokens_used();
         let ctx_pct = (self.session.context_percent() as u64).min(100);
@@ -4493,30 +4467,10 @@ impl App {
         // one space between blocks, counted exactly like the spans below:
         // no slack anywhere, the row must fill the terminal edge to edge
         let fixed_len: usize =
-            cols(&ctx_label) + 1 + cols(&model_label) + 1 + cols(&ef_label) + cols(&lsp_label);
+            cols(&ctx_label) + 1 + cols(&model_label) + 1 + cols(&ef_label) + cols(&lsp_label) + 1;
 
         let lw = left_base_cols as u16;
-
-        // Everything except the directory, which is the least important item
-        // and therefore the one that yields when the row is too narrow. `pad`
-        // below saturates at zero, so without this the row simply grew past
-        // the terminal: at width 70 a directory named `仕事プロジェクト`
-        // produced a 72-column status bar, and the click targets derived from
-        // these same numbers landed outside the row.
-        let dir_budget = (w as usize)
-            .saturating_sub(lw as usize + fixed_len)
-            .min(DIR_MAX_COLS);
-        let dir_label = if dir.is_empty() || dir_budget < 2 {
-            String::new()
-        } else {
-            // leading gap + one trailing space: the gap is part of the
-            // label, so fixed_len stays exact whether the tail shows or not
-            format!(
-                " {} ",
-                truncate_display_width(&dir, dir_budget.saturating_sub(2))
-            )
-        };
-        let right_len = fixed_len + cols(&dir_label);
+        let right_len = fixed_len;
         // mode chip: soft effort hues, with a quick RGB sweep between
         // them on toggle (truecolor only). Same text, weight and width
         // either way, so the padding and click targets below are unaffected.
@@ -4561,9 +4515,7 @@ impl App {
         if !lsp_label.is_empty() {
             spans.push(Span::styled(lsp_label, Theme::warn()));
         }
-        if !dir_label.is_empty() {
-            spans.push(Span::styled(dir_label, Theme::meta()));
-        }
+        spans.push(Span::styled(" ".to_string(), Theme::base()));
         spans
     }
 }
@@ -4621,10 +4573,6 @@ fn pad_display(s: &str, width: usize) -> String {
     let used = UnicodeWidthStr::width(s);
     format!("{s}{}", " ".repeat(width.saturating_sub(used)))
 }
-
-/// Widest the project directory may get in the status bar before it is
-/// truncated. It shrinks further when the rest of the row needs the space.
-const DIR_MAX_COLS: usize = 20;
 
 /// Background step-down for the modal-menu dim pass. DIM alone only dulls
 /// foreground intensity, so this maps every painted background one step

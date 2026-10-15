@@ -545,78 +545,25 @@ fn apply_session_from_startup_does_not_persist_empty_stub() {
 
 #[test]
 fn empty_mark_lines_cover_mcp_plan_and_plain_states() {
-    use crate::config::{McpServerDef, McpTransport};
     let text = |app: &crate::tui::app::App| -> Vec<String> {
         app.empty_mark_lines()
             .iter()
             .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
             .collect()
     };
-    // plain: no MCP, no linked plan → banner alone ("type to
-    // start" is obvious and stays out). Draw once so the mark sees a
-    // wide chat area; narrow terminals get the compact mark instead.
     let mut app = test_app("http://127.0.0.1:9/v1".into());
-    app.startup = false;
-    let _ = render_to_string(&mut app, 100, 30);
+    app.cwd_label = "~/sqwai".into();
     let lines = text(&app);
-    assert_eq!(lines.len(), 8, "wordmark block: {lines:?}");
-    assert!(
-        lines.iter().any(|l| l.contains('█')),
-        "block art: {lines:?}"
-    );
-    // linked plan: enter hint instead
-    let mut app = test_app("http://127.0.0.1:9/v1".into());
-    app.session.plan_id = Some("p1".into());
-    let lines = text(&app);
-    assert!(
-        lines
-            .last()
-            .expect("hint row")
-            .contains("enter: continue next plan step"),
-        "{lines:?}"
-    );
-    // narrow terminal: the compact quadrant wordmark instead of the
-    // pixel banner
+    assert_eq!(lines.len(), 2, "two-line transcript header: {lines:?}");
+    assert!(lines[0].contains("sqwai v"), "{lines:?}");
+    assert_eq!(lines[1], " ~/sqwai");
+
+    // Fits narrow terminals without changing shape
     let mut narrow = test_app("http://127.0.0.1:9/v1".into());
-    narrow.startup = false;
-    let _ = render_to_string(&mut narrow, 40, 30);
-    let lines = text(&narrow);
-    assert_eq!(lines.len(), 4, "compact block: {lines:?}");
-    assert!(
-        lines.iter().any(|l| l.contains('▀') || l.contains('▄')),
-        "compact art: {lines:?}"
-    );
-    assert!(
-        !lines.iter().any(|l| l.contains('░')),
-        "no pixel shading when narrow: {lines:?}"
-    );
-    // MCP: enabled servers counted, disabled skipped
-    let mut app = test_app("http://127.0.0.1:9/v1".into());
-    app.cfg.mcp.servers = vec![
-        McpServerDef {
-            name: "a".into(),
-            enabled: true,
-            transport: McpTransport::Stdio {
-                command: "x".into(),
-                args: Vec::new(),
-                env: Default::default(),
-            },
-        },
-        McpServerDef {
-            name: "b".into(),
-            enabled: false,
-            transport: McpTransport::Stdio {
-                command: "y".into(),
-                args: Vec::new(),
-                env: Default::default(),
-            },
-        },
-    ];
-    let lines = text(&app);
-    assert!(
-        lines.last().expect("hint row").contains("1 MCP"),
-        "{lines:?}"
-    );
+    narrow.cwd_label = "~/very/long/project/path/that/truncates/cleanly".into();
+    let _ = render_to_string(&mut narrow, 24, 16);
+    let nlines = text(&narrow);
+    assert_eq!(nlines.len(), 2);
 }
 
 #[test]
