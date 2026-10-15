@@ -169,7 +169,7 @@ impl App {
                 provider: self.model_cfg.provider.clone(),
             }),
             "/exit" => {
-                // §2.5 runs retention on `/new` and `/exit`; the current
+                // runs retention on `/new` and `/exit`; the current
                 // session's own chain is kept so a resumed session still has
                 // its undo history.
                 self.run_undo_maintenance();

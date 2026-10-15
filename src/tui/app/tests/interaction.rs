@@ -880,7 +880,7 @@ fn mode_toggle_rearms_blend_instead_of_breaking() {
     );
 }
 
-/// §5.1: the status bar shows the *effective* mapping. Selecting `max` on
+/// the status bar shows the *effective* mapping. Selecting `max` on
 /// a model whose API stops at `high` used to read `th:max`, which claimed
 /// work that was never requested.
 #[test]

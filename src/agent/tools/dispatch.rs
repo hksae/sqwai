@@ -21,7 +21,7 @@ pub struct FileDiff {
     pub hash_after: String,
     pub mode: String,
     pub checkpoint: Option<String>,
-    /// blake3 name of the pre-image in the layer-1 blob store (§2.5), when it
+    /// blake3 name of the pre-image in the layer-1 blob store, when it
     /// was stored. `None` for a file that did not exist yet, and for a store
     /// that could not be written — the edit still happens, uninsured, which
     /// is the same trade the git snapshot already made.
@@ -44,7 +44,7 @@ pub struct Outcome {
     pub file_diff: Option<FileDiff>,
     /// host-derived metadata for all modified files (e.g. multi-file patch)
     pub file_diffs: Vec<FileDiff>,
-    /// §3.7: the user pressed Esc while this tool was running. Distinct from
+    /// the user pressed Esc while this tool was running. Distinct from
     /// an ordinary failure — the journal records `code: "cancelled"` rather
     /// than folding it into an error the model is expected to react to.
     pub cancelled: bool,
@@ -73,7 +73,7 @@ impl Outcome {
             cancelled: false,
         }
     }
-    /// §3.7: `tool_result ok:false code:cancelled`. The step stays
+    /// `tool_result ok:false code:cancelled`. The step stays
     /// `in_progress` and nothing prior is reverted — this only marks the one
     /// call that was interrupted.
     pub fn cancelled() -> Self {
@@ -116,7 +116,7 @@ impl Outcome {
 }
 
 /// (id, owning session, command) of background jobs whose processes are
-/// still alive. The undo preflight (§2.5, S1) refuses a restore while any
+/// still alive. The undo preflight refuses a restore while any
 /// of these run — the writer lock stops in-process dispatch, but an
 /// already-running shell would keep writing mid-restore.
 pub(crate) fn bg_running_commands() -> Vec<(u64, String, String)> {
@@ -166,7 +166,7 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
         );
     }
     // A subagent mutating after its step was reopened (or its plan retired)
-    // would attach stale work to a fresh epoch (§2.2.4). Refuse instead.
+    // would attach stale work to a fresh epoch. Refuse instead.
     if let Some(inherited) = ctx.subagent_step.clone()
         && matches!(name, "write" | "edit" | "multi_edit" | "patch" | "bash")
         && !step_epoch_current(&ctx.root, &inherited)
@@ -365,7 +365,7 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
     }
 }
 
-/// The `journal` tool: a read-only projection of the host journal (§2.2).
+/// The `journal` tool: a read-only projection of the host journal.
 ///
 /// The model never writes here except through `note`, and it cannot read the
 /// journal files directly (host-owned state), so this op is the one window on
@@ -532,7 +532,7 @@ fn journal_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
     Outcome::ok(out)
 }
 
-/// Rendered recap: a day header, then one entry per session (§20). Bounded on
+/// Rendered recap: a day header, then one entry per session. Bounded on
 /// purpose — a busy week must cost one tool result, not a transcript, which is
 /// the mistake the diary made by pasting the whole session in every day.
 fn recap_text(items: &[crate::agent::journal::Recap], days: i64) -> String {
@@ -786,7 +786,7 @@ fn parse_time_bound(s: &str, end_of_day: bool) -> Option<chrono::DateTime<chrono
     None
 }
 
-/// The `plan` tool: one operation per call, validated by the host (§2.1.3).
+/// The `plan` tool: one operation per call, validated by the host.
 /// The two shapes the model writes when it batches `create` and `start` in one
 /// turn, before the create result exists: `step_id` where the op wants `id`,
 /// and the plan's own ULID in `id`. Both are answered while the intent is
@@ -925,7 +925,7 @@ pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                 // Host value, from the model's context and [plan].budget_ratio.
                 // It used to be read out of the model's own tool arguments,
                 // which let it raise its own ceiling and skip the folding in
-                // §2.1.5.
+                // .
                 let budget_limit = ctx
                     .plan_limits
                     .budget_tokens(ctx.context_limit)
@@ -935,7 +935,7 @@ pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                         created.sessions = vec![ctx.session_id.clone()];
                         let id = created.id.clone();
                         let step_count = created.steps.len();
-                        // Journal-first (§2.1.4): the intent carries everything
+                        // Journal-first: the intent carries everything
                         // replay needs to rebuild this plan.
                         let args = serde_json::json!({
                             "goal": created.goal.text,
@@ -1088,7 +1088,7 @@ pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                 }
                 Err(e) => return Outcome::err(format!("plan store unreadable: {e:#}")),
             };
-            // §2.1.4: finishing a step that still carries open assumptions is
+            // finishing a step that still carries open assumptions is
             // allowed, but the model has to be told — this is the closure
             // moment the `assumption` note kind never had.
             let starting = match &other {
@@ -1099,7 +1099,7 @@ pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                 plan::Op::Finish { id, .. } => Some(id.clone()),
                 _ => None,
             };
-            // Journal-first (§2.1.4): the intent is recorded ahead of the
+            // Journal-first: the intent is recorded ahead of the
             // store, carrying the full op for replay. `show` is read-only
             // and keeps the old plain store with no cursor advance.
             let op_value = serde_json::to_value(&other).unwrap_or(serde_json::Value::Null);
@@ -1158,7 +1158,7 @@ pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                         plan::Applied::Shown { text } => Outcome::ok(text),
                         plan::Applied::Completed => {
                             let mut msg = format!("plan {} completed", active.id);
-                            // soft nudge (§8): a finished plan is a natural moment
+                            // soft nudge: a finished plan is a natural moment
                             // to persist durable facts — but only nag while project
                             // memory is still empty, so it never repeats on every plan.
                             let memory_empty =

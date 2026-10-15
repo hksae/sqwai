@@ -13,9 +13,9 @@ pub struct NewStep {
     pub title: String,
 }
 
-/// One operation per call (§2.1.3). `Serialize` is for the journal intent
+/// One operation per call. `Serialize` is for the journal intent
 /// record: every accepted op is journaled with its full args before the
-/// plan file is stored, so a crash between the two heals by replay (§2.1.4).
+/// plan file is stored, so a crash between the two heals by replay.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Op {
@@ -208,7 +208,7 @@ impl Default for Limits {
 
 /// Close the plan. The host checks only that no step is left open — the
 /// criteria are the agent's own done-notes, which nothing here runs or grades
-/// (§16). This is a completeness check on the form, not a verdict on the work.
+///. This is a completeness check on the form, not a verdict on the work.
 pub(crate) fn complete(plan: &mut Plan) -> Result<Applied, Rejection> {
     let pending: Vec<String> = plan
         .steps
@@ -477,7 +477,7 @@ pub(crate) fn resolve_boundary_commits(
     (start_sha, finish_sha)
 }
 
-/// Apply one operation. Every rule from §2.1.4 except the evidence rule.
+/// Apply one operation. Every rule except the evidence rule.
 pub fn apply(
     plan: &mut Plan,
     op: Op,
@@ -609,7 +609,7 @@ fn start(
             "only a pending or reopened step can be started",
         );
     }
-    // One step at a time (§2.2.3): the caller's session must not hold another
+    // One step at a time: the caller's session must not hold another
     // step, and the plan must not have one in progress either (a second
     // InProgress step would make dispatch attribution ambiguous).
     if let Some(other) = current_step.filter(|current| *current != id) {

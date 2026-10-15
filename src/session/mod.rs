@@ -136,7 +136,7 @@ pub struct Session {
     /// plan this session works on, if any
     #[serde(default)]
     pub plan_id: Option<String>,
-    /// step this session currently holds (§2.2.3). Set on `plan start`,
+    /// step this session currently holds. Set on `plan start`,
     /// cleared on `finish`/`block`/`cancel`; mirrored from the agent loop
     /// via `StepCurrent` events. `None` means idle.
     #[serde(default)]

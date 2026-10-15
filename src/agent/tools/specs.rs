@@ -37,7 +37,7 @@ struct ToolDef {
 /// `| Select-Object -First/Last N`". A live session on Windows obeyed it, ran
 /// under cmd.exe where no such cmdlet exists, and lost the call to exit 255 —
 /// the tool description was the bug. `ShellKind::detect()` already decides which
-/// classifier layer is authoritative (§5.2), so the same answer goes here.
+/// classifier layer is authoritative, so the same answer goes here.
 fn bash_description() -> &'static str {
     static TEXT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     TEXT.get_or_init(|| {
@@ -355,7 +355,7 @@ approach (so it is not retried), an `assumption` you are relying on but have not
 (pass `resolves` with that note's seq to close it later), a `lesson` learned, or a `blocker`. \
 Notes are how your reasoning outlives the transcript, and tomorrow-you reads them blind. \
 One batch at the close of a step is enough.",
-            parameters: json!({"type":"object","properties":{"note":{"type":"string"},"kind":{"type":"string","enum":["decision","rejected","assumption","lesson","blocker"]},"resolves":{"type":"integer","description":"journal seq of an assumption this note closes (§2.1.4)"}},"required":["note","kind"]}),
+            parameters: json!({"type":"object","properties":{"note":{"type":"string"},"kind":{"type":"string","enum":["decision","rejected","assumption","lesson","blocker"]},"resolves":{"type":"integer","description":"journal seq of an assumption this note closes"}},"required":["note","kind"]}),
         },
         ToolDef {
             name: "journal",

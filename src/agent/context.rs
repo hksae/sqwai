@@ -13,8 +13,8 @@
 //! degraded memory instead of dying on a failed request.
 //!
 //! The durable plan is not touched by any stage: it lives in
-//! `.sqwai/plans/<id>.json` (design §2.1) and is re-injected into the system
-//! block every request (design §5), so compaction can never cost the agent
+//! `.sqwai/plans/<id>.json` and is re-injected into the system
+//! block every request, so compaction can never cost the agent
 //! its goal or next step.
 
 use crate::providers::{Message, Role};
@@ -27,7 +27,7 @@ use crate::providers::{Message, Role};
 /// It used to ride every request while `system.md` told the model to treat it
 /// as the source of truth "because earlier history may be gone" — which taught
 /// a live session to distrust the conversation in front of it and re-answer its
-/// own previous turn (§18.1.5).
+/// own previous turn.
 pub fn anchor(root: &std::path::Path, session_id: &str) -> String {
     let mut out =
         String::from("ANCHOR (host-generated working memo; journal facts, not a summary)\n");
@@ -85,7 +85,7 @@ pub fn anchor(root: &std::path::Path, session_id: &str) -> String {
             .map(|seq| format!("successful exec j#{seq}"))
             .unwrap_or_else(|| "none".to_string())
     ));
-    // §2.1.4 asks the anchor to surface open assumptions: compaction is
+    // asks the anchor to surface open assumptions: compaction is
     // exactly when an unresolved assumption would otherwise vanish from the
     // conversation while still holding up the work. Scoped to this session:
     // sequence numbers restart per journal file.
@@ -164,7 +164,7 @@ pub fn anchor(root: &std::path::Path, session_id: &str) -> String {
     // No imperatives here. The anchor describes what the journal proves; the
     // rule that durable facts belong in `memory_write` lives in system.md, where
     // it is stated once. Riding every request as a command is what made a live
-    // session call `memory_write` in the middle of an unrelated loop (§18.1.3).
+    // session call `memory_write` in the middle of an unrelated loop.
     out
 }
 
@@ -176,7 +176,7 @@ pub fn anchor(root: &std::path::Path, session_id: &str) -> String {
 /// plans leave `start` records too, and a plan file can be revised after the
 /// crash. The open step is only reported when it belongs to the currently
 /// active plan for this session and the plan's own state agrees that the
-/// step is in progress (§2.1.4 host-owned state over journal claims).
+/// step is in progress.
 pub fn resume_notice(root: &std::path::Path, session_id: &str) -> Option<String> {
     let records = crate::agent::journal::Journal::records_for(root, session_id).ok()?;
     let mut open_step = None;
@@ -536,7 +536,7 @@ pub fn transcript(messages: &[Message]) -> String {
     out
 }
 
-/// Cap for the restricted short summary (§3.3.2): the only summary mode
+/// Cap for the restricted short summary: the only summary mode
 /// (`compaction.summary: off|short`). Anything the plan already owns must
 /// not be re-listed — the budget exists for what the plan does not hold.
 pub const SUMMARY_SHORT_MAX_TOKENS: u32 = 300;
@@ -563,7 +563,7 @@ pub fn truncate_summary(text: &str) -> String {
     format!("{head}{MARKER}")
 }
 
-/// The user turn of the restricted summarization request (§3.3.2): ONLY
+/// The user turn of the restricted summarization request: ONLY
 /// what the user explicitly asked, forbade, or stated as fact in the
 /// dropped messages that is NOT already covered by the durable plan.
 /// `plan_hint` is preformatted "Goal: …\nConstraints: …" (possibly empty:

@@ -360,7 +360,7 @@ fn provider_check_badge_reports_the_outcome() {
 /// checkpoint instead — a destructive command acting on the wrong target
 /// and reporting success. Per-step undo is not built yet, so an argument
 /// that is not a count has to be refused.
-/// §3.7 / §7 S: Esc must tell a running tool from plain text streaming.
+/// Esc must tell a running tool from plain text streaming.
 /// Only one tool executes at a time, so the open row — `ok: None` — is
 /// the signal; a closed row or no tool row at all means there is nothing
 /// "mid-tool" to cancel.

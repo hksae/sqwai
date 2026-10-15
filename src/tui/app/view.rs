@@ -4445,7 +4445,7 @@ impl App {
         let ctx_label = format!("{ctx_pct}% ({tok_str})");
 
         let model_label = self.session.model_key.clone();
-        // reports the effective mapping, not the raw selection (§5.1).
+        // reports the effective mapping, not the raw selection.
         // No "ef:" prefix: the models table and the effort menu already
         // dropped it, so the bar matches them.
         let effort_plan = self.effort_plan();

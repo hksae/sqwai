@@ -107,8 +107,7 @@ fn is_binary(buf: &[u8]) -> bool {
     buf.iter().take(8000).any(|&b| b == 0)
 }
 
-/// unified diff of two file contents (design §4.1: edits are shown to the user
-/// after the fact, no confirmation dialog beforehand)
+/// unified diff of two file contents
 pub(crate) fn make_diff(old: &str, new: &str) -> String {
     let d = similar::TextDiff::from_lines(old, new);
     let out = d
@@ -140,7 +139,7 @@ pub(crate) fn file_diff(
     diff: &str,
 ) -> FileDiff {
     let (added, removed) = diff_counts(diff);
-    // Layer 1 (§2.5): keep the bytes this edit is about to replace, so a
+    // Layer 1: keep the bytes this edit is about to replace, so a
     // single step can be reverted without a tree snapshot and without git.
     // A store that cannot be written must not block the edit — the same
     // decision the git snapshot already makes a few lines up.
@@ -781,7 +780,7 @@ pub(super) fn grep(
     // to grep that file, so the skip must not refuse the very path the host
     // named. Only a walk *named* into the spill dir sees what it names — a
     // sweep from the project root still never reaches host state. Same
-    // asymmetry `ctx::resolve` grants `read` (§2.0).
+    // asymmetry `ctx::resolve` grants `read`.
     let spill = host_owned.join("spill");
     let spill_named = base_dir.starts_with(&spill);
     'outer: for entry in WalkBuilder::new(&base_dir).hidden(true).build().flatten() {
@@ -870,7 +869,7 @@ fn checkpoint(ctx: &mut ToolCtx, p: &Path, what: &str) {
     let label = format!("{what} {}", rel_label(&ctx.root, p));
     // Layer 2 is best-effort by design: layer 1 already holds this file's
     // pre-image, so a missing git binary costs the tree snapshot and nothing
-    // else (§2.5's degradation table).
+    // else.
     // An unchanged tree needs no commit, and no git binary means no layer 2 —
     // neither is a reason to fail the edit.
     if let Ok(Some(sha)) = crate::agent::checkpoints::snapshot_session(

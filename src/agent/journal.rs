@@ -1,4 +1,4 @@
-//! Host-owned append-only session journal (§2.2).
+//! Host-owned append-only session journal.
 
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
@@ -48,7 +48,7 @@ pub struct Record {
     pub step: Option<String>,
     pub plan: Option<String>,
     pub agent: String,
-    /// Step epoch the record was written under (§2.2.4). `None` for
+    /// Step epoch the record was written under. `None` for
     /// pre-epoch records and the main agent, which always count as current.
     /// A subagent stamps its inherited epoch; after the step is reopened
     /// (epoch bumped) such records stop counting as evidence.
@@ -69,7 +69,7 @@ pub struct Journal {
     epoch: Option<u64>,
 }
 
-/// What a per-step revert can and cannot put back (§2.5).
+/// What a per-step revert can and cannot put back.
 #[derive(Debug, Default, Clone)]
 pub struct StepRevert {
     /// pre-images that can be restored without disturbing another step
@@ -79,7 +79,7 @@ pub struct StepRevert {
     pub written_since: Vec<String>,
 }
 
-/// What one file looked like before an undone window touched it (§2.5).
+/// What one file looked like before an undone window touched it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreImage {
     pub path: String,
@@ -95,7 +95,7 @@ pub struct PreImage {
     pub agent_hash: Option<String>,
 }
 
-/// An assumption the model recorded and nothing has resolved (§7 U).
+/// An assumption the model recorded and nothing has resolved.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Assumption {
     pub seq: u64,
@@ -318,7 +318,7 @@ impl Journal {
     }
 
     /// Stamp the inherited step epoch on every record this writer produces
-    /// (§2.2.4). Used by subagent sessions; the main session leaves it `None`.
+    ///. Used by subagent sessions; the main session leaves it `None`.
     pub fn set_epoch(&mut self, epoch: Option<u64>) {
         self.epoch = epoch;
     }
@@ -329,11 +329,11 @@ impl Journal {
     }
 
     /// Append a host-owned record and, when a step is in progress, atomically
-    /// attach it to that step's evidence (§2.1.4).
+    /// attach it to that step's evidence.
     ///
     /// The record is written either way. With nothing in progress it carries
     /// `step: null` and counts as a session fact — for the recap and
-    /// the compaction anchor — but never as evidence (§2.2.3).
+    /// the compaction anchor — but never as evidence.
     pub fn append_evidence(&mut self, kind: &str, fields: Value) -> Result<u64> {
         let seq = self.append(kind, fields)?;
         let (Some(step_id), Some(plan_id)) = (self.step.clone(), self.plan.clone()) else {
@@ -384,7 +384,7 @@ impl Journal {
     /// Re-read the tail counter from disk. `plan::commit` appends through a
     /// short-lived handle, so a long-lived writer must call this after any
     /// plan tool call before appending again — otherwise it would reuse a
-    /// sequence number (§2.1.4).
+    /// sequence number.
     ///
     /// #189: failures are returned, never swallowed — a silent stale
     /// counter reuses sequence numbers and corrupts evidence refs.
@@ -463,7 +463,7 @@ impl Journal {
     }
 
     /// What happened in this project over the last `days` days, per session
-    /// (§20). Every number comes from a record the host wrote and every plan
+    ///. Every number comes from a record the host wrote and every plan
     /// line from the plan file itself: there is no model prose in a recap, so
     /// it cannot report an outcome it never saw — which is exactly how the
     /// diary it replaces differed.
@@ -639,7 +639,7 @@ impl Journal {
 
     /// Pre-images for one plan step, and what stands in the way of using them.
     ///
-    /// §2.5: reverting a single step needs layer 1 only — *"restore
+    /// reverting a single step needs layer 1 only — *"restore
     /// `hash_before` from the blob store if the file has not been touched by
     /// any other steps since (verified via the journal's `file_diff` chain)"*.
     /// That proviso is the whole difficulty: a file the step wrote and a later
@@ -765,7 +765,7 @@ impl Journal {
         Ok(revert)
     }
 
-    /// Record a per-step revert (§2.2.2's `undo` kind, `step` variant).
+    /// Record a per-step revert.
     #[cfg(test)]
     pub fn append_undo_step(
         &mut self,
@@ -788,7 +788,7 @@ impl Journal {
     /// Retention reads this rather than the current session's journal alone:
     /// a resumed session, or a plan whose evidence points at an older
     /// session's records, must not have its pre-images collected out from
-    /// under it (§2.5).
+    /// under it.
     pub fn referenced_blobs(root: &Path) -> Result<std::collections::HashSet<String>> {
         let mut ids = std::collections::HashSet::new();
         for record in Self::records(root)? {
@@ -806,7 +806,7 @@ impl Journal {
 
     /// Session ids that still have a journal on disk. A chain whose journal is
     /// gone has nothing left that could reference its checkpoints, which is
-    /// what §2.5 means by blobs being *"purged together with the session
+    /// what means by blobs being *"purged together with the session
     /// journal"*.
     pub fn sessions_on_disk(root: &Path) -> Vec<String> {
         let dir = root.join(".sqwai").join("journal");
@@ -824,7 +824,7 @@ impl Journal {
             .collect()
     }
 
-    /// Assumption notes that nothing has closed yet (§2.1.4, §7 U).
+    /// Assumption notes that nothing has closed yet.
     ///
     /// A `note { note: "assumption" }` opens one; a later note carrying
     /// `resolves: <seq>` closes the note with that sequence number. Without
@@ -1077,7 +1077,7 @@ impl Journal {
             bail!("journal fields must be a JSON object");
         }
         let mut fields = fields.as_object().cloned().unwrap_or_default();
-        // §2.2.2: "no secrets (the same screening as §2.3.6 applies to
+        // "no secrets (the same screening as applies to
         // `summary` and `text`)". Those two carry command output and model
         // prose; everything else is a path, a hash or a count the host built
         // itself, and screening those would only mangle facts.
@@ -1226,7 +1226,7 @@ fn last_seq(path: &Path) -> Result<u64> {
 
 /// Truncate a partial trailing line, reporting how many bytes went.
 ///
-/// A crash mid-append leaves half a record; §2.2.1 has the reader drop it. It
+/// A crash mid-append leaves half a record; has the reader drop it. It
 /// also has the host write a `journal_repair` record, which is the part that
 /// was missing: an append-only log that exists for auditing was quietly losing
 /// bytes with nothing to show it happened.

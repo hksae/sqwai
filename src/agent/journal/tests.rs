@@ -89,7 +89,7 @@ fn interleaved_handles_stay_monotonic() {
     fs::remove_dir_all(root).ok();
 }
 
-/// §2.2.2 forbids secrets in the journal. The filter existed and was wired
+/// forbids secrets in the journal. The filter existed and was wired
 /// to the diary and to MEMORY.md, but not here — so a command that echoed
 /// a token wrote it verbatim into `.sqwai/journal/*.jsonl`, and from there
 /// into the diary host block and the compaction anchor, both of which are
@@ -134,7 +134,7 @@ fn secrets_are_screened_out_of_summaries_and_notes() {
     fs::remove_dir_all(root).ok();
 }
 
-/// §2.2.3: a record taken while nothing is in progress carries `step: null`
+/// a record taken while nothing is in progress carries `step: null`
 /// and is still a session fact. Dropping it emptied the diary host block
 /// and the compaction anchor for every session without an active plan.
 #[test]
@@ -241,7 +241,7 @@ fn a_record_without_a_blob_is_not_mistaken_for_a_created_file() {
     assert_eq!(pre[0].agent_hash.as_deref(), Some("sha256:new"));
 }
 
-/// §2.5's proviso for per-step undo: a file may be reverted alone only if
+/// proviso for per-step undo: a file may be reverted alone only if
 /// no later step has written it since. Reverting it anyway would put back
 /// bytes from before the *later* step, silently undoing that step too —
 /// which is worse than refusing, because the plan would still call it done.
@@ -421,7 +421,7 @@ fn a_step_reverts_only_its_own_writes() {
     );
 }
 
-/// §2.1.4 / §7 U: an assumption is open until a note closes it by seq.
+/// an assumption is open until a note closes it by seq.
 /// Without the closure the kind exists but never settles.
 #[test]
 fn an_assumption_is_open_until_a_note_resolves_it_by_seq() {
@@ -691,7 +691,7 @@ fn repairs_partial_tail_and_records_that_it_did() {
     fs::write(&path, "{\"seq\":1,\"ts\":\"1\",\"step\":null,\"plan\":null,\"agent\":\"main\",\"kind\":\"note\",\"text\":\"ok\"}\n{\"seq\":2").unwrap();
     let mut journal = Journal::open(&root, "session").unwrap();
 
-    // §2.2.1: the partial line goes, and the host says so. Truncating an
+    // the partial line goes, and the host says so. Truncating an
     // append-only log in silence is the one thing an audit record cannot do.
     let records = Journal::records_for(&root, "session").unwrap();
     assert_eq!(records.len(), 2, "{records:?}");

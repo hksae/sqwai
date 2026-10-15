@@ -361,7 +361,7 @@ fn run_blocking(ctx: &ToolCtx, command: &str, timeout_secs: u64) -> Outcome {
         if status.is_some() {
             break;
         }
-        // §3.7 / §7 S: Esc sets this from the TUI. Checked at the same
+        // Esc sets this from the TUI. Checked at the same
         // cadence as the timeout, because this loop is the only place a
         // long-running `bash` call can be interrupted at all — the tokio task
         // running the agent loop can be aborted, but that does not reach a

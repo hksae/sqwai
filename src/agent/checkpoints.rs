@@ -1,14 +1,14 @@
-//! Checkpoints taken before mutating actions (§2.5), across two layers.
+//! Checkpoints taken before mutating actions, across two layers.
 //!
 //! Layer 1 ([`crate::agent::blobs`]) keeps the pre-image of every file the
 //! host is about to write, needs no git, and powers `/undo step N`.
 //!
 //! Layer 2 ([`crate::agent::shadow`]) is the tree snapshot `bash` needs,
 //! taken in a shadow repository of our own. It used to be taken as a dangling
-//! commit in the *user's* repository, which §2.5 forbids and which a routine
+//! commit in the *user's* repository, which forbids and which a routine
 //! `git gc` in their project silently invalidated (#17). Nothing here touches
 //! their `.git` any more, and `git2` is gone from the dependency list per
-//! §5.10 — git is a binary invoked with an explicit `--git-dir`.
+//! — git is a binary invoked with an explicit `--git-dir`.
 //!
 //! Restoring is path-scoped: the caller passes the paths the host recorded as
 //! its own writes, each with the hash the agent left it at. A path whose
@@ -74,7 +74,7 @@ pub fn available_in(root: &Path, store: ShadowStore) -> bool {
 }
 
 /// Snapshot the worktree onto this session's chain in the shadow repository
-/// (§2.5), returning the commit.
+///, returning the commit.
 ///
 /// The session id keys the chain (`refs/sessions/<id>`), so two sessions in
 /// the same project do not interleave their history. An unchanged tree
@@ -91,7 +91,7 @@ pub fn snapshot_session(
     shadow.snapshot(session_id, label)
 }
 
-/// Hash-gate for pre-bash snapshots (§2.5): true when the worktree moved
+/// Hash-gate for pre-bash snapshots: true when the worktree moved
 /// since this chain's last snapshot, or when that cannot be determined.
 /// Lets safe-classified commands skip the staging cost of `snapshot_session`
 /// while keeping silently-mutating ones (formatters, checkouts) insured.
@@ -170,7 +170,7 @@ impl Maintenance {
     }
 }
 
-/// Retention for both layers (§2.5), run when a session ends.
+/// Retention for both layers, run when a session ends.
 ///
 /// Layer 1: a blob is kept while any journal still names it, or while it is
 /// younger than `[undo].blob_grace_secs`.
@@ -185,7 +185,7 @@ impl Maintenance {
 /// the maintenance, and its own undo history has to survive it.
 ///
 /// `[undo].keep_per_session` is **reported, not enforced**, and that is a
-/// deliberate gap rather than an oversight. §2.5 stores checkpoints as a
+/// deliberate gap rather than an oversight. stores checkpoints as a
 /// commit chain, and dropping the oldest commits of a chain requires
 /// rewriting every descendant — which changes the shas the session already
 /// recorded in its journal and in plan evidence, turning working undo
@@ -281,7 +281,7 @@ fn current_hash(path: &Path) -> Option<String> {
 
 /// Restore files from the layer-1 blob store, with no git involved at all.
 ///
-/// This is what §2.5 means by "the constraint 'undo unavailable outside git
+/// This is what means by "the constraint 'undo unavailable outside git
 /// repositories' is lifted": every file the host wrote through
 /// `write | edit | multi_edit | patch` has its pre-image in the store, keyed
 /// from the journal, so putting it back is a copy.
@@ -413,7 +413,7 @@ fn prune_empty_dirs(root: &Path, path: &Path) {
 /// A target present in the snapshot is written back byte for byte; one that is
 /// absent from it appeared afterwards and is deleted. A target whose current
 /// content does not match `agent_hash` was edited outside sqwai after the agent
-/// wrote it, and is reported as skipped rather than overwritten (§2.5).
+/// wrote it, and is reported as skipped rather than overwritten.
 ///
 /// The index and HEAD are never touched, and no path outside `targets` is read
 /// or written.
@@ -465,7 +465,7 @@ pub fn restore_paths_in(
                     report.failed = Some(format!("{}: {e}", parent.display()));
                     break;
                 }
-                // bytes as recorded, no git filters (§2.5: core.autocrlf = false)
+                // bytes as recorded, no git filters
                 if let Err(e) = std::fs::write(&absolute, &content) {
                     report.failed = Some(format!("{}: {e}", absolute.display()));
                     break;

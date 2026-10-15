@@ -1,4 +1,4 @@
-//! Host-owned MEMORY.md and USER.md proposal storage (DESIGN §2.3.5).
+//! Host-owned MEMORY.md and USER.md proposal storage.
 
 use crate::agent::secrets::screen;
 use anyhow::{Context, Result, bail};

@@ -1,4 +1,4 @@
-//! G0 benchmark harness (§8.2). Live, ignored-by-default tests driving full
+//! G0 benchmark harness. Live, ignored-by-default tests driving full
 //! agent runs against fixture copies.
 //!
 //! Run one shakedown first (single task, single arm), then the matrix:
@@ -10,7 +10,7 @@
 //! - plan file (steps, acceptance validation) for the mechanism arm,
 //! - fixture state (acceptance commands, trap-file hashes),
 //! - provider usage events (cost), per-turn latencies,
-//! - finish per the pre-registered symmetric definitions (§8.2).
+//! - finish per the pre-registered symmetric definitions.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -419,7 +419,7 @@ pub async fn run_arm(task: &TaskSpec, baseline: bool, session_tag: &str) -> Opti
     report.root = root;
     Some(report)
 }
-/// Mechanism finish (§8.2, pre-registered): every step closed AND every
+/// Mechanism finish: every step closed AND every
 /// acceptance item verified or waived — the `complete` call itself is not
 /// required. A completed plan counts too (it passed the same gate).
 fn plan_finished(root: &Path) -> bool {
@@ -481,7 +481,7 @@ fn plan_criteria(plan: &crate::plan::Plan) -> bool {
             crate::plan::StepStatus::Done
                 | crate::plan::StepStatus::Cancelled
                 // a step blocked with rationale is honest evidence discipline,
-                // not an open end — the `complete` ritual must not fail the run (§8.2)
+                // not an open end — the `complete` ritual must not fail the run
                 | crate::plan::StepStatus::Blocked
         )
     })
@@ -785,7 +785,7 @@ pub fn write_eval(report: &RunReport, score: &Score) {
     }
 }
 
-/// Shakedown (§8.2): one task, mechanism arm, threshold 0.01 (T1's prune
+/// Shakedown: one task, mechanism arm, threshold 0.01 (T1's prune
 /// steady-state sits near ~16k tokens, so the spec's 0.04 never compacts).
 /// Go/no-go: compactions ≥ 2 (T1 is the smallest task; longer ones keep ≥ 3),
 /// finish detected, latency not strangled. Live: needs
@@ -1114,7 +1114,7 @@ async fn bench_t4_baseline() {
     assert!(report.claimed_done, "baseline must claim T4: {report:?}");
 }
 
-/// Matrix (§8.2, pre-registered): T1, mechanism arm. Run twice; each run is
+/// Matrix: T1, mechanism arm. Run twice; each run is
 /// an independent repeat (fresh fixture copy, own eval line). Gates: ≥1
 /// compaction + spec finish rule. Acceptance/traps are DATA, not gates —
 /// a red acceptance on one arm is a finding, not a rerun trigger.

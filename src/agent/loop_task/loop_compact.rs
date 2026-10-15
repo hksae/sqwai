@@ -83,7 +83,7 @@ fn constraint_covers(constraints: &[String], lower_directive: &str) -> bool {
     })
 }
 
-/// Preformatted durable-plan block for the restricted summary (§3.3.2):
+/// Preformatted durable-plan block for the restricted summary:
 /// the summarizer can only exclude what it can see. Empty when no plan is
 /// active — then every user ask counts as uncovered.
 pub(crate) fn plan_hint_for_summary(root: &std::path::Path, session_id: &str) -> String {
@@ -439,7 +439,7 @@ impl TurnFailure {
 /// Evidence that a requested effort level was not acted on, or `None` when
 /// there is none. The distinction that matters: `reasoning_tokens: None` means
 /// the provider said nothing about reasoning, which is not the same as saying
-/// it did none — only an explicit zero is evidence (§5.1, §1.1).
+/// it did none — only an explicit zero is evidence.
 /// How many consecutive zero-reasoning turns it takes before the host says
 /// anything. One is not enough: a reasoning model may legitimately spend
 /// nothing on a trivial question, and a gateway may stub its usage details.

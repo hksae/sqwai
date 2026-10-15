@@ -77,7 +77,7 @@ fn available_in_respects_the_configured_store() {
     );
 }
 
-/// §2.5: blobs are *"purged together with the session journal"*. A chain
+/// blobs are *"purged together with the session journal"*. A chain
 /// whose journal is gone has nothing left that could reference its
 /// checkpoints; a chain whose journal is still there must survive, and so
 /// must the session running the maintenance.
@@ -148,7 +148,7 @@ fn maintenance_reports_a_chain_over_the_keep_limit() {
     );
 }
 
-/// §2.5's headline promise: undo works in a project that is not a git
+/// headline promise: undo works in a project that is not a git
 /// repository at all. No `git init` anywhere in this test.
 #[test]
 fn a_project_without_git_can_still_be_reverted() {

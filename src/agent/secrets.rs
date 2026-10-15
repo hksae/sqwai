@@ -1,4 +1,4 @@
-//! Secret screening for everything the host writes down (§2.3.6).
+//! Secret screening for everything the host writes down.
 //!
 //! Applied to MEMORY.md, the prompt blocks built from them, and the
 //! free-text fields of journal records. It is the last thing between a command

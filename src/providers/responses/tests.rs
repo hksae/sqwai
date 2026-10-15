@@ -140,7 +140,7 @@ fn body_roles_and_reasoning() {
 /// glued into the leading system block.
 /// The host block trails the history as a `system` item, one slot before the
 /// newest user turn — the model must answer the human, not the state block
-/// (§18.1.1). Inside a tool loop it stays last, because a host item must not
+///. Inside a tool loop it stays last, because a host item must not
 /// be wedged between a `function_call` and its `function_call_output`.
 #[test]
 fn host_block_trails_the_history_as_system() {

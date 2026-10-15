@@ -268,7 +268,7 @@ fn subagent_scope_sees_through_wrapper_prefixes() {
     fs::remove_dir_all(&dir).ok();
 }
 
-/// §11 operand roles: a scoped child may read from anywhere and write
+/// operand roles: a scoped child may read from anywhere and write
 /// only inside its scope. A mover's sources are reads, `/dev/null` is a
 /// sink, a sed script is not a file — none of them may refuse.
 #[test]
@@ -744,9 +744,9 @@ fn git_status_marks_paths_this_session_never_wrote() {
     fs::remove_dir_all(&dir).ok();
 }
 
-/// §2.0: file tools must refuse host-owned state under `.sqwai/`. Without
+/// file tools must refuse host-owned state under `.sqwai/`. Without
 /// this the model can rewrite the goal and mark steps done with `write`,
-/// which would contradict §8.1 ("a plan's goal cannot be changed by any
+/// which would contradict ("a plan's goal cannot be changed by any
 /// model action").
 #[test]
 fn host_owned_state_is_unreachable_from_file_tools() {
@@ -1202,10 +1202,10 @@ fn tool_schemas_are_mode_independent() {
     assert!(!is_mutating_call("read", &json!({"file_path": "src/a.rs"})));
 }
 
-/// §2.1.2 makes the plan budget a host value: model context times
+/// makes the plan budget a host value: model context times
 /// [plan].budget_ratio. It used to be read out of the model's own tool
 /// arguments — `args["context_limit"]` — so the model could raise its own
-/// ceiling and skip the folding in §2.1.5. The field is no longer even
+/// ceiling and skip the folding. The field is no longer even
 /// advertised.
 #[test]
 fn the_plan_budget_comes_from_the_host_not_the_model() {
@@ -1320,7 +1320,7 @@ fn git_branch_actions_are_identical_across_modes() {
     assert!(!is_mutating_call("git_branch", &json!({"action": "list"})));
 }
 
-/// §4: the guard is hash-tracked, so a file changed by `bash` since the
+/// the guard is hash-tracked, so a file changed by `bash` since the
 /// last read has to be read again. With paths alone the model could edit
 /// content that was already gone.
 #[test]
@@ -1370,8 +1370,8 @@ fn the_read_guard_does_not_care_how_the_path_is_spelled() {
     fs::remove_dir_all(&dir).ok();
 }
 
-/// §2.1.4 lets a step close on "diagnostics with zero errors". The
-/// record was defined in §2.2.2 and never written, so that branch was
+/// lets a step close on "diagnostics with zero errors". The
+/// record was defined and never written, so that branch was
 /// unreachable — this is the evidence path, now that it exists.
 #[test]
 fn clean_diagnostics_close_a_verify_step() {
@@ -1415,7 +1415,7 @@ fn plan_join_op_is_refused_for_the_model() {
     assert!(refused.output.contains("host-only"), "{}", refused.output);
 }
 /// A subagent mutating after its step was reopened would attach stale
-/// work to a fresh epoch (§2.2.4). The dispatcher refuses the mutation
+/// work to a fresh epoch. The dispatcher refuses the mutation
 /// instead; read-only tools keep working, and a fresh spawn proceeds.
 #[test]
 fn subagent_mutation_refused_after_step_reopen() {
@@ -1707,7 +1707,7 @@ fn finish_warns_when_evidence_predates_step_start() {
     fs::remove_dir_all(&dir).ok();
 }
 
-/// §2.1.4's closure moment: finishing a step with an open assumption
+/// closure moment: finishing a step with an open assumption
 /// succeeds and says so. A silent finish is how an assumption outlives the
 /// work that depended on it.
 #[test]
@@ -2392,7 +2392,7 @@ fn journal_read_renders_and_filters() {
         o.output
     );
     // an unfiltered list points at the digest instead of making the model
-    // page through records to find out what happened recently (§20)
+    // page through records to find out what happened recently
     assert!(
         o.output.contains("op=recap"),
         "the bare read should hint at the recap: {}",
@@ -2449,7 +2449,7 @@ fn journal_read_renders_and_filters() {
     fs::remove_dir_all(&dir).ok();
 }
 
-/// `op=recap` summarizes the recent days from host records only (§20):
+/// `op=recap` summarizes the recent days from host records only:
 /// counts, files, the plan a session worked on, and what stayed open.
 #[test]
 fn journal_recap_summarizes_recent_sessions() {

@@ -84,7 +84,7 @@ fn tool_schemas_carry_the_first_cache_breakpoint() {
     );
     assert_eq!(tools[2]["cache_control"]["type"], "ephemeral");
     // stable system keeps one trailing marker; the host block rides after it,
-    // unmarked, in `system` — never as a user turn (§18.1.1)
+    // unmarked, in `system` — never as a user turn
     let system = body["system"].as_array().unwrap();
     assert_eq!(system.len(), 2);
     assert_eq!(system[0]["text"], "stable");

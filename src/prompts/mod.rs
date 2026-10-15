@@ -29,7 +29,7 @@ const MEMORY_MAX_CHARS: usize = 12_000;
 /// The diary used to ride here too (two days raw, five more as headings) and
 /// cost up to 24KB of prefix for a copy of the journal — whose writer had in
 /// fact never produced a line of prose. Recent history is pulled now, with
-/// `journal op=recap` (§20).
+/// `journal op=recap`.
 pub fn memory_block(root: &std::path::Path) -> Option<String> {
     let mut sections = Vec::new();
     if let Ok(path) = crate::config::config_dir().map(|dir| dir.join("USER.md"))
@@ -139,7 +139,7 @@ pub fn plan_block(root: &std::path::Path, session_id: Option<&str>) -> Option<St
 /// The moving half of the plan: status and steps. Rebuilt per request — a
 /// volatile host-block part, never the cached prefix.
 ///
-/// Reference tone on purpose (§18.1.3). This block used to end in "call ops
+/// Reference tone on purpose. This block used to end in "call ops
 /// directly with the step ids above … do not `create` — continue it", and a live
 /// session obeyed it into a five-iteration loop: with every step already done
 /// there was nothing to continue, so "continue it" came out as "проверяю,
@@ -453,7 +453,7 @@ mod tests {
         assert!(v.is_empty());
     }
 
-    /// The plan block states facts and gives no orders (§18.1.3). An
+    /// The plan block states facts and gives no orders. An
     /// imperative here — "continue it" — is what a live session followed into
     /// a loop once every step was already done, because there was nothing left
     /// to continue except closing.
@@ -503,7 +503,7 @@ mod tests {
         }
         // and a closed plan says nothing at all: the absence convention lives
         // in system.md, not in a block that would re-inject plan vocabulary
-        // where there is no plan (§18.1.6)
+        // where there is no plan
         plan.status = plan::PlanStatus::Completed;
         plan::store(&dir, &plan).unwrap();
         assert!(plan_status_block(&dir, Some("sess")).is_none());

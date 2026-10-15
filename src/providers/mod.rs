@@ -189,7 +189,7 @@ pub struct Usage {
     /// Tokens the model spent reasoning, when the provider counts them.
     /// `Some(0)` is the only positive evidence that a request for effort was
     /// not acted on — `None` means the provider said nothing, which is not
-    /// the same thing and must never be read as zero (§5.1).
+    /// the same thing and must never be read as zero.
     pub reasoning_tokens: Option<u64>,
 }
 
@@ -271,7 +271,7 @@ impl SystemPart {
 /// They trail as a `system` item, and one slot earlier when the request ends
 /// on a user turn ([`host_block_trails`]): a live session proved that a host
 /// block wearing `role: user` is answered *instead of* the human, on every
-/// iteration of a tool loop (§18).
+/// iteration of a tool loop.
 pub fn stable_system_text(system: &[SystemPart]) -> String {
     join_texts(
         system
@@ -297,7 +297,7 @@ pub fn volatile_system_text(system: &[SystemPart]) -> String {
 /// is the thing the model must answer last, and a request that answers a tool
 /// call must not have anything wedged between a `function_call` and the
 /// `function_call_output` that completes it — there the block stays last, but
-/// with `system` role, which is what stops it reading as a new request (§18).
+/// with `system` role, which is what stops it reading as a new request.
 #[cfg(test)]
 pub fn host_block_trails(messages: &[Message]) -> bool {
     !messages.last().is_some_and(|m| m.role == Role::User)
@@ -377,7 +377,7 @@ pub struct RequestBreakdown {
     /// opaque provider state riding the messages. Replayed reasoning items are
     /// base64 and enormous — in one live run they were 363 KB of a 392 KB
     /// second-largest pile — and a breakdown that ignored them reported a
-    /// 257KB request for one carrying 199KB more (§18.1.9). They get their own
+    /// 257KB request for one carrying 199KB more. They get their own
     /// row because nothing else on the wire is this unmovable: the host cannot
     /// read them, summarize them, or clear them the way it can a tool result.
     pub reasoning_bytes: u64,
@@ -526,7 +526,7 @@ pub enum StreamEvent {
 
 pub type StreamResult = anyhow::Result<StreamEvent>;
 
-/// Why a provider request failed (§5.1).
+/// Why a provider request failed.
 ///
 /// Decided from the response — status and body — and attached to the error, so
 /// the retry policy is a decision about a class rather than a substring match
@@ -1128,7 +1128,7 @@ mod system_layout_tests {
         }
     }
 
-    /// Where the host block goes (§18.1.1): before the newest user turn, so the
+    /// Where the host block goes: before the newest user turn, so the
     /// human's words are the last thing the model reads; behind everything when
     /// the request answers a tool call, because a host item must not be wedged
     /// between a call and the output that completes it.

@@ -341,7 +341,7 @@ pub const BUILTIN_PROVIDERS_URL: &str =
 /// this. DNS names are NOT resolved here: resolution races the connect
 /// (rebinding) — a hostile-DNS residual remains, documented not fixed.
 ///
-/// `allow_hosts` is the user's `[web]` opt-in (§11) and opens exactly one
+/// `allow_hosts` is the user's `[web]` opt-in and opens exactly one
 /// class: loopback. A dev server on `localhost:3000` or `127.0.0.1:8080` is a
 /// legitimate target the gate used to refuse while bash `curl` reached the
 /// same host silently — the honest path was missing, not the danger.
@@ -639,7 +639,7 @@ pub fn validate_fetched_catalog(text: &str, cached_serial: u64) -> Result<Builti
             );
         }
         // The catalog is remote text: it gets no share of the user's own
-        // `[web].allow_hosts` (§11).
+        // `[web].allow_hosts`.
         url_host_allowed(&url, &[])
             .map_err(|detail| anyhow::anyhow!("provider {name:?} base_url {detail}"))?;
         if let Some((host, key_env)) = pinned_origin(name) {
@@ -760,7 +760,7 @@ pub struct SafetyConfig {
 /// `[web]` — the opt-in exceptions to the SSRF gate.
 ///
 /// `allow_hosts` lists `host` or `host:port` targets the loopback class may
-/// serve (§11). Deliberately narrow: only loopback (127.0.0.0/8, `::1`,
+/// serve. Deliberately narrow: only loopback (127.0.0.0/8, `::1`,
 /// `localhost`, `*.localhost`) can be listed. Other non-public ranges
 /// (10/8, 172.16/12, 192.168/16, 169.254/16, CGNAT) and the cloud metadata
 /// names stay refused, list or no list — those are the SSRF blast radius, and
@@ -893,7 +893,7 @@ impl Default for MemoryConfig {
     }
 }
 
-/// `[undo]` — retention and storage for the two checkpoint layers (§2.5).
+/// `[undo]` — retention and storage for the two checkpoint layers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UndoConfig {
     /// commits of a session's shadow chain to keep
@@ -946,11 +946,11 @@ impl Default for UndoConfig {
     }
 }
 
-/// `[plan]` — the host's own limits on the structured plan (§5.9).
+/// `[plan]` — the host's own limits on the structured plan.
 ///
 /// These are host values on purpose. The plan budget used to be computed from
 /// a `context_limit` the model passed in its own tool arguments, which let it
-/// raise its own ceiling and avoid the folding in §2.1.5.
+/// raise its own ceiling and avoid the folding.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct PlanConfig {
     /// share of the model's context the injected plan may occupy
@@ -983,7 +983,7 @@ pub struct VerifyConfig {
     pub commands: std::collections::BTreeMap<String, String>,
 }
 
-/// `[secrets]` — files the host must not read into durable state (§2.3.6).
+/// `[secrets]` — files the host must not read into durable state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SecretsConfig {
     /// glob patterns the project indexer skips entirely
@@ -1073,7 +1073,7 @@ impl Default for CompactionConfig {
     }
 }
 
-/// Project-level overrides (`.sqwai/config.toml`, §5.9).
+/// Project-level overrides (`.sqwai/config.toml`).
 ///
 /// A cloned repo must never be able to reconfigure trust: providers, models,
 /// keys, safety, plan gates, MCP/LSP servers, and skills-dirs are NOT

@@ -192,7 +192,7 @@ pub fn build_body(req: &ChatRequest, default_max_tokens: u32, cache_breakpoints:
     }
 
     // one mapping for the whole codebase: what goes on the wire and what the
-    // UI reports come from the same plan (§5.1)
+    // UI reports come from the same plan
     if let Some(level) = req.effort.filter(|l| *l != EffortLevel::Off)
         && let super::effort::Wire::Budget(b) = super::effort::plan(level, req.effort_support).wire
         && b > 0
@@ -213,7 +213,7 @@ pub fn build_body(req: &ChatRequest, default_max_tokens: u32, cache_breakpoints:
                         "description": t.description,
                         "input_schema": t.parameters,
                     });
-                    // §3.2 puts the tool schemas in the stable prefix with a
+                    // puts the tool schemas in the stable prefix with a
                     // breakpoint after them. A marker on the last tool caches
                     // the whole array: they are byte-identical every turn, and
                     // without this they were re-sent uncached on every request.

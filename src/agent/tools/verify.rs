@@ -12,7 +12,7 @@ use super::ctx::ToolCtx;
 use crate::plan;
 use serde_json::json;
 
-/// Append the open-assumption warning to a successful `finish` (§2.1.4).
+/// Append the open-assumption warning to a successful `finish`.
 ///
 /// Non-blocking on purpose: the step is already finished when this runs. The
 /// point is that an assumption cannot quietly outlive the step that made it —
@@ -166,7 +166,7 @@ pub(crate) fn with_authorship(ctx: &ToolCtx, mut outcome: Outcome) -> Outcome {
     outcome
 }
 
-/// Rejections are a normal tool result the model can act on (§2.1.4).
+/// Rejections are a normal tool result the model can act on.
 pub(crate) fn rejection(r: plan::Rejection) -> Outcome {
     Outcome::err(
         json!({

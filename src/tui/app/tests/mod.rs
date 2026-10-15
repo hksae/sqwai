@@ -292,7 +292,7 @@ fn rendered(app: &App) -> String {
 }
 
 // ──────────────────────────────────────────────────────────────────────
-// Render-fixture helpers and snapshot suite (§12)
+// Render-fixture helpers and snapshot suite
 // ──────────────────────────────────────────────────────────────────────
 
 /// Build a terminal, draw the app, and return all rows joined by '\n'.

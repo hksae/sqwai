@@ -1,4 +1,4 @@
-//! Structured plan (DESIGN §2.1).
+//! Structured plan.
 //!
 //! A plan is a host-owned document: the model reaches it only through the
 //! `plan` tool operations validated here. The model can never write `goal`,
@@ -78,7 +78,7 @@ impl<'de> Deserialize<'de> for EvidenceRef {
     }
 }
 
-/// Default ceiling for the number of steps (§2.1.2, `[plan].max_steps`).
+/// Default ceiling for the number of steps.
 pub const MAX_STEPS_DEFAULT: usize = 24;
 
 // ---------------------------------------------------------------- model
@@ -118,7 +118,7 @@ impl StepStatus {
         }
     }
 
-    /// Steps the host may fold away when the plan outgrows its budget (§2.1.5).
+    /// Steps the host may fold away when the plan outgrows its budget.
     #[allow(dead_code)]
     pub fn is_closed(self) -> bool {
         matches!(self, Self::Done | Self::Cancelled)
@@ -161,15 +161,15 @@ pub struct Step {
     pub summary: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
-    /// Journal seq values. Written by the host only (§2.1.2).
+    /// Journal seq values. Written by the host only.
     #[serde(default)]
     pub evidence: Vec<EvidenceRef>,
     /// Bumped by every host-only reopen; subagent evidence from an older
-    /// epoch does not count (§2.2.4, phase 2).
+    /// epoch does not count.
     #[serde(default)]
     pub step_epoch: u64,
-    /// Set on pending steps after a goal revision (§2.1.6).
-    /// Set on pending steps after a goal revision (§2.1.6).
+    /// Set on pending steps after a goal revision.
+    /// Set on pending steps after a goal revision.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stale_goal: Option<bool>,
 }
@@ -197,12 +197,12 @@ pub struct Plan {
     #[serde(default)]
     pub sessions: Vec<String>,
     /// Scoped `session:seq` of the last journal event applied to this file.
-    /// The plan is a projection replayed from here on load (§2.1.4, phase 1).
+    /// The plan is a projection replayed from here on load.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub applied_event: Option<String>,
-    /// Per-session replay cursors (§2.1.4, phase 2): `applied_event` above
+    /// Per-session replay cursors: `applied_event` above
     /// only remembers the last writer, so a crash between another session's
-    /// append and store left ops where replay never looked (§13). Each
+    /// append and store left ops where replay never looked. Each
     /// session advances only its own entry; sessions with no entry replay
     /// nothing. The single cursor stays maintained alongside for old
     /// readers and as the last-writer marker.
@@ -305,7 +305,7 @@ pub(crate) fn now() -> String {
 }
 
 /// Reopen a completed step after host-side undo removed its recorded evidence.
-/// Conservative rule (§3.6): ANY reverted part of the step's result reopens
+/// Conservative rule: ANY reverted part of the step's result reopens
 /// it — reverting a subset cannot leave the step marked completed. Bumps
 /// `step_epoch` so subagent records from before the reopen stop counting as
 /// evidence, and resets `validation` (a reverted result is unverified).

@@ -12,7 +12,7 @@ use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
 /// True when the step a subagent was spawned for still exists in the named
-/// plan at exactly the inherited epoch (§2.2.4). Anything else — reopened,
+/// plan at exactly the inherited epoch. Anything else — reopened,
 /// retired plan, deleted step — means the inherited context is stale.
 pub(crate) fn step_epoch_current(root: &Path, inherited: &plan::StepContext) -> bool {
     let Some(plan) = plan::read_plan_file(root, &inherited.plan_id) else {

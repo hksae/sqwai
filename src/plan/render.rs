@@ -5,7 +5,7 @@
 
 use super::{GoalRevision, Plan, PlanStatus, StepStatus, now};
 
-/// Apply a goal revision the user accepted (§2.1.6). Host-only.
+/// Apply a goal revision the user accepted. Host-only.
 pub fn set_goal(plan: &mut Plan, text: String, source: &str, reason: Option<String>) {
     let previous = std::mem::replace(&mut plan.goal.text, text.clone());
     plan.goal.history.push(GoalRevision {

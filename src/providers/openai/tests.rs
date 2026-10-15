@@ -503,7 +503,7 @@ fn system_block_precedes_history_and_host_state_is_not_a_user_turn() {
     let body = OpenAiProvider::build_body(&req);
     let msgs = body["messages"].as_array().unwrap();
     // stable system first, then the host block, then the human's turn last:
-    // the model answers the person, never the state block (§18.1.1)
+    // the model answers the person, never the state block
     assert_eq!(msgs[0]["role"], "system");
     assert_eq!(msgs[0]["content"], "A");
     assert_eq!(msgs[1]["role"], "system");
@@ -595,7 +595,7 @@ fn volatile_change_keeps_the_prefix_bytes() {
     // Everything up to the host block is the cached prefix: the stable
     // system message, then the older history. The block itself and the
     // newest turn after it are new bytes either way, so a volatile change
-    // re-reads only from the block onward (§18.1.1).
+    // re-reads only from the block onward.
     let prefix = |body: &Value| {
         body["messages"]
             .as_array()
@@ -848,7 +848,7 @@ mod live_cache {
         assert!(u.prompt_tokens > 0);
     }
 
-    /// The layout change in one live question (§18.1.1): does this gateway
+    /// The layout change in one live question: does this gateway
     /// accept a `system` item that is not first — before the newest user
     /// turn on a fresh request, and trailing a tool result inside a loop?
     /// A relay that only reads `system` at index 0 would 400 or silently

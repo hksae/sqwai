@@ -17,19 +17,19 @@ pub struct ToolCtx {
     root_canon: PathBuf,
     /// secondary project instances can inspect but not mutate project state
     pub read_only: bool,
-    /// Session this context belongs to. §2.5 keys the shadow snapshot chain
+    /// Session this context belongs to. keys the shadow snapshot chain
     /// on it (`refs/sessions/<id>`), so two sessions in one project do not
     /// interleave their checkpoint history — and retention can truncate one
     /// session's chain without touching another's.
     pub session_id: String,
-    /// Override for the checkpoint chain only (§2.2.4): a child session's
+    /// Override for the checkpoint chain only: a child session's
     /// snapshots land on its parent's chain, so the parent's `/undo` sees
     /// the child's step boundaries and bash mutations. `None` means the own
     /// chain. Job isolation, read-guard and journal identity all stay on
     /// `session_id` — only the shadow chain is shared.
     pub checkpoint_session: Option<String>,
     /// Files read this session and the content hash they had at the time,
-    /// keyed by canonical path. §4 calls for the guard to be hash-tracked: a
+    /// keyed by canonical path. calls for the guard to be hash-tracked: a
     /// file changed by `bash` since the last read has to be read again, and
     /// with paths alone the model could edit it blind. The canonical key also
     /// stops `read("src/x.rs")` followed by `edit("./src/x.rs")` from being
@@ -46,11 +46,11 @@ pub struct ToolCtx {
     pub journal: Vec<(String, String)>,
     /// Host limits on the plan, and the model context they are derived from.
     /// The budget used to come from a `context_limit` the model passed in its
-    /// own tool arguments (§2.1.2 makes it a host value).
+    /// own tool arguments.
     pub plan_limits: crate::config::PlanConfig,
     /// context window of the model driving this session, in tokens
     pub context_limit: u64,
-    /// §3.7 (§7 S): set from the TUI when the user presses Esc during a
+    /// set from the TUI when the user presses Esc during a
     /// running tool. Long-running handlers poll it at their existing
     /// wait/retry points and stop cooperatively — nothing here can reach into
     /// a handler and pull it out mid-syscall, so a handler that never checks
@@ -58,11 +58,11 @@ pub struct ToolCtx {
     pub cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Where the shadow repository lives, from [undo].shadow configuration.
     pub shadow_store: crate::config::ShadowStore,
-    /// Step this session currently holds (§2.2.3). Set on `plan start`,
+    /// Step this session currently holds. Set on `plan start`,
     /// cleared on `finish`/`block`/`cancel`; the loop mirrors it into the
     /// journal attribution at dispatch. `None` means idle.
     pub current_step: Option<String>,
-    /// Immutable spawn context for subagent sessions (§2.2.4). `None` for
+    /// Immutable spawn context for subagent sessions. `None` for
     /// the main agent. Mutating tools refuse to run when the inherited
     /// epoch no longer matches the plan.
     pub subagent_step: Option<plan::StepContext>,
@@ -195,7 +195,7 @@ impl ToolCtx {
     }
 
     /// resolve a user-supplied path inside the project; rejects escapes and
-    /// host-owned state under `.sqwai/` (§2.0). Reading is the permissive
+    /// host-owned state under `.sqwai/`. Reading is the permissive
     /// direction: spilled tool output under `.sqwai/spill/` stays reachable,
     /// because a pointer the host handed out has to be one the model can
     /// follow. Mutations go through
@@ -262,7 +262,7 @@ impl ToolCtx {
         };
         // Plan, journal, memory and graph are reachable only through their own
         // tools. Enforcing it here is what makes "host-written" and
-        // "append-only" guarantees rather than requests (§2.0).
+        // "append-only" guarantees rather than requests.
         if let Some(denied) = host_owned_denial(relative, mutating) {
             return Err(denied);
         }
@@ -426,7 +426,7 @@ fn file_hash(path: &Path) -> String {
 /// The agent's own state directory. File tools see only `skills/`,
 /// `config.toml` and spilled tool output under `spill/` inside it; plan,
 /// journal, memory and checkpoints are host-owned and reachable only through
-/// their dedicated tools (§2.0).
+/// their dedicated tools.
 const STATE_DIR: &str = ".sqwai";
 
 /// Deny message when `relative` points at host-owned state, `None` otherwise.

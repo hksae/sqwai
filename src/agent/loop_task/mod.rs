@@ -163,7 +163,7 @@ pub enum AgentEvent {
         call_id: String,
         questions: Vec<AskQuestion>,
     },
-    /// the session's current plan step changed (§2.2.3); `None` means idle.
+    /// the session's current plan step changed; `None` means idle.
     /// The TUI persists it on the session; the loop itself tracks it in
     /// `current_step` and never waits for this round-trip.
     StepCurrent {
@@ -175,7 +175,7 @@ pub enum AgentEvent {
         command: String,
         reason: String,
     },
-    /// a shadow git checkpoint was taken before a mutation (design §6, §10)
+    /// a shadow git checkpoint was taken before a mutation
     Checkpoint {
         label: String,
     },
@@ -197,7 +197,7 @@ pub enum AgentEvent {
         delay_secs: u64,
         error: String,
     },
-    /// switched to a fallback model on retry-exhausted network/5xx (§5.1, §7 T)
+    /// switched to a fallback model on retry-exhausted network/5xx
     FallbackSwitched {
         from: String,
         to: String,
@@ -234,7 +234,7 @@ pub struct AgentHandle {
     pub rx: mpsc::Receiver<AgentEvent>,
     pub control: mpsc::Sender<ControlMsg>,
     abort: tokio::task::AbortHandle,
-    /// §3.7 (§7 S): flipped by Esc while a tool is executing. Distinct from
+    /// flipped by Esc while a tool is executing. Distinct from
     /// [`Self::abort`] — that tears the whole turn down via `AbortHandle`,
     /// which does not reach a child process spawned on a `spawn_blocking`
     /// thread (tokio cannot cancel a blocking closure), so pressing Esc
@@ -267,7 +267,7 @@ impl AgentHandle {
     }
 
     /// The stop half of this handle for the S1 child registry
-    /// (§2.2.4): undo cancels whatever is still registered before it
+    ///: undo cancels whatever is still registered before it
     /// reverts the tree. Cloned, never moved — the event stream stays here.
     pub fn child_control(&self) -> super::undo_guard::ChildControl {
         super::undo_guard::ChildControl::new(self.abort.clone(), self.cancel.clone())
@@ -285,7 +285,7 @@ pub struct AgentInput {
     pub model_id: String,
     pub model_key: String,
     pub effort: Option<EffortLevel>,
-    /// what the target model does with that level (§5.1); threaded through so
+    /// what the target model does with that level; threaded through so
     /// providers never have to guess and the UI never has to re-derive it
     pub effort_support: crate::config::EffortSupport,
     pub max_tokens: Option<u32>,
@@ -301,7 +301,7 @@ pub struct AgentInput {
     pub session_id: String,
     /// hard-blocked command patterns from [safety].blocked_patterns
     pub blocked_patterns: Vec<String>,
-    /// PLAN mode: read-only tools only, mutations are refused (design §5)
+    /// PLAN mode: read-only tools only, mutations are refused
     pub plan_mode: bool,
     /// model context limit used to enforce the plan size budget
     pub context_limit: u64,
@@ -340,16 +340,16 @@ pub struct AgentInput {
     /// nesting guard for delegated subagents; the first generation may create
     /// children, but children cannot recursively create more children.
     pub subagent_depth: u8,
-    /// Immutable step context inherited from the spawning session (§2.2.4).
+    /// Immutable step context inherited from the spawning session.
     /// `None` for main agents. The child stamps it on its journal records
     /// and refuses mutations once the step moves to a newer epoch.
     pub parent_step: Option<plan::StepContext>,
     /// Session id of the spawning agent, if any. The child's shadow
     /// snapshots land on this chain so the parent's `/undo` sees them
-    /// (§2.2.4); everything else (journal, jobs, read-guard) stays on the
+    ///; everything else (journal, jobs, read-guard) stays on the
     /// child's own session.
     pub parent_session: Option<String>,
-    /// Optional fallback models to switch to if primary model fails with retry-exhausted network/5xx (§5.1, §7 T).
+    /// Optional fallback models to switch to if primary model fails with retry-exhausted network/5xx.
     pub fallback_chain: Vec<FallbackCandidate>,
 }
 
@@ -368,7 +368,7 @@ pub fn spawn_agent(input: AgentInput) -> AgentHandle {
 
 /// Marker of the advisory note appended to a first identical re-run.
 const REPEAT_NOTE_MARK: &str = "\n[host: you already called";
-/// Marker of the stub that replaces a repeated result entirely (§18.1.8).
+/// Marker of the stub that replaces a repeated result entirely.
 const REPEAT_STUB_MARK: &str = "[host: not re-reported";
 
 /// What the host decides to do with a result the model has already seen
@@ -384,7 +384,7 @@ enum RepeatVerdict {
     Withheld(String),
 }
 
-/// Repeat handling for any tool outcome (§18.1.8). Compares full outputs, not
+/// Repeat handling for any tool outcome. Compares full outputs, not
 /// journal summaries (truncated to 200 chars), so same-headed but
 /// different-tailed outputs never match.
 ///
@@ -686,7 +686,7 @@ async fn run_agent(
     // `/compact` — run the policy and hand the transcript back without a chat
     // turn. It used to write a mandatory diary entry first; the entry was the
     // only thing that made the compaction visible to the next session, and the
-    // writer never produced a line of prose (§20).
+    // writer never produced a line of prose.
     if compact_only {
         let mut compaction_journal = if !read_only {
             crate::agent::journal::Journal::open(&root, &session_id).ok()
@@ -775,11 +775,11 @@ async fn run_agent(
     // slow baseline capture defers to the background worker on interactive
     // turns; everywhere else the tool call captures synchronously
     ctx.background_baselines = background_baselines;
-    // A child's shadow snapshots belong on the parent chain (§2.2.4), so the
+    // A child's shadow snapshots belong on the parent chain, so the
     // parent's `/undo` sees step boundaries and bash mutations; the journal,
     // job isolation and read-guard stay on the child's own session.
     ctx.checkpoint_session = parent_session.clone();
-    // Subagents inherit their spawn context (§2.2.4): it stamps their
+    // Subagents inherit their spawn context: it stamps their
     // journal records and gates their mutations against reopen races.
     ctx.subagent_step = parent_step.clone();
     // ...and their parent's trust state: a fresh child journal reads
@@ -792,14 +792,13 @@ async fn run_agent(
     // ...and their shadow snapshots land on the parent chain, so the
     // parent's `/undo` sees them (ToolCtx::checkpoint_session).
     ctx.checkpoint_session = parent_session.clone();
-    // The session's current step (§2.2.3). Adopt whatever the plan holds in
-    // progress — after a crash that is the interrupted step (§3.4) — and
+    // The session's current step. Adopt whatever the plan holds in
+    // progress — after a crash that is the interrupted step — and
     // keep it in lockstep with plan outcomes below. `ctx.current_step` is
     // the single live copy; the TUI persists it via `StepCurrent` events.
     ctx.current_step = adopt_in_progress_step(&root, &session_id);
     if enable_tools && !read_only {
-        // Heal a crash between a journal intent and its plan store (§2.1.4,
-        // §3.7) before anything — including this session's writer — reads the
+        // Heal a crash between a journal intent and its plan store before anything — including this session's writer — reads the
         // plan or the tail counter. No-op on a clean tree.
         let _ = plan::replay(&root);
     }
@@ -811,7 +810,7 @@ async fn run_agent(
     if let Some(writer) = journal.as_mut() {
         if let Some(inherited) = parent_step.as_ref() {
             // Stamp the inherited epoch on every record this writer produces
-            // so post-reopen validation can tell stale work apart (§2.2.4).
+            // so post-reopen validation can tell stale work apart.
             writer.set_epoch(Some(inherited.step_epoch));
         }
         let plan_id = plan::open_active_for_session(&root, Some(&session_id))
@@ -940,7 +939,7 @@ async fn run_agent(
             );
             // Same rule as the overflow retry below: the transcript the host
             // owns has changed, so the provider's copy of it is no longer the
-            // context this turn is about (§3.3).
+            // context this turn is about.
             previous_response_id = None;
             turn_system = build_turn_system(&system, &root, &session_id);
             let _ = tx
@@ -955,7 +954,7 @@ async fn run_agent(
         // "no plan block means no plan, do not reconstruct one from history" is
         // a system.md rule, stated once — a per-request note naming the closed
         // plan would inject plan vocabulary exactly where the plan is gone
-        // (§18.1.6).
+        //.
         // claim-lint repetition removed with Y: no nag block rides here
         // Decided per request, not once per turn: a request that carries tool
         // results must never rely on the provider holding the calls they
@@ -1006,10 +1005,10 @@ async fn run_agent(
         .await
         {
             Ok(turn) => {
-                // §5.1 asks the UI to say "(ignored by model)" when a level
+                // asks the UI to say "(ignored by model)" when a level
                 // does not land. Everything the config can tell us is a claim;
                 // these two are evidence, so they are recorded like any other
-                // fact the host observed (§2.2.2) and reported once.
+                // fact the host observed and reported once.
                 if turn_shows_no_reasoning(&turn) {
                     zero_reasoning_turns += 1;
                 } else {
@@ -1107,7 +1106,7 @@ async fn run_agent(
                 }
 
                 // A request that does not fit gets one compaction and one more
-                // try, which is the only thing that can make it fit (§5.1).
+                // try, which is the only thing that can make it fit.
                 // Asking the same oversized request again cannot.
                 if failure.class == Some(ErrorClass::ContextOverflow) && !compacted_for_overflow {
                     compacted_for_overflow = true;
@@ -1140,7 +1139,7 @@ async fn run_agent(
                         );
                         // The transcript this turn resends is not the one the
                         // provider holds any more, so the reference cannot be
-                        // reused for the retry either (§3.3).
+                        // reused for the retry either.
                         previous_response_id = None;
                         let _ = tx
                             .send(AgentEvent::Compaction {
@@ -1161,7 +1160,7 @@ async fn run_agent(
                         .await;
                     break;
                 }
-                // Stage T: Provider Fallback Chain on retry-exhausted network / 5xx error (§5.1, §7 T).
+                // Stage T: Provider Fallback Chain on retry-exhausted network / 5xx error.
                 // A turn whose text was already streamed to the user never
                 // falls back: re-running it on another provider would show a
                 // second answer on top of the partial one (audit H8).
@@ -1242,7 +1241,7 @@ async fn run_agent(
                 .with_thinking(turn.reasoning_text, turn.reasoning_ms),
         );
 
-        // §3.7 / §7 S: once the user cancels one call, no further calls in
+        // once the user cancels one call, no further calls in
         // this batch run and no further model turns are requested — Esc means
         // stop, not "let the model decide what to do about it".
         let mut interrupted = false;
@@ -1303,7 +1302,7 @@ async fn run_agent(
                         .ok()
                         .flatten();
                     let plan_id = active.as_ref().map(|p| p.id.clone());
-                    // Explicit session step first (§2.2.3); the plan scan is only
+                    // Explicit session step first; the plan scan is only
                     // a fallback for records predating current-step tracking.
                     let step = if call.name == "plan" {
                         None
@@ -1330,7 +1329,7 @@ async fn run_agent(
                     );
                 }
                 // live row first: the TUI shows the tool name and its arguments
-                // with a spinner while it runs (design §10)
+                // with a spinner while it runs
                 let _ = tx
                     .send(AgentEvent::ToolStart {
                         name: call.name.clone(),
@@ -1380,7 +1379,7 @@ async fn run_agent(
                             } else {
                                 tools::web::search(&call.args).await
                             };
-                            // R banner (§2.2): external bytes travel delimited
+                            // R banner: external bytes travel delimited
                             // so the boundary survives into context. Failures
                             // stay bare — a host error is not untrusted content.
                             if outcome.ok {
@@ -1420,7 +1419,7 @@ async fn run_agent(
                             // (or `start`) inside it retires (or moves) the
                             // step this session holds, and the next `plan
                             // start` in the same turn would be refused
-                            // against the stale hold (§2.2.3). Re-adopt.
+                            // against the stale hold. Re-adopt.
                             let held_before = ctx.current_step.clone();
                             ctx.current_step = adopt_in_progress_step(&root, &ctx.session_id);
                             if ctx.current_step != held_before {
@@ -1498,7 +1497,7 @@ async fn run_agent(
                                 .call(other, call.args.clone())
                                 .await
                             {
-                                // R banner (§2.2): server-authored bytes are
+                                // R banner: server-authored bytes are
                                 // untrusted content even when the server
                                 // labels them an error (audit H11) — unlike
                                 // webfetch failures, which the host
@@ -1535,11 +1534,11 @@ async fn run_agent(
                     }
                 };
 
-                // §2.5 / §3.7: `bash` is the one tool whose targets are not known
+                // `bash` is the one tool whose targets are not known
                 // in advance, so a cancelled run can have mutated files no
                 // pre-checkpoint covered. `snapshot_session` already implements
                 // "only if the tree changed since the previous snapshot" — that
-                // is exactly the condition §3.7 asks for, so it is read from
+                // is exactly the condition asks for, so it is read from
                 // there rather than reimplemented.
                 if outcome.cancelled
                     && call.name == "bash"
@@ -1595,8 +1594,8 @@ async fn run_agent(
                                 count: diagnostic_count,
                             })
                             .await;
-                        // §2.2.2 defines this record and nothing was writing it,
-                        // which left §2.1.4's "diagnostics with zero errors" route
+                        // defines this record and nothing was writing it,
+                        // which left "diagnostics with zero errors" route
                         // to closing a verify step unreachable: the branch existed
                         // on the read side only.
                         if let Some(writer) = journal.as_mut() {
@@ -1677,7 +1676,7 @@ async fn run_agent(
                         "note": call.args.get("kind").and_then(|v| v.as_str()).unwrap_or("lesson"),
                         "text": call.args.get("note").and_then(|v| v.as_str()).unwrap_or_default(),
                         // present only when this note closes an assumption
-                        // (§2.1.4); the dispatcher has already checked that
+                        //; the dispatcher has already checked that
                         // the target is open
                         "resolves": call.args.get("resolves").and_then(|v| v.as_u64()),
                     }));
@@ -1698,7 +1697,7 @@ async fn run_agent(
                         )
                         .ok()
                     } else {
-                        // R taint (§2.2): every content-bearing result carries
+                        // R taint: every content-bearing result carries
                         // its class; the trust flag goes low with it. Plan ops
                         // above stay high — host observations, not content.
                         let taint = crate::agent::trust::tool_taint(
@@ -1722,7 +1721,7 @@ async fn run_agent(
                                     Some(crate::agent::trust::TaintClass::Local) => "local",
                                     None => "none",
                                 },
-                                // §3.7: distinct from an ordinary failure, so the
+                                // distinct from an ordinary failure, so the
                                 // journal can say the user stopped this rather
                                 // than that it went wrong on its own
                                 "code": if outcome.cancelled { Some("cancelled") } else { None },
@@ -1758,7 +1757,7 @@ async fn run_agent(
                                 "hash_after": metadata.hash_after,
                                 "mode": metadata.mode,
                                 "checkpoint": metadata.checkpoint,
-                                // links into the layer-1 blob store (§2.5), so a
+                                // links into the layer-1 blob store, so a
                                 // single step can be reverted from the journal
                                 // alone; absent when nothing was stored
                                 "blob_before": metadata.blob_before,
@@ -1768,7 +1767,7 @@ async fn run_agent(
                     }
                     if call.name == "plan" {
                         // `plan_op` journals its own intent records ahead of every
-                        // store (§2.1.4); resync this long-lived handle past them
+                        // store; resync this long-lived handle past them
                         // so the next append cannot reuse a sequence number.
                         // A failed resync is loud (#189): proceeding on a stale
                         // counter would corrupt evidence refs.
@@ -1792,7 +1791,7 @@ async fn run_agent(
                             && let Some(id) = plan_step_id
                         {
                             writer.set_attribution(Some(id.to_string()), plan_id, "main");
-                            // The session now holds this step (§2.2.3).
+                            // The session now holds this step.
                             ctx.current_step = Some(id.to_string());
                             if subagent_depth == 0 {
                                 let _ = tx
@@ -1844,21 +1843,21 @@ async fn run_agent(
                                 }
                             }
                             writer.set_attribution(None, plan_id, "main");
-                            // The session is idle again (§2.2.3).
+                            // The session is idle again.
                             ctx.current_step = None;
                             if subagent_depth == 0 {
                                 let _ = tx.send(AgentEvent::StepCurrent { step: None }).await;
                             }
                         }
                         // The diary entry that used to fire on finish/block/cancel
-                        // is gone (§20): `journal op=recap` reads these same
+                        // is gone: `journal op=recap` reads these same
                         // records on demand, and the writer never produced prose.
                     }
                 }
                 if outcome.cancelled {
                     interrupted = true;
                 }
-                // Repeat handling (§18.1.8): the first identical re-run is
+                // Repeat handling: the first identical re-run is
                 // reported with a note, the next one loses its bytes — the note
                 // alone did not stop a live session from calling the same
                 // `git_diff` five times over the same 18KB.
@@ -1872,7 +1871,7 @@ async fn run_agent(
                 }
                 messages.push(Message::tool_result(&call.id, outcome.output, !outcome.ok));
                 if interrupted {
-                    // §3.7: Esc means stop — the remaining calls in this batch
+                    // Esc means stop — the remaining calls in this batch
                     // (if the model requested several) do not run. Each of them
                     // still needs a tool_result: a tool_use without a matching
                     // tool_result is a fatal protocol error for Anthropic
@@ -1893,7 +1892,7 @@ async fn run_agent(
         if interrupted {
             // and no further model turn is requested this round; the turn
             // ends with what was accumulated, the same shape as a normal
-            // final answer (§3.7: step stays in_progress, nothing reverted).
+            // final answer.
             break;
         }
     }

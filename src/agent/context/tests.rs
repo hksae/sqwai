@@ -307,7 +307,7 @@ fn anchor_ignores_completed_plans() {
 /// The anchor describes what the journal proves and gives no orders. Its
 /// `memory_write` imperative used to ride every request inside the host
 /// block, and a live session obeyed it in the middle of an unrelated loop
-/// (§18.1.3).
+///.
 #[test]
 fn anchor_states_facts_and_issues_no_commands() {
     let root = temp_root("facts");

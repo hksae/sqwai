@@ -34,7 +34,7 @@ fn reopened_step_ids(
     session_id: &str,
     files: &[String],
 ) -> Vec<String> {
-    // Conservative rule (§3.6): ANY reverted part of a done step's result
+    // Conservative rule: ANY reverted part of a done step's result
     // reopens it. Reverting a subset while the rest stays changed cannot
     // leave the step marked completed. Paths are separator-normalized so
     // git forward slashes match journal backslashes on Windows.
@@ -304,7 +304,7 @@ pub struct App {
     /// armed when a session with history is loaded or a compaction changed
     /// something — the only genuine restores
     resume_notice_armed: bool,
-    /// label of the last shadow checkpoint (design §10 indicator)
+    /// label of the last shadow checkpoint
     last_checkpoint: Option<String>,
     /// user message index pushed for the active turn, if any
     turn_user_index: Option<usize>,
@@ -638,7 +638,7 @@ impl App {
         let project_root = std::env::current_dir().unwrap_or_default();
         if !read_only {
             // Heal a crash between a journal intent and its plan store
-            // (§2.1.4, §3.7) before any plan read. No-op on a clean tree.
+            // before any plan read. No-op on a clean tree.
             let _ = crate::plan::replay(&project_root);
         }
         // display form of the project root: home-relative (~/sqwai),
@@ -1196,7 +1196,7 @@ impl App {
         }
         // Shutdown must never wait for a provider request: the session is
         // saved and nothing else runs on the exit path. The host-only diary
-        // entry that used to be appended here is gone with the diary (§20).
+        // entry that used to be appended here is gone with the diary.
         if self.session_has_messages() {
             self.session.save().ok();
         }
@@ -1681,7 +1681,7 @@ impl App {
     /// The host rewrote the transcript. A continuation reference points at the
     /// provider's copy of the history that was *not* rewritten, so continuing
     /// from it would hand the model the very context compaction removed
-    /// (§3.3) while the host accounts for the compacted one.
+    /// while the host accounts for the compacted one.
     pub(super) fn note_compaction(&mut self, summarized: bool, before: u64, after: u64) {
         self.context_bootstrap_pending = true;
         self.rebuild_session_environment();
@@ -1720,7 +1720,7 @@ impl App {
 
     /// Whether this provider may be asked to continue from its own copy of the
     /// conversation. Off means the transcript is resent every request, which
-    /// is what §1.1 and §2.2 assume: the host owns the context.
+    /// is what and assume: the host owns the context.
     pub(super) fn continuation_enabled(&self) -> bool {
         self.cfg
             .providers
@@ -2313,7 +2313,7 @@ impl App {
         if self.session_has_messages() {
             self.session.save().ok();
         }
-        // §2.5 runs retention when a session ends. Doing it here rather than
+        // runs retention when a session ends. Doing it here rather than
         // on the way out means it also happens for a session the user simply
         // walks away from, and the new session's own chain is protected by
         // name so its undo history survives its own maintenance.
@@ -2911,7 +2911,7 @@ impl App {
                     self.open_ask(&call_id, id, questions);
                 }
                 AgentEvent::StepCurrent { step } => {
-                    // the loop moved the session's current step (§2.2.3):
+                    // the loop moved the session's current step:
                     // persist the mirror so resume and the next run agree
                     self.session.current_step_id = step;
                     self.session.save().ok();
@@ -3397,9 +3397,9 @@ impl App {
 
     /// True while a tool call is executing right now — the row `ToolStart`
     /// opened and `ToolNotice` has not yet closed. Mutating calls run alone
-    /// (§3.1), but same-turn subagent calls overlap, so any open row counts.
+    ///, but same-turn subagent calls overlap, so any open row counts.
     /// This is what Esc uses to decide between a cooperative per-tool cancel
-    /// (§3.7) and the hard whole-turn abort: there is nothing "mid-tool" to
+    /// and the hard whole-turn abort: there is nothing "mid-tool" to
     /// cancel while the model is only streaming text.
     fn tool_running(&self) -> bool {
         self.segments
@@ -3804,7 +3804,7 @@ impl App {
         self.retry_line = None;
         self.prev_turn_ok = matches!(res, Ok(()));
         // A turn that did not finish cleanly leaves the provider holding a
-        // history the host no longer vouches for (§3.3): bootstrap the next
+        // history the host no longer vouches for: bootstrap the next
         // request instead of continuing it. An aborted turn additionally
         // arms the resume notice — the next turn must continue the plan,
         // not silently redo settled steps.

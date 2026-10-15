@@ -1,4 +1,4 @@
-//! Layer 1 of §2.5: a content-addressed store of file pre-images.
+//! Layer 1: a content-addressed store of file pre-images.
 //!
 //! The point of this layer is that it has **no dependency on git at all**. For
 //! `write | edit | multi_edit | patch` the file about to change is known in
@@ -8,8 +8,7 @@
 //! makes reverting a single step possible at all — a tree snapshot cannot say
 //! which of several files belonged to which step, and the journal can.
 //!
-//! Blobs are named by their blake3 hash (§5.10 assigns blake3 to this layer
-//! and keeps sha2 for the hashes the journal already records), stored under
+//! Blobs are named by their blake3 hash, stored under
 //! `.sqwai/checkpoints/blobs/<first two hex>/<hash>` and deduplicated by that
 //! name: writing the same content twice costs one existence check.
 //!
@@ -18,7 +17,7 @@
 //! `blob_before` / `blob_after`, which are the blake3 names *in this store*.
 //! Two algorithms sound like an accident; it is the alternative that is worse.
 //! Renaming the journal's hashes would silently invalidate every record
-//! written before the change, and dropping blake3 would contradict §5.10. So
+//! written before the change, and dropping blake3 would contradict . So
 //! the record carries both, and the link is explicit rather than implied.
 
 use anyhow::{Context, Result};
@@ -119,7 +118,7 @@ pub fn has(root: &Path, id: &str) -> bool {
     path_for(root, id).exists()
 }
 
-/// Remove blobs nothing references any more (§2.5 retention).
+/// Remove blobs nothing references any more.
 ///
 /// A blob is kept when a journal still names it, or when it is younger than
 /// `grace` — the second condition is what stops a race with a write that has

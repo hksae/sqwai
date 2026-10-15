@@ -377,7 +377,7 @@ impl App {
                                     // handle to cancel through
                                     self.stop_test_churn();
                                 } else if self.tool_running() {
-                                    // §3.7 / §7 S: a tool is mid-flight —
+                                    // a tool is mid-flight —
                                     // cancel that call cooperatively (it gets
                                     // a normal cancelled tool_result) rather
                                     // than tearing down the whole turn. The
@@ -544,7 +544,7 @@ impl App {
                                 self.inline_ask_open_custom(q);
                             }
                         }
-                        // plan/act is switched by the user only (design §5).
+                        // plan/act is switched by the user only.
                         KeyCode::Tab
                             if self.menu_stack.is_empty() && self.active_ask_seg().is_none() =>
                         {

@@ -1,4 +1,4 @@
-//! R: untrusted-input machinery (§2.2).
+//! R: untrusted-input machinery.
 //!
 //! The prompt rule already declares every content source untrusted; this
 //! module is the machinery behind it. Three pieces, all journal-derived
@@ -94,7 +94,7 @@ pub fn taint_level(root: &Path, session: &str) -> TaintLevel {
 /// there is nothing to gate (local bytes never leave the machine through
 /// these shapes without the safety classifier already asking).
 ///
-/// `acked` is the session's already-confirmed egress kinds (§11): one dialog
+/// `acked` is the session's already-confirmed egress kinds: one dialog
 /// per (session, kind), not one per command. A headless context never
 /// inherits an answer someone at the keyboard gave — the denial there is the
 /// point, so `acked` is consulted only on the interactive path.
@@ -196,7 +196,7 @@ mod tests {
         ));
     }
 
-    /// §11: one Confirm per (session, egress kind). A confirmed `git push`
+    /// one Confirm per (session, egress kind). A confirmed `git push`
     /// covers later pushes; a different egress shape still asks, and a
     /// headless context never inherits the human's answer.
     #[test]

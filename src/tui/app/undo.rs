@@ -50,7 +50,7 @@ pub(super) struct UndoCoverage {
 }
 
 impl App {
-    /// Retention for both checkpoint layers (§2.5). Reports only when it did
+    /// Retention for both checkpoint layers. Reports only when it did
     /// something: a maintenance pass that announces "nothing to do" on every
     /// `/new` is noise.
     pub(super) fn run_undo_maintenance(&mut self) {
@@ -247,7 +247,7 @@ impl App {
         // Scope the restore to what the host recorded as its own writes across
         // the checkpoints being undone. Without this, undo reverts the whole
         // tree to the snapshot and silently discards anything the user edited
-        // in their own editor while the agent was working (§2.5).
+        // in their own editor while the agent was working.
         let undone: Vec<String> = self.session.checkpoints[idx..]
             .iter()
             .map(|(sha, _)| sha.clone())
@@ -269,7 +269,7 @@ impl App {
         } else {
             0
         };
-        // Layer 1 (§2.5): the pre-images the host stored before each write.
+        // Layer 1: the pre-images the host stored before each write.
         // No git needed, and it is the only path that works in a project that
         // is not a repository at all.
         let pre_images =
@@ -389,7 +389,7 @@ impl App {
         }
     }
 
-    /// Revert one plan step (§2.5, `/undo step N`).
+    /// Revert one plan step.
     ///
     /// Only layer 1 is involved: the journal knows which `file_diff` records
     /// `undo_step` against an explicit root.
@@ -480,12 +480,12 @@ impl App {
                 if let Ok(mut journal) =
                     crate::agent::journal::Journal::open(root, &self.session.id.to_string())
                 {
-                    // host-written, like every other undo record (§2.2.2)
+                    // host-written, like every other undo record
                     journal.set_attribution(None, None, "host");
                     let _ = journal.append_undo_step(step, &touched, &reopened);
                 }
                 // The provider's copy of the conversation still contains the
-                // reverted work (§3.3, #50).
+                // reverted work.
                 self.context_bootstrap_pending = true;
                 self.session.save().ok();
 

@@ -83,7 +83,7 @@ impl App {
         // truth "because earlier history may be gone" — a standing order to
         // distrust the conversation in front of the model, and the engine of a
         // live session that re-answered its own previous turn and ran five
-        // identical `git_diff` calls (§18.1.5).
+        // identical `git_diff` calls.
         if self.session.summary.is_some() {
             parts.push(SystemPart::volatile(crate::agent::context::anchor(
                 &root,

@@ -56,7 +56,7 @@ impl ShellKind {
 
     /// Where Git for Windows keeps `bash.exe`. Resolved once and cached: shell
     /// identity is asked for on every command, both to spawn it and to classify
-    /// it (§5.2), and a filesystem probe does not belong in that path.
+    /// it, and a filesystem probe does not belong in that path.
     #[cfg(windows)]
     pub fn git_bash() -> Option<&'static Path> {
         use std::sync::OnceLock;
@@ -119,7 +119,7 @@ impl ShellKind {
     /// `C:\Windows\System32\cmd.exe` is one single component and `file_stem`
     /// returns the whole string. That made every such value fall through to
     /// the `Sh` default — and shell detection decides which layer of the
-    /// dangerous-command classifier is authoritative (§5.2).
+    /// dangerous-command classifier is authoritative.
     fn from_program(path: &Path) -> Option<Self> {
         let segment = path.to_str()?.rsplit(['/', '\\']).next()?;
         let stem = segment.rsplit_once('.').map_or(segment, |(stem, _)| stem);

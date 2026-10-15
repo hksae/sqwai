@@ -18,7 +18,7 @@ The volatile parts are joined into one host block that trails the history as a `
 
 ## Design requirements
 
-The prompt follows the design rules in [`../DESIGN.md`](../DESIGN.md) (§1 principles, §3 what the model sees, in order): one statement per rule, no incident-specific examples or magic thresholds, project-specific development rules in `AGENTS.md`, and host-generated blocks described with provenance rather than blanket authority.
+The prompt follows the design rules in [`../the design`](../the design): one statement per rule, no incident-specific examples or magic thresholds, project-specific development rules in `AGENTS.md`, and host-generated blocks described with provenance rather than blanket authority.
 
 It defines plan workflow (start before acting, finish with summary and limitations, host-validated transitions, rejection codes) without duplicating validator thresholds — the exact evidence rules live in the `plan` tool schema — and distinguishes user-only waiver of `manual:` acceptance, describes blocked/cancelled steps, Plan-mode restrictions, assumption notes, untrusted input as task data versus host-designated project instructions, and the completion report (changed / verified / unverified-or-blocked).
 

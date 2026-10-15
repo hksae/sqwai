@@ -489,7 +489,7 @@ fn table_narrow_columns_keep_whole_tokens() {
     // longest token always overflowed its own `wi - 2` budget by the two
     // unpaid padding columns
     let hl = Highlighter::new();
-    let md = "| Инструмент | Категория | Мутирует | Чекпоинт / Undo | Соответствие DESIGN.md |\n|---|---|---|---|---|\n| `file_remove` | files | Да | Да (blob_before) | Устраняет обходные пути через `bash rm`, сохраняет инвариант хостовых диффов |\n| `git_st` | git | Да | Да | Закрывает разрыв: позволяет коммитить untracked файлы |\n";
+    let md = "| Инструмент | Категория | Мутирует | Чекпоинт / Undo | Соответствие the design |\n|---|---|---|---|---|\n| `file_remove` | files | Да | Да (blob_before) | Устраняет обходные пути через `bash rm`, сохраняет инвариант хостовых диффов |\n| `git_st` | git | Да | Да | Закрывает разрыв: позволяет коммитить untracked файлы |\n";
     let lines = render(md, 100, &hl);
     let text: Vec<String> = lines.iter().map(|l| line_text_pub(l)).collect();
     for token in ["Инструмент", "file_remove", "Категория", "git_st"] {

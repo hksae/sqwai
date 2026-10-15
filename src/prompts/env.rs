@@ -232,7 +232,7 @@ fn git_info(root: &Path) -> String {
                 Err(error) => return format!("Git: unavailable ({error})\n"),
             };
             let mut out = format!("Git: {branch}\n");
-            // §14 deleted "N changed file(s) at session start" as a bare,
+            // deleted "N changed file(s) at session start" as a bare,
             // unoriented count — and with it the one job that line silently
             // did: mark the authorship boundary. Measured in the first live
             // session after the cut: the model found files modified that it had
@@ -275,7 +275,7 @@ fn git_info(root: &Path) -> String {
 
 /// Shallow, ignored-aware directory map. Files are deliberately absent: the
 /// model reads root files with one `ls`, and mixed entries age out faster
-/// than the block that carries them (§14).
+/// than the block that carries them.
 fn tree_block(root: &Path) -> String {
     let mut entries = Vec::new();
     for entry in manifest_walk(root).flatten() {
@@ -372,7 +372,7 @@ enum ProbeResult {
 }
 
 /// Toolchain facts in the two layers that actually answer different questions
-/// (§14): what the project declares it is written for, and what this machine
+///: what the project declares it is written for, and what this machine
 /// can run. Declared versions cost no processes and never lie about a tool
 /// that exists; installed versions are probed, capped, and a timeout is
 /// printed as a timeout rather than as "not installed".
@@ -598,7 +598,7 @@ fn probe_plan(paths: &[PathBuf]) -> Vec<Probe> {
             from_stderr: false,
         });
     }
-    // the ecosystems the old root-only list missed entirely (§14.3)
+    // the ecosystems the old root-only list missed entirely
     if has("build.gradle")
         || has("build.gradle.kts")
         || has("settings.gradle")
@@ -994,7 +994,7 @@ mod tests {
         assert!(tree_block(root.path()).contains("… +3 more"));
     }
 
-    /// §14: directories only. Root files are one `ls` away, and a mixed list
+    /// directories only. Root files are one `ls` away, and a mixed list
     /// ages out before the block that carries it does.
     #[test]
     fn tree_lists_no_files() {
@@ -1095,7 +1095,7 @@ mod tests {
         assert!(joined.contains("dotnet 8.0.100"), "{joined}");
     }
 
-    /// Coverage (§14.3): the ecosystems the root-only list missed, and the
+    /// Coverage: the ecosystems the root-only list missed, and the
     /// cap that keeps a polyglot tree from spending the whole budget. The cap
     /// cuts in manifest order, so the sixth ecosystem is honestly absent.
     #[test]

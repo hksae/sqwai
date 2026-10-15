@@ -510,7 +510,7 @@ fn complete_rejects_reopened_steps() {
 
 #[test]
 fn replay_heals_other_session_crash_leaving_mine_alone() {
-    // §13 flagship: B's op journaled but never stored (crash between
+    // flagship: B's op journaled but never stored (crash between
     // append and store); the old single cursor only remembered A.
     let dir = std::env::temp_dir().join(format!("sqwai-plan-multisess-{}", new_id()));
     let mut plan = new_plan();
@@ -991,7 +991,7 @@ fn start_rejected_while_session_holds_another_step() {
         None,
     )
     .unwrap();
-    // Same session holding step 1 cannot start step 2 (§2.2.3).
+    // Same session holding step 1 cannot start step 2.
     let err = apply(
         &mut plan,
         Op::Start {

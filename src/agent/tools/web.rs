@@ -31,7 +31,7 @@ fn url_arg(args: &Value, allow_hosts: &[String]) -> Result<Url, String> {
 }
 
 /// Thin webfetch spelling over the shared gate: same rules, our prefix.
-/// `[web].allow_hosts` is the user's opt-in for loopback targets (§11).
+/// `[web].allow_hosts` is the user's opt-in for loopback targets.
 fn host_allowed(url: &Url, allow_hosts: &[String]) -> Result<(), String> {
     crate::config::url_host_allowed(url, allow_hosts).map_err(|detail| format!("webfetch {detail}"))
 }
@@ -364,7 +364,7 @@ mod tests {
         assert!(host_allowed(&fine, &[]).is_ok());
     }
 
-    /// §11: with `[web].allow_hosts` the loopback class becomes reachable
+    /// with `[web].allow_hosts` the loopback class becomes reachable
     /// through webfetch — the honest path to a dev server. The gate's own
     /// spelling is what the redirect policy uses, so hops obey the same list.
     #[test]

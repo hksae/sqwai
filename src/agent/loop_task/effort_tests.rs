@@ -572,7 +572,7 @@ fn summary_policy() -> context::Policy {
 }
 
 /// First identical re-run: reported with a note. Second one: the bytes are
-/// withheld (§18.1.8). A changed output, a different command, or a first run
+/// withheld. A changed output, a different command, or a first run
 /// stays untouched.
 #[test]
 fn repeat_verdict_notes_once_then_withholds() {

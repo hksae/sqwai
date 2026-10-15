@@ -355,8 +355,8 @@ pub(crate) async fn run_subagent_batch(
 
 /// The step a session should hold: whatever the plan keeps in progress,
 /// or idle. Used at startup (adopt the interrupted step after a crash,
-/// §3.4) and after a subagent returns (the child may have retired or
-/// moved the held step, §2.2.3). `ctx.current_step` stays the single live
+/// ) and after a subagent returns (the child may have retired or
+/// moved the held step). `ctx.current_step` stays the single live
 /// copy; the TUI persists it via `StepCurrent` events.
 pub(crate) fn adopt_in_progress_step(root: &Path, session_id: &str) -> Option<String> {
     plan::open_active_for_session(root, Some(session_id))
@@ -482,11 +482,11 @@ pub(crate) async fn run_subagent(
     if task.write {
         tools::register_subagent_scope(&child_session, task.paths.clone());
     }
-    // NOTE (§2.2.4): children always complete inside this tool call — the
+    // NOTE: children always complete inside this tool call — the
     // event loop below is awaited before the outcome returns. There is no
     // fire-and-forget spawn, so `plan finish` can never race still-running
     // children of the same step; no extra gate is needed for that.
-    // Inherit the spawning step, if any (§2.2.4): the child stamps this
+    // Inherit the spawning step, if any: the child stamps this
     // context on its records and stops mutating once the epoch moves on.
     // Resolved against the PARENT session, never the global fallback: the
     // most recent active plan may belong to another session, and the child
@@ -563,7 +563,7 @@ pub(crate) async fn run_subagent(
     let deadline = tokio::time::Instant::now() + timeout;
     // Esc polling: the parent cancel flag is the only stop signal visible
     // inside this wait — without it a stop request sits unobserved until
-    // the timeout, and the TUI shows "cancelling…" forever (§3.7).
+    // the timeout, and the TUI shows "cancelling…" forever.
     let mut cancel_poll = tokio::time::interval(std::time::Duration::from_millis(100));
     loop {
         // Checked at the top of every iteration, not only on the interval

@@ -282,7 +282,7 @@ async fn trust_gate_prompts_with_reason_and_honors_deny() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// §11: one dialog per (session, egress kind). After the user answers for
+/// one dialog per (session, egress kind). After the user answers for
 /// a push, the next push in the same session runs without asking, and the
 /// answer is in the journal — so it survives a resume.
 #[tokio::test]

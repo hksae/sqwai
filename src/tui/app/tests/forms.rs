@@ -1256,7 +1256,7 @@ fn sessions_first_keystroke_filters_instead_of_acting() {
 /// and nothing in the UI opened it — it was reachable from tests only, so
 /// every setting in it was effectively config-file-only. Every section
 /// offered by `/settings` must open a menu that has rows.
-/// §3.3 exists so that after compaction the model works from the anchor
+/// exists so that after compaction the model works from the anchor
 /// the host assembled. A continuation reference points at the provider's
 /// copy of the history compaction just removed, so it cannot survive one.
 #[test]
@@ -1456,7 +1456,7 @@ fn undo_reopens_step_on_any_partial_revert() {
     };
     let records = vec![record(10, "src/a.rs"), record(11, "src/b.rs")];
 
-    // Only one of the two files reverted: conservative rule (§3.6)
+    // Only one of the two files reverted: conservative rule
     // still reopens — a partial revert cannot leave "done" standing.
     let reopened = reopened_step_ids(&active, &records, "session", &["src/a.rs".into()]);
     assert_eq!(reopened, vec!["1"]);

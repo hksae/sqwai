@@ -1,4 +1,4 @@
-//! Two-layer safety classification for shell commands (design §4.4).
+//! Two-layer safety classification for shell commands.
 //!
 //! Layer 1: fast heuristic (substring/regex-based).
 //! Layer 2: AST structural analysis via tree-sitter-bash (pipeline into
@@ -27,7 +27,7 @@ pub fn classify(cmd: &str) -> Verdict {
     classify_for(ShellKind::detect(), cmd)
 }
 
-/// Outward-data commands for the trust gate (R, §2.2): network upload and
+/// Outward-data commands for the trust gate: network upload and
 /// transports out of the machine. Returns a short label for the approval
 /// reason. Deliberately narrow — unknown exfiltration shapes stay the
 /// safety classifier's job; this answers only "does this command send

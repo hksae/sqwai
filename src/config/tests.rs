@@ -654,7 +654,7 @@ provider = "p"
     );
     assert!(notes.iter().any(|n| n.contains("[safety]")), "{notes:?}");
     assert!(notes.iter().any(|n| n.contains("[models]")), "{notes:?}");
-    // §11: a cloned repo must not widen the hosts our webfetch may reach
+    // a cloned repo must not widen the hosts our webfetch may reach
     assert!(notes.iter().any(|n| n.contains("[web]")), "{notes:?}");
     assert!(
         cfg.web.allow_hosts.is_empty(),
@@ -811,7 +811,7 @@ fn gate(url: &str, allow: &[&str]) -> Result<(), String> {
     )
 }
 
-/// §11: the opt-in opens exactly the loopback class, and only when the
+/// the opt-in opens exactly the loopback class, and only when the
 /// user named it. Empty list = today's behavior, refuse every local host.
 #[test]
 fn loopback_needs_an_explicit_entry() {

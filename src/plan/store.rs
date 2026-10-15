@@ -79,7 +79,7 @@ impl Drop for PlanLock {
     }
 }
 
-/// Immutable spawn context a subagent inherits (§2.2.4): which plan step it
+/// Immutable spawn context a subagent inherits: which plan step it
 /// works on and at which epoch. Mutations and evidence from an older epoch
 /// are refused / filtered after the step is reopened.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,7 +89,7 @@ pub struct StepContext {
     pub step_epoch: u64,
 }
 
-// ---------------------------------------------------------------- journal-first commits and replay (§2.1.4, §2.2.1)
+// ---------------------------------------------------------------- journal-first commits and replay
 //
 // Every mutation of a plan file is preceded by a journal `plan` intent
 // record carrying the full op args. The record's scoped `session:seq`
@@ -526,7 +526,7 @@ fn apply_record(
     }
 }
 
-/// Atomic write: temp file + rename (§2.1.2).
+/// Atomic write: temp file + rename.
 pub fn store(root: &Path, plan: &Plan) -> Result<()> {
     let dir = plans_dir(root);
     std::fs::create_dir_all(&dir).context("creating plans directory")?;
@@ -583,7 +583,7 @@ pub fn open(root: &Path, id: &str) -> Result<Plan> {
     }
 }
 
-/// Rebuild a schema-broken plan file from journaled intents (§2.1.4).
+/// Rebuild a schema-broken plan file from journaled intents.
 /// Collects the create intent plus every later op for this plan id across all
 /// session journals — ordered best-effort by (ts, session, seq), because there
 /// is no total-order counter — and re-applies them onto a fresh base. Any
@@ -729,7 +729,7 @@ fn rebuild_corrupt(root: &Path, id: &str) -> Option<Plan> {
     Some(plan)
 }
 
-/// At most one active plan per project (§2.1.1).
+/// At most one active plan per project.
 pub fn open_active(root: &Path) -> Result<Option<Plan>> {
     open_active_for_session(root, None)
 }

@@ -310,12 +310,12 @@ pub(crate) async fn bash_call(
             safety::Verdict::NeedsApproval(reason) => Some(reason.to_string()),
         };
 
-    // 1b. trust gate (R, §2.2): external taint + an egress-shaped command
+    // 1b. trust gate: external taint + an egress-shaped command
     // needs the same approval with a trust reason; headless contexts deny
     // instead. Runs after the safety verdict so a Blocked command never
     // reaches here; a command both dangerous and exfiltrating carries one
     // combined reason into the single dialog. One dialog per (session, egress
-    // kind): a kind the user already confirmed passes (§11).
+    // kind): a kind the user already confirmed passes.
     let acked = crate::agent::trust::acked_egress(&ctx.root, &ctx.session_id);
     let mut taint_kind: Option<&'static str> = None;
     match crate::agent::trust::trust_gate(
@@ -390,10 +390,10 @@ pub(crate) async fn bash_call(
         }
         // checkpoint before running: dangerous-approved commands always;
         // otherwise only if the tree moved since this chain's last snapshot
-        // (hash-gate, §2.5). The classifier cannot see mutations, only risk:
+        // (hash-gate). The classifier cannot see mutations, only risk:
         // formatters and checkout-class commands look safe and mutate
         // silently, and must not run uninsured.
-        // §2.5: bash is the one case whose targets cannot be known in
+        // bash is the one case whose targets cannot be known in
         // advance, so this is where layer 2 earns its existence.
         let snapshot_wanted = needs_approval.is_some()
             || checkpoints::tree_changed(&ctx.root, ctx.shadow_store, ctx.checkpoint_chain());

@@ -1,6 +1,6 @@
 //! Mapping from the user's effort slider to what a provider actually receives.
 //!
-//! DESIGN.md §5.1 asks for two things at once: an honest mapping per
+//! We ask for two things at once: an honest mapping per
 //! provider, and honest *reporting* of that mapping — "when a model ignores
 //! the selected level, the status/header text must say `effort: <level>
 //! (ignored by model)` rather than implying that more work is active".
@@ -122,7 +122,7 @@ pub fn plan(level: EffortLevel, support: EffortSupport) -> Plan {
 impl Plan {
     /// Full sentence for places with room for one: the effort menu, and the
     /// confirmation shown when the level changes. The wording for an ignored
-    /// level is the one §5.1 prescribes.
+    /// level is the one prescribes.
     pub fn label(&self) -> String {
         let level = self.level.as_str();
         match self.status {
