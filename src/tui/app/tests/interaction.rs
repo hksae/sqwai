@@ -1523,6 +1523,7 @@ fn test_subcommands_gated_behind_experimental_flag() {
             "/test anim".to_string(),
             "/test approval".to_string(),
             "/test art".to_string(),
+            "/test ask".to_string(),
             "/test churn".to_string(),
             "/test colors".to_string(),
             "/test md".to_string(),

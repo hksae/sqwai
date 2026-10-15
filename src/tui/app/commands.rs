@@ -59,6 +59,8 @@ impl App {
                 } else if rest.split_whitespace().nth(1) == Some("plan") {
                     self.test_plan = Some(Self::sample_test_plan());
                     self.open_menu(Menu::Plan);
+                } else if rest.split_whitespace().nth(1) == Some("ask") {
+                    self.start_test_ask();
                 } else if rest.split_whitespace().nth(1) == Some("approval") {
                     self.open_menu(Menu::Approval {
                         id: 0,
@@ -69,7 +71,7 @@ impl App {
                     self.start_test_churn();
                 } else {
                     self.status(
-                        "/test takes: anim, approval, art, churn, colors, md, plan",
+                        "/test takes: anim, approval, art, ask, churn, colors, md, plan",
                         StatusKind::Warn,
                     );
                 }
@@ -546,5 +548,83 @@ impl App {
         p.steps[4].status = plan::StepStatus::Cancelled;
         p.steps[4].reason = Some("unified into /plan instead".into());
         p
+    }
+
+    fn start_test_ask(&mut self) {
+        use crate::agent::loop_task::{AskOption, AskQuestion};
+        let questions = vec![
+            AskQuestion {
+                header: "Storage".into(),
+                question: "Which backend should we use?".into(),
+                options: vec![
+                    AskOption {
+                        label: "SQLite".into(),
+                        description: Some("Single-file local database, zero config".into()),
+                        recommended: true,
+                    },
+                    AskOption {
+                        label: "PostgreSQL".into(),
+                        description: Some("Full relational server".into()),
+                        recommended: false,
+                    },
+                    AskOption {
+                        label: "In-memory".into(),
+                        description: Some("Ephemeral store for tests".into()),
+                        recommended: false,
+                    },
+                ],
+                multiple: false,
+                allow_free: true,
+            },
+            AskQuestion {
+                header: "Features".into(),
+                question: "Select all features to enable".into(),
+                options: vec![
+                    AskOption {
+                        label: "Prompt caching".into(),
+                        description: Some("Reuse stable system prefix".into()),
+                        recommended: true,
+                    },
+                    AskOption {
+                        label: "Shadow git".into(),
+                        description: Some("Automatic undo checkpoints".into()),
+                        recommended: false,
+                    },
+                    AskOption {
+                        label: "Streaming".into(),
+                        description: Some("Incremental token output".into()),
+                        recommended: false,
+                    },
+                ],
+                multiple: true,
+                allow_free: true,
+            },
+            AskQuestion {
+                header: "Verify".into(),
+                question: "Run full test suite after applying changes?".into(),
+                options: vec![
+                    AskOption {
+                        label: "Yes".into(),
+                        description: Some("Run cargo test before commit".into()),
+                        recommended: true,
+                    },
+                    AskOption {
+                        label: "Fast check only".into(),
+                        description: Some("Run cargo check only".into()),
+                        recommended: false,
+                    },
+                ],
+                multiple: false,
+                allow_free: false,
+            },
+        ];
+        let summary = questions
+            .iter()
+            .map(|q| q.question.clone())
+            .collect::<Vec<_>>()
+            .join(" | ");
+        let call_id = format!("test-ask-{}", self.segments.len());
+        self.handle_tool_start("ask_user".into(), summary, Some(call_id.clone()));
+        self.open_ask(&call_id, 0, questions);
     }
 }
