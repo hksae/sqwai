@@ -494,23 +494,22 @@ fn form_label_column_fits_long_setting_names() {
 #[test]
 fn plan_subcommand_popup_filters_and_inserts() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
-    // level 2 visible after `/plan `, lists every subcommand
+    // level 2 visible after `/plan `, lists only `/plan delete`
     app.input = App::fresh_input("/plan ".into());
     assert!(app.popup_visible());
     let items = app.popup_items();
-    assert_eq!(items.len(), menus::subcommands_of("/plan").unwrap().len());
-    assert!(items.contains(&"/plan complete".to_string()));
+    assert_eq!(items, vec!["/plan delete".to_string()]);
     // filtering by the typed prefix
-    app.input = App::fresh_input("/plan com".into());
+    app.input = App::fresh_input("/plan del".into());
     assert!(app.popup_visible());
-    assert_eq!(app.popup_items(), vec!["/plan complete".to_string()]);
+    assert_eq!(app.popup_items(), vec!["/plan delete".to_string()]);
     // insert replaces only the subcommand word, keeps typed args
-    app.input = App::fresh_input("/plan comp".into());
-    app.apply_subcommand_insert("/plan", "complete");
-    assert_eq!(app.input_text(), "/plan complete ");
-    app.input = App::fresh_input("/plan complete 2".into());
-    app.apply_subcommand_insert("/plan", "complete");
-    assert_eq!(app.input_text(), "/plan complete 2");
+    app.input = App::fresh_input("/plan del".into());
+    app.apply_subcommand_insert("/plan", "delete");
+    assert_eq!(app.input_text(), "/plan delete ");
+    app.input = App::fresh_input("/plan delete 2".into());
+    app.apply_subcommand_insert("/plan", "delete");
+    assert_eq!(app.input_text(), "/plan delete 2");
     // other level-2 commands behave the same way
     app.input = App::fresh_input("/mode ".into());
     assert!(app.popup_visible());
@@ -546,7 +545,7 @@ fn plan_subcommand_popup_filters_and_inserts() {
     assert_eq!(app.popup_accepted(), None);
     app.popup_move(1);
     assert!(app.popup_accepted().is_some());
-    app.apply_subcommand_insert("/plan", "history");
+    app.apply_subcommand_insert("/plan", "delete");
     assert_eq!(app.popup_accepted(), None, "subcommand insert clears focus so next Enter submits");
 }
 

@@ -18,7 +18,7 @@ use uuid::Uuid;
 mod ops;
 mod render;
 pub(crate) mod store;
-pub use ops::{Applied, Limits, NewStep, Op, Rejection, abandon, apply, create};
+pub use ops::{Applied, Limits, NewStep, Op, Rejection, apply, create};
 pub(crate) use ops::{add_criteria, step_diff};
 pub use render::{render, render_goal, render_status, set_goal};
 pub use store::{

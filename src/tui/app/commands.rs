@@ -277,7 +277,7 @@ impl App {
         match self.session_plan() {
             Some(plan) if plan.status == plan::PlanStatus::Active => Ok(plan),
             Some(plan) => Err(format!(
-                "plan is {} (read-only, see /plan history); create a new plan to continue",
+                "plan is {} (read-only); create a new plan to continue",
                 match plan.status {
                     plan::PlanStatus::Completed => "completed",
                     plan::PlanStatus::Abandoned => "abandoned",
@@ -308,7 +308,6 @@ impl App {
     }
 
     pub(super) fn plan_command(&mut self, rest: &str) {
-        let root = self.project_root.clone();
         let args: Vec<&str> = rest.split_whitespace().skip(1).collect();
         let result = match args.first().copied() {
             // bare `/plan` opens the overview; there is no `show` alias
@@ -326,88 +325,6 @@ impl App {
                 }
                 None => "no active plan".to_string(),
             },
-            Some("history") => {
-                let plans = plan::list(&root);
-                if plans.is_empty() {
-                    "no plan history".to_string()
-                } else {
-                    plans
-                        .iter()
-                        .filter(|p| p.status != plan::PlanStatus::Active)
-                        .map(|p| format!("{} · {:?} · {}", p.id, p.status, p.goal.text))
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                }
-            }
-            Some("limit") => {
-                format!(
-                    "plan step limit is [plan].max_steps in the config (currently {}); \
-                     a runtime override is not implemented yet",
-                    self.cfg.plan.max_steps
-                )
-            }
-            Some("complete") => match self.workable_plan() {
-                Ok(mut active) => {
-                    match plan::apply(
-                        &mut active,
-                        plan::Op::Complete,
-                        &plan::Limits::default(),
-                        None,
-                    ) {
-                        Ok(plan::Applied::Completed) => {
-                            let sid = self.session.id.to_string();
-                            match plan::commit(
-                                &root,
-                                &sid,
-                                &mut active,
-                                "complete",
-                                "user",
-                                true,
-                                serde_json::json!({}),
-                            ) {
-                                Ok(_) => "plan completed".to_string(),
-                                Err(e) => format!("plan write failed: {e:#}"),
-                            }
-                        }
-                        Ok(_) => "plan complete did not change its status".to_string(),
-                        Err(e) => format!("plan complete rejected [{}]: {}", e.code, e.reason),
-                    }
-                }
-                Err(message) => message,
-            },
-            Some("abandon") => {
-                let reason = args
-                    .get(1..)
-                    .map(|v| v.join(" "))
-                    .unwrap_or_default()
-                    .trim()
-                    .to_string();
-                if reason.is_empty() {
-                    "usage: /plan abandon <reason>".to_string()
-                } else {
-                    match self.workable_plan() {
-                        Ok(mut active) => {
-                            plan::abandon(&mut active);
-                            let sid = self.session.id.to_string();
-                            let commit_args =
-                                serde_json::json!({"op": "abandon", "reason": reason});
-                            match plan::commit(
-                                &root,
-                                &sid,
-                                &mut active,
-                                "abandon",
-                                "user",
-                                true,
-                                commit_args,
-                            ) {
-                                Ok(_) => format!("plan abandoned: {reason}"),
-                                Err(e) => format!("plan write failed: {e:#}"),
-                            }
-                        }
-                        Err(message) => message,
-                    }
-                }
-            }
             Some("waive") | Some("confirm") => {
                 "waive/confirm are retired: acceptance is now plain done-criteria notes the \
                  agent keeps for itself — there is nothing for the host to certify"

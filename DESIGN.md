@@ -71,7 +71,10 @@ record and the file heals on replay: an orphaned create intent rebuilds the
 plan, a torn plan file rebuilds from the create intent plus every later op, and
 a rebuild that cannot match its journal quarantines the bytes instead of
 guessing. Plans are re-opened per session by id; a session never inherits
-another session's plan.
+another session's plan. In the TUI, `/plan` opens the read-only plan surface and
+`/plan delete` removes the session's plan; lifecycle transitions (`complete`,
+`abandon`, `block_plan`, step mutations) belong to the `plan` tool rather than
+user slash subcommands.
 
 **Journal** — the append-only event log, one file per session, every line
 addressable as `j#<seq>`: `user_msg`, `tool_call`, `tool_result`, `file_diff`,
@@ -212,10 +215,11 @@ Each of these stops something a user cannot recover from by themselves.
 - **Plan shape** — `create` needs a goal, at least one criterion, and steps.
   This is the only plan refusal left, and it checks the completeness of a form,
   not the quality of the work.
-- **A wrong plan is abandoned, not silently rewritten** — `abandon` (free for
-  both actors) requires a reason that goes in the journal; `block_plan`
-  requires the quoted contradiction. Neither stops work; both make the drift
-  visible, which is what the future reader and the user's own memory depend on.
+- **A wrong plan is abandoned, not silently rewritten** — `abandon` requires a
+  reason that goes in the journal; `block_plan` requires the quoted
+  contradiction (and the user can drop a plan outright with `/plan delete`).
+  Neither stops work; both make the drift visible, which is what the future
+  reader and the user's own memory depend on.
 - **Secrets** — screened out of memory writes, and never committed or pushed
   without an explicit request.
 

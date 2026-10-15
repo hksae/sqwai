@@ -46,10 +46,7 @@ pub(super) const COMMANDS: &[&str] = &[
 /// the dispatch arms. Commands absent here keep level-1-only behavior
 /// (the popup hides after the first space).
 pub(super) const SUBCOMMANDS: &[(&str, &[&str])] = &[
-    (
-        "/plan",
-        &["history", "limit", "complete", "abandon", "delete"],
-    ),
+    ("/plan", &["delete"]),
     ("/undo", &["step"]),
     (
         "/test",

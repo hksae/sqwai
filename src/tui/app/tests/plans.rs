@@ -190,27 +190,15 @@ fn completed_linked_plan_refuses_tui_mutations() {
 
     let last_status = |app: &App| toast_text(app);
 
-    app.plan_command("/plan complete");
-    assert!(
-        last_status(&app).contains("completed") && last_status(&app).contains("read-only"),
-        "complete must refuse: {}",
-        last_status(&app)
-    );
     app.plan_command("/plan waive 0 looks fine");
     assert!(
         last_status(&app).contains("retired"),
         "waive is retired outright: {}",
         last_status(&app)
     );
-    app.plan_command("/plan abandon wrong plan");
-    assert!(
-        last_status(&app).contains("read-only"),
-        "abandon must refuse: {}",
-        last_status(&app)
-    );
     app.goal_command("/goal a new direction");
     assert!(
-        last_status(&app).contains("read-only"),
+        last_status(&app).contains("completed") && last_status(&app).contains("read-only"),
         "goal must refuse: {}",
         last_status(&app)
     );
@@ -364,26 +352,18 @@ fn tui_commands_operate_on_session_plan_not_newest_global() {
     // resolver prefers the linked plan over the newest global one
     assert_eq!(app.session_plan().map(|p| p.id), Some(plan_a.id.clone()));
 
-    // /plan complete mutates A, leaves B alone
-    let mut a_ready = plan::open(&temp_dir, &plan_a.id).unwrap();
-    a_ready.steps[0].status = plan::StepStatus::Done;
-    plan::store(&temp_dir, &a_ready).unwrap();
-    app.plan_command("/plan complete");
-    let a_completed = plan::open(&temp_dir, &plan_a.id).unwrap();
-    assert_eq!(a_completed.status, plan::PlanStatus::Completed);
-    let b_after_complete = plan::open(&temp_dir, &plan_b.id).unwrap();
-    assert_eq!(b_after_complete.status, plan::PlanStatus::Active);
+    // /goal and /constraints mutate linked plan A, leave B alone
+    app.goal_command("/goal updated session A goal");
+    let a_updated = plan::open(&temp_dir, &plan_a.id).unwrap();
+    assert_eq!(a_updated.goal.text, "updated session A goal");
+    let b_after_goal = plan::open(&temp_dir, &plan_b.id).unwrap();
+    assert_eq!(b_after_goal.goal.text, "other goal");
 
-    // /plan abandon mutates linked plan, leaves B alone
-    let mut plan_c = mk_plan("session C goal");
-    plan_c.sessions = vec![sid.clone()];
-    plan::store(&temp_dir, &plan_c).unwrap();
-    app.session.plan_id = Some(plan_c.id.clone());
-    app.plan_command("/plan abandon wrong plan");
-    let c_abandoned = plan::open(&temp_dir, &plan_c.id).unwrap();
-    assert_eq!(c_abandoned.status, plan::PlanStatus::Abandoned);
+    app.constraints_command("/constraints add keep B untouched");
+    let a_constrained = plan::open(&temp_dir, &plan_a.id).unwrap();
+    assert_eq!(a_constrained.constraints, vec!["keep B untouched".to_string()]);
     let b_still_active = plan::open(&temp_dir, &plan_b.id).unwrap();
-    assert_eq!(b_still_active.status, plan::PlanStatus::Active);
+    assert!(b_still_active.constraints.is_empty());
 
     app.session.plan_id = Some(plan_a.id.clone());
     // Menu::Plan renders the session's plan, not the newest global one
