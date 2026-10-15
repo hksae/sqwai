@@ -334,6 +334,24 @@ pub(super) struct AskState {
     pub focus: usize,
 }
 
+impl AskState {
+    pub(super) fn is_answered(&self, q: usize) -> bool {
+        let has_pick = self
+            .picked
+            .get(q)
+            .is_some_and(|v| v.iter().any(|p| *p));
+        let has_custom = self
+            .custom
+            .get(q)
+            .is_some_and(|s| !s.trim().is_empty());
+        has_pick || has_custom
+    }
+
+    pub(super) fn can_reach(&self, q: usize) -> bool {
+        q < self.questions.len() && (0..q).all(|i| self.is_answered(i))
+    }
+}
+
 /// One interactive row inside a live `ask_user` row, used for mouse
 /// hover/click mapping. Questions and separators are not targets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -845,20 +863,34 @@ impl App {
                 // outside-rect Esc path)
                 match row {
                     AskRow::Option { q, opt } => {
-                        let multiple = matches!(
-                            self.segments.get(idx),
+                        let (allowed, multiple) = match self.segments.get(idx) {
                             Some(Segment::Tool {
-                                ask: Some(ask),
-                                ..
-                            }) if ask.questions.get(q).is_some_and(|qq| qq.multiple)
-                        );
+                                ask: Some(ask), ..
+                            }) => (
+                                q <= ask.focus && ask.can_reach(q),
+                                ask.questions.get(q).is_some_and(|qq| qq.multiple),
+                            ),
+                            _ => (false, false),
+                        };
+                        if !allowed {
+                            return;
+                        }
                         if multiple {
                             self.inline_ask_toggle(q, opt);
                         } else {
                             self.inline_ask_select(q, opt);
                         }
                     }
-                    AskRow::Custom { q } => self.inline_ask_open_custom(q),
+                    AskRow::Custom { q } => {
+                        let allowed = matches!(
+                            self.segments.get(idx),
+                            Some(Segment::Tool { ask: Some(ask), .. })
+                                if q <= ask.focus && ask.can_reach(q)
+                        );
+                        if allowed {
+                            self.inline_ask_open_custom(q);
+                        }
+                    }
                     AskRow::Confirm => self.inline_ask_confirm(),
                 }
             }
@@ -1319,6 +1351,7 @@ impl App {
         };
         for (q_idx, q) in ask.questions.iter().enumerate() {
             let focused = live && q_idx == ask.focus;
+            let locked = live && (q_idx > ask.focus || !ask.can_reach(q_idx));
             if !q.header.is_empty() {
                 row(
                     vec![Span::styled(
@@ -1331,7 +1364,7 @@ impl App {
             row(
                 vec![Span::styled(
                     truncate_display_width(&format!("  {}", q.question), width),
-                    Theme::base(),
+                    if locked { Theme::dim() } else { Theme::base() },
                 )],
                 false,
             );
@@ -1367,13 +1400,17 @@ impl App {
                                 Theme::dim()
                             },
                         ),
-                        Span::styled(text, Theme::base()),
+                        Span::styled(
+                            text,
+                            if locked { Theme::dim() } else { Theme::base() },
+                        ),
                     ],
-                    live && self.ask_hover
-                        == Some(AskRow::Option {
-                            q: q_idx,
-                            opt: o_idx,
-                        }),
+                    live && !locked
+                        && self.ask_hover
+                            == Some(AskRow::Option {
+                                q: q_idx,
+                                opt: o_idx,
+                            }),
                 );
             }
             if q.allow_free {
@@ -1412,14 +1449,14 @@ impl App {
                         ),
                         Span::styled(
                             text,
-                            if filled || editing {
+                            if (filled || editing) && !locked {
                                 Theme::base()
                             } else {
                                 Theme::dim()
                             },
                         ),
                     ],
-                    live && self.ask_hover == Some(AskRow::Custom { q: q_idx }),
+                    live && !locked && self.ask_hover == Some(AskRow::Custom { q: q_idx }),
                 );
             }
             if q_idx + 1 < ask.questions.len() {
@@ -1432,12 +1469,17 @@ impl App {
                 );
             }
         }
+        let confirm_label = if ask.focus + 1 < ask.questions.len() {
+            "   enter to next question"
+        } else {
+            "   enter to confirm"
+        };
         row(
             vec![Span::styled(
-                truncate_display_width("   enter to confirm", width),
+                truncate_display_width(confirm_label, width),
                 Theme::dim(),
             )],
-            live && self.ask_hover == Some(AskRow::Confirm),
+            live && ask.is_answered(ask.focus) && self.ask_hover == Some(AskRow::Confirm),
         );
         out
     }

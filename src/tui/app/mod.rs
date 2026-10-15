@@ -1404,6 +1404,9 @@ impl App {
             return;
         };
         if let Some(Segment::Tool { ask: Some(ask), .. }) = self.segments.get_mut(seg) {
+            if !ask.can_reach(q) {
+                return;
+            }
             let Some(opts) = ask.picked.get_mut(q) else {
                 return;
             };
@@ -1433,6 +1436,9 @@ impl App {
             return;
         };
         if let Some(Segment::Tool { ask: Some(ask), .. }) = self.segments.get_mut(seg) {
+            if !ask.can_reach(q) {
+                return;
+            }
             let Some(v) = ask.picked.get_mut(q).and_then(|v| v.get_mut(opt)) else {
                 return;
             };
@@ -1449,9 +1455,10 @@ impl App {
         let Some(seg) = self.active_ask_seg() else {
             return;
         };
-        if let Some(Segment::Tool { ask: Some(ask), .. }) = self.segments.get_mut(seg)
-            && q < ask.questions.len()
-        {
+        if let Some(Segment::Tool { ask: Some(ask), .. }) = self.segments.get_mut(seg) {
+            if !ask.can_reach(q) {
+                return;
+            }
             ask.focus = q;
         }
         self.touch_segment(seg);
@@ -1463,6 +1470,14 @@ impl App {
     /// this is the user choosing "something else", so the option markers clear —
     /// the same radio `inline_ask_select` enforces from the other side.
     pub(super) fn inline_ask_open_custom(&mut self, q: usize) {
+        let Some(seg) = self.active_ask_seg() else {
+            return;
+        };
+        if let Some(Segment::Tool { ask: Some(ask), .. }) = self.segments.get(seg)
+            && !ask.can_reach(q)
+        {
+            return;
+        }
         self.inline_ask_focus(q);
         if let Some(seg) = self.active_ask_seg()
             && let Some(Segment::Tool { ask: Some(ask), .. }) = self.segments.get_mut(seg)
@@ -1478,11 +1493,26 @@ impl App {
         self.dirty = true;
     }
 
-    /// confirm the whole inline ask and send it to the agent
+    /// confirm the current question: if it is answered and more questions
+    /// follow, advance focus to the next one; on the last question, submit the
+    /// whole questionnaire to the agent. Unanswered questions cannot confirm.
     pub(super) fn inline_ask_confirm(&mut self) {
         let Some(seg) = self.active_ask_seg() else {
             return;
         };
+        if let Some(Segment::Tool { ask: Some(ask), .. }) = self.segments.get_mut(seg) {
+            let cur = ask.focus;
+            if !ask.is_answered(cur) {
+                return;
+            }
+            if cur + 1 < ask.questions.len() {
+                ask.focus = cur + 1;
+                self.ask_custom_focus = None;
+                self.touch_segment(seg);
+                self.dirty = true;
+                return;
+            }
+        }
         let text = self.inline_ask_text(seg);
         self.inline_ask_answer(text);
     }

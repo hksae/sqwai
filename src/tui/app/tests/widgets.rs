@@ -802,7 +802,24 @@ fn ask_user_answer_collapses_to_head_row() {
         ),
         "live questions open unfolded"
     );
+    // Q2 cannot be clicked or toggled before Q1 is answered, and Enter does nothing
+    app.inline_ask_toggle(1, 0);
+    app.inline_ask_confirm();
+    assert!(matches!(
+        &app.segments[seg],
+        Segment::Tool { ask: Some(ask), .. } if ask.focus == 0 && !ask.is_answered(1)
+    ));
+
+    // Answer Q1 and press Enter -> advances focus to Q2 without closing
     app.inline_ask_select(0, 1);
+    app.inline_ask_confirm();
+    assert!(matches!(
+        &app.segments[seg],
+        Segment::Tool { ask: Some(ask), .. } if ask.focus == 1
+    ));
+
+    // Answer Q2 and press Enter -> closes and collapses to the head row
+    app.inline_ask_toggle(1, 0);
     app.inline_ask_confirm();
     assert!(
         matches!(
