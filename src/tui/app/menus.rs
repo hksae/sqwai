@@ -50,6 +50,7 @@ pub(super) const SUBCOMMANDS: &[(&str, &[&str])] = &[
             "anim", "approval", "art", "ask", "churn", "colors", "md", "plan",
         ],
     ),
+    ("/undo", &["list", "step", "turn"]),
 ];
 
 /// Subcommand list for a top-level command, if it has second-level completions.

@@ -515,8 +515,19 @@ fn plan_subcommand_popup_filters_and_inserts() {
     assert!(!app.popup_visible());
     app.input = App::fresh_input("/providers ".into());
     assert!(!app.popup_visible());
-    app.input = App::fresh_input("/undo ".into());
+    app.input = App::fresh_input("/redo ".into());
     assert!(!app.popup_visible());
+    // /undo has second-level completions (list, step, turn)
+    app.input = App::fresh_input("/undo ".into());
+    assert!(app.popup_visible());
+    assert_eq!(
+        app.popup_items(),
+        vec![
+            "/undo list".to_string(),
+            "/undo step".to_string(),
+            "/undo turn".to_string(),
+        ]
+    );
     // level 1 untouched
     app.input = App::fresh_input("/pl".into());
     assert!(app.popup_visible());
