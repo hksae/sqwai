@@ -2,7 +2,7 @@
 //!
 //! A plan is a host-owned document: the model reaches it only through the
 //! `plan` tool operations validated here. The model can never write `goal`,
-//! `constraints`, `evidence` or `folded` directly. `criteria` are the agent's
+//! `constraints` or `evidence` directly. `criteria` are the agent's
 //! own plain-text done-notes — the host stores and renders them, but runs and
 //! certifies nothing.
 //!
@@ -175,14 +175,6 @@ pub struct Step {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Folded {
-    pub ids: Vec<String>,
-    pub text: String,
-    #[serde(default)]
-    pub evidence: Vec<EvidenceRef>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Budget {
     pub tokens: u64,
     pub limit: u64,
@@ -221,8 +213,6 @@ pub struct Plan {
     pub criteria: Vec<String>,
     #[serde(default)]
     pub steps: Vec<Step>,
-    #[serde(default)]
-    pub folded: Vec<Folded>,
     pub budget: Budget,
     pub revision: u64,
     #[serde(default)]

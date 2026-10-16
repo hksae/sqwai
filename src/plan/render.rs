@@ -55,9 +55,6 @@ pub fn render_status(plan: &Plan) -> String {
         "steps: {} done · {} in progress · {} blocked · {} pending · {} cancelled\n",
         c.done, c.in_progress, c.blocked, c.pending, c.cancelled
     ));
-    for f in &plan.folded {
-        out.push_str(&format!("  {}\n", f.text));
-    }
     for s in &plan.steps {
         let marker = match s.status {
             StepStatus::Done => "[x]",

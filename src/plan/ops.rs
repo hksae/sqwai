@@ -331,7 +331,6 @@ pub fn create(
                 stale_goal: None,
             })
             .collect(),
-        folded: Vec::new(),
         budget: Budget {
             tokens: 0,
             limit: budget_limit,
