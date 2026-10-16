@@ -490,17 +490,14 @@ pub fn patch(ctx: &mut ToolCtx, args: &Value) -> Outcome {
         return Outcome::err(format!("patch rejected: {}", truncate(error.trim())));
     }
 
-    let checkpoint = if let Ok(Some(sha)) = crate::agent::checkpoints::snapshot_session(
+    let sha = crate::agent::checkpoints::checkpoint_for_mutation(
         &ctx.root,
         ctx.shadow_store,
         ctx.checkpoint_chain(),
         "patch",
-    ) {
-        ctx.journal.push((sha.clone(), "patch".to_string()));
-        Some(sha)
-    } else {
-        None
-    };
+    );
+    ctx.journal.push((sha.clone(), "patch".to_string()));
+    let checkpoint = Some(sha);
 
     let mut apply = match Command::new("git")
         .current_dir(&ctx.root)

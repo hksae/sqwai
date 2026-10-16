@@ -204,8 +204,14 @@ impl Shadow {
         // Nested repositories (submodules, vendored checkouts) are excluded
         // rather than snapshotted: git would record them as gitlinks whose
         // objects we do not have, and a restore could not reproduce them.
-        for nested in nested_git_dirs(&self.root) {
-            lines.push_str(&format!("{nested}\n"));
+        // Oversized untracked artifacts (> 16 MB) are also excluded so a build
+        // or dump in the worktree never stalls `git add -A` or bloats `.sqwai`.
+        let (nested, oversized) = scan_worktree_exclusions(&self.root);
+        for dir in nested {
+            lines.push_str(&format!("{dir}\n"));
+        }
+        for file in oversized {
+            lines.push_str(&format!("{file}\n"));
         }
         if let Ok(project) = std::fs::read_to_string(self.root.join(".gitignore")) {
             lines.push_str("\n# from .gitignore\n");
@@ -432,15 +438,31 @@ fn session_ref(session_id: &str) -> String {
     format!("refs/sessions/{session_id}")
 }
 
+/// Maximum size (16 MB) of a single file that the shadow repository will stage
+/// into a checkpoint. Larger untracked artifacts (archives, binaries, DB dumps)
+/// are added to `info/exclude` so `git add -A` never stalls or bloats `.sqwai`.
+const MAX_SNAPSHOT_FILE_BYTES: u64 = 16 * 1024 * 1024;
+
 /// Directories inside the project that are repositories of their own,
 /// relative to the root and ready for `info/exclude`. Recursive with a
 /// depth bound: a nested checkout deeper than one level was recorded as a
 /// gitlink whose "content" on restore is a 40-char SHA (audit C9). A
 /// directory that IS a repo stops the descent — its internals are its own
 /// git's business.
+#[cfg(test)]
 fn nested_git_dirs(root: &Path) -> Vec<String> {
-    fn walk(dir: &Path, root: &Path, depth: u8, found: &mut Vec<String>) {
-        if depth > 6 || found.len() >= 64 {
+    scan_worktree_exclusions(root).0
+}
+
+fn scan_worktree_exclusions(root: &Path) -> (Vec<String>, Vec<String>) {
+    fn walk(
+        dir: &Path,
+        root: &Path,
+        depth: u8,
+        nested: &mut Vec<String>,
+        oversized: &mut Vec<String>,
+    ) {
+        if depth > 6 || nested.len() >= 64 {
             return;
         }
         let Ok(entries) = std::fs::read_dir(dir) else {
@@ -448,7 +470,18 @@ fn nested_git_dirs(root: &Path) -> Vec<String> {
         };
         for entry in entries.flatten() {
             let path = entry.path();
-            if !path.is_dir() {
+            let Ok(meta) = entry.metadata() else {
+                continue;
+            };
+            if meta.is_file() {
+                if meta.len() > MAX_SNAPSHOT_FILE_BYTES
+                    && let Ok(rel) = path.strip_prefix(root)
+                {
+                    oversized.push(rel.to_string_lossy().replace('\\', "/"));
+                }
+                continue;
+            }
+            if !meta.is_dir() {
                 continue;
             }
             let name = entry.file_name().to_string_lossy().into_owned();
@@ -457,16 +490,17 @@ fn nested_git_dirs(root: &Path) -> Vec<String> {
             }
             if path.join(".git").exists() {
                 if let Ok(rel) = path.strip_prefix(root) {
-                    found.push(format!("{}/", rel.to_string_lossy().replace('\\', "/")));
+                    nested.push(format!("{}/", rel.to_string_lossy().replace('\\', "/")));
                 }
                 continue;
             }
-            walk(&path, root, depth + 1, found);
+            walk(&path, root, depth + 1, nested, oversized);
         }
     }
-    let mut found = Vec::new();
-    walk(root, root, 0, &mut found);
-    found
+    let mut nested = Vec::new();
+    let mut oversized = Vec::new();
+    walk(root, root, 0, &mut nested, &mut oversized);
+    (nested, oversized)
 }
 
 #[cfg(test)]

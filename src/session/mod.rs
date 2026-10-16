@@ -84,6 +84,18 @@ pub struct TurnNote {
     pub is_error: bool,
 }
 
+/// One reversible `/undo` operation stored on the session so `/redo` can
+/// re-apply the undone file states, checkpoints, and plan step statuses.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RedoEntry {
+    pub label: String,
+    #[serde(default)]
+    pub checkpoints: Vec<(String, String)>,
+    pub files: Vec<crate::agent::journal::PreImage>,
+    #[serde(default)]
+    pub reopened_steps: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
     pub id: Uuid,
@@ -151,6 +163,14 @@ pub struct Session {
     /// (sha, label) undo journal: one entry per mutating agent action
     #[serde(default)]
     pub checkpoints: Vec<(String, String)>,
+    /// Index in `checkpoints` where the latest agent turn started, used by
+    /// `/undo turn` to roll back all mutations of the last turn at once.
+    #[serde(default)]
+    pub turn_checkpoint_start: usize,
+    /// Stack of undone operations that `/redo` can re-apply; cleared whenever
+    /// a new agent mutation checkpoint lands.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub redo_stack: Vec<RedoEntry>,
     /// One summary for each completed agent turn that produced activity.
     /// Kept separately from provider messages because it is presentation state.
     #[serde(default)]
@@ -208,6 +228,8 @@ impl Session {
             last_response_id: None,
             last_response_model: None,
             checkpoints: Vec::new(),
+            turn_checkpoint_start: 0,
+            redo_stack: Vec::new(),
             activity: Vec::new(),
             turn_notes: Vec::new(),
             prev_turn_aborted: false,

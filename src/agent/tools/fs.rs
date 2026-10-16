@@ -373,7 +373,7 @@ pub(super) fn write_file(ctx: &mut ToolCtx, raw: &str, content: &str) -> Outcome
     }
     let body = restore_bom(content.to_string(), had_bom && !content.starts_with(BOM));
     // checkpoint before mutation
-    checkpoint(ctx, &p, "write");
+    let checkpoint = Some(checkpoint(ctx, &p, "write"));
     if let Err(e) = fs::write(&p, &body) {
         return Outcome::err(format!("write failed: {e}"));
     }
@@ -387,7 +387,6 @@ pub(super) fn write_file(ctx: &mut ToolCtx, raw: &str, content: &str) -> Outcome
         // write-path lints (AF) see the same diff shape as an edit
         None => make_diff("", content),
     };
-    let checkpoint = ctx.journal.last().map(|(sha, _)| sha.clone());
     let metadata = file_diff(
         &p,
         &ctx.root,
@@ -552,8 +551,7 @@ pub(super) fn edit(
         Err(e) => return Outcome::err(e),
     };
     let updated = restore_bom(edited, had_bom);
-    checkpoint(ctx, &p, "edit");
-    let checkpoint_id = ctx.journal.last().map(|(sha, _)| sha.clone());
+    let checkpoint_id = Some(checkpoint(ctx, &p, "edit"));
     if let Err(e) = fs::write(&p, &updated) {
         return Outcome::err(format!("write failed: {e}"));
     }
@@ -566,7 +564,7 @@ pub(super) fn edit(
         &ctx.root,
         // the pre- and post-images are the file's bytes, marker and all: this
         // is what the blob store and `/undo` restore, not the model's view
-        Some(raw.as_bytes()),
+        Some(original.as_bytes()),
         updated.as_bytes(),
         "edit",
         checkpoint_id,
@@ -614,8 +612,7 @@ pub(super) fn multi_edit(
         }
         staged = apply_one(&staged, old, new, *all).unwrap_or(staged.clone());
     }
-    checkpoint(ctx, &p, "multi_edit");
-    let checkpoint_id = ctx.journal.last().map(|(sha, _)| sha.clone());
+    let checkpoint_id = Some(checkpoint(ctx, &p, "multi_edit"));
     let updated = restore_bom(staged, had_bom);
     if let Err(e) = fs::write(&p, &updated) {
         return Outcome::err(format!("write failed: {e}"));
@@ -868,21 +865,16 @@ fn json_out_no_matches(pattern: &str) -> String {
     format!("no matches for /{pattern}/")
 }
 
-fn checkpoint(ctx: &mut ToolCtx, p: &Path, what: &str) {
+fn checkpoint(ctx: &mut ToolCtx, p: &Path, what: &str) -> String {
     let label = format!("{what} {}", rel_label(&ctx.root, p));
-    // Layer 2 is best-effort by design: layer 1 already holds this file's
-    // pre-image, so a missing git binary costs the tree snapshot and nothing
-    // else.
-    // An unchanged tree needs no commit, and no git binary means no layer 2 —
-    // neither is a reason to fail the edit.
-    if let Ok(Some(sha)) = crate::agent::checkpoints::snapshot_session(
+    let id = crate::agent::checkpoints::checkpoint_for_mutation(
         &ctx.root,
         ctx.shadow_store,
         ctx.checkpoint_chain(),
         &label,
-    ) {
-        ctx.journal.push((sha, label));
-    }
+    );
+    ctx.journal.push((id.clone(), label));
+    id
 }
 
 fn rel_label(root: &Path, p: &Path) -> String {

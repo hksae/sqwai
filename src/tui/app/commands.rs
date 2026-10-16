@@ -183,14 +183,63 @@ impl App {
                 if self.streaming {
                     self.show_busy_status();
                 } else {
-                    match rest.split_whitespace().nth(1) {
+                    let mut parts = rest.split_whitespace().skip(1);
+                    match parts.next() {
                         None => self.undo(1),
+                        Some("turn") => {
+                            if parts.next().is_some() {
+                                self.status(
+                                    "invalid command /undo turn <аргумент не нужен>",
+                                    StatusKind::Warn,
+                                );
+                            } else {
+                                self.undo_turn();
+                            }
+                        }
+                        Some("list") => {
+                            if parts.next().is_some() {
+                                self.status(
+                                    "invalid command /undo list <аргумент не нужен>",
+                                    StatusKind::Warn,
+                                );
+                            } else if self.session.checkpoints.is_empty()
+                                && self.session.redo_stack.is_empty()
+                            {
+                                self.status("nothing to undo", StatusKind::Info);
+                            } else {
+                                self.open_menu(Menu::UndoList);
+                            }
+                        }
+                        Some("step") => match parts.next() {
+                            Some(step) if parts.next().is_none() => self.undo_step(step),
+                            _ => self.status(
+                                "invalid command /undo step <укажите номер шага>",
+                                StatusKind::Warn,
+                            ),
+                        },
                         Some(arg) => match arg.parse::<usize>() {
-                            Ok(n) => self.undo(n),
+                            Ok(n) if parts.next().is_none() => self.undo(n),
                             // Never guess: this used to parse as `/undo 1` and
                             // revert the last checkpoint, reported as success.
-                            Err(_) => self.status(
-                                &format!("invalid command /undo <аргумент не число>"),
+                            _ => self.status(
+                                "invalid command /undo <аргумент не число>",
+                                StatusKind::Warn,
+                            ),
+                        },
+                    }
+                }
+            }
+            "/redo" => {
+                if self.streaming {
+                    self.show_busy_status();
+                } else {
+                    let mut parts = rest.split_whitespace().skip(1);
+                    match parts.next() {
+                        None => self.redo(1),
+                        Some(arg) => match arg.parse::<usize>() {
+                            Ok(n) if parts.next().is_none() => self.redo(n),
+                            _ => self.status(
+                                "invalid command /redo <аргумент не число>",
                                 StatusKind::Warn,
                             ),
                         },

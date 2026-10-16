@@ -2455,6 +2455,7 @@ impl App {
             | Some(Menu::TestMd)
             | Some(Menu::CompactionSummary)
             | Some(Menu::UndoShadow)
+            | Some(Menu::UndoList)
             | Some(Menu::Providers)
             | Some(Menu::EditProvider { .. })
             | Some(Menu::ProviderFormat { .. })
@@ -2492,6 +2493,7 @@ impl App {
                 | Some(Menu::EditScalar(..))
                 | Some(Menu::CompactionSummary)
                 | Some(Menu::UndoShadow)
+                | Some(Menu::UndoList)
                 | Some(Menu::Providers)
                 | Some(Menu::EditProvider { .. })
                 | Some(Menu::EditProviderField { .. })
@@ -2784,6 +2786,7 @@ impl App {
                         | Some(Menu::EditScalar(..))
                         | Some(Menu::CompactionSummary)
                         | Some(Menu::UndoShadow)
+                        | Some(Menu::UndoList)
                         | Some(Menu::Providers)
                         | Some(Menu::EditProvider { .. })
                         | Some(Menu::EditProviderField { .. })
@@ -3102,6 +3105,7 @@ impl App {
                 | Some(Menu::EditScalar(..))
                 | Some(Menu::CompactionSummary)
                 | Some(Menu::UndoShadow)
+                | Some(Menu::UndoList)
                 | Some(Menu::Providers)
                 | Some(Menu::EditProvider { .. })
                 | Some(Menu::EditProviderField { .. })
@@ -3999,7 +4003,8 @@ impl App {
             Some(
                 Menu::ProviderFormat { .. }
                 | Menu::CompactionSummary
-                | Menu::UndoShadow,
+                | Menu::UndoShadow
+                | Menu::UndoList,
             ) => vec![
                 ("enter", "use".to_string()),
                 ("esc", "back".to_string()),

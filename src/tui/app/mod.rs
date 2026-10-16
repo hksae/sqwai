@@ -2123,6 +2123,7 @@ impl App {
             fallback_chain,
         };
         self.context_bootstrap_pending = false;
+        self.session.turn_checkpoint_start = self.session.checkpoints.len();
         self.agent = Some(spawn_agent(input));
         self.streaming = true;
         self.aborted = false;
@@ -3010,7 +3011,14 @@ impl App {
             } => {
                 self.handle_tool_notice(name, summary, ok, diff, Some(call_id));
             }
-            AgentEvent::Checkpoint { label } => {
+            AgentEvent::Checkpoint { sha, label } => {
+                if !undo::is_boundary_checkpoint(&label) {
+                    self.session.redo_stack.clear();
+                }
+                let entry = (sha, label.clone());
+                if self.session.checkpoints.last() != Some(&entry) {
+                    self.session.checkpoints.push(entry);
+                }
                 self.last_checkpoint = Some(label);
                 self.dirty = true;
             }
@@ -3504,7 +3512,15 @@ impl App {
         if !outcome.plan_todos.is_empty() {
             self.todos = outcome.plan_todos;
         }
-        self.session.checkpoints.extend(outcome.journal);
+        let start = self
+            .session
+            .turn_checkpoint_start
+            .min(self.session.checkpoints.len());
+        for entry in outcome.journal {
+            if !self.session.checkpoints[start..].contains(&entry) {
+                self.session.checkpoints.push(entry);
+            }
+        }
         self.finish_turn_inner(Ok(()), advanced);
     }
 

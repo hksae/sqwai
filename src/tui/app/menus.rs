@@ -31,6 +31,7 @@ pub(super) const COMMANDS: &[&str] = &[
     "/new",
     "/plan",
     "/providers",
+    "/redo",
     "/sessions",
     "/skill",
     "/skills",
@@ -216,6 +217,8 @@ pub(super) enum Menu {
     CompactionSummary,
     /// picker for `[undo].shadow`
     UndoShadow,
+    /// `/undo list`: interactive checkpoint & redo history picker
+    UndoList,
     /// single-field form to rename a session
     EditSessionTitle {
         id: String,
@@ -352,6 +355,8 @@ pub(super) enum MenuAction {
     CycleUndoShadow,
     OpenUndoShadow,
     SetUndoShadow(crate::config::ShadowStore),
+    UndoCount(usize),
+    RedoCount(usize),
     ToggleSkillsAutoLoad,
     EditScalar(ScalarSetting),
 }
@@ -532,6 +537,7 @@ impl App {
                 | Some(Menu::EditScalar(..))
                 | Some(Menu::CompactionSummary)
                 | Some(Menu::UndoShadow)
+                | Some(Menu::UndoList)
                 | Some(Menu::Providers)
                 | Some(Menu::EditProvider { .. })
                 | Some(Menu::EditProviderField { .. })
@@ -1408,6 +1414,14 @@ impl App {
                 );
                 self.menu_back();
             }
+            MenuAction::UndoCount(n) => {
+                self.menu_home();
+                self.undo(n);
+            }
+            MenuAction::RedoCount(n) => {
+                self.menu_home();
+                self.redo(n);
+            }
             MenuAction::ToggleSkillsAutoLoad => {
                 self.cfg.skills.auto_load = !self.cfg.skills.auto_load;
                 self.cfg.save().ok();
@@ -1894,6 +1908,7 @@ impl App {
             Some(Menu::Settings) => " Config ".into(),
             Some(Menu::CompactionSummary) => " Config · compaction summary ".into(),
             Some(Menu::UndoShadow) => " Config · undo shadow ".into(),
+            Some(Menu::UndoList) => " Undo / Redo checkpoints ".into(),
             Some(Menu::Providers) => " Providers ".into(),
             Some(Menu::Models { provider }) => format!(" Models · {provider} "),
             Some(Menu::EditProvider { name }) => match name {
@@ -2108,6 +2123,46 @@ impl App {
                         Line::from(vec![Span::styled(s.as_str(), style)]),
                         MenuAction::SetUndoShadow(s),
                     ));
+                }
+            }
+            Menu::UndoList => {
+                for (i, entry) in self.session.redo_stack.iter().rev().enumerate() {
+                    let n = i + 1;
+                    self.menu_rows.push(row(
+                        Line::from(vec![
+                            Span::styled(format!("redo {n:<3}"), Theme::ok()),
+                            Span::styled(entry.label.clone(), Style::new().fg(Theme::FG())),
+                            Span::styled(
+                                format!(" ({} file(s))", entry.files.len()),
+                                Theme::dim(),
+                            ),
+                        ]),
+                        MenuAction::RedoCount(n),
+                    ));
+                }
+                let total = self.session.checkpoints.len();
+                for (i, (sha, label)) in self.session.checkpoints.iter().rev().enumerate() {
+                    let n = i + 1;
+                    let idx = total - n;
+                    let in_latest_turn = idx >= self.session.turn_checkpoint_start;
+                    let short_sha: String = sha.chars().take(12).collect();
+                    let mut spans = vec![
+                        Span::styled(
+                            format!("undo {n:<3}"),
+                            if in_latest_turn {
+                                Theme::brand_ink()
+                            } else {
+                                Theme::meta()
+                            },
+                        ),
+                        Span::styled(label.clone(), Style::new().fg(Theme::FG())),
+                        Span::styled(format!(" ({short_sha})"), Theme::dim()),
+                    ];
+                    if in_latest_turn {
+                        spans.push(Span::styled(" · this turn", Theme::dim()));
+                    }
+                    self.menu_rows
+                        .push(row(Line::from(spans), MenuAction::UndoCount(n)));
                 }
             }
             Menu::EditScalar(..) => {

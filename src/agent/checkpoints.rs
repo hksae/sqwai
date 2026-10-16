@@ -91,6 +91,99 @@ pub fn snapshot_session(
     shadow.snapshot(session_id, label)
 }
 
+/// Obtain a checkpoint id before a known-file mutation (`write`, `edit`,
+/// `multi_edit`, `patch`):
+/// 1. When Layer 2 (`Shadow`) is active, snapshots the worktree. If the
+///    worktree was already identical to `head_of(session_id)` (e.g. right
+///    after a `step_N_start` / `step_N_finish` boundary commit), returns that
+///    `head` SHA instead of `None` so the mutation's `file_diff` is still
+///    bound to a valid checkpoint.
+/// 2. When Layer 2 is off or `git` is unavailable, mints a deterministic
+///    Layer-1 checkpoint id (`blob:<uuid>`) so `session.checkpoints` and
+///    `/undo` work seamlessly from the Layer-1 blob store alone.
+pub fn checkpoint_for_mutation(
+    root: &Path,
+    store: ShadowStore,
+    session_id: &str,
+    label: &str,
+) -> String {
+    if let Some(shadow) = shadow(root, store) {
+        match shadow.snapshot(session_id, label) {
+            Ok(Some(sha)) => return sha,
+            Ok(None) => {
+                if let Some(head) = shadow.head_of(session_id) {
+                    return head;
+                }
+            }
+            Err(_) => {}
+        }
+    }
+    format!("blob:{}", uuid::Uuid::new_v4().simple())
+}
+
+/// Capture `FileDiff` records for all paths that a `bash` command modified,
+/// created, or deleted relative to its pre-bash shadow snapshot `pre_sha`.
+///
+/// This brings OpenCode-style `before -> after` attribution to `bash`:
+/// - Files modified or deleted by `bash` have their pre-bash bytes stored in
+///   the Layer-1 blob store (`blob_before`).
+/// - Files modified or created by `bash` record their post-bash `hash_after`,
+///   so if the user later edits those files by hand, `/undo` detects the hash
+///   mismatch and protects the user's manual work instead of clobbering it.
+/// - Files deleted by `bash` record an empty `hash_after` (`""`), which tells
+///   restore that the agent itself deleted the file and it should be restored.
+pub fn bash_file_diffs(
+    root: &Path,
+    store: ShadowStore,
+    pre_sha: &str,
+) -> Vec<crate::agent::tools::FileDiff> {
+    let Some(shadow) = shadow(root, store) else {
+        return Vec::new();
+    };
+    let Ok(changed) = shadow.changed_files(pre_sha) else {
+        return Vec::new();
+    };
+    let mut diffs = Vec::new();
+    for rel in changed {
+        let rel_norm = rel.replace('\\', "/");
+        if traversal_path(&rel_norm) || rel_norm.split('/').any(|s| s == ".sqwai") {
+            continue;
+        }
+        let abs = root.join(&rel_norm);
+        if abs.is_dir() {
+            continue;
+        }
+        let before = shadow.show(pre_sha, &rel_norm).ok().flatten();
+        let after = std::fs::read(&abs).ok();
+        if before == after {
+            continue;
+        }
+        let blob_before = before
+            .as_deref()
+            .and_then(|b| crate::agent::blobs::put(root, b).ok());
+        let blob_after = after
+            .as_deref()
+            .and_then(|b| crate::agent::blobs::put(root, b).ok());
+        let hash_before = before.as_deref().map(bytes_hash);
+        let hash_after = after
+            .as_deref()
+            .map(bytes_hash)
+            .unwrap_or_default();
+        diffs.push(crate::agent::tools::FileDiff {
+            path: rel_norm,
+            added: 0,
+            removed: 0,
+            hash_before,
+            hash_after,
+            mode: "bash".to_string(),
+            checkpoint: Some(pre_sha.to_string()),
+            blob_before,
+            blob_after,
+        });
+    }
+    diffs
+}
+
 /// Hash-gate for pre-bash snapshots: true when the worktree moved
 /// since this chain's last snapshot, or when that cannot be determined.
 /// Lets safe-classified commands skip the staging cost of `snapshot_session`
@@ -274,9 +367,65 @@ impl RestoreReport {
 /// skips while hand-rolled test hashes stayed green.
 fn current_hash(path: &Path) -> Option<String> {
     let bytes = std::fs::read(path).ok()?;
+    Some(bytes_hash(&bytes))
+}
+
+fn bytes_hash(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(&bytes);
-    Some(format!("sha256:{:x}", hasher.finalize()))
+    hasher.update(bytes);
+    format!("sha256:{:x}", hasher.finalize())
+}
+
+/// Snapshot the pre-undo state of `paths` into the Layer-1 blob store right
+/// before `/undo` modifies the worktree. Paired with [`finalize_redo_images`]
+/// after the restore completes so `/redo` knows both what bytes to restore
+/// (`blob_before`) and what hash `/undo` left on disk (`agent_hash`).
+pub fn capture_pre_undo_blobs(
+    root: &Path,
+    paths: &[String],
+) -> std::collections::HashMap<String, (Option<String>, bool)> {
+    let mut out = std::collections::HashMap::new();
+    for rel in paths {
+        if out.contains_key(rel) || traversal_path(rel) {
+            continue;
+        }
+        let abs = root.join(rel);
+        match std::fs::read(&abs) {
+            Ok(bytes) => {
+                let blob = crate::agent::blobs::put(root, &bytes).ok();
+                out.insert(rel.clone(), (blob, true));
+            }
+            Err(_) => {
+                out.insert(rel.clone(), (None, false));
+            }
+        }
+    }
+    out
+}
+
+/// Build the `PreImage` list for a [`crate::session::RedoEntry`] after `/undo`
+/// touched `touched_paths`. Each entry carries the pre-undo blob to restore
+/// on `/redo` and the post-undo `agent_hash` currently on disk so `/redo`
+/// refuses to clobber a file the user edited after running `/undo`.
+pub fn finalize_redo_images(
+    root: &Path,
+    touched_paths: &[String],
+    pre_undo: &std::collections::HashMap<String, (Option<String>, bool)>,
+) -> Vec<crate::agent::journal::PreImage> {
+    let mut out = Vec::with_capacity(touched_paths.len());
+    for rel in touched_paths {
+        let Some((blob_before, existed_before)) = pre_undo.get(rel).cloned() else {
+            continue;
+        };
+        let post_undo_hash = current_hash(&root.join(rel)).unwrap_or_default();
+        out.push(crate::agent::journal::PreImage {
+            path: rel.clone(),
+            blob_before,
+            existed_before,
+            agent_hash: Some(post_undo_hash),
+        });
+    }
+    out
 }
 
 /// Restore files from the layer-1 blob store, with no git involved at all.
@@ -326,8 +475,9 @@ pub fn restore_from_blobs(
         // Absent file the agent left content behind on: someone else deleted
         // it after the agent wrote it. Resurrecting the blob would destroy
         // the user's own action — report, do not restore. (Absent with no
-        // agent hash means the agent itself deleted it: that restores below.)
-        if current.is_none() && item.agent_hash.is_some() {
+        // non-empty agent hash means the agent itself deleted it: that
+        // restores below.)
+        if current.is_none() && item.agent_hash.as_deref().is_some_and(|h| !h.is_empty()) {
             report.skipped.push(item.path.clone());
             continue;
         }
@@ -450,9 +600,9 @@ pub fn restore_paths_in(
         }
         // Absent file the agent left content behind on: the user deleted it
         // after the agent wrote it — resurrecting would destroy their action.
-        // (Absent with no agent hash means the agent itself deleted it:
-        // that restores from the snapshot below.)
-        if live.is_none() && target.agent_hash.is_some() {
+        // (Absent with no non-empty agent hash means the agent itself deleted
+        // it: that restores from the snapshot below.)
+        if live.is_none() && target.agent_hash.as_deref().is_some_and(|h| !h.is_empty()) {
             report.skipped.push(target.path.clone());
             continue;
         }

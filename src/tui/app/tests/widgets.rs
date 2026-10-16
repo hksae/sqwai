@@ -1851,3 +1851,176 @@ fn truncate_chars_clips_to_columns_not_characters() {
     // Cyrillic is one column per char, so it keeps seven of them plus the mark
     assert_eq!(truncate_chars("Проекты-агента", 8), "Проекты…");
 }
+
+#[test]
+fn undo_and_redo_round_trip_restores_files_and_recompletes_plan_step() {
+    use crate::agent::journal::Journal;
+    use serde_json::json;
+    use sha2::Digest;
+
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.startup = false;
+    app.cfg.undo.shadow = crate::config::ShadowStore::Off;
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    app.project_root = root.to_path_buf();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    let target = root.join("src/a.rs");
+    let before = b"fn a() -> i32 { 1 }\n";
+    let after = b"fn a() -> i32 { 2 }\n";
+    let blob_before = crate::agent::blobs::put(root, before).unwrap();
+    let blob_after = crate::agent::blobs::put(root, after).unwrap();
+    std::fs::write(&target, after).unwrap();
+
+    let sid = app.session.id.to_string();
+    let mut plan = crate::plan::create(
+        "test redo".into(),
+        Vec::new(),
+        vec!["constraint".into()],
+        vec![crate::plan::NewStep {
+            title: "edit a.rs".into(),
+        }],
+        &crate::plan::Limits::default(),
+    )
+    .unwrap();
+    plan.sessions = vec![sid.clone()];
+    plan.steps[0].status = crate::plan::StepStatus::Done;
+    plan.steps[0].evidence = vec![crate::plan::EvidenceRef {
+        session: sid.clone(),
+        seq: 1,
+    }];
+    crate::plan::store(root, &plan).unwrap();
+    app.session.plan_id = Some(plan.id.clone());
+
+    let ckpt = "blob:test-ckpt-1".to_string();
+    let mut journal = Journal::open(root, &sid).unwrap();
+    journal.set_attribution(Some("1".into()), Some(plan.id.clone()), "main");
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(after);
+    let hash_after = format!("sha256:{:x}", hasher.finalize());
+    journal
+        .append(
+            "file_diff",
+            json!({
+                "path": "src/a.rs",
+                "hash_before": "sha256:before",
+                "hash_after": hash_after,
+                "blob_before": blob_before,
+                "blob_after": blob_after,
+                "checkpoint": ckpt,
+            }),
+        )
+        .unwrap();
+
+    app.session
+        .checkpoints
+        .push((ckpt.clone(), "pre_mutation src/a.rs".into()));
+
+    // 1. Run undo
+    app.undo(1);
+    assert_eq!(std::fs::read(&target).unwrap(), before);
+    assert!(app.session.checkpoints.is_empty());
+    assert_eq!(app.session.redo_stack.len(), 1);
+    let plan_after_undo = crate::plan::open(root, &plan.id).unwrap();
+    assert_eq!(plan_after_undo.steps[0].status, crate::plan::StepStatus::Reopened);
+
+    // 2. Run redo
+    app.redo(1);
+    assert_eq!(std::fs::read(&target).unwrap(), after);
+    assert_eq!(app.session.checkpoints.len(), 1);
+    assert!(app.session.redo_stack.is_empty());
+    let plan_after_redo = crate::plan::open(root, &plan.id).unwrap();
+    assert_eq!(plan_after_redo.steps[0].status, crate::plan::StepStatus::Done);
+}
+
+#[test]
+fn undo_turn_reverts_only_latest_turn_and_keeps_aborted_turn_checkpoints() {
+    use crate::agent::journal::Journal;
+    use serde_json::json;
+    use sha2::Digest;
+
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.startup = false;
+    app.cfg.undo.shadow = crate::config::ShadowStore::Off;
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    app.project_root = root.to_path_buf();
+    let f1 = root.join("turn1.txt");
+    let f2 = root.join("turn2.txt");
+    std::fs::write(&f1, b"turn1-after").unwrap();
+    std::fs::write(&f2, b"turn2-after").unwrap();
+    let b1 = crate::agent::blobs::put(root, b"turn1-before").unwrap();
+    let b2 = crate::agent::blobs::put(root, b"turn2-before").unwrap();
+
+    let hash = |bytes: &[u8]| {
+        let mut h = sha2::Sha256::new();
+        h.update(bytes);
+        format!("sha256:{:x}", h.finalize())
+    };
+
+    let sid = app.session.id.to_string();
+    let mut journal = Journal::open(root, &sid).unwrap();
+    journal
+        .append(
+            "file_diff",
+            json!({
+                "path": "turn1.txt",
+                "hash_before": "sha256:0",
+                "hash_after": hash(b"turn1-after"),
+                "blob_before": b1,
+                "checkpoint": "blob:turn1",
+            }),
+        )
+        .unwrap();
+    journal
+        .append(
+            "file_diff",
+            json!({
+                "path": "turn2.txt",
+                "hash_before": "sha256:0",
+                "hash_after": hash(b"turn2-after"),
+                "blob_before": b2,
+                "checkpoint": "blob:turn2",
+            }),
+        )
+        .unwrap();
+
+    // Turn 1 finished earlier
+    app.session
+        .checkpoints
+        .push(("blob:turn1".into(), "pre_mutation turn1.txt".into()));
+
+    // Turn 2 starts and streams a checkpoint before being aborted (never reaching Done)
+    app.session.turn_checkpoint_start = app.session.checkpoints.len();
+    app.handle_agent_event(crate::agent::loop_task::AgentEvent::Checkpoint {
+        sha: "blob:turn2".into(),
+        label: "pre_mutation turn2.txt".into(),
+    });
+    assert_eq!(app.session.checkpoints.len(), 2);
+
+    // /undo turn should revert only turn 2's checkpoint
+    app.undo_turn();
+    assert_eq!(std::fs::read(&f2).unwrap(), b"turn2-before");
+    assert_eq!(
+        std::fs::read(&f1).unwrap(),
+        b"turn1-after",
+        "turn 1 file must remain untouched by /undo turn"
+    );
+    assert_eq!(app.session.checkpoints.len(), 1);
+    assert_eq!(app.session.checkpoints[0].0, "blob:turn1");
+}
+
+#[test]
+fn undo_list_command_opens_checkpoint_menu() {
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.startup = false;
+    app.session
+        .checkpoints
+        .push(("blob:1".into(), "pre_mutation src/main.rs".into()));
+
+    app.command("undo list");
+    assert!(matches!(app.cur_menu(), Some(Menu::UndoList)));
+    assert_eq!(app.menu_rows.len(), 1);
+}

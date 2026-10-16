@@ -5,39 +5,87 @@
 #![allow(unused_imports)]
 use super::*;
 
+pub(super) fn is_boundary_checkpoint(label: &str) -> bool {
+    label.starts_with("step_") && (label.ends_with("_start") || label.ends_with("_finish"))
+}
+
 fn reopen_undone_steps(
     root: &std::path::Path,
     session_id: &str,
     files: &[String],
     checkpoint: &str,
+    undone_checkpoints: &[String],
 ) -> Vec<String> {
-    let Some(mut active) = plan::open_active_for_session(root, Some(session_id))
+    let active_opt = plan::open_active_for_session(root, Some(session_id))
         .ok()
-        .flatten()
-    else {
-        return Vec::new();
-    };
-    let records = crate::agent::journal::Journal::records_for(root, session_id).unwrap_or_default();
-    let reopened = reopened_step_ids(&active, &records, session_id, files);
-    for step_id in &reopened {
-        let _ = plan::reopen_for_undo(
-            &mut active,
-            step_id,
-            format!("reopened by undo to {checkpoint}"),
-        );
-    }
-    if !reopened.is_empty() {
-        let args = serde_json::json!({
-            "ids": reopened,
-            "reason": format!("reopened by undo to {checkpoint}"),
-        });
-        let _ = plan::commit(root, session_id, &mut active, "reopen", "host", true, args);
+        .flatten();
+    let mut reopened = Vec::new();
+    let mut active_id = None;
+    if let Some(mut active) = active_opt {
+        active_id = Some(active.id.clone());
+        let records =
+            crate::agent::journal::Journal::records_for(root, session_id).unwrap_or_default();
+        reopened = reopened_step_ids(&active, &records, session_id, files);
+        for step_id in &reopened {
+            let _ = plan::reopen_for_undo(
+                &mut active,
+                step_id,
+                format!("reopened by undo to {checkpoint}"),
+            );
+        }
+        if !reopened.is_empty() {
+            let args = serde_json::json!({
+                "ids": reopened,
+                "reason": format!("reopened by undo to {checkpoint}"),
+            });
+            let _ = plan::commit(root, session_id, &mut active, "reopen", "host", true, args);
+        }
     }
     if let Ok(mut journal) = crate::agent::journal::Journal::open(root, session_id) {
-        journal.set_attribution(None, Some(active.id.clone()), "host");
-        let _ = journal.append_undo(checkpoint, files, &reopened);
+        journal.set_attribution(None, active_id, "host");
+        let _ = journal.append_undo_window(checkpoint, undone_checkpoints, files, &reopened);
     }
     reopened
+}
+
+fn restore_redone_steps(
+    root: &std::path::Path,
+    session_id: &str,
+    reopened_steps: &[String],
+    checkpoints: &[String],
+    files: &[String],
+) -> Vec<String> {
+    let mut restored = Vec::new();
+    let mut active_id = None;
+    if !reopened_steps.is_empty()
+        && let Some(mut active) = plan::open_active_for_session(root, Some(session_id))
+            .ok()
+            .flatten()
+    {
+        active_id = Some(active.id.clone());
+        for step_id in reopened_steps {
+            if let Some(step) = active.step_mut(step_id)
+                && matches!(
+                    step.status,
+                    plan::StepStatus::Reopened
+                        | plan::StepStatus::Pending
+                        | plan::StepStatus::InProgress
+                )
+            {
+                step.status = plan::StepStatus::Done;
+                restored.push(step_id.clone());
+            }
+        }
+        if !restored.is_empty() {
+            active.revision += 1;
+            let _ = plan::store(root, &active);
+        }
+    }
+    if let Ok(mut journal) = crate::agent::journal::Journal::open(root, session_id) {
+        journal.set_attribution(None, active_id, "host");
+        let _ = journal.append_redo(checkpoints, files, &restored);
+    }
+    restored
 }
 
 /// Coverage context for an undo toast: the mode tag plus a one-shot
@@ -230,6 +278,26 @@ impl App {
         }
     }
 
+    pub(super) fn undo_turn(&mut self) {
+        if self.session.checkpoints.is_empty() {
+            self.status("nothing to undo", StatusKind::Info);
+            return;
+        }
+        let start = self
+            .session
+            .turn_checkpoint_start
+            .min(self.session.checkpoints.len());
+        let count = self.session.checkpoints.len().saturating_sub(start);
+        if count == 0 {
+            self.status(
+                "undo turn: no checkpoints recorded in the latest turn (use /undo <n> or /undo list)",
+                StatusKind::Info,
+            );
+            return;
+        }
+        self.undo(count);
+    }
+
     pub(super) fn undo(&mut self, n: usize) {
         let n = n.max(1);
         if self.session.checkpoints.is_empty() {
@@ -248,23 +316,23 @@ impl App {
         // the checkpoints being undone. Without this, undo reverts the whole
         // tree to the snapshot and silently discards anything the user edited
         // in their own editor while the agent was working.
-        let undone: Vec<String> = self.session.checkpoints[idx..]
-            .iter()
-            .map(|(sha, _)| sha.clone())
-            .collect();
+        let undone_pairs: Vec<(String, String)> = self.session.checkpoints[idx..].to_vec();
+        let undone: Vec<String> = undone_pairs.iter().map(|(sha, _)| sha.clone()).collect();
         let recorded =
             crate::agent::journal::Journal::recorded_writes(&root, &undone).unwrap_or_default();
         let scoped = !recorded.is_empty();
         // A window can mix file edits with a `bash` call. Scoping to the
         // journal then silently leaves the shell command's effects in place,
-        // so count the checkpoints that contributed nothing and say so.
+        // so count the non-boundary checkpoints that contributed nothing.
         let unrecorded = if scoped {
             let with_records =
                 crate::agent::journal::Journal::checkpoints_with_writes(&root, &undone)
                     .unwrap_or_default();
-            undone
+            undone_pairs
                 .iter()
-                .filter(|sha| !with_records.contains(*sha))
+                .filter(|(c_sha, c_label)| {
+                    !is_boundary_checkpoint(c_label) && !with_records.contains(c_sha)
+                })
                 .count()
         } else {
             0
@@ -280,7 +348,8 @@ impl App {
         // covered; taking the blob path then reports the rest as "no stored
         // pre-image" while the shadow snapshot could have restored all of them.
         let covered = crate::agent::checkpoints::blobs_cover(&root, &pre_images);
-        if !git_snapshots && pre_images.is_empty() {
+        let is_blob_only_sha = sha.starts_with("blob:");
+        if (!git_snapshots || is_blob_only_sha) && pre_images.is_empty() {
             self.status(
                 "nothing to undo from: no shadow snapshot and no stored pre-images",
                 StatusKind::Warn,
@@ -294,11 +363,10 @@ impl App {
             Some(guard) => guard,
             None => return,
         };
-        // Prefer the blob store when it covers the window: it reverts exactly
-        // the recorded writes, needs no repository, and cannot be invalidated by
-        // the user's own `git gc`. Without layer 2 it is the only option, so a
-        // half-covered window is still reverted as far as it reaches.
-        if !git_snapshots || (scoped && covered) {
+        // Prefer the blob store when it covers the whole window (including
+        // when no unrecorded bash checkpoint sits in the window, or when Layer 2
+        // is unavailable / this checkpoint is a Layer-1 blob id).
+        if !git_snapshots || is_blob_only_sha || (scoped && covered && unrecorded == 0) {
             self.undo_from_blobs(
                 &root,
                 idx,
@@ -313,10 +381,27 @@ impl App {
             return;
         }
         let targets: Vec<crate::agent::checkpoints::Target> = if scoped {
-            recorded
+            let mut list: Vec<crate::agent::checkpoints::Target> = recorded
                 .into_iter()
                 .map(|(path, agent_hash)| crate::agent::checkpoints::Target { path, agent_hash })
-                .collect()
+                .collect();
+            // Hybrid window: if the window also contains an unrecorded `bash`
+            // checkpoint and `sha` is a real shadow commit, include any extra
+            // paths that changed since `sha` so the bash effects are reverted too.
+            if unrecorded > 0
+                && let Ok(extra) =
+                    crate::agent::checkpoints::changed_files(&root, self.cfg.undo.shadow, &sha)
+            {
+                for path in extra {
+                    if !list.iter().any(|t| t.path == path) {
+                        list.push(crate::agent::checkpoints::Target {
+                            path,
+                            agent_hash: None,
+                        });
+                    }
+                }
+            }
+            list
         } else {
             // Nothing recorded — a `bash` mutation, whose effects the host
             // cannot enumerate. Fall back to the snapshot-vs-worktree diff and
@@ -331,6 +416,9 @@ impl App {
                 .collect()
         };
 
+        let candidate_paths: Vec<String> = targets.iter().map(|t| t.path.clone()).collect();
+        let pre_undo = crate::agent::checkpoints::capture_pre_undo_blobs(&root, &candidate_paths);
+
         match crate::agent::checkpoints::restore_paths_in(
             &root,
             self.cfg.undo.shadow,
@@ -343,9 +431,26 @@ impl App {
                     return;
                 }
                 let touched = report.touched();
-                let reopened_steps =
-                    reopen_undone_steps(&root, &self.session.id.to_string(), &touched, &sha);
+                let reopened_steps = reopen_undone_steps(
+                    &root,
+                    &self.session.id.to_string(),
+                    &touched,
+                    &sha,
+                    &undone,
+                );
+                let redo_files =
+                    crate::agent::checkpoints::finalize_redo_images(&root, &touched, &pre_undo);
+                self.session.redo_stack.push(crate::session::RedoEntry {
+                    label: label.clone(),
+                    checkpoints: undone_pairs,
+                    files: redo_files,
+                    reopened_steps: reopened_steps.clone(),
+                });
                 self.session.checkpoints.truncate(idx);
+                self.session.turn_checkpoint_start = self
+                    .session
+                    .turn_checkpoint_start
+                    .min(self.session.checkpoints.len());
                 self.arm_undo_note(&format!("undo to '{label}'"), &touched);
                 // The provider's copy of the conversation still contains the
                 // work that was just reverted, and a continuation reference
@@ -389,11 +494,16 @@ impl App {
         }
     }
 
+    /// Revert one plan step in the current project root.
+    pub(super) fn undo_step(&mut self, step: &str) {
+        let root = self.project_root.clone();
+        self.undo_step_in(&root, step);
+    }
+
     /// Revert one plan step.
     ///
     /// Only layer 1 is involved: the journal knows which `file_diff` records
-    /// `undo_step` against an explicit root.
-    #[cfg(test)]
+    /// belong to `step` against an explicit root.
     pub(super) fn undo_step_in(&mut self, root: &std::path::Path, step: &str) {
         // Step numbers restart per plan, so "3" names nothing without one — and
         // the reopen half of this command cannot run at all, which would leave
@@ -447,6 +557,9 @@ impl App {
         let cov = self.undo_coverage_tag(layer2);
         let transition = self.undo_transition(layer2);
 
+        let candidate_paths: Vec<String> = revert.files.iter().map(|f| f.path.clone()).collect();
+        let pre_undo = crate::agent::checkpoints::capture_pre_undo_blobs(root, &candidate_paths);
+
         match crate::agent::checkpoints::restore_from_blobs(root, &revert.files) {
             Ok(report) => {
                 if report.failed.is_some() {
@@ -481,9 +594,17 @@ impl App {
                     crate::agent::journal::Journal::open(root, &self.session.id.to_string())
                 {
                     // host-written, like every other undo record
-                    journal.set_attribution(None, None, "host");
+                    journal.set_attribution(None, Some(plan_id.clone()), "host");
                     let _ = journal.append_undo_step(step, &touched, &reopened);
                 }
+                let redo_files =
+                    crate::agent::checkpoints::finalize_redo_images(root, &touched, &pre_undo);
+                self.session.redo_stack.push(crate::session::RedoEntry {
+                    label: format!("step {step}"),
+                    checkpoints: Vec::new(),
+                    files: redo_files,
+                    reopened_steps: reopened.clone(),
+                });
                 // The provider's copy of the conversation still contains the
                 // reverted work.
                 self.context_bootstrap_pending = true;
@@ -548,6 +669,8 @@ impl App {
             Some(guard) => guard,
             None => return,
         };
+        let candidate_paths: Vec<String> = pre_images.iter().map(|p| p.path.clone()).collect();
+        let pre_undo = crate::agent::checkpoints::capture_pre_undo_blobs(root, &candidate_paths);
         match crate::agent::checkpoints::restore_from_blobs(root, pre_images) {
             Ok(report) => {
                 if report.failed.is_some() {
@@ -555,15 +678,31 @@ impl App {
                     return;
                 }
                 let touched = report.touched();
-                let sha = self
-                    .session
-                    .checkpoints
-                    .get(idx)
-                    .map(|(sha, _)| sha.clone())
-                    .unwrap_or_default();
-                let reopened_steps =
-                    reopen_undone_steps(root, &self.session.id.to_string(), &touched, &sha);
+                let undone_pairs: Vec<(String, String)> =
+                    self.session.checkpoints[idx..].to_vec();
+                let undone_shas: Vec<String> =
+                    undone_pairs.iter().map(|(sha, _)| sha.clone()).collect();
+                let sha = undone_shas.first().cloned().unwrap_or_default();
+                let reopened_steps = reopen_undone_steps(
+                    root,
+                    &self.session.id.to_string(),
+                    &touched,
+                    &sha,
+                    &undone_shas,
+                );
+                let redo_files =
+                    crate::agent::checkpoints::finalize_redo_images(root, &touched, &pre_undo);
+                self.session.redo_stack.push(crate::session::RedoEntry {
+                    label: label.to_string(),
+                    checkpoints: undone_pairs,
+                    files: redo_files,
+                    reopened_steps: reopened_steps.clone(),
+                });
                 self.session.checkpoints.truncate(idx);
+                self.session.turn_checkpoint_start = self
+                    .session
+                    .turn_checkpoint_start
+                    .min(self.session.checkpoints.len());
                 self.arm_undo_note(&format!("undo to '{label}'"), &touched);
                 self.context_bootstrap_pending = true;
                 self.session.save().ok();
@@ -608,5 +747,108 @@ impl App {
             }
             Err(e) => self.status(&format!("undo failed: {e:#}"), StatusKind::Err),
         }
+    }
+
+    /// Re-apply the most recent `n` undone operations from `session.redo_stack`.
+    pub(super) fn redo(&mut self, n: usize) {
+        let root = self.project_root.clone();
+        self.redo_in(&root, n);
+    }
+
+    pub(super) fn redo_in(&mut self, root: &std::path::Path, n: usize) {
+        let n = n.max(1);
+        if self.session.redo_stack.is_empty() {
+            self.status("nothing to redo", StatusKind::Info);
+            return;
+        }
+        let _restore = match self.undo_preflight() {
+            Some(guard) => guard,
+            None => return,
+        };
+        let steps_to_redo = n.min(self.session.redo_stack.len());
+        let mut total_touched: Vec<String> = Vec::new();
+        let mut total_deleted: usize = 0;
+        let mut total_skipped: Vec<String> = Vec::new();
+        let mut total_restored_steps: Vec<String> = Vec::new();
+        let mut last_label = String::new();
+
+        for _ in 0..steps_to_redo {
+            let Some(entry) = self.session.redo_stack.pop() else {
+                break;
+            };
+            last_label = entry.label.clone();
+            match crate::agent::checkpoints::restore_from_blobs(root, &entry.files) {
+                Ok(report) => {
+                    if let Some(err) = report.failed {
+                        self.status(
+                            &format!("redo stopped: {err}; {} file(s) re-applied", total_touched.len()),
+                            StatusKind::Err,
+                        );
+                        self.dirty = true;
+                        return;
+                    }
+                    let touched = report.touched();
+                    total_deleted += report.deleted.len();
+                    for f in &touched {
+                        if !total_touched.contains(f) {
+                            total_touched.push(f.clone());
+                        }
+                    }
+                    for s in report.skipped {
+                        if !total_skipped.contains(&s) {
+                            total_skipped.push(s);
+                        }
+                    }
+                    let cp_shas: Vec<String> =
+                        entry.checkpoints.iter().map(|(s, _)| s.clone()).collect();
+                    self.session.checkpoints.extend(entry.checkpoints);
+                    let restored = restore_redone_steps(
+                        root,
+                        &self.session.id.to_string(),
+                        &entry.reopened_steps,
+                        &cp_shas,
+                        &touched,
+                    );
+                    for st in restored {
+                        if !total_restored_steps.contains(&st) {
+                            total_restored_steps.push(st);
+                        }
+                    }
+                }
+                Err(e) => {
+                    self.status(&format!("redo failed: {e:#}"), StatusKind::Err);
+                    return;
+                }
+            }
+        }
+
+        if self.session.redo_stack.is_empty() {
+            self.session.pending_undo_note = None;
+        }
+        self.context_bootstrap_pending = true;
+        self.session.save().ok();
+
+        let mut note = format!(
+            "redo: re-applied '{last_label}' ({} file(s)",
+            total_touched.len()
+        );
+        if total_deleted > 0 {
+            note.push_str(&format!(", {total_deleted} removed"));
+        }
+        note.push(')');
+        if !total_restored_steps.is_empty() {
+            note.push_str(&format!("; restored {} step(s)", total_restored_steps.len()));
+        }
+        let kind = if !total_skipped.is_empty() {
+            note.push_str(&format!(
+                "; left alone, changed outside sqwai: {}",
+                total_skipped.join(", ")
+            ));
+            StatusKind::Warn
+        } else {
+            StatusKind::Ok
+        };
+        self.status(&note, kind);
+        self.dirty = true;
     }
 }

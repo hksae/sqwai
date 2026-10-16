@@ -80,7 +80,7 @@ pub struct StepRevert {
 }
 
 /// What one file looked like before an undone window touched it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PreImage {
     pub path: String,
     /// layer-1 blob to write back, when one was stored
@@ -620,17 +620,23 @@ impl Journal {
                     .fields
                     .get(name)
                     .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
                     .map(str::to_string)
             };
+            let hash_after = record
+                .fields
+                .get("hash_after")
+                .and_then(Value::as_str)
+                .map(str::to_string);
             match out.iter_mut().find(|found| found.path == path) {
                 // The first record for a path holds the state to return to;
                 // later ones only move the "as the host left it" hash forward.
-                Some(slot) => slot.agent_hash = field("hash_after"),
+                Some(slot) => slot.agent_hash = hash_after,
                 None => out.push(PreImage {
                     path: path.to_string(),
                     blob_before: field("blob_before"),
                     existed_before: field("hash_before").is_some(),
-                    agent_hash: field("hash_after"),
+                    agent_hash: hash_after,
                 }),
             }
         }
@@ -658,8 +664,86 @@ impl Journal {
     /// only thing allowed to run it is a test fixture. `/undo step` refuses
     /// without a plan, because a revert it cannot attribute is a revert it
     /// cannot reopen.
+    /// Filter `records` down to `file_diff` entries that have not been rolled
+    /// back by a subsequent `undo` record (unless re-applied by a later `redo`).
+    fn active_file_diffs(records: &[Record]) -> Vec<&Record> {
+        let mut ordered: Vec<&Record> = records.iter().collect();
+        ordered.sort_by(|a, b| a.ts.cmp(&b.ts).then(a.seq.cmp(&b.seq)));
+        let mut active: Vec<&Record> = Vec::new();
+        let mut all_diffs: Vec<&Record> = Vec::new();
+        for record in ordered {
+            match record.kind.as_str() {
+                "file_diff" => {
+                    active.push(record);
+                    all_diffs.push(record);
+                }
+                "undo" => {
+                    if let Some(cps) = record.fields.get("checkpoints").and_then(Value::as_array) {
+                        let undone: Vec<&str> = cps.iter().filter_map(Value::as_str).collect();
+                        if !undone.is_empty() {
+                            active.retain(|r| {
+                                !r.fields
+                                    .get("checkpoint")
+                                    .and_then(Value::as_str)
+                                    .is_some_and(|cp| undone.contains(&cp))
+                            });
+                            continue;
+                        }
+                    }
+                    if let Some(step_id) = record.fields.get("step").and_then(Value::as_str) {
+                        let files: Vec<&str> = record
+                            .fields
+                            .get("files")
+                            .and_then(Value::as_array)
+                            .map(|arr| arr.iter().filter_map(Value::as_str).collect())
+                            .unwrap_or_default();
+                        active.retain(|r| {
+                            if r.step.as_deref() != Some(step_id) {
+                                return true;
+                            }
+                            if files.is_empty() {
+                                return false;
+                            }
+                            !r.fields
+                                .get("path")
+                                .and_then(Value::as_str)
+                                .is_some_and(|p| files.contains(&p))
+                        });
+                    } else if let Some(cp) =
+                        record.fields.get("to_checkpoint").and_then(Value::as_str)
+                        && !cp.is_empty()
+                    {
+                        active.retain(|r| {
+                            r.fields.get("checkpoint").and_then(Value::as_str) != Some(cp)
+                        });
+                    }
+                }
+                "redo" => {
+                    if let Some(cps) = record.fields.get("checkpoints").and_then(Value::as_array) {
+                        let redone: Vec<&str> = cps.iter().filter_map(Value::as_str).collect();
+                        for r in &all_diffs {
+                            if r.fields
+                                .get("checkpoint")
+                                .and_then(Value::as_str)
+                                .is_some_and(|cp| redone.contains(&cp))
+                                && !active
+                                    .iter()
+                                    .any(|a| a.session == r.session && a.seq == r.seq)
+                            {
+                                active.push(*r);
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        active
+    }
+
     pub fn step_pre_images_in(root: &Path, plan: Option<&str>, step: &str) -> Result<StepRevert> {
-        let records = Self::records(root)?;
+        let all_records = Self::records(root)?;
+        let records = Self::active_file_diffs(&all_records);
         let in_scope = |record: &Record| {
             plan.is_none_or(|wanted| {
                 record.plan.as_deref() == Some(wanted) || record.plan.is_none()
@@ -678,7 +762,7 @@ impl Journal {
             (String, std::collections::HashMap<String, u64>),
         > = std::collections::HashMap::new();
 
-        for record in &records {
+        for &record in &records {
             if record.kind != "file_diff"
                 || !in_scope(record)
                 || record.step.as_deref() != Some(step)
@@ -709,17 +793,23 @@ impl Journal {
                     .fields
                     .get(name)
                     .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
                     .map(str::to_string)
             };
+            let hash_after = record
+                .fields
+                .get("hash_after")
+                .and_then(Value::as_str)
+                .map(str::to_string);
             match revert.files.iter_mut().find(|found| found.path == path) {
                 // first record wins for the pre-image, last for the hash the
                 // host left the file at
-                Some(slot) => slot.agent_hash = field("hash_after"),
+                Some(slot) => slot.agent_hash = hash_after,
                 None => revert.files.push(PreImage {
                     path: path.to_string(),
                     blob_before: field("blob_before"),
                     existed_before: field("hash_before").is_some(),
-                    agent_hash: field("hash_after"),
+                    agent_hash: hash_after,
                 }),
             }
         }
@@ -732,7 +822,7 @@ impl Journal {
         // chronologically) and the file order within one session; anything
         // not provably earlier stands in the way, because a silent revert
         // would undo that later work too.
-        for record in &records {
+        for &record in &records {
             if record.kind != "file_diff" || !in_scope(record) {
                 continue;
             }
@@ -766,7 +856,6 @@ impl Journal {
     }
 
     /// Record a per-step revert.
-    #[cfg(test)]
     pub fn append_undo_step(
         &mut self,
         step: &str,
@@ -1149,6 +1238,40 @@ impl Journal {
                 "to_checkpoint": checkpoint,
                 "files": files,
                 "reopened_steps": reopened_steps,
+            }),
+        )
+    }
+
+    pub fn append_undo_window(
+        &mut self,
+        checkpoint: &str,
+        checkpoints: &[String],
+        files: &[String],
+        reopened_steps: &[String],
+    ) -> Result<u64> {
+        self.append(
+            "undo",
+            json!({
+                "to_checkpoint": checkpoint,
+                "checkpoints": checkpoints,
+                "files": files,
+                "reopened_steps": reopened_steps,
+            }),
+        )
+    }
+
+    pub fn append_redo(
+        &mut self,
+        checkpoints: &[String],
+        files: &[String],
+        restored_steps: &[String],
+    ) -> Result<u64> {
+        self.append(
+            "redo",
+            json!({
+                "checkpoints": checkpoints,
+                "files": files,
+                "restored_steps": restored_steps,
             }),
         )
     }

@@ -175,8 +175,9 @@ pub enum AgentEvent {
         command: String,
         reason: String,
     },
-    /// a shadow git checkpoint was taken before a mutation
+    /// a shadow git or layer-1 checkpoint was taken before a mutation
     Checkpoint {
+        sha: String,
         label: String,
     },
     /// the compaction policy ran: token counts before/after
@@ -1654,16 +1655,17 @@ async fn run_agent(
                         call_id: call.id.clone(),
                     })
                     .await;
-                // report a checkpoint taken by the mutation, if any
+                // report any checkpoints taken by the mutation
                 if ctx.journal.len() > journal_mark {
                     if let Some(writer) = journal.as_mut() {
                         for (sha, label) in ctx.journal[journal_mark..].iter() {
                             let _ = writer.append("checkpoint", checkpoint_fields(sha, label));
                         }
                     }
-                    if let Some((_, label)) = ctx.journal.last() {
+                    for (sha, label) in ctx.journal[journal_mark..].iter() {
                         let _ = tx
                             .send(AgentEvent::Checkpoint {
+                                sha: sha.clone(),
                                 label: label.clone(),
                             })
                             .await;
@@ -1818,6 +1820,12 @@ async fn run_agent(
                             {
                                 ctx.journal.push((sha.clone(), tag.clone()));
                                 let _ = writer.append("checkpoint", checkpoint_fields(&sha, &tag));
+                                let _ = tx
+                                    .send(AgentEvent::Checkpoint {
+                                        sha,
+                                        label: tag,
+                                    })
+                                    .await;
                             }
                         } else if outcome.ok && matches!(op, "finish" | "block" | "cancel") {
                             if op == "finish"
@@ -1840,6 +1848,12 @@ async fn run_agent(
                                     ctx.journal.push((sha.clone(), tag.clone()));
                                     let _ =
                                         writer.append("checkpoint", checkpoint_fields(&sha, &tag));
+                                    let _ = tx
+                                        .send(AgentEvent::Checkpoint {
+                                            sha,
+                                            label: tag,
+                                        })
+                                        .await;
                                 }
                             }
                             writer.set_attribution(None, plan_id, "main");

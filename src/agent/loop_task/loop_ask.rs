@@ -388,30 +388,46 @@ pub(crate) async fn bash_call(
                 }
             }
         }
-        // checkpoint before running: dangerous-approved commands always;
-        // otherwise only if the tree moved since this chain's last snapshot
-        // (hash-gate). The classifier cannot see mutations, only risk:
-        // formatters and checkout-class commands look safe and mutate
-        // silently, and must not run uninsured.
-        // bash is the one case whose targets cannot be known in
-        // advance, so this is where layer 2 earns its existence.
-        let snapshot_wanted = needs_approval.is_some()
-            || checkpoints::tree_changed(&ctx.root, ctx.shadow_store, ctx.checkpoint_chain());
-        if snapshot_wanted
-            && let Ok(Some(sha)) = checkpoints::snapshot_session(
-                &ctx.root,
-                ctx.shadow_store,
-                ctx.checkpoint_chain(),
-                &format!("pre_bash {command}"),
-            )
-        {
-            ctx.journal.push((sha, format!("bash {command}")));
-        }
+    }
+
+    // checkpoint before running: dangerous-approved commands always;
+    // otherwise only if the tree moved since this chain's last snapshot
+    // (hash-gate). The classifier cannot see mutations, only risk:
+    // formatters and checkout-class commands look safe and mutate
+    // silently, and must not run uninsured.
+    // bash is the one case whose targets cannot be known in
+    // advance, so this is where layer 2 earns its existence.
+    let snapshot_wanted = needs_approval.is_some()
+        || checkpoints::tree_changed(&ctx.root, ctx.shadow_store, ctx.checkpoint_chain());
+    let mut bash_sha: Option<String> = None;
+    if snapshot_wanted
+        && let Ok(Some(sha)) = checkpoints::snapshot_session(
+            &ctx.root,
+            ctx.shadow_store,
+            ctx.checkpoint_chain(),
+            &format!("pre_bash {command}"),
+        )
+    {
+        ctx.journal.push((sha.clone(), format!("bash {command}")));
+        bash_sha = Some(sha);
     }
 
     // 2. run it through the normal bash handler on a blocking thread so a long
     //    command never stalls the async runtime (and the TUI render loop)
-    run_tool_blocking(ctx, "bash", &call.args).await
+    let mut outcome = run_tool_blocking(ctx, "bash", &call.args).await;
+
+    // 3. OpenCode-style `before -> after` bash attribution: if a pre-bash
+    //    snapshot was taken (or exists on the chain when a journal is active)
+    //    and the command modified files, record their pre-images and post-bash
+    //    hashes so `/undo` can revert bash writes (including `mv`/`rm`) while
+    //    protecting later user edits.
+    if let Some(sha) = bash_sha {
+        let diffs = checkpoints::bash_file_diffs(&ctx.root, ctx.shadow_store, &sha);
+        if !diffs.is_empty() {
+            outcome = outcome.with_file_diffs(diffs);
+        }
+    }
+    outcome
 }
 
 /// Execute a tool handler on a dedicated blocking thread.

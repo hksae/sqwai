@@ -632,6 +632,9 @@ pub(crate) async fn run_subagent(
                     })
                     .await;
             }
+            AgentEvent::Checkpoint { sha, label } => {
+                let _ = parent_tx.send(AgentEvent::Checkpoint { sha, label }).await;
+            }
             AgentEvent::Completed(result) => {
                 let result = match result {
                     Ok(outcome) => {

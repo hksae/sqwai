@@ -827,3 +827,135 @@ fn session_chains_do_not_interleave() {
     );
     assert_eq!(labels("bbb"), vec!["bbb-1".to_string()]);
 }
+
+#[test]
+fn edit_tool_stores_original_content_not_path_in_layer1_blob_and_works_with_shadow_off() {
+    use crate::agent::journal::Journal;
+    use serde_json::json;
+
+    let dir = tempfile::Builder::new()
+        .prefix("sqwai-edit-blob-")
+        .tempdir()
+        .unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join("src")).unwrap();
+    let file_path = root.join("src/lib.rs");
+    let original = "pub fn answer() -> u32 {\n    41\n}\n";
+    fs::write(&file_path, original).unwrap();
+
+    let mut ctx = crate::agent::tools::ToolCtx::new(root);
+    ctx.session_id = "s-edit".to_string();
+    ctx.shadow_store = ShadowStore::Off;
+    crate::agent::tools::execute(
+        &mut ctx,
+        "read",
+        &json!({ "file_path": "src/lib.rs" }),
+    );
+    let out = crate::agent::tools::execute(
+        &mut ctx,
+        "edit",
+        &json!({
+            "file_path": "src/lib.rs",
+            "old_string": "41",
+            "new_string": "42",
+        }),
+    );
+
+    let diff = out.file_diff.expect("edit must produce FileDiff");
+    let ckpt = diff
+        .checkpoint
+        .clone()
+        .expect("checkpoint_for_mutation must return a blob:* id when shadow is off");
+    assert!(ckpt.starts_with("blob:"), "unexpected ckpt id: {ckpt}");
+    assert_eq!(
+        fs::read_to_string(&file_path).unwrap(),
+        "pub fn answer() -> u32 {\n    42\n}\n"
+    );
+
+    let mut journal = Journal::open(root, "s-edit").unwrap();
+    journal
+        .append(
+            "file_diff",
+            json!({
+                "path": diff.path,
+                "hash_before": diff.hash_before,
+                "hash_after": diff.hash_after,
+                "blob_before": diff.blob_before,
+                "blob_after": diff.blob_after,
+                "checkpoint": ckpt,
+            }),
+        )
+        .unwrap();
+
+    let pre_images = Journal::recorded_pre_images(root, std::slice::from_ref(&ckpt)).unwrap();
+    assert_eq!(pre_images.len(), 1);
+    let report = restore_from_blobs(root, &pre_images).unwrap();
+    assert_eq!(report.restored, vec!["src/lib.rs".to_string()]);
+    assert_eq!(
+        fs::read_to_string(&file_path).unwrap(),
+        original,
+        "edit pre-image must restore original file content, not the path string"
+    );
+}
+
+#[test]
+fn bash_file_diffs_records_layer1_blobs_and_hashes_for_scoped_undo() {
+    use crate::agent::journal::Journal;
+    use serde_json::json;
+
+    let repo = tmp_repo();
+    let dir = repo.path();
+    fs::write(dir.join("keep_delete.txt"), "before bash deleted me\n").unwrap();
+    let sha = snapshot_session(dir, ShadowStore::Local, "s-bash", "pre_bash")
+        .expect("no shadow repo")
+        .expect("snapshot");
+
+    // Simulate bash modifying a.txt, creating b.txt, and deleting keep_delete.txt
+    fs::write(dir.join("a.txt"), "modified by bash\n").unwrap();
+    fs::write(dir.join("b.txt"), "created by bash\n").unwrap();
+    fs::remove_file(dir.join("keep_delete.txt")).unwrap();
+
+    let diffs = bash_file_diffs(dir, ShadowStore::Local, &sha);
+    assert_eq!(diffs.len(), 3, "diffs: {diffs:?}");
+
+    let mut journal = Journal::open(dir, "s-bash").unwrap();
+    for d in &diffs {
+        journal
+            .append(
+                "file_diff",
+                json!({
+                    "path": d.path,
+                    "hash_before": d.hash_before,
+                    "hash_after": d.hash_after,
+                    "blob_before": d.blob_before,
+                    "blob_after": d.blob_after,
+                    "checkpoint": d.checkpoint,
+                }),
+            )
+            .unwrap();
+    }
+
+    // User manually edits a.txt after bash completed
+    fs::write(dir.join("a.txt"), "user edit after bash\n").unwrap();
+
+    let pre_images = Journal::recorded_pre_images(dir, std::slice::from_ref(&sha)).unwrap();
+    assert!(blobs_cover(dir, &pre_images));
+    let report = restore_from_blobs(dir, &pre_images).unwrap();
+
+    assert_eq!(
+        report.skipped,
+        vec!["a.txt".to_string()],
+        "user edit after bash must be protected"
+    );
+    assert_eq!(
+        fs::read_to_string(dir.join("a.txt")).unwrap(),
+        "user edit after bash\n"
+    );
+    assert_eq!(report.deleted, vec!["b.txt".to_string()]);
+    assert!(!dir.join("b.txt").exists());
+    assert_eq!(report.restored, vec!["keep_delete.txt".to_string()]);
+    assert_eq!(
+        fs::read_to_string(dir.join("keep_delete.txt")).unwrap(),
+        "before bash deleted me\n"
+    );
+}
