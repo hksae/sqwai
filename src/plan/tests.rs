@@ -188,7 +188,6 @@ fn finish_requires_in_progress() {
     )
     .unwrap_err();
     assert_eq!(err.code, "step_not_in_progress");
-    assert_eq!(plan.rejections_in_a_row, 1);
 }
 
 #[test]

@@ -197,8 +197,6 @@ pub struct Plan {
     #[serde(default)]
     pub steps: Vec<Step>,
     pub revision: u64,
-    #[serde(default)]
-    pub rejections_in_a_row: u32,
     /// The quoted conflict that blocked this plan (`BlockPlan`), if any.
     /// Read by `/plan show` and the bench harness; old files simply lack it.
     #[serde(default, skip_serializing_if = "Option::is_none")]

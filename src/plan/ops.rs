@@ -173,13 +173,7 @@ pub fn validate_surrender_reason(reason: &str, what: &str) -> Result<String, Rej
 /// The quoted conflict is stored on the plan file itself — it is the
 /// artifact future readers and the bench harness judge, not the journal.
 fn block_plan(plan: &mut Plan, reason: String) -> Result<Applied, Rejection> {
-    let quoted = match validate_surrender_reason(&reason, "blocking a plan") {
-        Ok(quoted) => quoted,
-        Err(rejection) => {
-            plan.rejections_in_a_row += 1;
-            return Err(rejection);
-        }
-    };
+    let quoted = validate_surrender_reason(&reason, "blocking a plan")?;
     plan.status = PlanStatus::Blocked;
     plan.blocked_reason = Some(quoted);
     plan.revision += 1;
@@ -230,7 +224,6 @@ pub(crate) fn complete(plan: &mut Plan) -> Result<Applied, Rejection> {
     }
     plan.status = PlanStatus::Completed;
     plan.revision += 1;
-    plan.rejections_in_a_row = 0;
     Ok(Applied::Completed)
 }
 
@@ -327,7 +320,6 @@ pub fn create(
             })
             .collect(),
         revision: 0,
-        rejections_in_a_row: 0,
         blocked_reason: None,
     };
     Ok(plan)
@@ -501,10 +493,7 @@ pub fn apply(
             format!("an active plan already exists: {}", plan.id),
             "work that plan instead: start/finish its steps, do not create another one. The current plan is in your context above",
         ),
-        Op::Show => {
-            plan.rejections_in_a_row = 0;
-            Ok(Applied::Shown { text: render(plan) })
-        }
+        Op::Show => Ok(Applied::Shown { text: render(plan) }),
         // Answered by the dispatcher (which owns root, session and shadow
         // handles this signature lacks); reaching apply means a bug. Kept
         // explicit so the match stays exhaustive if the dispatcher changes.
@@ -521,13 +510,7 @@ pub fn apply(
         Op::Cancel { id, reason } => cancel(plan, id.as_deref(), reason),
         Op::BlockPlan { reason } => block_plan(plan, reason),
         Op::Abandon { reason } => {
-            let quoted = match validate_surrender_reason(&reason, "abandoning a plan") {
-                Ok(quoted) => quoted,
-                Err(rejection) => {
-                    plan.rejections_in_a_row += 1;
-                    return Err(rejection);
-                }
-            };
+            let quoted = validate_surrender_reason(&reason, "abandoning a plan")?;
             abandon(plan);
             accept(plan, format!("plan {} abandoned: {quoted}", plan.id))
         }
@@ -549,25 +532,22 @@ fn join(plan: &mut Plan, session: &str) -> Result<Applied, Rejection> {
 }
 
 pub(crate) fn reject(
-    plan: &mut Plan,
+    _plan: &Plan,
     code: &'static str,
     reason: impl Into<String>,
     hint: impl Into<String>,
 ) -> Result<Applied, Rejection> {
-    plan.rejections_in_a_row += 1;
     Err(Rejection::new(code, reason, hint))
 }
 
 pub(crate) fn accept(plan: &mut Plan, message: impl Into<String>) -> Result<Applied, Rejection> {
     plan.revision += 1;
-    plan.rejections_in_a_row = 0;
     Ok(Applied::Updated {
         message: message.into(),
     })
 }
 
-/// Gate fields read without holding a borrow, so a rejection can still bump
-/// `rejections_in_a_row`.
+/// Gate fields read without holding a borrow.
 fn step_status(plan: &Plan, id: &str) -> Option<(StepStatus, bool)> {
     plan.step(id)
         .map(|s| (s.status, s.stale_goal == Some(true)))
