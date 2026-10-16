@@ -580,6 +580,44 @@ fn toggle_keeps_header_on_screen_row() {
         ),
         "tool did not expand"
     );
+
+    // Expanding the very last segment while following the tail must NOT
+    // anchor: `follow` stays true so the composer remains on screen and the
+    // unfolded body scrolls up into view above it.
+    let last_idx = app.segments.len();
+    app.push_segment(Segment::Tool {
+        call_id: None,
+        name: "read".into(),
+        args: "bottom.rs".into(),
+        ok: Some(true),
+        output: "b1\nb2\nb3\nb4".into(),
+        diff: None,
+        preview: Vec::new(),
+        preview_total: 0,
+        expanded: false,
+        flash: None,
+        ask: None,
+    });
+    app.follow = true;
+    terminal.draw(|frame| app.draw(frame)).unwrap();
+    let last_header = app
+        .cache_rowseg
+        .iter()
+        .position(|t| *t == Some(last_idx))
+        .expect("bottom tool header assembled");
+    app.click(last_header);
+    assert!(
+        app.follow,
+        "expanding the bottom-most row must keep follow enabled so the composer stays visible"
+    );
+    terminal.draw(|frame| app.draw(frame)).unwrap();
+    assert!(
+        matches!(
+            app.segments.get(last_idx),
+            Some(Segment::Tool { expanded: true, .. })
+        ),
+        "bottom tool expanded"
+    );
 }
 
 /// Review checklist 5: a repeat draw of an unchanged subagent view

@@ -928,9 +928,14 @@ impl App {
                     _ => None,
                 };
                 if let Some(v) = toggle {
-                    // anchor the header row BEFORE flipping so the block
-                    // keeps its screen line instead of jumping with follow
-                    self.capture_anchor_for_view(None, idx, screen);
+                    // Anchor the header row BEFORE flipping so the block keeps
+                    // its screen line — EXCEPT when toggling the bottom-most
+                    // segment while following the tail, where anchoring would
+                    // turn off `follow`, hide the composer, and bury the
+                    // unfolded output below the viewport.
+                    if !(self.follow && idx + 1 == self.segments.len()) {
+                        self.capture_anchor_for_view(None, idx, screen);
+                    }
                     // unfolding an error also copies its full text: the
                     // collapsed row is truncated, the clipboard gets all
                     if v && let Some(Segment::Status {
@@ -1018,10 +1023,13 @@ impl App {
         // anchor wants the row's TAG (segment index), never its position:
         // passing the position re-anchored to whatever row later sat
         // there and yanked the viewport to the bottom on expand.
-        if self.cache_rowseg.contains(&Some(idx)) {
-            self.capture_anchor_for_view(Some(id), idx, screen);
-        } else {
-            self.pause_follow_for_inspection();
+        let is_last = idx + 1 == chat.len();
+        if !(self.follow && is_last) {
+            if self.cache_rowseg.contains(&Some(idx)) {
+                self.capture_anchor_for_view(Some(id), idx, screen);
+            } else {
+                self.pause_follow_for_inspection();
+            }
         }
         if let Some(chat) = self.subagent_chats.get_mut(&id) {
             match chat.get_mut(idx) {
