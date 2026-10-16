@@ -332,7 +332,7 @@ fn plan_show_alias_is_gone() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.plan_command("/plan show");
     assert!(
-        matches!(&app.toast, Some(t) if t.text.contains("unknown /plan action")),
+        matches!(&app.toast, Some(t) if t.text.contains("invalid command /plan show")),
         "unknown action toasts"
     );
     // bare `/plan` still opens the overview

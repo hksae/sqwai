@@ -47,7 +47,7 @@ impl App {
             "/config" | "/settings" => self.open_menu(Menu::Settings),
             "/test" => {
                 if !self.experimental_test() {
-                    self.status("unknown command /test", StatusKind::Warn);
+                    self.status("invalid command /test <флаг не включен>", StatusKind::Warn);
                 } else if rest.split_whitespace().nth(1) == Some("art") {
                     self.open_menu(Menu::TestArt);
                 } else if rest.split_whitespace().nth(1) == Some("anim") {
@@ -71,7 +71,7 @@ impl App {
                     self.start_test_churn();
                 } else {
                     self.status(
-                        "/test takes: anim, approval, art, ask, churn, colors, md, plan",
+                        "invalid command /test <имя не распознано>",
                         StatusKind::Warn,
                     );
                 }
@@ -190,9 +190,7 @@ impl App {
                             // Never guess: this used to parse as `/undo 1` and
                             // revert the last checkpoint, reported as success.
                             Err(_) => self.status(
-                                &format!(
-                                    "/undo takes a count: /undo or /undo 3. Cannot undo {arg:?}."
-                                ),
+                                &format!("invalid command /undo <аргумент не число>"),
                                 StatusKind::Warn,
                             ),
                         },
@@ -201,16 +199,16 @@ impl App {
             }
             "/export" => {
                 if rest.split_whitespace().nth(1).is_some() {
-                    self.status("/export takes no arguments", StatusKind::Warn);
+                    self.status("invalid command /export <аргумент не нужен>", StatusKind::Warn);
                 } else {
                     self.export_session();
                 }
             }
             other if COMMANDS.contains(&other) => {
-                self.status(&format!("{other}: not implemented yet"), StatusKind::Warn)
+                self.status(&format!("invalid command {other}"), StatusKind::Warn)
             }
             "" => {}
-            other => self.status(&format!("unknown command {other}"), StatusKind::Warn),
+            other => self.status(&format!("invalid command {other}"), StatusKind::Warn),
         }
         self.dirty = true;
     }
@@ -272,11 +270,9 @@ impl App {
                 None => "no active plan".to_string(),
             },
             Some("waive") | Some("confirm") => {
-                "waive/confirm are retired: acceptance is now plain done-criteria notes the \
-                 agent keeps for itself — there is nothing for the host to certify"
-                    .to_string()
+                format!("invalid command /plan <subcommand больше не используется>")
             }
-            Some(other) => format!("unknown /plan action '{other}'"),
+            Some(other) => format!("invalid command /plan {other} <имя не распознано>"),
         };
         self.status(&result, StatusKind::Info);
     }

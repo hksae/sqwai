@@ -92,16 +92,16 @@ fn plan_confirm_and_waive_are_retired() {
     app.session.plan_id = Some(created.id.clone());
 
     // acceptance is now plain done-criteria notes: the host certifies nothing,
-    // so both settle commands answer with the retirement notice.
+    // so both settle commands answer as invalid commands.
     app.plan_command("/plan confirm 0 looks good");
     assert!(
-        toast_text(&app).starts_with("waive/confirm are retired"),
+        toast_text(&app).starts_with("invalid command /plan"),
         "confirm toast: {:?}",
         toast_text(&app)
     );
     app.plan_command("/plan waive 0 skip it");
     assert!(
-        toast_text(&app).starts_with("waive/confirm are retired"),
+        toast_text(&app).starts_with("invalid command /plan"),
         "waive toast: {:?}",
         toast_text(&app)
     );
@@ -188,7 +188,7 @@ fn completed_linked_plan_refuses_tui_mutations() {
 
     app.plan_command("/plan waive 0 looks fine");
     assert!(
-        last_status(&app).contains("retired"),
+        last_status(&app).starts_with("invalid command /plan waive"),
         "waive is retired outright: {}",
         last_status(&app)
     );
