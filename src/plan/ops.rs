@@ -278,7 +278,7 @@ pub fn create(
                 steps.len(),
                 limits.max_steps
             ),
-            "merge steps, or ask the user to raise it with /plan limit N",
+            "merge steps, or ask the user to raise [plan].max_steps in the config",
         ));
     }
 
@@ -710,18 +710,20 @@ fn cancel(plan: &mut Plan, id: Option<&str>, reason: String) -> Result<Applied, 
             plan,
             "need_step_id",
             "cancel needs a step id".to_string(),
-            "cancel a step that will not happen, or ask the user to abandon the whole plan (/plan abandon)".to_string(),
+            "cancel a step that will not happen, or ask the user to delete the whole plan (/plan delete)".to_string(),
         );
     };
-    // Abandoning the whole plan is the user's call (TUI `/plan abandon`,
-    // journaled with by: user). The model surrenders contradictions with
-    // `block_plan` (quoted) instead of walking around the goal.
+    // Abandoning the whole plan is the model's call (`block_plan` with a
+    // quoted contradiction, or `abandon` with a reason); the user can also
+    // delete it outright with `/plan delete`. The model surrenders
+    // contradictions with `block_plan` (quoted) instead of walking around
+    // the goal.
     if id == plan.id {
         return reject(
             plan,
             "abandon_user_only",
             format!("plan {} can only be abandoned by the user", plan.id),
-            "surrender a contradiction with block_plan (quote it), or ask the user to abandon it"
+            "surrender a contradiction with block_plan (quote it), ask the user to delete it (/plan delete), or describe the contradiction in chat"
                 .to_string(),
         );
     }
@@ -769,7 +771,7 @@ fn add(
                 "adding a step would exceed the limit of {}",
                 limits.max_steps
             ),
-            "merge or cancel steps first, or /plan limit N",
+            "merge or cancel steps first, or ask the user to raise [plan].max_steps in the config",
         );
     }
     let index = match after {
@@ -881,7 +883,7 @@ fn split(
                 "splitting would give {resulting} steps, over the limit of {max}",
                 max = limits.max_steps
             ),
-            "cancel or merge steps first, or /plan limit N",
+            "cancel or merge steps first, or ask the user to raise [plan].max_steps in the config",
         );
     }
     let suffixes = ["a", "b", "c", "d", "e", "f", "g", "h"];

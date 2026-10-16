@@ -988,7 +988,7 @@ pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                         "ok": false,
                         "code": "need_step_id",
                         "reason": "cancel needs a step id",
-                        "hint": "cancel a step that will not happen, or ask the user to abandon the whole plan (/plan abandon)",
+                        "hint": "cancel a step that will not happen, or ask the user to delete the whole plan (/plan delete)",
                     })
                     .to_string(),
                 ),
@@ -1005,7 +1005,7 @@ pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                                 "ok": false,
                                 "code": "abandon_user_only",
                                 "reason": format!("plan {target_id} can only be abandoned by the user"),
-                                "hint": "surrender a contradiction with block_plan (quote it), or ask the user to abandon it",
+                                "hint": "surrender a contradiction with block_plan (quote it), ask the user to delete it (/plan delete), or describe the contradiction in chat",
                             })
                             .to_string(),
                         );
