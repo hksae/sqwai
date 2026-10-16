@@ -233,10 +233,13 @@ pub fn sets() -> &'static [Anim] {
     ]
 }
 
-/// Frame of one set at a given tick.
+/// Frame of one set at a given tick (zero-alloc).
 pub fn frame_at(set: &Anim, tick: usize) -> char {
-    let frames: Vec<char> = set.frames.chars().collect();
-    frames[tick % frames.len()]
+    let len = set.frames.chars().count();
+    set.frames
+        .chars()
+        .nth(tick % len)
+        .expect("every set has at least one frame")
 }
 
 /// The live status marker cycles through the `sand` family of the gallery

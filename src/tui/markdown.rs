@@ -433,12 +433,13 @@ pub struct LiveRender {
     per_id: std::collections::HashMap<u64, LivePrefix>,
 }
 
-/// Reusable prefix for one live segment: unwrapped lines for `text[..cut]`.
+/// Reusable prefix for one live segment: unwrapped and wrapped lines for `text[..cut]`.
 struct LivePrefix {
     cut: usize,
     hash: [u8; 32],
     width: u16,
     lines: Vec<Line<'static>>,
+    wrapped: Vec<Line<'static>>,
 }
 
 impl LiveRender {
@@ -454,6 +455,10 @@ impl LiveRender {
         self.per_id.retain(|id, _| keep(*id));
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.per_id.is_empty()
+    }
+
     /// Render `text` at `width`, reusing the cached prefix lines for `id`.
     pub fn lines(
         &mut self,
@@ -462,77 +467,183 @@ impl LiveRender {
         width: u16,
         hl: &Highlighter,
     ) -> Vec<Line<'static>> {
-        let entry = self.per_id.get(&id);
-        let prefix_ok = match entry {
+        let prefix_ok = match self.per_id.get(&id) {
             Some(prefix) => {
                 prefix.width == width
                     && prefix.cut > 0
                     && text.len() > prefix.cut
+                    && text.is_char_boundary(prefix.cut)
                     && blake3::hash(&text.as_bytes()[..prefix.cut]).as_bytes() == &prefix.hash
             }
             None => false,
         };
-        if prefix_ok && let Some(cut) = safe_split(text, self.per_id[&id].cut) {
-            let prefix = self.per_id.get_mut(&id).expect("prefix_ok above");
-            let mut lines = std::mem::take(&mut prefix.lines);
-            let mid = render(&text[prefix.cut..cut], width, hl);
+        if prefix_ok {
+            let old_cut = self.per_id[&id].cut;
+            if let Some(cut) = safe_split_from(text, old_cut) {
+                let prefix = self.per_id.get_mut(&id).expect("prefix_ok above");
+                if cut > old_cut {
+                    let mid = render(&text[old_cut..cut], width, hl);
+                    let (mid_wrapped, _) = wrap_tagged_inner(
+                        mid.iter().cloned().map(|l| (l, None)).collect(),
+                        width,
+                        false,
+                    );
+                    prefix.lines.extend(mid);
+                    prefix.wrapped.extend(mid_wrapped);
+                    prefix.cut = cut;
+                    prefix.hash = *blake3::hash(&text.as_bytes()[..cut]).as_bytes();
+                }
+                let tail = render(&text[cut..], width, hl);
+                let mut lines = Vec::with_capacity(prefix.lines.len() + tail.len());
+                lines.extend(prefix.lines.iter().cloned());
+                lines.extend(tail);
+                return lines;
+            }
+        }
+        if let Some(cut) = safe_split_from(text, 0)
+            && cut > 0
+        {
+            let head = render(&text[..cut], width, hl);
+            let (head_wrapped, _) = wrap_tagged_inner(
+                head.iter().cloned().map(|l| (l, None)).collect(),
+                width,
+                false,
+            );
             let tail = render(&text[cut..], width, hl);
-            lines.extend(mid);
-            // the grown prefix is what the next reveal reuses; `tail` rides
-            // on the output only — it is still growing
-            prefix.cut = cut;
-            prefix.hash = *blake3::hash(&text.as_bytes()[..cut]).as_bytes();
-            prefix.width = width;
-            prefix.lines = lines.clone();
+            let mut lines = Vec::with_capacity(head.len() + tail.len());
+            lines.extend(head.iter().cloned());
             lines.extend(tail);
+            self.per_id.insert(
+                id,
+                LivePrefix {
+                    cut,
+                    hash: *blake3::hash(&text.as_bytes()[..cut]).as_bytes(),
+                    width,
+                    lines: head,
+                    wrapped: head_wrapped,
+                },
+            );
             return lines;
         }
-        let lines = render(text, width, hl);
-        match safe_split(text, 0) {
-            Some(cut) if cut > 0 => {
-                self.per_id.insert(
-                    id,
-                    LivePrefix {
-                        cut,
-                        hash: *blake3::hash(&text.as_bytes()[..cut]).as_bytes(),
-                        width,
-                        lines: render(&text[..cut], width, hl),
-                    },
-                );
+        self.per_id.remove(&id);
+        render(text, width, hl)
+    }
+
+    /// Render and wrap `text` at `width` for segment `idx`, reusing the
+    /// already-wrapped prefix rows for `id` so streaming only wraps the
+    /// active tail past the last safe split point.
+    pub fn wrapped_lines(
+        &mut self,
+        id: u64,
+        idx: usize,
+        text: &str,
+        width: u16,
+        hl: &Highlighter,
+    ) -> Vec<(Line<'static>, Option<usize>)> {
+        let tag = Some(idx);
+        let prefix_ok = match self.per_id.get(&id) {
+            Some(prefix) => {
+                prefix.width == width
+                    && prefix.cut > 0
+                    && text.len() > prefix.cut
+                    && text.is_char_boundary(prefix.cut)
+                    && blake3::hash(&text.as_bytes()[..prefix.cut]).as_bytes() == &prefix.hash
             }
-            _ => {
-                self.per_id.remove(&id);
+            None => false,
+        };
+        if prefix_ok {
+            let old_cut = self.per_id[&id].cut;
+            if let Some(cut) = safe_split_from(text, old_cut) {
+                let prefix = self.per_id.get_mut(&id).expect("prefix_ok above");
+                if cut > old_cut {
+                    let mid = render(&text[old_cut..cut], width, hl);
+                    let (mid_wrapped, _) = wrap_tagged_inner(
+                        mid.iter().cloned().map(|l| (l, None)).collect(),
+                        width,
+                        false,
+                    );
+                    prefix.lines.extend(mid);
+                    prefix.wrapped.extend(mid_wrapped);
+                    prefix.cut = cut;
+                    prefix.hash = *blake3::hash(&text.as_bytes()[..cut]).as_bytes();
+                }
+                let tail = render(&text[cut..], width, hl);
+                let (tail_wrapped, _) =
+                    wrap_tagged_inner(tail.into_iter().map(|l| (l, tag)).collect(), width, true);
+                let mut out = Vec::with_capacity(prefix.wrapped.len() + tail_wrapped.len());
+                out.extend(prefix.wrapped.iter().cloned().map(|l| (l, tag)));
+                out.extend(tail_wrapped.into_iter().map(|l| (l, tag)));
+                return out;
             }
         }
-        lines
+        if let Some(cut) = safe_split_from(text, 0)
+            && cut > 0
+        {
+            let head = render(&text[..cut], width, hl);
+            let (head_wrapped, _) = wrap_tagged_inner(
+                head.iter().cloned().map(|l| (l, None)).collect(),
+                width,
+                false,
+            );
+            let tail = render(&text[cut..], width, hl);
+            let (tail_wrapped, _) =
+                wrap_tagged_inner(tail.into_iter().map(|l| (l, tag)).collect(), width, true);
+            let mut out = Vec::with_capacity(head_wrapped.len() + tail_wrapped.len());
+            out.extend(head_wrapped.iter().cloned().map(|l| (l, tag)));
+            out.extend(tail_wrapped.into_iter().map(|l| (l, tag)));
+            self.per_id.insert(
+                id,
+                LivePrefix {
+                    cut,
+                    hash: *blake3::hash(&text.as_bytes()[..cut]).as_bytes(),
+                    width,
+                    lines: head,
+                    wrapped: head_wrapped,
+                },
+            );
+            return out;
+        }
+        self.per_id.remove(&id);
+        let full = render(text, width, hl);
+        let (wrapped, tags) =
+            wrap_tagged_inner(full.into_iter().map(|l| (l, tag)).collect(), width, true);
+        wrapped.into_iter().zip(tags).collect()
     }
 }
 
-/// Byte offset of the last line start past `from` where splitting keeps
+/// Byte offset of the last line start at or past `from` where splitting keeps
 /// `render(a) · render(b)` identical to `render(a + b)`: no fenced code or
 /// `$$` math block may be open (their state is the only cross-line renderer
 /// state), the line itself must be non-blank (blank runs collapse), the
 /// previous and this line may not both carry a pipe (a GFM table never
 /// straddles the cut), and the line must not be a setext underline (it would
 /// reinterpret the paragraph above the cut — see [`is_setext_underline`]).
-/// `None` when no such boundary exists.
-fn safe_split(text: &str, from: usize) -> Option<usize> {
+///
+/// Precondition when `from > 0`: `from` was itself a valid split point for
+/// `text[..from]`, so at `offset == from` the cross-line state is guaranteed
+/// to be `(!in_code, !in_math, !prev_pipe)`. This allows scanning only
+/// `&text[from..]` in O(tail) instead of rescanning the entire document.
+fn safe_split_from(text: &str, from: usize) -> Option<usize> {
     let mut in_code = false;
     let mut in_math = false;
     let mut best: Option<usize> = None;
     let mut prev_pipe = false;
-    let mut offset = 0usize;
-    for line in text.split('\n') {
+    let mut offset = from;
+    for line in text[from..].split('\n') {
         let start = offset;
         offset += line.len() + 1;
         let lead = line.trim_start();
-        if start > from
-            && !in_code
+        let valid_here = !in_code
             && !in_math
             && !lead.is_empty()
             && !prev_pipe
-            && !is_setext_underline(line)
-        {
+            && !is_setext_underline(line);
+        if start == from && from > 0 && !valid_here {
+            // The byte at `from` was mutated such that `from` itself is no
+            // longer a valid split boundary; force a full re-establish.
+            return None;
+        }
+        if start > 0 && start >= from && valid_here {
             best = Some(start);
         }
         // render's own construct order: a fence line toggles code only
@@ -1788,7 +1899,24 @@ pub fn wrap_tagged(
     lines: Vec<(Line<'static>, Option<usize>)>,
     width: u16,
 ) -> (Vec<Line<'static>>, Vec<Option<usize>>) {
-    WRAP_TAGGED_CALLS.with(|c| c.set(c.get() + 1));
+    wrap_tagged_inner(lines, width, true)
+}
+
+pub(crate) fn wrap_tagged_uncounted(
+    lines: Vec<(Line<'static>, Option<usize>)>,
+    width: u16,
+) -> (Vec<Line<'static>>, Vec<Option<usize>>) {
+    wrap_tagged_inner(lines, width, false)
+}
+
+fn wrap_tagged_inner(
+    lines: Vec<(Line<'static>, Option<usize>)>,
+    width: u16,
+    count_call: bool,
+) -> (Vec<Line<'static>>, Vec<Option<usize>>) {
+    if count_call {
+        WRAP_TAGGED_CALLS.with(|c| c.set(c.get() + 1));
+    }
     let width = (width as usize).max(1);
     let fallback = Style::new().fg(Theme::rule_color()).bg(Theme::BG());
 

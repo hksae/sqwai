@@ -7,6 +7,7 @@ use super::*;
 fn assert_incremental_matches_full(doc: &str) {
     let hl = Highlighter::new();
     let mut live = LiveRender::new();
+    let mut live_wrapped = LiveRender::new();
     let mut text = String::new();
     let bytes: Vec<&[u8]> = doc.as_bytes().chunks(7).collect();
     for (step, chunk) in bytes.iter().enumerate() {
@@ -20,12 +21,34 @@ fn assert_incremental_matches_full(doc: &str) {
             "mismatch after step {step} at {} bytes",
             text.len()
         );
+        let inc_wrapped = live_wrapped.wrapped_lines(7, 2, &text, 60, &hl);
+        let (full_w, full_t) = wrap_tagged(
+            full.into_iter().map(|l| (l, Some(2))).collect(),
+            60,
+        );
+        let full_wrapped: Vec<_> = full_w.into_iter().zip(full_t).collect();
+        assert_eq!(
+            inc_wrapped,
+            full_wrapped,
+            "wrapped mismatch after step {step} at {} bytes",
+            text.len()
+        );
     }
     // replacing the whole answer (finish_turn backfill) must fall back
     // cleanly: guards fail, full parse, prefix re-established
     let replaced = format!("{doc}\n\nAuthoritative tail.");
     let incremental = live.lines(7, &replaced, 60, &hl);
     assert_eq!(incremental, render(&replaced, 60, &hl));
+    let inc_wrapped = live_wrapped.wrapped_lines(7, 2, &replaced, 60, &hl);
+    let (full_w, full_t) = wrap_tagged(
+        render(&replaced, 60, &hl)
+            .into_iter()
+            .map(|l| (l, Some(2)))
+            .collect(),
+        60,
+    );
+    let full_wrapped: Vec<_> = full_w.into_iter().zip(full_t).collect();
+    assert_eq!(inc_wrapped, full_wrapped);
 }
 
 #[test]

@@ -894,6 +894,84 @@ impl App {
         if self.last_input.width >= 6 { 2 } else { 0 }
     }
 
+    /// Compute the earliest wall-clock `Instant` the main loop needs to wake
+    /// up for when no input or agent event arrives first. Returns `None` when
+    /// the UI is completely idle (zero timers, zero animations, nothing dirty),
+    /// allowing the event loop to sleep indefinitely with 0% CPU wakeups.
+    fn next_wake_deadline(&self, last_build: Instant) -> Option<Instant> {
+        let now = Instant::now();
+        let mut earliest: Option<Instant> = None;
+        let mut consider = |t: Instant| {
+            earliest = Some(match earliest {
+                Some(cur) => cur.min(t),
+                None => t,
+            });
+        };
+
+        // 1. Frame build pending: either waiting out a 150ms resize drag settle
+        //    or held back by the 8.33ms presenter pacing gate.
+        if self.dirty {
+            if self.defer_rebuild
+                && let Some(t_res) = self.last_resize
+            {
+                consider(t_res + Duration::from_millis(150));
+            } else {
+                consider(last_build + crate::tui::presenter::MIN_PRESENT_INTERVAL);
+            }
+        }
+
+        // 2. Enter burst gate (30ms submit disambiguation).
+        if let Some(dl) = self.enter_gate.deadline() {
+            consider(dl);
+        }
+
+        // 3. Typewriter reveal queue (90ms flush window).
+        if !self.pending_reveal.is_empty() {
+            let dl = match self.last_reveal {
+                Some(t0) => t0 + REVEAL_FLUSH_INTERVAL,
+                None => now,
+            };
+            consider(dl);
+        }
+
+        // 4. Short 250ms color sweeps (mode chip / effort slider): step at
+        //    ~60 FPS (16ms) for smooth gradient interpolation.
+        let smooth_blend = self
+            .mode_blend
+            .is_some_and(|(_, t0)| t0.elapsed().as_millis() < MODE_BLEND_MS as u128)
+            || self
+                .effort_blend
+                .is_some_and(|(_, t0)| t0.elapsed().as_millis() < MODE_BLEND_MS as u128);
+        if smooth_blend {
+            consider(now + Duration::from_millis(16));
+        }
+
+        // 5. 20 FPS animations (streaming, running tools, finish wave, gallery).
+        let (animating, _) = self.animating_terms();
+        if animating {
+            let elapsed_ms = self.tick_origin.elapsed().as_millis() as u64;
+            let next_tick_ms = ((elapsed_ms / 50) + 1) * 50;
+            consider(self.tick_origin + Duration::from_millis(next_tick_ms));
+        }
+
+        // 6. Toast expiration deadline (exact 3s wakeup, no polling in between).
+        if let Some(toast) = &self.toast {
+            consider(toast.until);
+        }
+
+        // 7. Background std::sync::mpsc tasks or queued paste batch remainder.
+        if !self.pending_events.is_empty() {
+            consider(now + Duration::from_millis(8));
+        } else if self.provider_check_rx.is_some()
+            || self.builtin_update_rx.is_some()
+            || self.maintain_rx.is_some()
+        {
+            consider(now + Duration::from_millis(50));
+        }
+
+        earliest
+    }
+
     pub async fn run(
         mut self,
         frame_tx: crate::tui::presenter::FrameTx,
@@ -918,8 +996,6 @@ impl App {
             }
         });
 
-        let mut tick = tokio::time::interval(std::time::Duration::from_millis(50));
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         // UI-side build gate: widget render is memory-fast, but there is no
         // point rebuilding buffers faster than the presenter can show them.
         // Slow presents coalesce in the mailbox structurally (no EMA needed).
@@ -934,14 +1010,33 @@ impl App {
         let mut frame_bufs: Vec<std::sync::Arc<ratatui::buffer::Buffer>> = Vec::new();
         let mut frame_buf_idx = 0usize;
         while !self.quit {
-            // Event-driven wakeup: a mouse/key event wakes the loop instantly
-            // instead of waiting up to 50ms for the next tick. The tick stays
-            // for spinner/typewriter/background polls while idle. Presenting
-            // happens on the presenter thread: this loop never blocks on
-            // terminal I/O.
+            // Tickless, event-driven wakeup:
+            // - Crossterm input wakes instantly via `input_notify`.
+            // - Agent events (`TextDelta`, `ToolStart`, `ToolNotice`, etc.)
+            //   wake instantly via cancel-safe `agent.rx.recv()`.
+            // - Deadlines (8.33ms frame gate, 16ms color blend, 30ms enter
+            //   gate, 50ms spinner tick, 90ms typewriter flush, 3s toast TTL)
+            //   sleep until the exact target instant; when completely idle,
+            //   no timer runs at all (0% CPU wakeups).
+            let deadline = self.next_wake_deadline(last_build);
+            let has_agent = self.agent.is_some();
+            let mut woke_agent_ev: Option<AgentEvent> = None;
             tokio::select! {
                 _ = input_notify.notified() => {},
-                _ = tick.tick() => {},
+                maybe_ev = async {
+                    match self.agent.as_mut() {
+                        Some(handle) => handle.rx.recv().await,
+                        None => std::future::pending().await,
+                    }
+                }, if has_agent => {
+                    woke_agent_ev = maybe_ev;
+                },
+                _ = async {
+                    match deadline {
+                        Some(dl) => tokio::time::sleep_until(tokio::time::Instant::from_std(dl)).await,
+                        None => std::future::pending().await,
+                    }
+                } => {},
             }
             let presenter_gone = !presenter_alive.load(std::sync::atomic::Ordering::Relaxed);
             if presenter_gone && !self.renderer_dead_reported {
@@ -952,7 +1047,13 @@ impl App {
                 self.submit();
             }
             self.poll_input(&ev_rx)?;
-            self.poll_agent();
+            if let Some(ev) = woke_agent_ev {
+                if !self.handle_agent_event(ev) {
+                    self.poll_agent();
+                }
+            } else {
+                self.poll_agent();
+            }
             self.poll_provider_check();
             self.poll_builtin_update();
             self.poll_maintain();
@@ -2605,16 +2706,15 @@ impl App {
     }
 
     fn poll_agent(&mut self) {
-        // Do not drain an entire buffered response in one 50 ms tick. Keeping
-        // a small event budget lets the reveal queue and spinner repaint even
-        // when a local model delivers several chunks back-to-back.
-        const MAX_EVENTS_PER_TICK: usize = 8;
+        // Drain up to MAX_EVENTS_PER_TICK non-text events per pass; consecutive
+        // TextDelta chunks only append to `pending_reveal` (O(1) string append,
+        // no layout/render work), so they coalesce without burning the budget.
+        const MAX_EVENTS_PER_TICK: usize = 16;
         let mut processed = 0;
         loop {
             if processed >= MAX_EVENTS_PER_TICK {
                 return;
             }
-            processed += 1;
             let ev = match self.agent.as_mut() {
                 Some(handle) => match handle.rx.try_recv() {
                     Ok(ev) => ev,
@@ -2642,377 +2742,389 @@ impl App {
                 },
                 None => return,
             };
-            match ev {
-                AgentEvent::TextDelta(t) => {
-                    self.clear_retry_state();
-                    self.handle_text_delta(t);
+            if !matches!(ev, AgentEvent::TextDelta(_)) {
+                processed += 1;
+            }
+            if self.handle_agent_event(ev) {
+                return;
+            }
+        }
+    }
+
+    /// Process a single [`AgentEvent`]. Returns `true` when the turn completed
+    /// and the caller should stop draining the channel for this pass.
+    fn handle_agent_event(&mut self, ev: AgentEvent) -> bool {
+        match ev {
+            AgentEvent::TextDelta(t) => {
+                self.clear_retry_state();
+                self.handle_text_delta(t);
+            }
+            AgentEvent::ThinkingDelta(t) => {
+                self.handle_thinking_delta(t);
+            }
+            AgentEvent::Usage(u) => {
+                self.session.add_usage(&u);
+                // high-water mark of the live window, provider truth
+                self.session.context_peak_tokens =
+                    self.session.context_peak_tokens.max(u.prompt_tokens);
+                self.dirty = true;
+            }
+            AgentEvent::EffortIgnored { level, why } => {
+                self.status(
+                    &format!("effort: {level} (ignored by model — {why})"),
+                    StatusKind::Warn,
+                );
+                self.effort_observed_ignored =
+                    Some((self.model_cfg.id.clone(), self.model_cfg.effort, why));
+                self.dirty = true;
+            }
+            AgentEvent::EffortHonoured => self.note_effort_honoured(),
+            AgentEvent::ResponseId(id) => {
+                // the id only continues a conversation for the model that
+                // produced it; the scope is re-checked before each request
+                self.session.last_response_id = Some(id);
+                self.session.last_response_model = Some(self.session.model_key.clone());
+                self.dirty = true;
+            }
+            AgentEvent::Compaction {
+                summarized,
+                before,
+                after,
+            } => self.note_compaction(summarized, before, after),
+            AgentEvent::TranscriptSync { messages, summary } => {
+                self.persist_transcript(messages, summary)
+            }
+            AgentEvent::RequestBreakdown(b) => {
+                self.session.last_breakdown = Some(b);
+                // #209 L14: the same split the panel shows, in the request
+                // log — what no compaction can return versus what can.
+                let fixed = b.system_tokens + b.memory_tokens + b.skills_tokens + b.host_tokens;
+                crate::providers::log_http(&format!(
+                    "request breakdown: system={}B memory={}B skills={}B history={}B \
+                     tool_output={}B host={}B reasoning={}B total={}B fixed={}t",
+                    b.system_bytes,
+                    b.memory_bytes,
+                    b.skills_bytes,
+                    b.history_bytes,
+                    b.tool_output_bytes,
+                    b.host_bytes,
+                    b.reasoning_bytes,
+                    b.total_bytes,
+                    fixed,
+                ));
+            }
+            AgentEvent::SubagentStart { id, task } => {
+                self.handle_subagent_start(id, task);
+                self.dirty = true;
+            }
+            AgentEvent::SubagentThinking { id, text } => {
+                if let Some(chat) = self.subagent_chats.get_mut(&id)
+                    && let Some(Segment::Thinking { text: current, .. }) = chat
+                        .iter_mut()
+                        .find(|segment| matches!(segment, Segment::Thinking { live: true, .. }))
+                {
+                    current.push_str(&text);
                 }
-                AgentEvent::ThinkingDelta(t) => {
-                    self.handle_thinking_delta(t);
+                self.sub_touch_all(id);
+                self.dirty = true;
+            }
+            AgentEvent::SubagentText { id, text } => {
+                if let Some(chat) = self.subagent_chats.get_mut(&id)
+                    && let Some(Segment::Assistant { text: current, .. }) =
+                        chat.iter_mut().rev().find(|segment| {
+                            matches!(segment, Segment::Assistant { live: true, .. })
+                        })
+                {
+                    current.push_str(&text);
                 }
-                AgentEvent::Usage(u) => {
-                    self.session.add_usage(&u);
-                    // high-water mark of the live window, provider truth
-                    self.session.context_peak_tokens =
-                        self.session.context_peak_tokens.max(u.prompt_tokens);
-                    self.dirty = true;
-                }
-                AgentEvent::EffortIgnored { level, why } => {
-                    self.status(
-                        &format!("effort: {level} (ignored by model — {why})"),
-                        StatusKind::Warn,
-                    );
-                    self.effort_observed_ignored =
-                        Some((self.model_cfg.id.clone(), self.model_cfg.effort, why));
-                    self.dirty = true;
-                }
-                AgentEvent::EffortHonoured => self.note_effort_honoured(),
-                AgentEvent::ResponseId(id) => {
-                    // the id only continues a conversation for the model that
-                    // produced it; the scope is re-checked before each request
-                    self.session.last_response_id = Some(id);
-                    self.session.last_response_model = Some(self.session.model_key.clone());
-                    self.dirty = true;
-                }
-                AgentEvent::Compaction {
-                    summarized,
-                    before,
-                    after,
-                } => self.note_compaction(summarized, before, after),
-                AgentEvent::TranscriptSync { messages, summary } => {
-                    self.persist_transcript(messages, summary)
-                }
-                AgentEvent::RequestBreakdown(b) => {
-                    self.session.last_breakdown = Some(b);
-                    // #209 L14: the same split the panel shows, in the request
-                    // log — what no compaction can return versus what can.
-                    let fixed = b.system_tokens + b.memory_tokens + b.skills_tokens + b.host_tokens;
-                    crate::providers::log_http(&format!(
-                        "request breakdown: system={}B memory={}B skills={}B history={}B \
-                         tool_output={}B host={}B reasoning={}B total={}B fixed={}t",
-                        b.system_bytes,
-                        b.memory_bytes,
-                        b.skills_bytes,
-                        b.history_bytes,
-                        b.tool_output_bytes,
-                        b.host_bytes,
-                        b.reasoning_bytes,
-                        b.total_bytes,
-                        fixed,
-                    ));
-                }
-                AgentEvent::SubagentStart { id, task } => {
-                    self.handle_subagent_start(id, task);
-                    self.dirty = true;
-                }
-                AgentEvent::SubagentThinking { id, text } => {
-                    if let Some(chat) = self.subagent_chats.get_mut(&id)
-                        && let Some(Segment::Thinking { text: current, .. }) = chat
-                            .iter_mut()
-                            .find(|segment| matches!(segment, Segment::Thinking { live: true, .. }))
-                    {
-                        current.push_str(&text);
-                    }
-                    self.sub_touch_all(id);
-                    self.dirty = true;
-                }
-                AgentEvent::SubagentText { id, text } => {
-                    if let Some(chat) = self.subagent_chats.get_mut(&id)
-                        && let Some(Segment::Assistant { text: current, .. }) =
-                            chat.iter_mut().rev().find(|segment| {
-                                matches!(segment, Segment::Assistant { live: true, .. })
-                            })
-                    {
-                        current.push_str(&text);
-                    }
-                    self.sub_touch_all(id);
-                    self.dirty = true;
-                }
-                AgentEvent::SubagentToolStart { id, name, summary } => {
-                    // Compute positions/texts first (borrowing the chat),
-                    // mutate through the aligned helpers afterwards.
-                    let preamble: Option<(usize, String)> = if let Some(chat) =
-                        self.subagent_chats.get_mut(&id)
-                    {
-                        chat.iter()
-                            .rposition(|segment| {
-                                matches!(segment, Segment::Assistant { live: true, .. })
-                            })
-                            .and_then(|pos| {
-                                if let Some(Segment::Assistant { text, .. }) = chat.get_mut(pos) {
-                                    let t = text.trim();
-                                    if !t.is_empty() {
-                                        Some((pos, std::mem::take(text)))
-                                    } else {
-                                        text.clear();
-                                        None
-                                    }
+                self.sub_touch_all(id);
+                self.dirty = true;
+            }
+            AgentEvent::SubagentToolStart { id, name, summary } => {
+                // Compute positions/texts first (borrowing the chat),
+                // mutate through the aligned helpers afterwards.
+                let preamble: Option<(usize, String)> = if let Some(chat) =
+                    self.subagent_chats.get_mut(&id)
+                {
+                    chat.iter()
+                        .rposition(|segment| {
+                            matches!(segment, Segment::Assistant { live: true, .. })
+                        })
+                        .and_then(|pos| {
+                            if let Some(Segment::Assistant { text, .. }) = chat.get_mut(pos) {
+                                let t = text.trim();
+                                if !t.is_empty() {
+                                    Some((pos, std::mem::take(text)))
                                 } else {
+                                    text.clear();
                                     None
                                 }
-                            })
-                    } else {
-                        None
-                    };
-                    if let Some((pos, p)) = preamble {
-                        let trimmed = p.trim();
-                        if !trimmed.is_empty() {
-                            self.sub_insert(id, pos, Segment::Commentary(trimmed.to_string()));
-                        }
-                    }
-                    // the take/clear above emptied a live row in place (both
-                    // the Some and the whitespace-clear None path): bump
-                    // revisions so its cached rows are re-rendered
-                    self.sub_touch_all(id);
-                    let tool_pos = self
-                        .subagent_chats
-                        .get(&id)
-                        .and_then(|chat| {
-                            chat.iter().rposition(|segment| {
-                                matches!(segment, Segment::Assistant { live: true, .. })
-                            })
-                        })
-                        .unwrap_or_else(|| {
-                            self.subagent_chats.get(&id).map(|c| c.len()).unwrap_or(0)
-                        });
-                    self.sub_insert(
-                        id,
-                        tool_pos,
-                        Segment::Tool {
-                            name,
-                            args: summary,
-                            // child rows are matched by name within one
-                            // child's chat (sequential there); no call id
-                            call_id: None,
-                            ok: None,
-                            output: String::new(),
-                            diff: None,
-                            preview: Vec::new(),
-                            preview_total: 0,
-                            expanded: false,
-                            flash: None,
-                            // a child cannot reach the user: no ask body here
-                            ask: None,
-                        },
-                    );
-                    self.dirty = true;
-                }
-                AgentEvent::SubagentToolDone {
-                    id,
-                    name,
-                    summary,
-                    ok,
-                    diff,
-                } => {
-                    if let Some(chat) = self.subagent_chats.get_mut(&id)
-                        && let Some(Segment::Tool {
-                            ok: state,
-                            output,
-                            diff: current_diff,
-                            preview,
-                            preview_total,
-                            flash,
-                            ..
-                        }) = chat.iter_mut().rev().find(|segment| matches!(segment, Segment::Tool { name: current, ok: None, .. } if current == &name))
-                    {
-                        *state = Some(ok);
-                        *output = summary;
-                        *current_diff = diff;
-                        (*preview, *preview_total) =
-                            view::tool_preview(current_diff.as_deref(), output.as_str());
-                        *flash = Some(std::time::Instant::now());
-                    }
-                    self.sub_touch_all(id);
-                    self.dirty = true;
-                }
-                AgentEvent::SubagentDone { id, ok, output } => {
-                    crate::tui::event_log::log(
-                        "SUBAGENT",
-                        format!("done id={id} ok={ok} output_len={}", output.chars().count()),
-                    );
-                    if let Some((_, _, status, current, _)) = self
-                        .subagents
-                        .iter_mut()
-                        .find(|(sid, _, _, _, _)| *sid == id)
-                    {
-                        *status = if ok {
-                            "completed".into()
-                        } else {
-                            "failed".into()
-                        };
-                        *current = output.clone();
-                    }
-                    if let Some(pos) = self
-                        .segments
-                        .iter()
-                        .rposition(|s| matches!(s, Segment::Subagent { id: sid, .. } if *sid == id))
-                        && let Some(Segment::Subagent {
-                            status,
-                            output: current,
-                            ..
-                        }) = self.segments.get_mut(pos)
-                    {
-                        *status = if ok {
-                            "completed".into()
-                        } else {
-                            "failed".into()
-                        };
-                        *current = output;
-                        self.touch_segment(pos);
-                    }
-                    if let Some(chat) = self.subagent_chats.get_mut(&id) {
-                        for segment in chat {
-                            match segment {
-                                Segment::Thinking { live, .. }
-                                | Segment::Assistant { live, .. } => *live = false,
-                                _ => {}
+                            } else {
+                                None
                             }
+                        })
+                } else {
+                    None
+                };
+                if let Some((pos, p)) = preamble {
+                    let trimmed = p.trim();
+                    if !trimmed.is_empty() {
+                        self.sub_insert(id, pos, Segment::Commentary(trimmed.to_string()));
+                    }
+                }
+                // the take/clear above emptied a live row in place (both
+                // the Some and the whitespace-clear None path): bump
+                // revisions so its cached rows are re-rendered
+                self.sub_touch_all(id);
+                let tool_pos = self
+                    .subagent_chats
+                    .get(&id)
+                    .and_then(|chat| {
+                        chat.iter().rposition(|segment| {
+                            matches!(segment, Segment::Assistant { live: true, .. })
+                        })
+                    })
+                    .unwrap_or_else(|| {
+                        self.subagent_chats.get(&id).map(|c| c.len()).unwrap_or(0)
+                    });
+                self.sub_insert(
+                    id,
+                    tool_pos,
+                    Segment::Tool {
+                        name,
+                        args: summary,
+                        // child rows are matched by name within one
+                        // child's chat (sequential there); no call id
+                        call_id: None,
+                        ok: None,
+                        output: String::new(),
+                        diff: None,
+                        preview: Vec::new(),
+                        preview_total: 0,
+                        expanded: false,
+                        flash: None,
+                        // a child cannot reach the user: no ask body here
+                        ask: None,
+                    },
+                );
+                self.dirty = true;
+            }
+            AgentEvent::SubagentToolDone {
+                id,
+                name,
+                summary,
+                ok,
+                diff,
+            } => {
+                if let Some(chat) = self.subagent_chats.get_mut(&id)
+                    && let Some(Segment::Tool {
+                        ok: state,
+                        output,
+                        diff: current_diff,
+                        preview,
+                        preview_total,
+                        flash,
+                        ..
+                    }) = chat.iter_mut().rev().find(|segment| matches!(segment, Segment::Tool { name: current, ok: None, .. } if current == &name))
+                {
+                    *state = Some(ok);
+                    *output = summary;
+                    *current_diff = diff;
+                    (*preview, *preview_total) =
+                        view::tool_preview(current_diff.as_deref(), output.as_str());
+                    *flash = Some(std::time::Instant::now());
+                }
+                self.sub_touch_all(id);
+                self.dirty = true;
+            }
+            AgentEvent::SubagentDone { id, ok, output } => {
+                crate::tui::event_log::log(
+                    "SUBAGENT",
+                    format!("done id={id} ok={ok} output_len={}", output.chars().count()),
+                );
+                if let Some((_, _, status, current, _)) = self
+                    .subagents
+                    .iter_mut()
+                    .find(|(sid, _, _, _, _)| *sid == id)
+                {
+                    *status = if ok {
+                        "completed".into()
+                    } else {
+                        "failed".into()
+                    };
+                    *current = output.clone();
+                }
+                if let Some(pos) = self
+                    .segments
+                    .iter()
+                    .rposition(|s| matches!(s, Segment::Subagent { id: sid, .. } if *sid == id))
+                    && let Some(Segment::Subagent {
+                        status,
+                        output: current,
+                        ..
+                    }) = self.segments.get_mut(pos)
+                {
+                    *status = if ok {
+                        "completed".into()
+                    } else {
+                        "failed".into()
+                    };
+                    *current = output;
+                    self.touch_segment(pos);
+                }
+                if let Some(chat) = self.subagent_chats.get_mut(&id) {
+                    for segment in chat {
+                        match segment {
+                            Segment::Thinking { live, .. }
+                            | Segment::Assistant { live, .. } => *live = false,
+                            _ => {}
                         }
                     }
-                    // the finished child needs no folding anymore: the flat
-                    // transcript shows every row, stored indices stay valid
-                    // because no more rows land after Done
-                    self.sub_touch_all(id);
-                    self.dirty = true;
                 }
-                AgentEvent::ToolStart {
-                    name,
-                    summary,
-                    call_id,
-                } => {
-                    self.clear_retry_state();
-                    self.handle_tool_start(name, summary, Some(call_id));
-                }
-                AgentEvent::ToolNotice {
-                    name,
-                    summary,
-                    ok,
-                    diff,
-                    call_id,
-                } => {
-                    self.handle_tool_notice(name, summary, ok, diff, Some(call_id));
-                }
-                AgentEvent::Checkpoint { label } => {
-                    self.last_checkpoint = Some(label);
-                    self.dirty = true;
-                }
-                AgentEvent::Todos(items) => {
-                    self.todos = items;
-                    self.dirty = true;
-                }
-                AgentEvent::AskUser {
-                    id,
-                    call_id,
-                    questions,
-                } => {
-                    // The call's own row carries the questionnaire: no overlay,
-                    // no modal menu, so a small window never covers the history
-                    // and the mouse target is the chat row itself.
-                    self.open_ask(&call_id, id, questions);
-                }
-                AgentEvent::StepCurrent { step } => {
-                    // the loop moved the session's current step:
-                    // persist the mirror so resume and the next run agree
-                    self.session.current_step_id = step;
-                    self.session.save().ok();
-                }
-                AgentEvent::Approval {
+                // the finished child needs no folding anymore: the flat
+                // transcript shows every row, stored indices stay valid
+                // because no more rows land after Done
+                self.sub_touch_all(id);
+                self.dirty = true;
+            }
+            AgentEvent::ToolStart {
+                name,
+                summary,
+                call_id,
+            } => {
+                self.clear_retry_state();
+                self.handle_tool_start(name, summary, Some(call_id));
+            }
+            AgentEvent::ToolNotice {
+                name,
+                summary,
+                ok,
+                diff,
+                call_id,
+            } => {
+                self.handle_tool_notice(name, summary, ok, diff, Some(call_id));
+            }
+            AgentEvent::Checkpoint { label } => {
+                self.last_checkpoint = Some(label);
+                self.dirty = true;
+            }
+            AgentEvent::Todos(items) => {
+                self.todos = items;
+                self.dirty = true;
+            }
+            AgentEvent::AskUser {
+                id,
+                call_id,
+                questions,
+            } => {
+                // The call's own row carries the questionnaire: no overlay,
+                // no modal menu, so a small window never covers the history
+                // and the mouse target is the chat row itself.
+                self.open_ask(&call_id, id, questions);
+            }
+            AgentEvent::StepCurrent { step } => {
+                // the loop moved the session's current step:
+                // persist the mirror so resume and the next run agree
+                self.session.current_step_id = step;
+                self.session.save().ok();
+            }
+            AgentEvent::Approval {
+                id,
+                command,
+                reason,
+            } => {
+                self.open_menu(Menu::Approval {
                     id,
                     command,
                     reason,
-                } => {
-                    self.open_menu(Menu::Approval {
-                        id,
-                        command,
-                        reason,
-                    });
-                    self.dirty = true;
-                }
-                AgentEvent::Diagnostics { count } => {
-                    self.lsp_diagnostics = count;
-                    if count > 0 {
-                        self.status(
-                            &format!(
-                                "LSP: {count} diagnostic{}",
-                                if count == 1 { "" } else { "s" }
-                            ),
-                            StatusKind::Warn,
-                        );
-                    }
-                    self.dirty = true;
-                }
-                AgentEvent::Retry {
-                    attempt,
-                    delay_secs,
-                    error,
-                } => {
-                    if !self.retry_notified {
-                        self.retry_notified = true;
-                        // the full text of the first failure goes into the chat:
-                        // the status bar below keeps only a truncated indicator,
-                        // while here it stays readable and copyable (click to unfold)
-                        self.push_segment(Segment::Status {
-                            text: format!("request failed — retrying with backoff: {error}"),
-                            kind: StatusKind::Err,
-                            expanded: false,
-                            // retracted when the turn completes successfully;
-                            // a terminal failure keeps it (see finish_turn_inner)
-                            transient: true,
-                        });
-                        if self.prev_turn_ok {
-                            crate::agent::notify::windows_toast(
-                                "sqwai",
-                                &format!(
-                                    "request failed — retrying for up to 1h (esc stops): {}",
-                                    truncate_chars(&error, 90)
-                                ),
-                            );
-                        }
-                    }
-                    self.retry_line = Some(format!("retry #{attempt} in {delay_secs}s — {error}"));
-                    self.dirty = true;
-                }
-                AgentEvent::FallbackSwitched { from, to } => {
-                    self.push_segment(Segment::Status {
-                        text: format!("primary model '{from}' failed; switched to fallback '{to}'"),
-                        kind: StatusKind::Warn,
-                        expanded: false,
-                        transient: false,
-                    });
-                    self.session.model_key = to.clone();
-                    if let Some(mc) = self.cfg.models.get(&to) {
-                        self.model_cfg = mc.clone();
-                        self.session.context_limit = mc.context;
-                    }
-                    self.retry_line = None;
-                    self.retry_notified = false;
+                });
+                self.dirty = true;
+            }
+            AgentEvent::Diagnostics { count } => {
+                self.lsp_diagnostics = count;
+                if count > 0 {
                     self.status(
-                        &format!("switched to fallback model: {to}"),
+                        &format!(
+                            "LSP: {count} diagnostic{}",
+                            if count == 1 { "" } else { "s" }
+                        ),
                         StatusKind::Warn,
                     );
-                    self.dirty = true;
                 }
-                AgentEvent::Completed(res) => {
-                    crate::tui::event_log::log(
-                        "TURN",
-                        format!("Completed ok={} aborted={}", res.is_ok(), self.aborted),
-                    );
-                    // Esc aborts the request, but the provider task may still
-                    // race to deliver a buffered successful completion. Once
-                    // abort was requested, that completion is stale and must
-                    // not replace the visible turn with the previous answer.
-                    if self.aborted {
-                        self.finish_turn(Err("aborted".into()));
-                        return;
+                self.dirty = true;
+            }
+            AgentEvent::Retry {
+                attempt,
+                delay_secs,
+                error,
+            } => {
+                if !self.retry_notified {
+                    self.retry_notified = true;
+                    // the full text of the first failure goes into the chat:
+                    // the status bar below keeps only a truncated indicator,
+                    // while here it stays readable and copyable (click to unfold)
+                    self.push_segment(Segment::Status {
+                        text: format!("request failed — retrying with backoff: {error}"),
+                        kind: StatusKind::Err,
+                        expanded: false,
+                        // retracted when the turn completes successfully;
+                        // a terminal failure keeps it (see finish_turn_inner)
+                        transient: true,
+                    });
+                    if self.prev_turn_ok {
+                        crate::agent::notify::windows_toast(
+                            "sqwai",
+                            &format!(
+                                "request failed — retrying for up to 1h (esc stops): {}",
+                                truncate_chars(&error, 90)
+                            ),
+                        );
                     }
-                    match res {
-                        Ok(outcome) => self.finish_turn_ok(outcome),
-                        Err(e) => self.finish_turn(Err(e)),
-                    }
-                    return;
                 }
+                self.retry_line = Some(format!("retry #{attempt} in {delay_secs}s — {error}"));
+                self.dirty = true;
+            }
+            AgentEvent::FallbackSwitched { from, to } => {
+                self.push_segment(Segment::Status {
+                    text: format!("primary model '{from}' failed; switched to fallback '{to}'"),
+                    kind: StatusKind::Warn,
+                    expanded: false,
+                    transient: false,
+                });
+                self.session.model_key = to.clone();
+                if let Some(mc) = self.cfg.models.get(&to) {
+                    self.model_cfg = mc.clone();
+                    self.session.context_limit = mc.context;
+                }
+                self.retry_line = None;
+                self.retry_notified = false;
+                self.status(
+                    &format!("switched to fallback model: {to}"),
+                    StatusKind::Warn,
+                );
+                self.dirty = true;
+            }
+            AgentEvent::Completed(res) => {
+                crate::tui::event_log::log(
+                    "TURN",
+                    format!("Completed ok={} aborted={}", res.is_ok(), self.aborted),
+                );
+                // Esc aborts the request, but the provider task may still
+                // race to deliver a buffered successful completion. Once
+                // abort was requested, that completion is stale and must
+                // not replace the visible turn with the previous answer.
+                if self.aborted {
+                    self.finish_turn(Err("aborted".into()));
+                    return true;
+                }
+                match res {
+                    Ok(outcome) => self.finish_turn_ok(outcome),
+                    Err(e) => self.finish_turn(Err(e)),
+                }
+                return true;
             }
         }
+        false
     }
 
     /// Settle rows left running when their turn ended: a dropped done-event

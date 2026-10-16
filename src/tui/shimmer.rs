@@ -10,6 +10,7 @@
 //! 50ms while work runs, so one tick is one frame (40 ticks per sweep) and
 //! the output is fully deterministic under test.
 
+use std::borrow::Cow;
 use std::sync::OnceLock;
 
 use ratatui::style::{Color, Modifier, Style};
@@ -17,6 +18,38 @@ use ratatui::text::Span;
 use unicode_width::UnicodeWidthChar;
 
 use super::theme::Theme;
+
+/// Single-byte ASCII table (`0x00..=0x7f`) so per-character spans in
+/// shimmers, flashes, and gradients borrow `'static` slices instead of
+/// heap-allocating a `String` per glyph on every animation tick.
+const ASCII_TABLE: &str = concat!(
+    "\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f",
+    "\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f",
+    " !\"#$%&'()*+,-./0123456789:;<=>?",
+    "@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_",
+    "`abcdefghijklmnopqrstuvwxyz{|}~\x7f"
+);
+
+#[inline]
+pub(crate) fn char_cow(ch: char) -> Cow<'static, str> {
+    let u = ch as u32;
+    if u < 128 {
+        let i = u as usize;
+        Cow::Borrowed(&ASCII_TABLE[i..i + 1])
+    } else {
+        match ch {
+            '•' => Cow::Borrowed("•"),
+            '✓' => Cow::Borrowed("✓"),
+            '✗' => Cow::Borrowed("✗"),
+            '…' => Cow::Borrowed("…"),
+            '·' => Cow::Borrowed("·"),
+            '─' => Cow::Borrowed("─"),
+            '│' => Cow::Borrowed("│"),
+            '›' => Cow::Borrowed("›"),
+            _ => Cow::Owned(ch.to_string()),
+        }
+    }
+}
 
 /// Ticks per full sweep at the 50ms UI tick (2 seconds).
 pub const SHIMMER_PERIOD_TICKS: usize = 40;
@@ -137,31 +170,28 @@ pub fn shimmer_brand_spans(text: &str, tick: usize) -> Vec<Span<'static>> {
     if has_truecolor() {
         shimmer_rgb_tint(text, tick, crate::tui::art::CORAL_START, CREST_RGB)
     } else {
-        let chars: Vec<char> = text.chars().collect();
-        if chars.is_empty() {
+        if text.is_empty() {
             return Vec::new();
         }
-        let widths: Vec<f64> = chars
-            .iter()
-            .map(|c| UnicodeWidthChar::width(*c).unwrap_or(0) as f64)
-            .collect();
-        let total: f64 = widths.iter().sum();
+        let mut count = 0usize;
+        let mut total = 0.0f64;
+        for c in text.chars() {
+            count += 1;
+            total += UnicodeWidthChar::width(c).unwrap_or(0) as f64;
+        }
+        let mut out = Vec::with_capacity(count);
         let mut column = 0.0;
-        chars
-            .into_iter()
-            .zip(widths)
-            .map(|(ch, w)| {
-                let center = column + w / 2.0;
-                column += w;
-                let t = wave_t(tick, center, total);
-                let style = if t >= 0.6 {
-                    Style::new().fg(Color::White).add_modifier(Modifier::BOLD)
-                } else {
-                    Theme::brand_ink().add_modifier(Modifier::BOLD)
-                };
-                Span::styled(ch.to_string(), style)
-            })
-            .collect()
+        let crest_style = Style::new().fg(Color::White).add_modifier(Modifier::BOLD);
+        let base_style = Theme::brand_ink().add_modifier(Modifier::BOLD);
+        for ch in text.chars() {
+            let w = UnicodeWidthChar::width(ch).unwrap_or(0) as f64;
+            let center = column + w / 2.0;
+            column += w;
+            let t = wave_t(tick, center, total);
+            let style = if t >= 0.6 { crest_style } else { base_style };
+            out.push(Span::styled(char_cow(ch), style));
+        }
+        out
     }
 }
 
@@ -180,63 +210,64 @@ fn shimmer_rgb_tint(
     base: (u8, u8, u8),
     crest: (u8, u8, u8),
 ) -> Vec<Span<'static>> {
-    let chars: Vec<char> = text.chars().collect();
-    if chars.is_empty() {
+    if text.is_empty() {
         return Vec::new();
     }
-    let widths: Vec<f64> = chars
-        .iter()
-        .map(|c| UnicodeWidthChar::width(*c).unwrap_or(0) as f64)
-        .collect();
-    let total: f64 = widths.iter().sum();
+    let mut count = 0usize;
+    let mut total = 0.0f64;
+    for c in text.chars() {
+        count += 1;
+        total += UnicodeWidthChar::width(c).unwrap_or(0) as f64;
+    }
+    let mut out = Vec::with_capacity(count);
     let mut column = 0.0;
-    chars
-        .into_iter()
-        .zip(widths)
-        .map(|(ch, w)| {
-            let center = column + w / 2.0;
-            column += w;
-            let (r, g, b) = blend(base, crest, wave_t(tick, center, total));
-            Span::styled(
-                ch.to_string(),
-                Style::default()
-                    .fg(Color::Rgb(r, g, b))
-                    .add_modifier(Modifier::BOLD),
-            )
-        })
-        .collect()
+    for ch in text.chars() {
+        let w = UnicodeWidthChar::width(ch).unwrap_or(0) as f64;
+        let center = column + w / 2.0;
+        column += w;
+        let (r, g, b) = blend(base, crest, wave_t(tick, center, total));
+        out.push(Span::styled(
+            char_cow(ch),
+            Style::default()
+                .fg(Color::Rgb(r, g, b))
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    out
 }
 
 /// ANSI fallback: dim → plain → bold steps, Codex `color_for_level`.
 fn shimmer_ansi(text: &str, tick: usize) -> Vec<Span<'static>> {
-    let chars: Vec<char> = text.chars().collect();
-    if chars.is_empty() {
+    if text.is_empty() {
         return Vec::new();
     }
     // display-column centers keep wide glyphs aligned with the wave
-    let widths: Vec<f64> = chars
-        .iter()
-        .map(|c| UnicodeWidthChar::width(*c).unwrap_or(0) as f64)
-        .collect();
-    let total: f64 = widths.iter().sum();
+    let mut count = 0usize;
+    let mut total = 0.0f64;
+    for c in text.chars() {
+        count += 1;
+        total += UnicodeWidthChar::width(c).unwrap_or(0) as f64;
+    }
+    let mut out = Vec::with_capacity(count);
     let mut column = 0.0;
-    chars
-        .into_iter()
-        .zip(widths)
-        .map(|(ch, w)| {
-            let center = column + w / 2.0;
-            column += w;
-            let t = wave_t(tick, center, total);
-            let style = if t < 0.2 {
-                Theme::dim()
-            } else if t < 0.6 {
-                Theme::base()
-            } else {
-                Style::new().add_modifier(Modifier::BOLD)
-            };
-            Span::styled(ch.to_string(), style)
-        })
-        .collect()
+    let dim_style = Theme::dim();
+    let base_style = Theme::base();
+    let bold_style = Style::new().add_modifier(Modifier::BOLD);
+    for ch in text.chars() {
+        let w = UnicodeWidthChar::width(ch).unwrap_or(0) as f64;
+        let center = column + w / 2.0;
+        column += w;
+        let t = wave_t(tick, center, total);
+        let style = if t < 0.2 {
+            dim_style
+        } else if t < 0.6 {
+            base_style
+        } else {
+            bold_style
+        };
+        out.push(Span::styled(char_cow(ch), style));
+    }
+    out
 }
 
 /// One-shot finish wave for a tool head row: a saturated green (ok) or
@@ -258,18 +289,26 @@ pub fn flash_spans(marker: &str, name: &str, done_ok: bool, progress: f64) -> Ve
     } else {
         Theme::ERR_RGB
     };
-    let marker_w: f64 = marker
-        .chars()
-        .map(|c| unicode_width::UnicodeWidthChar::width(c).unwrap_or(0) as f64)
-        .sum();
-    let name_w: f64 = name
-        .chars()
-        .map(|c| unicode_width::UnicodeWidthChar::width(c).unwrap_or(0) as f64)
-        .sum();
+    let mut count = 0usize;
+    let mut marker_w = 0.0f64;
+    for c in marker.chars() {
+        count += 1;
+        marker_w += unicode_width::UnicodeWidthChar::width(c).unwrap_or(0) as f64;
+    }
+    let mut name_w = 0.0f64;
+    for c in name.chars() {
+        count += 1;
+        name_w += unicode_width::UnicodeWidthChar::width(c).unwrap_or(0) as f64;
+    }
     let total = marker_w + name_w;
     let frontier = progress.clamp(0.0, 1.0) * (total + BAND);
-    let mut out = Vec::new();
+    let mut out = Vec::with_capacity(count);
     let mut column = 0.0;
+    let wave_style = Style::default()
+        .fg(Color::Rgb(target.0, target.1, target.2))
+        .add_modifier(Modifier::BOLD);
+    let head_bold = Theme::tool_head_bold();
+    let head_plain = Theme::tool_head();
     for (part, ch) in marker
         .chars()
         .map(|ch| (true, ch))
@@ -279,19 +318,13 @@ pub fn flash_spans(marker: &str, name: &str, done_ok: bool, progress: f64) -> Ve
         let center = column + w / 2.0;
         column += w;
         // settled: exactly the static row's styles, no pop at either end
-        let settled = if part {
-            Theme::tool_head_bold()
-        } else {
-            Theme::tool_head()
-        };
+        let settled = if part { head_bold } else { head_plain };
         let style = if center <= frontier && center > frontier - BAND {
-            Style::default()
-                .fg(Color::Rgb(target.0, target.1, target.2))
-                .add_modifier(Modifier::BOLD)
+            wave_style
         } else {
             settled
         };
-        out.push(Span::styled(ch.to_string(), style));
+        out.push(Span::styled(char_cow(ch), style));
     }
     out
 }

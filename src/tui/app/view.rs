@@ -546,13 +546,9 @@ impl App {
         let Some(idx) = meta.iter().position(|m| m.id == id) else {
             return pressed;
         };
-        let Some(start) = self.cache_rowseg.iter().position(|t| *t == Some(idx)) else {
+        let Some((start, end)) = self.seg_row_range(idx) else {
             return pressed;
         };
-        let mut end = start;
-        while end < self.cache_rowseg.len() && self.cache_rowseg[end] == Some(idx) {
-            end += 1;
-        }
         if end <= start {
             return pressed;
         }
@@ -741,14 +737,36 @@ impl App {
         }
     }
 
-    /// contiguous absolute-row range of one segment in the wrapped cache
-    fn ask_block_range(&self, seg_idx: usize) -> Option<(usize, usize)> {
+    /// Contiguous absolute-row range `(start, end)` of segment `seg_idx` in
+    /// the current view's assembled buffers. Uses the chunk map (`asm_tags` /
+    /// `asm_lens`) in O(chunks) instead of scanning all wrapped lines in
+    /// `cache_rowseg`, falling back to `cache_rowseg` when a test populates
+    /// `cache_rowseg` directly without `asm_tags`.
+    fn seg_row_range(&self, seg_idx: usize) -> Option<(usize, usize)> {
+        let (_, meta) = self.view_transcript();
+        if self.asm_tags.len() == self.asm_lens.len() && !self.asm_tags.is_empty() {
+            if let Some(m) = meta.get(seg_idx) {
+                let target = AsmTag::Seg(m.id);
+                let mut offset = 0usize;
+                for (tag, &len) in self.asm_tags.iter().zip(self.asm_lens.iter()) {
+                    if *tag == target {
+                        return (len > 0).then_some((offset, offset + len));
+                    }
+                    offset += len;
+                }
+            }
+        }
         let start = self.cache_rowseg.iter().position(|t| *t == Some(seg_idx))?;
         let mut end = start;
         while end < self.cache_rowseg.len() && self.cache_rowseg[end] == Some(seg_idx) {
             end += 1;
         }
         Some((start, end))
+    }
+
+    /// contiguous absolute-row range of one segment in the wrapped cache
+    fn ask_block_range(&self, seg_idx: usize) -> Option<(usize, usize)> {
+        self.seg_row_range(seg_idx)
     }
 
     /// map an absolute cache row onto an interactive AskUser target, if any
@@ -1054,11 +1072,7 @@ impl App {
         self.follow = false;
         let y = self.last_chat.y;
         let offset = (screen.saturating_sub(y)) as usize;
-        let found = self
-            .cache_rowseg
-            .iter()
-            .position(|t| *t == Some(tag))
-            .is_some();
+        let found = self.seg_row_range(tag).is_some();
         self.pending_anchor = found.then_some((view, tag, offset));
     }
 
@@ -1307,7 +1321,11 @@ impl App {
     /// Segment source lines; the live assistant answer takes the incremental
     /// path (its completed prefix is parsed once — see markdown::LiveRender),
     /// everything else goes through the plain renderer.
-    fn render_segment_lines(
+    /// Render and wrap one main-transcript segment. The live assistant answer
+    /// takes the incremental wrapped path (`LiveRender::wrapped_lines`, where
+    /// its completed prefix is parsed AND wrapped once); everything else goes
+    /// through `render_segment` + `wrap_tagged`.
+    fn render_segment_wrapped(
         &mut self,
         id: u64,
         idx: usize,
@@ -1319,7 +1337,9 @@ impl App {
             Some(Segment::Assistant { live: true, .. })
         );
         if !live {
-            return self.render_segment(&self.segments, idx, w, interactive);
+            let chunk = self.render_segment(&self.segments, idx, w, interactive);
+            let (rows, tags) = wrap_tagged(chunk, w);
+            return rows.into_iter().zip(tags).collect();
         }
         // disjoint field borrows: the answer text is read while the prefix
         // store is updated
@@ -1330,11 +1350,7 @@ impl App {
             ..
         } = self;
         match &segments[idx] {
-            Segment::Assistant { text, .. } => live_md
-                .lines(id, text, w, hl)
-                .into_iter()
-                .map(|line| (line, Some(idx)))
-                .collect(),
+            Segment::Assistant { text, .. } => live_md.wrapped_lines(id, idx, text, w, hl),
             _ => Vec::new(), // the live check above pins this match
         }
     }
@@ -1859,8 +1875,15 @@ impl App {
                 struct_ord += 1;
             }};
         }
+        macro_rules! blank_row {
+            () => {{
+                chunks.push(blank_chunk(struct_ord));
+                fresh.push(true);
+                struct_ord += 1;
+            }};
+        }
         if self.active_subagent.is_none() {
-            struct_row!(blank(), None);
+            blank_row!();
             for l in self.empty_mark_lines() {
                 struct_row!(l, None);
             }
@@ -1874,7 +1897,7 @@ impl App {
             let seg = &self.segments[idx];
             match seg {
                 Segment::User(_) => {
-                    struct_row!(blank(), None);
+                    blank_row!();
                 }
                 Segment::Assistant { text, live } => {
                     // an unrevealed live answer is air, not content: zero
@@ -1882,22 +1905,22 @@ impl App {
                     if *live && text.trim().is_empty() {
                         continue;
                     }
-                    struct_row!(blank(), None);
+                    blank_row!();
                 }
                 Segment::Commentary(_) => {
-                    struct_row!(blank(), None);
+                    blank_row!();
                 }
                 Segment::Thinking { .. } => {
-                    struct_row!(blank(), None);
+                    blank_row!();
                 }
                 Segment::Subagent { .. } => {
-                    struct_row!(blank(), None);
+                    blank_row!();
                 }
                 Segment::Tool { .. } => {
-                    struct_row!(blank(), None);
+                    blank_row!();
                 }
                 Segment::Status { .. } => {
-                    struct_row!(blank(), None);
+                    blank_row!();
                 }
             }
 
@@ -1922,9 +1945,7 @@ impl App {
                 continue;
             }
             self.test_renders += 1;
-            let chunk = self.render_segment_lines(meta.id, idx, render_w, true);
-            let (rows, tags) = wrap_tagged(chunk, w);
-            let rows: Vec<(Line<'static>, Option<usize>)> = rows.into_iter().zip(tags).collect();
+            let rows = self.render_segment_wrapped(meta.id, idx, render_w, true);
             self.seg_cache.insert(
                 meta.id,
                 SegCacheEntry {
@@ -1948,7 +1969,7 @@ impl App {
                 self.turn_started.map(|at| at.elapsed().as_secs()),
                 self.spinner_tick,
             );
-            struct_row!(blank(), None);
+            blank_row!();
             struct_row!(line, None);
         }
         let _ = struct_ord;
@@ -1963,32 +1984,46 @@ impl App {
 
     /// Forget wrapped rows whose segment id is gone from every transcript.
     fn prune_seg_cache(&mut self) {
-        let mut live = std::collections::HashSet::new();
-        // ids whose segment is still a live assistant answer: those are the
-        // only ones keeping an incremental prefix store
-        let mut live_answers = std::collections::HashSet::new();
-        for (idx, meta) in self.seg_meta.iter().enumerate() {
+        const SEG_CACHE_CAP: usize = 2000;
+        if !self.live_md.is_empty() {
+            let segments = &self.segments;
+            let seg_meta = &self.seg_meta;
+            let subagent_chats = &self.subagent_chats;
+            let subagent_meta = &self.subagent_meta;
+            self.live_md.retain(|id| {
+                let in_main = seg_meta.iter().enumerate().any(|(idx, m)| {
+                    m.id == id
+                        && matches!(segments.get(idx), Some(Segment::Assistant { live: true, .. }))
+                });
+                if in_main {
+                    return true;
+                }
+                subagent_chats.iter().any(|(chat_id, chat)| {
+                    let metas = subagent_meta.get(chat_id);
+                    chat.iter().enumerate().any(|(idx, seg)| {
+                        matches!(seg, Segment::Assistant { live: true, .. })
+                            && metas.and_then(|m| m.get(idx)).is_some_and(|m| m.id == id)
+                    })
+                })
+            });
+        }
+        // Fast path: after rebuild_cache, every segment in `seg_meta` has its
+        // id in `seg_cache`. By pigeonhole, if no subagents exist and
+        // `seg_cache.len() <= seg_meta.len() <= SEG_CACHE_CAP`, every entry
+        // in `seg_cache` is live and nothing can be evicted.
+        if self.subagent_meta.is_empty()
+            && self.seg_cache.len() <= self.seg_meta.len()
+            && self.seg_cache.len() <= SEG_CACHE_CAP
+        {
+            return;
+        }
+        let mut live = std::collections::HashSet::with_capacity(self.seg_meta.len() + 8);
+        for meta in &self.seg_meta {
             live.insert(meta.id);
-            if matches!(
-                self.segments.get(idx),
-                Some(Segment::Assistant { live: true, .. })
-            ) {
-                live_answers.insert(meta.id);
-            }
         }
         for chat_meta in self.subagent_meta.values() {
             for meta in chat_meta {
                 live.insert(meta.id);
-            }
-        }
-        for (chat_id, chat) in &self.subagent_chats {
-            let metas = self.subagent_meta.get(chat_id);
-            for (idx, seg) in chat.iter().enumerate() {
-                if matches!(seg, Segment::Assistant { live: true, .. })
-                    && let Some(meta) = metas.and_then(|m| m.get(idx))
-                {
-                    live_answers.insert(meta.id);
-                }
             }
         }
         self.seg_cache.retain(|id, _| live.contains(id));
@@ -1997,7 +2032,6 @@ impl App {
         // Evict the oldest main-transcript entries past the cap: a scroll up
         // re-renders them on demand (correct, just slower). Subagent chats
         // are bounded by their own lifetime and keep their entries.
-        const SEG_CACHE_CAP: usize = 2000;
         if self.seg_cache.len() > SEG_CACHE_CAP {
             let keep_from = self.seg_meta.len().saturating_sub(SEG_CACHE_CAP);
             let evict: Vec<u64> = self.seg_meta[..keep_from].iter().map(|m| m.id).collect();
@@ -2005,7 +2039,6 @@ impl App {
                 self.seg_cache.remove(&id);
             }
         }
-        self.live_md.retain(|id| live_answers.contains(&id));
     }
 
     /// Cached rows for one chunk tag, for assembly paths whose fresh rows
@@ -2172,25 +2205,100 @@ impl App {
         self.last_merge = MergeKind::Concat;
     }
 
+    /// Dynamic time/tick component of a segment's render key, or `0` when the
+    /// segment is static across animation ticks. Used by [`Self::transcript_fp`]
+    /// so `spinner_tick` only triggers a transcript rebuild when a segment in
+    /// the transcript actually animates (running tool/subagent, finish wave,
+    /// or live thinking clock).
+    fn seg_time_key(&self, seg: &Segment) -> usize {
+        match seg {
+            Segment::Subagent { status, .. }
+                if !matches!(status.as_str(), "completed" | "failed") =>
+            {
+                self.spinner_tick.wrapping_mul(7).wrapping_add(1)
+            }
+            Segment::Thinking {
+                live: true,
+                started,
+                ..
+            } => started
+                .map(|t| (t.elapsed().as_millis() / 100) as usize)
+                .unwrap_or(0)
+                .wrapping_mul(11)
+                .wrapping_add(2),
+            Segment::Tool { ok: None, .. } => self.spinner_tick.wrapping_mul(7).wrapping_add(3),
+            Segment::Tool {
+                ok: Some(done),
+                flash: Some(t0),
+                ..
+            } if t0.elapsed().as_millis() < crate::tui::shimmer::flash_ms(*done) as u128
+                && crate::tui::shimmer::has_truecolor() =>
+            {
+                1_000_000usize.wrapping_add(self.spinner_tick.wrapping_mul(13))
+            }
+            _ => 0,
+        }
+    }
+
     /// Cheap transcript fingerprint: identities + revisions in order, group
     /// fold state, animation and hover bits, theme and width. Same input to
     /// this function always assembles the same rows, so a draw whose
     /// fingerprint matches the last one skips reassembly entirely — typing,
     /// scrolling, selection and hover never rebuild the transcript.
     /// O(segments), small integers only: no content hashing.
-    fn transcript_fp(&self, width: u16, meta: &[SegMeta]) -> u64 {
+    fn transcript_fp(&self, width: u16, segs: &[Segment], meta: &[SegMeta]) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         width.hash(&mut h);
         self.theme_rev.hash(&mut h);
-        for m in meta {
+        self.streaming.hash(&mut h);
+        self.thinking_open.hash(&mut h);
+        for (i, m) in meta.iter().enumerate() {
             m.id.hash(&mut h);
             m.rev.hash(&mut h);
+            if let Some(seg) = segs.get(i) {
+                let tk = self.seg_time_key(seg);
+                if tk != 0 {
+                    tk.hash(&mut h);
+                }
+            }
         }
-        self.spinner_tick.hash(&mut h);
         self.ask_hover.hash(&mut h);
         self.ask_custom_focus.hash(&mut h);
         h.finish()
+    }
+
+    /// Update the non-segment chrome rows (`empty_mark_lines` shimmer when
+    /// empty, `working_line` tail when streaming) in-place in `cache_lines`
+    /// when `transcript_fp` skipped a full `rebuild_cache`.
+    fn update_live_chrome_rows(&mut self, width: u16) {
+        if self.active_subagent.is_some() {
+            return;
+        }
+        if self.segments.is_empty() && self.cache_lines.len() >= 2 {
+            if let Some(first_mark) = self.empty_mark_lines().into_iter().next() {
+                self.cache_lines[1] = first_mark;
+            }
+        }
+        if self.streaming && !self.cache_lines.is_empty() {
+            let w = width.saturating_sub(2).max(10);
+            let line = working_line(
+                self.thinking_open,
+                self.turn_started.map(|at| at.elapsed().as_secs()),
+                self.spinner_tick,
+            );
+            let (rows, _) =
+                crate::tui::markdown::wrap_tagged_uncounted(vec![(line, None)], w);
+            if let Some(&old_len) = self.asm_lens.last()
+                && old_len == rows.len()
+                && self.cache_lines.len() >= old_len
+            {
+                let start = self.cache_lines.len() - old_len;
+                for (i, r) in rows.into_iter().enumerate() {
+                    self.cache_lines[start + i] = r;
+                }
+            }
+        }
     }
 
     /// True while a resize drag is (probably) still in flight: a resize
@@ -2234,7 +2342,7 @@ impl App {
         }
         let h = self.last_chat.height.max(1) as usize;
         let max = self.cache_lines.len().saturating_sub(h);
-        if let Some(abs) = self.cache_rowseg.iter().position(|t| *t == Some(tag)) {
+        if let Some((abs, _)) = self.seg_row_range(tag) {
             self.view_top = abs.saturating_sub(screen).min(max);
             self.follow = false;
         }
@@ -2467,13 +2575,15 @@ impl App {
                 self.defer_rebuild = true;
             } else {
                 self.rebuild_cache(chat.width);
-                self.last_fp = self.transcript_fp(chat.width, &self.seg_meta);
+                self.last_fp = self.transcript_fp(chat.width, &self.segments, &self.seg_meta);
             }
         } else {
-            let fp = self.transcript_fp(chat.width, &self.seg_meta);
+            let fp = self.transcript_fp(chat.width, &self.segments, &self.seg_meta);
             if fp != self.last_fp {
                 self.rebuild_cache(chat.width);
                 self.last_fp = fp;
+            } else {
+                self.update_live_chrome_rows(chat.width);
             }
         }
         self.last_chat = chat;
@@ -2506,105 +2616,69 @@ impl App {
         Block::new().style(Theme::base()).render(area, buf);
 
         // No startup screen: empty sessions render the plain transcript.
+        // Render visible lines directly into `buf` by reference (zero clones
+        // of Line/Span/String on the hot path); only rows under an active
+        // drag selection allocate a temporary reversed Line.
         {
             let top = self.chat_top(chat.height);
-            // User-message surface strips intentionally extend beyond the chat
-            // gutter, all the way to the terminal edges. Paint these rows first;
-            // the transcript below supplies the prefix and text over that fill.
+            let sel_range = self.sel.map(|s| s.ordered());
+            let first_mark = if self.active_subagent.is_none() && sel_range.is_none() && top <= 1 {
+                self.empty_mark_lines().into_iter().next()
+            } else {
+                None
+            };
+            let user_bg = Style::new().bg(Theme::INPUT_BG());
             for (screen_row, abs_row) in (top..top + chat.height as usize).enumerate() {
+                let y = chat.y + screen_row as u16;
                 let is_user = self
                     .cache_rowseg
                     .get(abs_row)
                     .and_then(|tag| *tag)
                     .is_some_and(|idx| matches!(self.segments.get(idx), Some(Segment::User(_))));
                 if is_user {
-                    let strip = Rect {
-                        x: area.x,
-                        y: chat.y + screen_row as u16,
-                        width: area.width,
-                        height: 1,
-                    };
-                    Paragraph::new(" ".repeat(area.width as usize))
-                        .style(Style::new().bg(Theme::INPUT_BG()))
-                        .render(strip, buf);
-                }
-            }
-            let sel = self.sel;
-            let mut visible: Vec<Line> = self
-                .cache_lines
-                .iter()
-                .enumerate()
-                .skip(top)
-                .take(chat.height as usize)
-                .map(|(abs, l)| match sel {
-                    Some(s) => {
-                        let (first, second) = s.ordered();
-                        if abs < first.row || abs > second.row {
-                            return l.clone();
-                        }
-                        let chars = line_text(l).chars().count();
-                        if chars == 0 {
-                            // empty row inside the selection: full-width highlight
-                            return Line::from(vec![Span::styled(
-                                " ".repeat(chat.width as usize),
-                                Style::new().add_modifier(Modifier::REVERSED),
-                            )]);
-                        }
-                        let cs = if abs == first.row {
-                            first.col.min(chars)
-                        } else {
-                            0
-                        };
-                        let ce = if abs == second.row {
-                            second.col.min(chars)
-                        } else {
-                            chars
-                        };
-                        apply_sel(l, cs, ce.max(cs))
-                    }
-                    _ => l.clone(),
-                })
-                .collect();
-            if self.active_subagent.is_none() && sel.is_none() && top <= 1 {
-                let idx = 1 - top;
-                if idx < visible.len()
-                    && let Some(first_mark) = self.empty_mark_lines().into_iter().next()
-                {
-                    visible[idx] = first_mark;
-                }
-            }
-            // Lines carry their own styles. Do not apply the base background at
-            // widget level: it would override INPUT_BG on user-strip rows.
-            Paragraph::new(visible).render(chat, buf);
-            // The transcript widget repaints its own rectangle, so apply the
-            // full-width fill again afterwards to restore the two outer gutters.
-            for (screen_row, abs_row) in (top..top + chat.height as usize).enumerate() {
-                let is_user = self
-                    .cache_rowseg
-                    .get(abs_row)
-                    .and_then(|tag| *tag)
-                    .is_some_and(|idx| matches!(self.segments.get(idx), Some(Segment::User(_))));
-                if is_user {
-                    let y = chat.y + screen_row as u16;
-                    let fill = Paragraph::new(" ").style(Style::new().bg(Theme::INPUT_BG()));
-                    fill.clone().render(
+                    buf.set_style(
                         Rect {
                             x: area.x,
                             y,
-                            width: 1,
+                            width: area.width,
                             height: 1,
                         },
-                        buf,
+                        user_bg,
                     );
-                    fill.render(
-                        Rect {
-                            x: area.x + area.width.saturating_sub(1),
-                            y,
-                            width: 1,
-                            height: 1,
-                        },
-                        buf,
-                    );
+                }
+                if abs_row == 1
+                    && let Some(ref mark) = first_mark
+                {
+                    buf.set_line(chat.x, y, mark, chat.width);
+                } else if let Some(l) = self.cache_lines.get(abs_row) {
+                    if let Some((first, second)) = sel_range
+                        && abs_row >= first.row
+                        && abs_row <= second.row
+                    {
+                        let chars = line_text(l).chars().count();
+                        let sel_line = if chars == 0 {
+                            // empty row inside the selection: full-width highlight
+                            Line::from(vec![Span::styled(
+                                " ".repeat(chat.width as usize),
+                                Style::new().add_modifier(Modifier::REVERSED),
+                            )])
+                        } else {
+                            let cs = if abs_row == first.row {
+                                first.col.min(chars)
+                            } else {
+                                0
+                            };
+                            let ce = if abs_row == second.row {
+                                second.col.min(chars)
+                            } else {
+                                chars
+                            };
+                            apply_sel(l, cs, ce.max(cs))
+                        };
+                        buf.set_line(chat.x, y, &sel_line, chat.width);
+                    } else {
+                        buf.set_line(chat.x, y, l, chat.width);
+                    }
                 }
             }
         }
@@ -2852,7 +2926,14 @@ impl App {
             self.last_input = Rect::default();
             return;
         };
-        let fp = self.transcript_fp(chat.width, &meta);
+        let fp = {
+            let sub_segs = self
+                .subagent_chats
+                .get(&id)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            self.transcript_fp(chat.width, sub_segs, &meta)
+        };
         if self.cache_w != chat.width && self.resize_settling() {
             self.defer_rebuild = true;
         } else if self.cache_w != chat.width || fp != self.last_fp {
@@ -2863,16 +2944,15 @@ impl App {
         self.last_input = Rect::default();
         self.apply_pending_anchor(Some(id));
         let top = self.chat_top(chat.height);
-        let visible: Vec<Line> = self
+        for (screen_row, l) in self
             .cache_lines
             .iter()
             .skip(top)
             .take(chat.height as usize)
-            .cloned()
-            .collect();
-        Paragraph::new(visible)
-            .style(Theme::base())
-            .render(chat, buf);
+            .enumerate()
+        {
+            buf.set_line(chat.x, chat.y + screen_row as u16, l, chat.width);
+        }
         // scroll is parked by close/switch, not here: persisting mid-view is
         // what the old code did for the fingerprint, and it is unnecessary
         // now that the live buffers (and last_fp) ARE this view's state
@@ -2927,7 +3007,7 @@ impl App {
                 self.subagent_chats.get(&id).and_then(|chat| chat.get(idx)),
                 Some(Segment::Assistant { live: true, .. })
             );
-            let lines = if live {
+            let rows: Vec<(Line<'static>, Option<usize>)> = if live {
                 // disjoint field borrows, same shape as the main transcript
                 // path: the child answer text is read while the prefix store
                 // is updated
@@ -2939,21 +3019,18 @@ impl App {
                 } = self;
                 let chat = subagent_chats.get(&id).unwrap();
                 match &chat[idx] {
-                    Segment::Assistant { text, .. } => live_md
-                        .lines(mid, text, render_w, hl)
-                        .into_iter()
-                        .map(|line| (line, Some(idx)))
-                        .collect(),
+                    Segment::Assistant { text, .. } => {
+                        live_md.wrapped_lines(mid, idx, text, render_w, hl)
+                    }
                     _ => Vec::new(), // the live check above pins this match
                 }
             } else {
                 // immutable borrow ends before the cache insert below
                 let chat = self.subagent_chats.get(&id).unwrap();
-                self.render_segment(chat, idx, render_w, false)
+                let chunk = self.render_segment(chat, idx, render_w, false);
+                let (rows, tags) = wrap_tagged(chunk, w);
+                rows.into_iter().zip(tags).collect()
             };
-            let chunk = lines;
-            let (rows, tags) = wrap_tagged(chunk, w);
-            let rows: Vec<(Line<'static>, Option<usize>)> = rows.into_iter().zip(tags).collect();
             self.seg_cache.insert(
                 mid,
                 SegCacheEntry {
@@ -4689,6 +4766,12 @@ mod frame_tests {
 fn struct_chunk(ord: u64, line: Line<'static>, tag: Option<usize>, width: u16) -> RowChunk {
     let (rows, tags) = wrap_tagged(vec![(line, tag)], width);
     (AsmTag::Struct(ord), rows.into_iter().zip(tags).collect())
+}
+
+/// Blank structural spacer chunk: already a single empty styled row at any
+/// width, so it bypasses `wrap_tagged` and `sanitize_line`.
+fn blank_chunk(ord: u64) -> RowChunk {
+    (AsmTag::Struct(ord), vec![(blank(), None)])
 }
 
 pub(super) fn blank() -> Line<'static> {

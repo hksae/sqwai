@@ -144,7 +144,7 @@ fn push_span(spans: &mut Vec<Span>, buf: &mut String, buf_style: &mut Option<Sty
 /// ramp moves every column. Without truecolor the run falls back to one
 /// solid brand color instead of garbage escapes.
 pub fn gradient_spans(spans: Vec<Span<'static>>) -> Vec<Span<'static>> {
-    use crate::tui::shimmer::has_truecolor;
+    use crate::tui::shimmer::{char_cow, has_truecolor};
     let truecolor = has_truecolor();
     let total: usize = spans.iter().map(|s| s.content.chars().count()).sum();
     let mut x = 0usize;
@@ -158,7 +158,7 @@ pub fn gradient_spans(spans: Vec<Span<'static>>) -> Vec<Span<'static>> {
             } else {
                 CORAL_FALLBACK
             });
-            out.push(Span::styled(ch.to_string(), style));
+            out.push(Span::styled(char_cow(ch), style));
             x += 1;
         }
     }

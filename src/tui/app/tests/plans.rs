@@ -990,3 +990,74 @@ fn subagent_rows_land_at_call_site_not_after_answer() {
         .collect();
     assert_eq!(kinds, vec!["user", "sub", "sub", "answer"]);
 }
+
+/// Advancing `spinner_tick` while streaming (or on the empty-screen brand
+/// shimmer) updates the live chrome rows in-place in O(1) without triggering
+/// a full `rebuild_cache` or `wrap_tagged` pass over the transcript.
+#[test]
+fn spinner_tick_updates_live_chrome_without_rebuilding_transcript() {
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.startup = false;
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+
+    // 1. Empty screen brand shimmer
+    terminal.draw(|frame| app.draw(frame)).unwrap();
+    app.test_renders = 0;
+    crate::tui::markdown::reset_wrap_tagged_calls();
+    app.spinner_tick += 1;
+    terminal.draw(|frame| app.draw(frame)).unwrap();
+    assert_eq!(app.test_renders, 0);
+    assert_eq!(
+        crate::tui::markdown::wrap_tagged_calls(),
+        0,
+        "empty-screen shimmer tick must not re-wrap transcript"
+    );
+
+    // 2. Streaming turn with completed history segments and live working_line
+    app.push_segment(Segment::User("hello".into()));
+    app.push_segment(Segment::Assistant {
+        text: "growing answer".into(),
+        live: true,
+    });
+    app.streaming = true;
+    terminal.draw(|frame| app.draw(frame)).unwrap();
+    let mark0 = crate::tui::anim::working_mark(app.spinner_tick);
+    assert!(
+        app.cache_lines
+            .last()
+            .unwrap()
+            .spans
+            .first()
+            .unwrap()
+            .content
+            .starts_with(mark0)
+    );
+
+    app.test_renders = 0;
+    crate::tui::markdown::reset_wrap_tagged_calls();
+    app.spinner_tick += 1;
+    terminal.draw(|frame| app.draw(frame)).unwrap();
+    let mark1 = crate::tui::anim::working_mark(app.spinner_tick);
+    assert_ne!(mark0, mark1);
+    assert_eq!(
+        app.test_renders, 0,
+        "spinner tick without running tools must not re-render segments"
+    );
+    assert_eq!(
+        crate::tui::markdown::wrap_tagged_calls(),
+        0,
+        "spinner tick must update working_line in place without wrap_tagged"
+    );
+    assert!(
+        app.cache_lines
+            .last()
+            .unwrap()
+            .spans
+            .first()
+            .unwrap()
+            .content
+            .starts_with(mark1),
+        "working_line marker must advance in place"
+    );
+}
+

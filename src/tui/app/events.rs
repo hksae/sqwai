@@ -80,6 +80,10 @@ impl EnterGate {
             false
         }
     }
+
+    pub(super) fn deadline(&self) -> Option<Instant> {
+        self.pending.map(|at| at + ENTER_BURST_GAP)
+    }
 }
 
 impl App {
