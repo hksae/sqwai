@@ -739,6 +739,16 @@ fn nudges_after_unaccounted_step_actions() {
     )
     .unwrap();
     crate::plan::store(&root, &plan).unwrap();
+    crate::plan::apply(
+        &mut plan,
+        crate::plan::Op::Join {
+            session: "nudge".into(),
+        },
+        &crate::plan::Limits::default(),
+        None,
+    )
+    .unwrap();
+    crate::plan::store(&root, &plan).unwrap();
     let mut journal = Journal::open(&root, "nudge").unwrap();
     journal.set_attribution(Some("1".into()), Some(plan.id.clone()), "main");
     for _ in 0..3 {
@@ -746,14 +756,17 @@ fn nudges_after_unaccounted_step_actions() {
             .append("tool_result", json!({"tool": "read", "ok": true}))
             .unwrap();
     }
+    // Session "nudge" joins at create time in the live loop (created.sessions
+    // carries the creating session); the test mirrors that membership so
+    // open_active_for_session resolves this session's own plan.
     assert!(
-        Journal::nudge(&root, None, 2)
+        Journal::nudge(&root, Some("nudge"), 2)
             .unwrap()
             .unwrap()
             .contains("3 actions")
     );
     journal.append("plan", json!({"op": "show"})).unwrap();
-    assert!(Journal::nudge(&root, None, 2).unwrap().is_none());
+    assert!(Journal::nudge(&root, Some("nudge"), 2).unwrap().is_none());
     fs::remove_dir_all(root).ok();
 }
 

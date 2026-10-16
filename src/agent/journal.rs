@@ -1029,7 +1029,10 @@ impl Journal {
         session_id: Option<&str>,
         threshold: usize,
     ) -> Result<Option<String>> {
-        let records = Self::records(root)?;
+        let Some(sid) = session_id else {
+            return Ok(None);
+        };
+        let records = Self::records_for(root, sid)?;
         let active = crate::plan::open_active_for_session(root, session_id)?;
         let Some(active) = active else {
             return Ok(None);

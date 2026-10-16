@@ -726,6 +726,145 @@ pub fn open_active(root: &Path) -> Result<Option<Plan>> {
     open_active_for_session(root, None)
 }
 
+static PLAN_META_CACHE: std::sync::LazyLock<std::sync::Mutex<PlanMetaCache>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(PlanMetaCache::default()));
+
+/// Directory-scan key: (plan id, status, created, sessions-hash). The journal
+/// replay only matters for content accuracy, never for "which plans are
+/// active" — status flips only through a journaled intent, and the file moves
+/// with the intent in the same commit, so metadata read from the file is
+/// current exactly when the file is.
+#[derive(Debug, Clone)]
+struct ActivePlanMeta {
+    id: String,
+    created: String,
+    sessions: Vec<String>,
+    modified: Option<std::time::SystemTime>,
+    len: u64,
+}
+
+/// Cache over `plans_dir`: for `open_active_for_session` the identity and
+/// membership of every plan is what matters, not its full content. Entries
+/// are validated against the file's (mtime, size) on every read: a same
+/// (mtime, size) hits without touching serde_json; a moved file re-parses
+/// exactly that file; vanished files and new files are reflected from the
+/// directory listing. A hand-edited file changes mtime or size, so it can
+/// never poison the cache — the new bytes are read before anyone decides
+/// whether the plan is active.
+#[derive(Debug, Default)]
+struct PlanMetaCache {
+    root: Option<std::path::PathBuf>,
+    entries: std::collections::HashMap<String, ActivePlanMeta>,
+}
+
+impl PlanMetaCache {
+    fn active_meta(&mut self, root: &Path) -> Vec<ActivePlanMeta> {
+        if self.root.as_ref() != Some(&root.to_path_buf()) {
+            self.root = Some(root.to_path_buf());
+            self.entries.clear();
+        }
+        let dir = plans_dir(root);
+        let mut live: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            self.entries.clear();
+            return Vec::new();
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("json") {
+                continue;
+            }
+            let Some(id) = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .map(str::to_string)
+            else {
+                continue;
+            };
+            live.insert(id.clone());
+            let Ok(meta) = std::fs::metadata(&path) else {
+                self.entries.remove(&id);
+                continue;
+            };
+            let fingerprint = (meta.modified().ok(), meta.len());
+            let fresh = self.entries.get(&id).is_some_and(|cached| {
+                cached.modified == fingerprint.0 && cached.len == fingerprint.1
+            });
+            if fresh {
+                continue;
+            }
+            match parse_active_meta(&path) {
+                Some(m) if m.modified == fingerprint.0 && m.len == fingerprint.1 => {
+                    self.entries.insert(id, m);
+                }
+                _ => {
+                    self.entries.remove(&id);
+                }
+            }
+        }
+        self.entries.retain(|id, _| live.contains(id));
+        self.entries.values().cloned().collect()
+    }
+}
+
+/// Parse only (id, status, created, sessions) from a plan file. A file that
+/// fails validation is not `active` — whether it later quarantines is the
+/// caller's decision in `open`, never in this directory scan.
+fn parse_active_meta(path: &Path) -> Option<ActivePlanMeta> {
+    use serde::de::Deserializer as _;
+    struct MetaVisitor;
+    impl<'de> serde::de::Visitor<'de> for MetaVisitor {
+        type Value = Option<ActivePlanMeta>;
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a plan object with id/status/created/sessions")
+        }
+        fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+        where
+            A: serde::de::MapAccess<'de>,
+        {
+            let mut id: Option<String> = None;
+            let mut status: Option<String> = None;
+            let mut created: Option<String> = None;
+            let mut sessions: Vec<String> = Vec::new();
+            while let Some(key) = map.next_key::<String>()? {
+                match key.as_str() {
+                    "id" => id = map.next_value().ok(),
+                    "status" => status = map.next_value().ok(),
+                    "created" => created = map.next_value().ok(),
+                    "sessions" => sessions = map.next_value().unwrap_or_default(),
+                    _ => {
+                        let _: serde::de::IgnoredAny = map.next_value()?;
+                    }
+                }
+            }
+            let (id, status, created) = match (id, status, created) {
+                (Some(id), Some(status), Some(created)) => (id, status, created),
+                _ => return Ok(None),
+            };
+            if status != "active" {
+                return Ok(None);
+            }
+            Ok(Some(ActivePlanMeta {
+                id,
+                created,
+                sessions,
+                modified: None,
+                len: 0,
+            }))
+        }
+    }
+    let text = std::fs::read_to_string(path).ok()?;
+    let meta = serde_json::Deserializer::from_str(&text)
+        .deserialize_map(MetaVisitor)
+        .ok()??;
+    let file_meta = std::fs::metadata(path).ok()?;
+    Some(ActivePlanMeta {
+        modified: file_meta.modified().ok(),
+        len: file_meta.len(),
+        ..meta
+    })
+}
+
 /// Open the active plan for a specific session: the session's own active
 /// plan, or — when the session has none — the most recent active plan.
 ///
@@ -733,40 +872,29 @@ pub fn open_active(root: &Path) -> Result<Option<Plan>> {
 /// sees the one active plan). Anything that mutates shared state or
 /// permanently links identity must use [`open_own_active_plan`] instead —
 /// silently adopting a foreign plan pollutes other sessions (#171).
+///
+/// Identity scan is cached: the directory listing plus each file's
+/// (mtime, size) decide whether its metadata is fresh, so a hot loop over
+/// one unchanged project never re-parses JSON. The full plan body is parsed
+/// only for the one selected plan, and only in a caller that needs it.
 pub fn open_active_for_session(root: &Path, session_id: Option<&str>) -> Result<Option<Plan>> {
-    let dir = plans_dir(root);
-    let entries = match std::fs::read_dir(&dir) {
-        Ok(e) => e,
-        Err(_) => return Ok(None),
-    };
-    let mut active_plans: Vec<Plan> = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("json") {
-            continue;
-        }
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        if let Ok(plan) = serde_json::from_str::<Plan>(&text)
-            && plan.status == PlanStatus::Active
-        {
-            active_plans.push(plan);
-        }
-    }
-    if active_plans.is_empty() {
+    let active_meta: Vec<ActivePlanMeta> = PLAN_META_CACHE
+        .lock()
+        .map(|mut cache| cache.active_meta(root))
+        .unwrap_or_default();
+    if active_meta.is_empty() {
         return Ok(None);
     }
     if let Some(sid) = session_id
-        && let Some(plan) = active_plans
+        && let Some(meta) = active_meta
             .iter()
-            .find(|p| p.sessions.iter().any(|s| s == sid))
+            .find(|m| m.sessions.iter().any(|s| s == sid))
     {
-        return Ok(Some(plan.clone()));
-    } else if session_id.is_some() {
         // #171: a session without its own active plan gets None — falling
         // through to another session's plan here silently adopts foreign
         // work into this session's identity and attribution.
+        return open(root, &meta.id).map(Some);
+    } else if session_id.is_some() {
         return Ok(None);
     }
     // Deterministic fallback: pick the most recent active plan by created
@@ -775,18 +903,19 @@ pub fn open_active_for_session(root: &Path, session_id: Option<&str>) -> Result<
     // after `02:00+03:00` although it is an hour later, so the "newest" plan
     // can be the older one. Compare instants; an unparseable stamp loses to
     // any real one, which keeps the comparator a total order.
-    let instant = |p: &Plan| {
-        chrono::DateTime::parse_from_rfc3339(&p.created)
+    let instant = |created: &str| {
+        chrono::DateTime::parse_from_rfc3339(created)
             .map(|t| t.with_timezone(&chrono::Utc))
             .ok()
     };
-    active_plans.sort_by(|a, b| match (instant(a), instant(b)) {
+    let mut ordered = active_meta;
+    ordered.sort_by(|a, b| match (instant(&a.created), instant(&b.created)) {
         (Some(x), Some(y)) => y.cmp(&x),
         (Some(_), None) => std::cmp::Ordering::Less,
         (None, Some(_)) => std::cmp::Ordering::Greater,
         (None, None) => b.created.cmp(&a.created),
     });
-    Ok(active_plans.into_iter().next())
+    ordered.first().map(|m| open(root, &m.id)).transpose()
 }
 
 pub fn list(root: &Path) -> Vec<Plan> {
