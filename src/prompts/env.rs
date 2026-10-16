@@ -55,6 +55,16 @@ pub fn stable_block() -> String {
 /// session as a full re-read of 200–273k tokens on a one-byte drift. They now
 /// come from [`turn_facts`], which trails the history instead.
 pub fn session_block(root: &Path) -> String {
+    static SESSION_BLOCK_CACHE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<PathBuf, String>>,
+    > = std::sync::OnceLock::new();
+    let key = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let cache = SESSION_BLOCK_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    if let Ok(guard) = cache.lock()
+        && let Some(cached) = guard.get(&key)
+    {
+        return cached.clone();
+    }
     let os = os_info_cached();
     let tc = toolchains(root);
     let mut out = String::with_capacity(os.len() + tc.len() + 48);
@@ -62,18 +72,21 @@ pub fn session_block(root: &Path) -> String {
     out.push_str(&os);
     out.push_str(&tc);
     out.push_str("</session_environment>\n");
+    if let Ok(mut guard) = cache.lock() {
+        guard.insert(key, out.clone());
+    }
     out
 }
 
-/// What is true of the project right now: the clock, git state, the directory
+/// What is true of the project right now: the date, git state, the directory
 /// map. The host appends this after the conversation, so refreshing it cannot
-/// invalidate anything cached in front of it.
+/// invalidate anything cached in front of it. Minute/second clock is omitted
+/// so consecutive turns on an unchanged worktree keep a byte-identical block.
 pub fn turn_facts(root: &Path) -> String {
     let results = run_session_probes(root.to_path_buf(), &["git"]);
     let now = chrono::Local::now();
     let date = now.format("%Y-%m-%d (%A)");
-    let time = now.format("%H:%M (UTC%:z)");
-    let mut out = format!("<turn_environment>\nDate: {date}\nTime: {time}\n");
+    let mut out = format!("<turn_environment>\nDate: {date}\n");
     if let Some(git) = results.get("git") {
         out.push_str(git);
     } else {

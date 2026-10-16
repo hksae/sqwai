@@ -310,6 +310,13 @@ fn volatile_change_keeps_the_prefix_bytes() {
     assert_eq!(before["system"], after["system"]);
     assert_eq!(before["messages"][0], after["messages"][0]);
     assert_eq!(before["messages"][1], after["messages"][1]);
+    // And messages[1] (right before the volatile block in messages[2]) carries
+    // an explicit cache_control breakpoint so Anthropic actually caches the
+    // clean history prefix before `host_tail`!
+    assert_eq!(
+        before["messages"][1]["content"][0]["cache_control"]["type"],
+        "ephemeral"
+    );
     assert_ne!(
         before["messages"][2]["content"][0],
         after["messages"][2]["content"][0]
@@ -677,4 +684,102 @@ fn saved_thinking_stays_home_when_effort_is_off() {
     assert_eq!(content[0]["type"], "text");
     assert_eq!(content[1]["type"], "tool_use");
     assert!(b.get("thinking").is_none());
+}
+
+#[test]
+fn mid_history_anchor_stays_stationary_on_user_turns_and_precedes_volatile_tail() {
+    // 1. Inside a long tool loop (last_user at index 0, followed by alternating
+    //    Assistant tool_use and Tool tool_result turns), the mid-history marker
+    //    stays frozen at index 8 across lengths 10, 12, 14, 16.
+    let tool_loop_req = |n: usize| {
+        let mut messages = vec![Message::new(Role::User, "initial prompt")];
+        for i in 1..n {
+            if i % 2 == 1 {
+                messages.push(
+                    Message::new(Role::Assistant, format!("step {i}")).with_tool_calls(vec![
+                        ToolCallReq::new(format!("c{i}"), "read", json!({})),
+                    ]),
+                );
+            } else {
+                messages.push(Message::tool_result(format!("c{}", i - 1), "ok", false));
+            }
+        }
+        ChatRequest {
+            model_id: "claude-x".into(),
+            system: vec![
+                crate::providers::SystemPart::cached("stable"),
+                crate::providers::SystemPart::volatile("git: main"),
+            ],
+            messages,
+            effort: None,
+            effort_support: Default::default(),
+            max_tokens: None,
+            tools: vec![],
+            previous_response_id: None,
+            context_transport: crate::providers::ContextTransport::Stateless,
+        }
+    };
+
+    for n in [10, 12, 14, 16] {
+        let b = build_body(&tool_loop_req(n), 8192, true);
+        let msgs = b["messages"].as_array().unwrap();
+        assert_eq!(msgs[8]["role"], "user");
+        let marked_at_8 = msgs[8]["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|blk| blk.get("cache_control").is_some());
+        assert!(marked_at_8, "mid anchor must stay at index 8 for len={n}");
+    }
+
+    // 2. When a new user turn arrives after prior history (`u_idx > 0`), the
+    //    pre-volatile breakpoint sits at `u_idx - 1` so the clean prior history
+    //    is cached before the volatile `host_tail` in `msgs[u_idx]`.
+    let multi_turn = ChatRequest {
+        model_id: "claude-x".into(),
+        system: vec![
+            crate::providers::SystemPart::cached("stable"),
+            crate::providers::SystemPart::volatile("git: main"),
+        ],
+        messages: vec![
+            Message::new(Role::User, "turn 1"),
+            Message::new(Role::Assistant, "reply 1"),
+            Message::new(Role::User, "turn 2"),
+        ],
+        effort: None,
+        effort_support: Default::default(),
+        max_tokens: None,
+        tools: vec![],
+        previous_response_id: None,
+        context_transport: crate::providers::ContextTransport::Stateless,
+    };
+    let b = build_body(&multi_turn, 8192, true);
+    let msgs = b["messages"].as_array().unwrap();
+    assert_eq!(
+        msgs[1]["content"][0]["cache_control"]["type"],
+        "ephemeral",
+        "msgs[u_idx - 1] must be marked before host_tail"
+    );
+    assert_eq!(
+        msgs[2]["content"][1]["cache_control"]["type"],
+        "ephemeral",
+        "msgs.last() is also marked"
+    );
+}
+
+#[test]
+fn cache_breakpoint_skips_thinking_and_empty_text_blocks() {
+    let mut blk = json!({"type": "thinking", "thinking": "deep thought", "signature": "SIG"});
+    let mut empty_txt = json!({"type": "text", "text": ""});
+    assert!(!super::is_cacheable_block(&blk));
+    assert!(!super::is_cacheable_block(&empty_txt));
+    let mut msg = json!({
+        "role": "assistant",
+        "content": [blk.clone(), empty_txt.clone()]
+    });
+    assert!(
+        !super::mark_message_cache_breakpoint(&mut msg),
+        "must refuse to mark thinking or empty text block"
+    );
+    let _ = (&mut blk, &mut empty_txt);
 }

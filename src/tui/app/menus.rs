@@ -3208,17 +3208,6 @@ impl App {
                 Mode::Act => "act",
             }
         ));
-        let checks = crate::config::Config::project_verify_commands(&self.project_root);
-        if !checks.is_empty() {
-            out.push_str(&format!(
-                "Checks: {}\n\n",
-                checks
-                    .iter()
-                    .map(|(n, c)| format!("{n} = {c}"))
-                    .collect::<Vec<_>>()
-                    .join("; ")
-            ));
-        }
         let facts = crate::prompts::env::turn_facts(&self.project_root);
         if !facts.trim().is_empty() {
             out.push_str(facts.trim());

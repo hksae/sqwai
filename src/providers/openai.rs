@@ -176,6 +176,69 @@ impl OpenAiProvider {
         }
         body
     }
+
+    /// Inject explicit `cache_control` breakpoints when talking to OpenRouter
+    /// for model families that require explicit markers on Chat Completions
+    /// (`anthropic/*`, `claude-*`, `google/*`, `gemini-*`, `qwen/*`).
+    ///
+    /// - For Anthropic models on OpenRouter, top-level `cache_control` enables
+    ///   automatic advancing conversation caching, and marking the leading
+    ///   stable `system` message guarantees the system prompt is cached even on
+    ///   the first turn.
+    /// - For Gemini and Qwen models on OpenRouter, marking the leading `system`
+    ///   message and the last eligible conversation message activates explicit
+    ///   prefix caching.
+    pub fn apply_openrouter_cache_control(body: &mut Value, base_url: &str, model_id: &str) {
+        if !base_url.contains("openrouter.ai") {
+            return;
+        }
+        let lower = model_id.to_ascii_lowercase();
+        let is_anthropic = lower.starts_with("anthropic/") || lower.contains("claude-");
+        let is_explicit_family = is_anthropic
+            || lower.starts_with("google/")
+            || lower.contains("gemini-")
+            || lower.starts_with("qwen/")
+            || lower.contains("qwen3");
+        if !is_explicit_family {
+            return;
+        }
+        if is_anthropic {
+            body["cache_control"] = json!({"type": "ephemeral"});
+        }
+        let Some(msgs) = body.get_mut("messages").and_then(|m| m.as_array_mut()) else {
+            return;
+        };
+        // 1. Mark the leading stable system message if present.
+        if let Some(first) = msgs.first_mut()
+            && first.get("role").and_then(|r| r.as_str()) == Some("system")
+            && let Some(text) = first
+                .get("content")
+                .and_then(|c| c.as_str())
+                .filter(|s| !s.is_empty() && !s.starts_with(super::HOST_STATE_LABEL))
+                .map(str::to_string)
+        {
+            first["content"] = json!([{
+                "type": "text",
+                "text": text,
+                "cache_control": {"type": "ephemeral"},
+            }]);
+        }
+        // 2. Mark the last non-host message with plain string content.
+        if let Some(last) = msgs.iter_mut().rev().find(|m| {
+            let role = m.get("role").and_then(|r| r.as_str()).unwrap_or("");
+            let content = m.get("content").and_then(|c| c.as_str()).unwrap_or("");
+            matches!(role, "user" | "tool" | "assistant")
+                && !content.is_empty()
+                && !content.starts_with(super::HOST_STATE_LABEL)
+        }) && let Some(text) = last.get("content").and_then(|c| c.as_str()).map(str::to_string)
+        {
+            last["content"] = json!([{
+                "type": "text",
+                "text": text,
+                "cache_control": {"type": "ephemeral"},
+            }]);
+        }
+    }
 }
 
 pub fn uses_max_completion_tokens(model: &str, has_reasoning: bool) -> bool {
@@ -240,9 +303,14 @@ impl Provider for OpenAiProvider {
                 );
             }
         let mut body = OpenAiProvider::build_body(&req);
+            OpenAiProvider::apply_openrouter_cache_control(
+                &mut body,
+                &this.base_url,
+                &req.model_id,
+            );
             // stable routing key: repeated prefixes of this session land on
-            // the same worker (Codex convention). Host-scoped, ignored where
-            // unsupported.
+            // the same worker (Codex / OpenRouter convention). Host-scoped,
+            // ignored where unsupported.
             if let Some(key) = super::prompt_cache_key(&this.base_url) {
                 body["prompt_cache_key"] = serde_json::json!(key);
             }

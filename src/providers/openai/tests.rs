@@ -1025,3 +1025,48 @@ mod live_cache {
         }
     }
 }
+
+#[test]
+fn openrouter_injects_cache_control_for_anthropic_gemini_and_qwen() {
+    let req = ChatRequest {
+        model_id: "anthropic/claude-sonnet-4.5".into(),
+        system: vec![
+            crate::providers::SystemPart::cached("stable rules"),
+            crate::providers::SystemPart::volatile("Mode: act"),
+        ],
+        messages: vec![Message::new(Role::User, "hello")],
+        effort: None,
+        effort_support: Default::default(),
+        max_tokens: None,
+        tools: vec![],
+        previous_response_id: None,
+        context_transport: crate::providers::ContextTransport::Stateless,
+    };
+    let mut body = OpenAiProvider::build_body(&req);
+    OpenAiProvider::apply_openrouter_cache_control(
+        &mut body,
+        "https://openrouter.ai/api/v1",
+        &req.model_id,
+    );
+    assert_eq!(body["cache_control"]["type"], "ephemeral");
+    assert_eq!(
+        body["messages"][0]["content"][0]["cache_control"]["type"],
+        "ephemeral"
+    );
+    assert_eq!(
+        body["messages"][2]["content"][0]["cache_control"]["type"],
+        "ephemeral"
+    );
+    // Host state block in messages[1] stays unmarked plain text
+    assert!(body["messages"][1]["content"].is_string());
+
+    // Non-OpenRouter hosts stay untouched
+    let mut plain = OpenAiProvider::build_body(&req);
+    OpenAiProvider::apply_openrouter_cache_control(
+        &mut plain,
+        "https://api.openai.com/v1",
+        &req.model_id,
+    );
+    assert!(plain.get("cache_control").is_none());
+    assert!(plain["messages"][0]["content"].is_string());
+}

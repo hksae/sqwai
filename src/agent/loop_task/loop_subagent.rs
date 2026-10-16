@@ -519,6 +519,18 @@ pub(crate) async fn run_subagent(
         let _guard = PLAN_JOIN_LOCK.lock().await;
         join_plan_session(root, parent_step.as_ref(), parent_session, &child_session);
     }
+    // Keep all cacheable system parts byte-identical to the parent so every
+    // child hits the parent's warm KV cache for `tools + stable system`, and
+    // retain only `Mode:` + `<turn_environment>` in the volatile tail (dropping
+    // parent-only one-shot notices like ANCHOR, stopped-turn, or undo notes).
+    let child_system: Vec<SystemPart> = system
+        .into_iter()
+        .filter(|p| {
+            p.cacheable
+                || p.text.starts_with("Mode: ")
+                || p.text.starts_with("<turn_environment>")
+        })
+        .collect();
     let child = spawn_agent(AgentInput {
         provider: provider.clone(),
         model_id: model_id.to_string(),
@@ -526,7 +538,7 @@ pub(crate) async fn run_subagent(
         effort,
         effort_support,
         max_tokens,
-        system,
+        system: child_system,
         messages: vec![Message::new(Role::User, task.label.clone())],
         root: root.to_path_buf(),
         // #190: NOT `sub-{id}` — the numeric counter resets on restart

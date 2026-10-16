@@ -22,6 +22,23 @@ impl App {
         if let Some(skills) = crate::prompts::skills::prompt(&loaded) {
             layers.push((PrefixSection::Skills, skills));
         }
+        // Verify-command names from .sqwai/config.toml ([verify]) are static
+        // project configuration: keeping them in the cached prefix avoids
+        // resending them in the volatile host block on every turn.
+        let checks = crate::config::Config::project_verify_commands(&root);
+        if !checks.is_empty() {
+            layers.push((
+                PrefixSection::System,
+                format!(
+                    "Checks: {}",
+                    checks
+                        .iter()
+                        .map(|(name, command)| format!("{name} = {command}"))
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                ),
+            ));
+        }
         layers
             .into_iter()
             .map(|(section, text)| crate::providers::SystemPart::cached(text).in_section(section))
@@ -96,21 +113,7 @@ impl App {
                 Mode::Act => "act",
             }
         )));
-        // Verify-command names from .sqwai/config.toml ([verify]): the model
-        // needs them to write cmd: acceptance (/init collects them, nothing
-        // else shows them).
-        let checks = crate::config::Config::project_verify_commands(&root);
-        if !checks.is_empty() {
-            parts.push(SystemPart::volatile(format!(
-                "Checks: {}",
-                checks
-                    .iter()
-                    .map(|(name, command)| format!("{name} = {command}"))
-                    .collect::<Vec<_>>()
-                    .join("; ")
-            )));
-        }
-        // `turn_facts` (clock, git status, directory tree) is populated off the
+        // `turn_facts` (date, git status, directory tree) is populated off the
         // UI thread at the start of `run_agent` so pressing Enter never blocks
         // on git subprocesses.
         // The anchor is host-generated from this session's journal, and it

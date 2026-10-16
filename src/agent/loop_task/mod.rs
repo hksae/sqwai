@@ -923,7 +923,7 @@ async fn run_agent(
         let msgs_before = messages.len();
         let plan_hint = plan_hint_for_summary(&root, &session_id);
         let prefix = CompactionPrefix {
-            system: &system,
+            system: &turn_system,
             tools: &tools,
         };
         if let Some((before, after, summarized)) = compact_history(
@@ -1114,7 +1114,7 @@ async fn run_agent(
                     let overflow_msgs_before = messages.len();
                     let overflow_plan_hint = plan_hint_for_summary(&root, &session_id);
                     let prefix = CompactionPrefix {
-                        system: &system,
+                        system: &turn_system,
                         tools: &tools,
                     };
                     if let Some((before, after, summarized)) = compact_history(

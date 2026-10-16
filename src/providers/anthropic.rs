@@ -10,6 +10,39 @@ use super::{ChatRequest, Provider, Role, StreamEvent, StreamResult, ToolCallReq}
 /// History length from which the middle anchor marker pays off: below this
 /// the end marker's ~20-block lookback already covers the whole history.
 const MID_HISTORY_MARKER_MSGS: usize = 10;
+/// Quantization step for the mid-history cache anchor. Stepping in multiples
+/// of 8 messages (and landing on a `user` turn that was previously `msgs.last()`)
+/// keeps the anchor stationary across 4 full tool-call rounds and reuses an
+/// already-written cache entry instead of paying a 1.25x cache-write penalty
+/// on every turn the way `msgs.len() / 2` did.
+const MID_HISTORY_STEP: usize = 8;
+
+/// Anthropic refuses or ignores `cache_control` on `thinking` / `redacted_thinking`
+/// blocks and on empty text blocks (`"text": ""`). Walk backward to the last
+/// eligible block in the message's content array.
+fn is_cacheable_block(block: &Value) -> bool {
+    match block.get("type").and_then(|t| t.as_str()) {
+        Some("thinking" | "redacted_thinking") => false,
+        Some("text") => block
+            .get("text")
+            .and_then(|t| t.as_str())
+            .is_some_and(|s| !s.is_empty()),
+        Some(_) => true,
+        None => false,
+    }
+}
+
+fn mark_message_cache_breakpoint(msg: &mut Value) -> bool {
+    let Some(arr) = msg.get_mut("content").and_then(|c| c.as_array_mut()) else {
+        return false;
+    };
+    if let Some(block) = arr.iter_mut().rev().find(|b| is_cacheable_block(b)) {
+        block["cache_control"] = json!({"type": "ephemeral"});
+        true
+    } else {
+        false
+    }
+}
 use crate::config::{EffortLevel, ResolvedProvider};
 
 #[derive(Clone)]
@@ -115,6 +148,7 @@ pub fn build_body(req: &ChatRequest, default_max_tokens: u32, cache_breakpoints:
         system.push(json!({"type": "text", "text": super::host_tail(&tail)}));
     }
     let mut msgs: Vec<Value> = Vec::new();
+    let mut last_user_msg_idx: Option<usize> = None;
     for (i, m) in req.messages.iter().enumerate() {
         if m.role == Role::System
             || (m.content.is_empty() && m.tool_calls.is_empty() && m.role != Role::Tool)
@@ -127,7 +161,8 @@ pub fn build_body(req: &ChatRequest, default_max_tokens: u32, cache_breakpoints:
             Role::System => unreachable!(),
         };
         let mut m_blocks = content_blocks(m, thinking_on);
-        if Some(i) == last_user && !tail.trim().is_empty() {
+        let is_last_user_with_tail = Some(i) == last_user && !tail.trim().is_empty();
+        if is_last_user_with_tail {
             m_blocks.insert(0, json!({"type": "text", "text": super::host_tail(&tail)}));
         }
         // merge consecutive same-role turns (API requires alternation);
@@ -147,11 +182,17 @@ pub fn build_body(req: &ChatRequest, default_max_tokens: u32, cache_breakpoints:
             // of the combined content, the rest extends it as before.
             arr.splice(..0, thinking_blocks(m, thinking_on));
             let mut rest = content_blocks(m, false);
-            if Some(i) == last_user && !tail.trim().is_empty() {
+            if is_last_user_with_tail {
                 rest.insert(0, json!({"type": "text", "text": super::host_tail(&tail)}));
             }
             arr.extend(rest);
+            if is_last_user_with_tail {
+                last_user_msg_idx = Some(msgs.len() - 1);
+            }
             continue;
+        }
+        if is_last_user_with_tail {
+            last_user_msg_idx = Some(msgs.len());
         }
         msgs.push(json!({
             "role": role,
@@ -160,24 +201,47 @@ pub fn build_body(req: &ChatRequest, default_max_tokens: u32, cache_breakpoints:
     }
     // breakpoint on the last history message: everything before it —
     // tools, stable system, earlier history — is the cached prefix.
-    if cache_breakpoints
-        && let Some(last) = msgs.last_mut()
-        && let Some(arr) = last.get_mut("content").and_then(|c| c.as_array_mut())
-        && let Some(block) = arr.last_mut()
-    {
-        block["cache_control"] = json!({"type": "ephemeral"});
+    // Walk backward if the trailing message has no cacheable block.
+    if cache_breakpoints {
+        for msg in msgs.iter_mut().rev() {
+            if mark_message_cache_breakpoint(msg) {
+                break;
+            }
+        }
     }
-    // fourth marker, mid-history: a breakpoint reaches ~20 blocks back, so
-    // one huge parallel tool batch between the stable prefix and the end
-    // marker would orphan everything before it. A middle anchor keeps the
-    // first half hittable. Only on long histories — adjacent markers buy
-    // nothing, and every marker is a potential cache write.
-    if cache_breakpoints && msgs.len() >= MID_HISTORY_MARKER_MSGS {
-        let mid = msgs.len() / 2;
-        if let Some(arr) = msgs[mid].get_mut("content").and_then(|c| c.as_array_mut())
-            && let Some(block) = arr.last_mut()
+    // fourth marker, pre-volatile / mid-history anchor:
+    // - When volatile host state sits at `last_user_msg_idx` (`u_idx > 0`) and
+    //   the current turn has fewer than `MID_HISTORY_MARKER_MSGS` messages
+    //   after `u_idx`, place the breakpoint at `u_idx - 1` (the exact end of
+    //   the clean history before `host_tail`). Without this, `msgs[0..u_idx]`
+    //   is never written to Anthropic's cache without `host_tail`, causing a
+    //   history cache miss on the next user turn when `host_tail` moves.
+    // - Once the history (or the current turn's tool loop after `u_idx`) is
+    //   `>= MID_HISTORY_MARKER_MSGS` messages long, place the breakpoint at a
+    //   quantized `user` turn (`MID_HISTORY_STEP = 8`) so the 20-block lookback
+    //   window is bridged without shifting the marker on every step.
+    if cache_breakpoints {
+        let anchor_idx = match last_user_msg_idx {
+            Some(u_idx)
+                if u_idx > 0 && msgs.len().saturating_sub(u_idx) < MID_HISTORY_MARKER_MSGS =>
+            {
+                Some(u_idx - 1)
+            }
+            _ if msgs.len() >= MID_HISTORY_MARKER_MSGS => {
+                let candidate = ((msgs.len() - 2) / MID_HISTORY_STEP) * MID_HISTORY_STEP;
+                Some(
+                    (0..=candidate)
+                        .rev()
+                        .find(|&idx| msgs[idx].get("role").and_then(|r| r.as_str()) == Some("user"))
+                        .unwrap_or(candidate),
+                )
+            }
+            _ => None,
+        };
+        if let Some(mid) = anchor_idx
+            && mid + 1 < msgs.len()
         {
-            block["cache_control"] = json!({"type": "ephemeral"});
+            mark_message_cache_breakpoint(&mut msgs[mid]);
         }
     }
 

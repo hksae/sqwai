@@ -849,11 +849,14 @@ pub fn opencode_session_value(base_url: &str) -> Option<String> {
 }
 
 /// Stable per-session cache-routing key for wires that document one
-/// (OpenAI `prompt_cache_key`; Codex sends the session id, subagents
-/// `{source}:{parent}`). Scoped to OpenAI and OpenCode hosts that document
-/// `prompt_cache_key`: a stable key routes repeated prefixes at the same worker.
+/// (OpenAI `prompt_cache_key`, OpenRouter sticky routing, and OpenCode Go).
+/// Scoped to hosts that document `prompt_cache_key`: a stable key routes
+/// repeated prefixes of the session (and its subagents) to the same worker.
 pub fn prompt_cache_key(base_url: &str) -> Option<String> {
-    if !base_url.contains("opencode.ai") && !base_url.contains("api.openai.com") {
+    if !base_url.contains("opencode.ai")
+        && !base_url.contains("api.openai.com")
+        && !base_url.contains("openrouter.ai")
+    {
         return None;
     }
     CONVERSATION_ID
@@ -863,13 +866,31 @@ pub fn prompt_cache_key(base_url: &str) -> Option<String> {
         .filter(|id| !id.is_empty())
 }
 
-/// attach `x-opencode-session` to a request builder when applicable
+/// value for `x-session-id` on OpenRouter, pinning all turns and subagents of
+/// a session to the same upstream provider endpoint for KV-cache reuse.
+pub fn openrouter_session_value(base_url: &str) -> Option<String> {
+    if !base_url.contains("openrouter.ai") {
+        return None;
+    }
+    CONVERSATION_ID
+        .read()
+        .ok()
+        .and_then(|g| g.clone())
+        .filter(|id| !id.is_empty())
+}
+
+/// attach session-affinity headers (`x-opencode-session` on OpenCode,
+/// `x-session-id` on OpenRouter) to a request builder when applicable
 pub fn with_opencode_session(
     builder: reqwest::RequestBuilder,
     base_url: &str,
 ) -> reqwest::RequestBuilder {
-    match opencode_session_value(base_url) {
+    let builder = match opencode_session_value(base_url) {
         Some(id) => builder.header("x-opencode-session", id),
+        None => builder,
+    };
+    match openrouter_session_value(base_url) {
+        Some(id) => builder.header("x-session-id", id),
         None => builder,
     }
 }
@@ -1123,6 +1144,14 @@ mod connection_tests {
         );
         assert_eq!(
             prompt_cache_key("https://api.openai.com/v1"),
+            Some("sess-7".to_string())
+        );
+        assert_eq!(
+            prompt_cache_key("https://openrouter.ai/api/v1"),
+            Some("sess-7".to_string())
+        );
+        assert_eq!(
+            openrouter_session_value("https://openrouter.ai/api/v1"),
             Some("sess-7".to_string())
         );
         assert_eq!(prompt_cache_key("http://127.0.0.1:11434/v1"), None);
