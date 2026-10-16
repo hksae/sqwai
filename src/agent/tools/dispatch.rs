@@ -1138,7 +1138,6 @@ pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                         ctx.journal.push((sha, format!("step_{id}_finish")));
                     }
                     match applied {
-                        plan::Applied::Created(_) => Outcome::ok("plan created".to_string()),
                         plan::Applied::Updated { message } => {
                             let msg = with_assumption_warning(ctx, finishing.as_deref(), message);
                             let msg =

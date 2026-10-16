@@ -129,11 +129,7 @@ impl Rejection {
 }
 
 #[derive(Debug, Clone)]
-#[allow(clippy::large_enum_variant)] // Created(Plan) is intentionally large; boxing would change call sites
 pub enum Applied {
-    /// `create` result — the caller must persist the plan.
-    #[allow(dead_code)]
-    Created(Plan),
     Updated {
         message: String,
     },
