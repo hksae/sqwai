@@ -117,17 +117,6 @@ impl StepStatus {
             Self::Reopened => "reopened",
         }
     }
-
-    /// Steps the host may fold away when the plan outgrows its budget.
-    #[allow(dead_code)]
-    pub fn is_closed(self) -> bool {
-        matches!(self, Self::Done | Self::Cancelled)
-    }
-
-    #[allow(dead_code)]
-    pub fn is_open(self) -> bool {
-        !self.is_closed()
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
