@@ -92,22 +92,13 @@ pub struct StepContext {
 // ---------------------------------------------------------------- journal-first commits and replay
 //
 // Every mutation of a plan file is preceded by a journal `plan` intent
-// record carrying the full op args. The record's scoped `session:seq`
-// becomes the file's `applied_event` in the same store, so a crash between
-// the two is detectable: on load the host replays journal events after the
-// cursor. Replay is pure re-application — no commands run, no approvals,
-// no evidence gates — which is sound because every replayed op was already
-// accepted (and validated, where validation applies) when first journaled.
-
-fn scoped(session: &str, seq: u64) -> String {
-    format!("{session}:{seq}")
-}
-
-fn split_applied(applied: &Option<String>) -> Option<(String, u64)> {
-    let cursor = applied.as_ref()?;
-    let (session, seq) = cursor.split_once(':')?;
-    Some((session.to_string(), seq.parse().ok()?))
-}
+// record carrying the full op args. The record's seq becomes the file's
+// per-session cursor (`applied_events`) in the same store, so a crash
+// between the two is detectable: on load the host replays journal events
+// after the cursor. Replay is pure re-application — no commands run, no
+// approvals, no evidence gates — which is sound because every replayed op
+// was already accepted (and validated, where validation applies) when
+// first journaled.
 
 /// Journal-first commit: append the intent record, point the file at it,
 /// then store. A crash before the append leaves nothing behind (the op only
@@ -149,7 +140,6 @@ pub fn commit(
     fields.insert("ok".to_string(), serde_json::Value::Bool(ok));
     let mut journal = crate::agent::journal::Journal::open(root, session_id)?;
     let seq = journal.append("plan", serde_json::Value::Object(fields))?;
-    plan.applied_event = Some(scoped(session_id, seq));
     plan.applied_events.insert(session_id.to_string(), seq);
     store(root, plan)?;
     Ok(seq)
@@ -165,23 +155,18 @@ pub struct ReplayReport {
 }
 
 /// Re-apply journaled plan ops the plan files have not caught up with, and
-/// re-attach evidence refs whose file update was lost. Files without a
-/// cursor (`applied_event`, i.e. written before journal-first) are skipped.
+/// re-attach evidence refs whose file update was lost. Files without any
+/// cursor (never committed through journal-first) are skipped.
 /// Idempotent: a clean tree changes nothing and stores nothing.
 pub fn replay(root: &Path) -> Result<ReplayReport> {
     let mut report = ReplayReport::default();
     for plan in list(root) {
-        // cursor set: one entry per session that ever committed here, else
-        // the legacy single cursor. BTreeMap order is deterministic; each
-        // stream heals independently (a stall holds its own stream while
-        // the others keep healing).
-        let mut cursors: std::collections::BTreeMap<String, u64> = plan.applied_events.clone();
+        // One entry per session that ever committed here. BTreeMap order is
+        // deterministic; each stream heals independently (a stall holds its
+        // own stream while the others keep healing).
+        let cursors: std::collections::BTreeMap<String, u64> = plan.applied_events.clone();
         if cursors.is_empty() {
-            if let Some((sess, cursor)) = split_applied(&plan.applied_event) {
-                cursors.insert(sess, cursor);
-            } else {
-                continue;
-            }
+            continue;
         }
         let mut plan = plan;
         let mut dirty = false;
@@ -209,7 +194,6 @@ pub fn replay(root: &Path) -> Result<ReplayReport> {
                     }
                     match apply_record(&mut plan, record) {
                         Ok(true) => {
-                            plan.applied_event = Some(scoped(sess, record.seq));
                             plan.applied_events.insert(sess.clone(), record.seq);
                             store(root, &plan)?;
                             report.ops_applied += 1;
@@ -292,8 +276,10 @@ pub fn replay(root: &Path) -> Result<ReplayReport> {
 
 fn applied_session(root: &Path, plan_id: &str) -> Option<String> {
     let plan = read_plan_file(root, plan_id)?;
-    let (sess, _) = split_applied(&plan.applied_event)?;
-    Some(sess)
+    plan.applied_events
+        .into_iter()
+        .max_by_key(|(_, seq)| *seq)
+        .map(|(sess, _)| sess)
 }
 
 /// Rebuild plans whose create intent was journaled but whose file is
@@ -412,7 +398,7 @@ fn rebuild_created(
         .iter()
         .filter_map(|value| value.as_str().map(str::to_string))
         .collect();
-    plan.applied_event = Some(scoped(sess, seq));
+    plan.applied_events.insert(sess.to_string(), seq);
     store(root, &plan).ok()?;
     Some(plan)
 }
@@ -548,18 +534,34 @@ pub fn store(root: &Path, plan: &Plan) -> Result<()> {
 /// Side-effect-free read of one plan file: missing or corrupt files yield
 /// `None` instead of an error (unlike `open`, it never moves anything aside).
 /// Used to resolve a session's linked plan without touching the store.
+/// Files from a newer binary are not adopted: they read as absent here and
+/// are left in place, never downgraded.
 pub fn read_plan_file(root: &Path, id: &str) -> Option<Plan> {
     let text = std::fs::read_to_string(plans_dir(root).join(format!("{id}.json"))).ok()?;
-    serde_json::from_str::<Plan>(&text).ok()
+    serde_json::from_str::<Plan>(&text)
+        .ok()
+        .filter(|plan| plan.version <= super::PLAN_VERSION)
 }
 
 /// A plan that fails schema validation is moved aside, never silently dropped.
+/// A well-formed file from a newer binary is refused without moving it:
+/// rebuilding it through this binary's journal intents would silently
+/// downgrade fields the old code does not know.
 pub fn open(root: &Path, id: &str) -> Result<Plan> {
     let dir = plans_dir(root);
     let path = dir.join(format!("{id}.json"));
     let text = std::fs::read_to_string(&path).with_context(|| format!("reading plan {id}"))?;
     match serde_json::from_str::<Plan>(&text) {
-        Ok(plan) => Ok(plan),
+        Ok(plan) => {
+            if plan.version > super::PLAN_VERSION {
+                return Err(anyhow::anyhow!(
+                    "plan {id} is version {}, this binary reads up to version {} — left in place",
+                    plan.version,
+                    super::PLAN_VERSION,
+                ));
+            }
+            Ok(plan)
+        }
         Err(e) => {
             // torn write or schema drift: rebuild from journaled intents
             // before giving up on the bytes (F1b). Only a clean rebuild
@@ -674,7 +676,6 @@ fn rebuild_corrupt(root: &Path, id: &str) -> Option<Plan> {
             .iter()
             .filter_map(|v| v.as_str().map(str::to_string))
             .collect();
-        plan.applied_event = Some(scoped(&create_sess, create_seq));
         plan.applied_events.insert(create_sess.clone(), create_seq);
         restore_create_criteria(&mut plan, &create_fields);
         (create_idx, plan)
@@ -710,7 +711,6 @@ fn rebuild_corrupt(root: &Path, id: &str) -> Option<Plan> {
         };
         match apply_record(&mut plan, &record) {
             Ok(true) => {
-                plan.applied_event = Some(scoped(sess, *seq));
                 plan.applied_events.insert(sess.clone(), *seq);
             }
             Ok(false) => {}
@@ -807,16 +807,18 @@ impl PlanMetaCache {
     }
 }
 
-/// Parse only (id, status, created, sessions) from a plan file. A file that
-/// fails validation is not `active` — whether it later quarantines is the
-/// caller's decision in `open`, never in this directory scan.
+/// Parse only (id, status, created, sessions, version) from a plan file.
+/// A file that fails validation — or comes from a newer binary — is not
+/// `active` here. Whether an unreadable file later quarantines is the
+/// caller's decision in `open`, never in this directory scan; future
+/// versions are refused there without moving the file.
 fn parse_active_meta(path: &Path) -> Option<ActivePlanMeta> {
     use serde::de::Deserializer as _;
     struct MetaVisitor;
     impl<'de> serde::de::Visitor<'de> for MetaVisitor {
         type Value = Option<ActivePlanMeta>;
         fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-            formatter.write_str("a plan object with id/status/created/sessions")
+            formatter.write_str("a plan object with id/status/created/sessions/version")
         }
         fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
         where
@@ -826,22 +828,26 @@ fn parse_active_meta(path: &Path) -> Option<ActivePlanMeta> {
             let mut status: Option<String> = None;
             let mut created: Option<String> = None;
             let mut sessions: Vec<String> = Vec::new();
+            let mut version: Option<u32> = None;
             while let Some(key) = map.next_key::<String>()? {
                 match key.as_str() {
                     "id" => id = map.next_value().ok(),
                     "status" => status = map.next_value().ok(),
                     "created" => created = map.next_value().ok(),
                     "sessions" => sessions = map.next_value().unwrap_or_default(),
+                    "version" => version = map.next_value().ok(),
                     _ => {
                         let _: serde::de::IgnoredAny = map.next_value()?;
                     }
                 }
             }
-            let (id, status, created) = match (id, status, created) {
-                (Some(id), Some(status), Some(created)) => (id, status, created),
+            let (id, status, created, version) = match (id, status, created, version) {
+                (Some(id), Some(status), Some(created), Some(version)) => {
+                    (id, status, created, version)
+                }
                 _ => return Ok(None),
             };
-            if status != "active" {
+            if status != "active" || version > super::PLAN_VERSION {
                 return Ok(None);
             }
             Ok(Some(ActivePlanMeta {
@@ -928,6 +934,7 @@ pub fn list(root: &Path) -> Vec<Plan> {
         .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("json"))
         .filter_map(|e| std::fs::read_to_string(e.path()).ok())
         .filter_map(|t| serde_json::from_str::<Plan>(&t).ok())
+        .filter(|p| p.version <= super::PLAN_VERSION)
         .collect()
 }
 

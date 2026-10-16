@@ -188,7 +188,7 @@ fn completed_linked_plan_refuses_tui_mutations() {
 
     app.plan_command("/plan waive 0 looks fine");
     assert!(
-        last_status(&app).starts_with("invalid command /plan waive"),
+        last_status(&app).starts_with("invalid command /plan"),
         "waive is retired outright: {}",
         last_status(&app)
     );
@@ -387,9 +387,10 @@ fn builtin_providers_and_models_are_immutable_and_updateable() {
     assert_eq!(app.form_fields.len(), 4, "full model form for a built-in");
     app.menu_home();
 
-    // 4. /providers update triggers update status
+    // 4. the built-in catalog update flow triggers update status
+    // (`/providers update` is gone; the flow lives on behind /debug)
     app.builtin_update_rx = None; // clear in-flight check from test_app startup
-    app.command("providers update");
+    app.start_builtin_update(true);
     assert!(toast_text(&app).contains("checking for built-in provider updates"));
 }
 

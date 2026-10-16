@@ -408,9 +408,9 @@ fn goal_revision_marks_pending_steps_stale() {
     set_goal(&mut plan, "a different goal".into(), "user", None);
     assert_eq!(plan.goal.text, "a different goal");
     assert_eq!(plan.goal.history.len(), 1);
-    assert_eq!(plan.step("2").unwrap().stale_goal, Some(true));
+    assert!(plan.step("2").unwrap().stale_goal);
     // step 1 is in progress, so it is not marked stale
-    assert_eq!(plan.step("1").unwrap().stale_goal, None);
+    assert!(!plan.step("1").unwrap().stale_goal);
 }
 
 #[test]
@@ -523,7 +523,6 @@ fn replay_heals_other_session_crash_leaving_mine_alone() {
         None,
     )
     .unwrap();
-    plan.applied_event = Some("aaa:1".to_string());
     plan.applied_events.insert("aaa".to_string(), 1);
     plan.applied_events.insert("bbb".to_string(), 0);
     store(&dir, &plan).unwrap();
@@ -552,13 +551,9 @@ fn replay_heals_other_session_crash_leaving_mine_alone() {
     assert_eq!(report.ops_applied, 1);
     let healed = open(&dir, &plan.id).unwrap();
     assert_eq!(healed.step("1").unwrap().status, StepStatus::Blocked);
-    // both cursors advanced independently; last writer wins the marker
+    // both cursors advanced independently
     assert_eq!(healed.applied_events.get("aaa"), Some(&1));
     assert_eq!(healed.applied_events.get("bbb"), Some(&1));
-    assert_eq!(
-        healed.applied_event.as_deref(),
-        Some("bbb:1".to_string().as_str())
-    );
     // idempotent again
     let again = replay(&dir).unwrap();
     assert_eq!(again.ops_applied, 0);
@@ -725,7 +720,7 @@ fn open_quarantines_when_rebuild_diverges_or_lacks_intent() {
 fn replay_heals_crash_between_journal_and_store() {
     let dir = std::env::temp_dir().join(format!("sqwai-plan-replay-{}", new_id()));
     let mut plan = new_plan();
-    plan.applied_event = Some("crash:0".to_string());
+    plan.applied_events.insert("crash".to_string(), 0);
     store(&dir, &plan).unwrap();
     // The crash: intent journaled, plan file never caught up.
     let mut journal = crate::agent::journal::Journal::open(&dir, "crash").unwrap();
@@ -745,7 +740,7 @@ fn replay_heals_crash_between_journal_and_store() {
     assert_eq!(report.plans_healed, vec![plan.id.clone()]);
     let healed = open(&dir, &plan.id).unwrap();
     assert_eq!(healed.step("1").unwrap().status, StepStatus::InProgress);
-    assert_eq!(healed.applied_event.as_deref(), Some("crash:1"));
+    assert_eq!(healed.applied_events.get("crash"), Some(&1));
 
     // Idempotent: a second run changes nothing and stores nothing.
     let again = replay(&dir).unwrap();
@@ -759,7 +754,7 @@ fn join_is_journal_first_idempotent_and_replayable() {
     let dir = std::env::temp_dir().join(format!("sqwai-plan-join-{}", new_id()));
     let mut plan = new_plan();
     plan.sessions = vec!["parent".to_string()];
-    plan.applied_event = Some("parent:0".to_string());
+    plan.applied_events.insert("parent".to_string(), 0);
     store(&dir, &plan).unwrap();
     // The crash: join intent journaled in the parent's file (where the
     // cursor points), plan file never caught up.
@@ -778,7 +773,7 @@ fn join_is_journal_first_idempotent_and_replayable() {
     assert_eq!(report.ops_applied, 1);
     let healed = open(&dir, &plan.id).unwrap();
     assert!(healed.sessions.contains(&"sub-9".to_string()));
-    assert_eq!(healed.applied_event.as_deref(), Some("parent:1"));
+    assert_eq!(healed.applied_events.get("parent"), Some(&1));
 
     // Idempotent: replay and direct apply change nothing further.
     let again = replay(&dir).unwrap();
@@ -823,7 +818,7 @@ fn replay_rebuilds_orphan_create_and_respects_delete() {
     assert_eq!(report.orphans_rebuilt, vec!["01J000ORPHAN00000000000001"]);
     let rebuilt = open(&dir, "01J000ORPHAN00000000000001").unwrap();
     assert_eq!(rebuilt.goal.text, "orphaned goal");
-    assert_eq!(rebuilt.applied_event.as_deref(), Some("orphan:1"));
+    assert_eq!(rebuilt.applied_events.get("orphan"), Some(&1));
 
     // Deliberate absence: a later plan_deleted means do not resurrect.
     journal
@@ -854,7 +849,7 @@ fn replay_restores_added_criteria() {
         &Limits::default(),
     )
     .unwrap();
-    plan.applied_event = Some("ra:0".to_string());
+    plan.applied_events.insert("ra".to_string(), 0);
     store(&dir, &plan).unwrap();
     let mut journal = crate::agent::journal::Journal::open(&dir, "ra").unwrap();
     journal
@@ -883,7 +878,7 @@ fn replay_restores_added_criteria() {
 fn replay_skips_rejected_intents() {
     let dir = std::env::temp_dir().join(format!("sqwai-plan-repskip-{}", new_id()));
     let mut plan = new_plan();
-    plan.applied_event = Some("rs:0".to_string());
+    plan.applied_events.insert("rs".to_string(), 0);
     store(&dir, &plan).unwrap();
     let mut journal = crate::agent::journal::Journal::open(&dir, "rs").unwrap();
     journal
@@ -968,7 +963,7 @@ fn legacy_plan_file_loads_with_phase0_defaults() {
     // step `refs` are ignored (no plain-text criteria to migrate from an
     // object shape), so criteria defaults empty while evidence parses.
     assert!(plan.criteria.is_empty());
-    assert_eq!(plan.applied_event, None);
+    assert!(plan.applied_events.is_empty());
     let step = &plan.steps[0];
     assert_eq!(step.step_epoch, 0);
     assert_eq!(step.evidence.len(), 2);
@@ -1297,4 +1292,63 @@ fn open_active_for_session_falls_back_to_the_later_instant() {
     );
 
     std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A plan file from a newer binary must never read as valid: `open`
+/// refuses without moving the file (no silent downgrade, no quarantine),
+/// `read_plan_file` and `list` skip it.
+#[test]
+fn future_plan_version_is_refused_not_adopted() {
+    let dir = std::env::temp_dir().join(format!("sqwai-plan-future-{}", new_id()));
+    let mut plan = new_plan();
+    plan.version = super::PLAN_VERSION + 1;
+    store(&dir, &plan).unwrap();
+
+    let err = open(&dir, &plan.id).unwrap_err();
+    assert!(
+        err.to_string().contains("reads up to version"),
+        "must name the cause: {err:#}"
+    );
+    // left in place: refusing a future file is not corruption
+    assert!(
+        plans_dir(&dir).join(format!("{}.json", plan.id)).exists(),
+        "a future-version file must not be quarantined"
+    );
+    assert!(
+        !plans_dir(&dir).join("corrupt").exists(),
+        "no quarantine dir for a well-formed future file"
+    );
+    assert!(
+        read_plan_file(&dir, &plan.id).is_none(),
+        "the linked-plan resolver must not adopt it"
+    );
+    assert!(
+        list(&dir).iter().all(|p| p.id != plan.id),
+        "replay/list must not heal a file this binary cannot read"
+    );
+    assert!(
+        open_active_for_session(&dir, None).unwrap().is_none(),
+        "the newest-plan fallback must not pick it"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A hand-edited non-numeric step id must fail loudly on `add`, never
+/// issue a colliding numeric id by silently skipping it.
+#[test]
+fn add_refuses_non_numeric_step_ids_instead_of_colliding() {
+    let mut plan = new_plan();
+    plan.steps[0].id = "1a".to_string();
+    let err = apply(
+        &mut plan,
+        Op::Add {
+            after: None,
+            title: "another".to_string(),
+        },
+        &Limits::default(),
+        None,
+    )
+    .unwrap_err();
+    assert_eq!(err.code, "bad_step_id", "{err:?}");
+    assert_eq!(plan.steps.len(), 2, "a refused add stores nothing");
 }

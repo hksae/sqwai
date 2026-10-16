@@ -17,7 +17,7 @@ pub fn set_goal(plan: &mut Plan, text: String, source: &str, reason: Option<Stri
     plan.goal.source = source.to_string();
     for step in &mut plan.steps {
         if step.status == StepStatus::Pending {
-            step.stale_goal = Some(true);
+            step.stale_goal = true;
         }
     }
     plan.revision += 1;
@@ -64,7 +64,7 @@ pub fn render_status(plan: &Plan) -> String {
             StepStatus::Pending | StepStatus::Reopened => "[ ]",
         };
         let mut line = format!("  {} {} {}", marker, s.id, s.title);
-        if s.stale_goal == Some(true) {
+        if s.stale_goal {
             line.push_str("  [stale goal]");
         }
         out.push_str(&line);

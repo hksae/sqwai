@@ -3303,7 +3303,7 @@ fn plan_rows(plan: &crate::plan::Plan) -> Vec<(Line<'static>, MenuAction)> {
         };
         let prefix = format!("{marker} {:<2} ", s.id);
         let mut title = s.title.clone();
-        if s.stale_goal == Some(true) {
+        if s.stale_goal {
             title.push_str("  [stale goal]");
         }
         push_wrapped(&mut rows, &prefix, &title, style, style);

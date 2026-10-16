@@ -1,5 +1,5 @@
 use super::{
-    Goal, MAX_STEPS_DEFAULT, Plan, PlanStatus, Step, StepStatus, new_id, now, render,
+    Goal, MAX_STEPS_DEFAULT, PLAN_VERSION, Plan, PlanStatus, Step, StepStatus, new_id, now, render,
 };
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -227,14 +227,19 @@ pub(crate) fn complete(plan: &mut Plan) -> Result<Applied, Rejection> {
     Ok(Applied::Completed)
 }
 
-pub(crate) fn next_id(plan: &Plan) -> String {
-    let max = plan
-        .steps
-        .iter()
-        .filter_map(|s| s.id.parse::<usize>().ok())
-        .max()
-        .unwrap_or(0);
-    (max + 1).to_string()
+pub(crate) fn next_id(plan: &Plan) -> Result<String, Rejection> {
+    let mut max = 0usize;
+    for s in &plan.steps {
+        let n = s.id.parse::<usize>().map_err(|_| {
+            Rejection::new(
+                "bad_step_id",
+                format!("step id {} is not a number", s.id),
+                "step ids are numbers; fix the plan file before adding steps",
+            )
+        })?;
+        max = max.max(n);
+    }
+    Ok((max + 1).to_string())
 }
 
 /// Build a new plan. Rejects an empty goal, empty criteria, zero steps and
@@ -284,12 +289,11 @@ pub fn create(
 
     let ts = now();
     let plan = Plan {
-        version: 3,
+        version: PLAN_VERSION,
         id: new_id(),
         status: PlanStatus::Active,
         created: ts.clone(),
         sessions: Vec::new(),
-        applied_event: None,
         applied_events: Default::default(),
         goal: Goal {
             text: goal,
@@ -316,7 +320,7 @@ pub fn create(
                 reason: None,
                 evidence: Vec::new(),
                 step_epoch: 0,
-                stale_goal: None,
+                stale_goal: false,
             })
             .collect(),
         revision: 0,
@@ -550,7 +554,7 @@ pub(crate) fn accept(plan: &mut Plan, message: impl Into<String>) -> Result<Appl
 /// Gate fields read without holding a borrow.
 fn step_status(plan: &Plan, id: &str) -> Option<(StepStatus, bool)> {
     plan.step(id)
-        .map(|s| (s.status, s.stale_goal == Some(true)))
+        .map(|s| (s.status, s.stale_goal))
 }
 
 fn unknown_step(plan: &mut Plan, id: &str) -> Result<Applied, Rejection> {
@@ -610,10 +614,10 @@ fn start(
             "re-read it against the new goal, then pass confirm: true",
         );
     }
-    let step = plan.step_mut(id).expect("checked above");
+        let step = plan.step_mut(id).expect("checked above");
     step.status = StepStatus::InProgress;
     step.started = Some(now());
-    step.stale_goal = None;
+    step.stale_goal = false;
     accept(plan, format!("step {id} in progress"))
 }
 
@@ -791,8 +795,9 @@ fn add(
             }
         }
     };
+    let id = next_id(plan)?;
     let step = Step {
-        id: next_id(plan),
+        id,
         title,
         status: StepStatus::Pending,
         started: None,
@@ -801,7 +806,7 @@ fn add(
         reason: None,
         evidence: Vec::new(),
         step_epoch: 0,
-        stale_goal: None,
+        stale_goal: false,
     };
     let id = step.id.clone();
     plan.steps.insert(index, step);
@@ -908,7 +913,7 @@ fn split(
             reason: None,
             evidence: Vec::new(),
             step_epoch: 0,
-            stale_goal: None,
+            stale_goal: false,
         })
         .collect();
     let ids: Vec<String> = replacements.iter().map(|s| s.id.clone()).collect();

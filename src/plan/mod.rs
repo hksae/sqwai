@@ -81,6 +81,10 @@ impl<'de> Deserialize<'de> for EvidenceRef {
 /// Default ceiling for the number of steps.
 pub const MAX_STEPS_DEFAULT: usize = 24;
 
+/// Current plan file schema version, written by `create`. Files with a
+/// newer version come from a newer binary and must not be read as valid.
+pub const PLAN_VERSION: u32 = 3;
+
 // ---------------------------------------------------------------- model
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -158,9 +162,8 @@ pub struct Step {
     #[serde(default)]
     pub step_epoch: u64,
     /// Set on pending steps after a goal revision.
-    /// Set on pending steps after a goal revision.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stale_goal: Option<bool>,
+    #[serde(default)]
+    pub stale_goal: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -171,16 +174,9 @@ pub struct Plan {
     pub created: String,
     #[serde(default)]
     pub sessions: Vec<String>,
-    /// Scoped `session:seq` of the last journal event applied to this file.
-    /// The plan is a projection replayed from here on load.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub applied_event: Option<String>,
-    /// Per-session replay cursors: `applied_event` above
-    /// only remembers the last writer, so a crash between another session's
-    /// append and store left ops where replay never looked. Each
-    /// session advances only its own entry; sessions with no entry replay
-    /// nothing. The single cursor stays maintained alongside for old
-    /// readers and as the last-writer marker.
+    /// Per-session replay cursors (`session -> last applied journal seq`).
+    /// Each session advances only its own entry; sessions with no entry
+    /// replay nothing. The plan is a projection replayed from here on load.
     #[serde(default)]
     pub applied_events: std::collections::BTreeMap<String, u64>,
     pub goal: Goal,
