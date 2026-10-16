@@ -319,7 +319,6 @@ impl App {
                     title: "Keep old floating todo popup".into(),
                 },
             ],
-            4096,
             &plan::Limits::default(),
         )
         .unwrap();

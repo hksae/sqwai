@@ -47,7 +47,6 @@ fn new_plan() -> Plan {
                 title: "add the validator".to_string(),
             },
         ],
-        20000,
         &Limits::default(),
     )
     .expect("plan creates")
@@ -853,7 +852,6 @@ fn replay_restores_added_criteria() {
         vec![NewStep {
             title: "work".into(),
         }],
-        1000,
         &Limits::default(),
     )
     .unwrap();

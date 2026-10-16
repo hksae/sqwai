@@ -1,4 +1,4 @@
-use super::ctx::{MIN_PLAN_BUDGET_TOKENS, ToolCtx};
+use super::ctx::ToolCtx;
 use super::exec;
 use super::fs;
 use super::git;
@@ -922,15 +922,7 @@ pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                 hint: "work that plan instead: start/finish its steps, do not create another one. The current plan is in your context above".to_string(),
             }),
             Ok(None) => {
-                // Host value, from the model's context and [plan].budget_ratio.
-                // It used to be read out of the model's own tool arguments,
-                // which let it raise its own ceiling and skip the folding in
-                // .
-                let budget_limit = ctx
-                    .plan_limits
-                    .budget_tokens(ctx.context_limit)
-                    .max(MIN_PLAN_BUDGET_TOKENS);
-                match plan::create(goal, constraints, criteria, steps, budget_limit, &limits) {
+                match plan::create(goal, constraints, criteria, steps, &limits) {
                     Ok(mut created) => {
                         created.sessions = vec![ctx.session_id.clone()];
                         let id = created.id.clone();
@@ -944,7 +936,6 @@ pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                             "steps": created.steps.iter().map(|s| serde_json::json!({
                                 "title": s.title,
                             })).collect::<Vec<_>>(),
-                            "budget_limit": created.budget.limit,
                             "result_id": created.id,
                             "result_created": created.created,
                             "result_sessions": created.sessions,

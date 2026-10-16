@@ -470,7 +470,6 @@ mod tests {
             vec![plan::NewStep {
                 title: "do the work".to_string(),
             }],
-            0,
             &plan::Limits::default(),
         )
         .unwrap();

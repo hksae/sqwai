@@ -947,15 +947,8 @@ impl Default for UndoConfig {
 }
 
 /// `[plan]` — the host's own limits on the structured plan.
-///
-/// These are host values on purpose. The plan budget used to be computed from
-/// a `context_limit` the model passed in its own tool arguments, which let it
-/// raise its own ceiling and avoid the folding.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct PlanConfig {
-    /// share of the model's context the injected plan may occupy
-    #[serde(default = "default_plan_budget_ratio")]
-    pub budget_ratio: f64,
     /// most steps a plan may hold before `add`/`split` are refused
     #[serde(default = "default_plan_max_steps")]
     pub max_steps: usize,
@@ -968,7 +961,6 @@ pub struct PlanConfig {
 impl Default for PlanConfig {
     fn default() -> Self {
         Self {
-            budget_ratio: default_plan_budget_ratio(),
             max_steps: default_plan_max_steps(),
             nudge_after: default_plan_nudge_after(),
         }
@@ -997,25 +989,6 @@ impl Default for SecretsConfig {
             exclude_globs: default_secrets_exclude_globs(),
         }
     }
-}
-
-impl PlanConfig {
-    /// Token budget for the injected plan, from the model's context.
-    pub fn budget_tokens(&self, context_limit: u64) -> u64 {
-        // NaN survives `clamp` (both comparisons false) and `NaN as u64`
-        // is 0 — a `budget_ratio = nan` override silently zeroed every
-        // plan budget (audit H19). Non-finite falls back to the default.
-        let ratio = if self.budget_ratio.is_finite() {
-            self.budget_ratio.clamp(0.0, 1.0)
-        } else {
-            default_plan_budget_ratio()
-        };
-        ((context_limit as f64) * ratio) as u64
-    }
-}
-
-fn default_plan_budget_ratio() -> f64 {
-    0.10
 }
 
 fn default_plan_max_steps() -> usize {
@@ -1122,7 +1095,6 @@ struct UndoOverride {
 
 #[derive(Debug, Clone, Default, Deserialize)]
 struct PlanOverride {
-    budget_ratio: Option<f64>,
     max_steps: Option<usize>,
     nudge_after: Option<usize>,
 }
@@ -1157,7 +1129,7 @@ const PROJECT_ALLOWLIST: &[(&str, &[&str])] = &[
             "shadow_max_bytes",
         ],
     ),
-    ("plan", &["budget_ratio", "max_steps", "nudge_after"]),
+    ("plan", &["max_steps", "nudge_after"]),
     ("verify", &["commands"]),
     (
         "memory",
@@ -1545,9 +1517,6 @@ impl Config {
         }
         let plan = &mut self.plan;
         let o = &overrides.plan;
-        if let Some(v) = o.budget_ratio {
-            plan.budget_ratio = v;
-        }
         if let Some(v) = o.max_steps {
             plan.max_steps = v;
         }

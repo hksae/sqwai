@@ -1,5 +1,5 @@
 use super::{
-    Budget, Goal, MAX_STEPS_DEFAULT, Plan, PlanStatus, Step, StepStatus, new_id, now, render,
+    Goal, MAX_STEPS_DEFAULT, Plan, PlanStatus, Step, StepStatus, new_id, now, render,
 };
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -257,7 +257,6 @@ pub fn create(
     constraints: Vec<String>,
     criteria: Vec<String>,
     steps: Vec<NewStep>,
-    budget_limit: u64,
     limits: &Limits,
 ) -> Result<Plan, Rejection> {
     if goal.trim().is_empty() {
@@ -331,10 +330,6 @@ pub fn create(
                 stale_goal: None,
             })
             .collect(),
-        budget: Budget {
-            tokens: 0,
-            limit: budget_limit,
-        },
         revision: 0,
         rejections_in_a_row: 0,
         blocked_reason: None,

@@ -30,7 +30,6 @@ fn plan_delete_user_command_flow() {
         vec![plan::NewStep {
             title: "step 1".into(),
         }],
-        1000,
         &limits,
     )
     .unwrap();
@@ -86,7 +85,6 @@ fn plan_confirm_and_waive_are_retired() {
         vec![plan::NewStep {
             title: "step 1".into(),
         }],
-        1000,
         &limits,
     )
     .unwrap();
@@ -130,7 +128,6 @@ fn plan_delete_prefers_session_plan_over_most_recent() {
             vec![plan::NewStep {
                 title: "step 1".into(),
             }],
-            1000,
             &limits,
         )
         .unwrap()
@@ -179,7 +176,6 @@ fn completed_linked_plan_refuses_tui_mutations() {
         vec![plan::NewStep {
             title: "step 1".into(),
         }],
-        1000,
         &limits,
     )
     .unwrap();
@@ -230,7 +226,6 @@ fn plan_delete_then_session_has_no_plan() {
             vec![plan::NewStep {
                 title: "step 1".into(),
             }],
-            1000,
             &limits,
         )
         .unwrap()
@@ -321,7 +316,6 @@ fn tui_commands_operate_on_session_plan_not_newest_global() {
             vec![plan::NewStep {
                 title: "step 1".into(),
             }],
-            1000,
             &limits,
         )
         .unwrap()

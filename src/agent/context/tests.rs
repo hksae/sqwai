@@ -18,7 +18,6 @@ fn anchor_keeps_journal_facts_not_plan_state() {
         vec![crate::plan::NewStep {
             title: "implement anchor".into(),
         }],
-        20_000,
         &crate::plan::Limits::default(),
     )
     .unwrap();
@@ -176,7 +175,6 @@ fn anchor_carries_no_plan_goals_for_any_session() {
         vec![crate::plan::NewStep {
             title: "step A".into(),
         }],
-        20_000,
         &limits,
     )
     .unwrap();
@@ -191,7 +189,6 @@ fn anchor_carries_no_plan_goals_for_any_session() {
         vec![crate::plan::NewStep {
             title: "step B".into(),
         }],
-        20_000,
         &limits,
     )
     .unwrap();
@@ -222,7 +219,6 @@ fn resume_notice_reports_unfinished_plan_step() {
         vec![crate::plan::NewStep {
             title: "unfinished change".into(),
         }],
-        20_000,
         &crate::plan::Limits::default(),
     )
     .unwrap();

@@ -360,7 +360,6 @@ pub(super) enum MenuAction {
 /// compaction summary, undo shadow) are cycle rows, not scalars.
 #[derive(Clone, Copy)]
 pub(super) enum ScalarSetting {
-    PlanBudgetRatio,
     PlanMaxSteps,
     PlanNudgeAfter,
     MemoryLoadBudgetRatio,
@@ -394,7 +393,6 @@ where
 impl ScalarSetting {
     pub(super) fn label(self) -> &'static str {
         match self {
-            Self::PlanBudgetRatio => "budget ratio",
             Self::PlanMaxSteps => "max steps",
             Self::PlanNudgeAfter => "nudge after",
             Self::MemoryLoadBudgetRatio => "load budget ratio",
@@ -411,7 +409,6 @@ impl ScalarSetting {
 
     pub(super) fn current(self, cfg: &Config) -> String {
         match self {
-            Self::PlanBudgetRatio => cfg.plan.budget_ratio.to_string(),
             Self::PlanMaxSteps => cfg.plan.max_steps.to_string(),
             Self::PlanNudgeAfter => cfg.plan.nudge_after.to_string(),
             Self::MemoryLoadBudgetRatio => cfg.memory.load_budget_ratio.to_string(),
@@ -430,12 +427,6 @@ impl ScalarSetting {
         let label = self.label();
         let def = Config::default();
         match self {
-            Self::PlanBudgetRatio => apply_num(
-                label,
-                raw,
-                &mut cfg.plan.budget_ratio,
-                def.plan.budget_ratio,
-            ),
             Self::PlanMaxSteps => {
                 apply_num(label, raw, &mut cfg.plan.max_steps, def.plan.max_steps)
             }
@@ -2003,11 +1994,6 @@ impl App {
                         "skills auto-load",
                         on_off(self.cfg.skills.auto_load),
                         MenuAction::ToggleSkillsAutoLoad,
-                    ),
-                    (
-                        "plan budget ratio",
-                        ScalarSetting::PlanBudgetRatio.current(&self.cfg),
-                        MenuAction::EditScalar(ScalarSetting::PlanBudgetRatio),
                     ),
                     (
                         "plan max steps",

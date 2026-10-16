@@ -378,7 +378,6 @@ async fn startup_empty_enter_ignores_foreign_global_plan() {
         vec![NewStep {
             title: "foreign step".into(),
         }],
-        1000,
         &limits,
     )
     .unwrap();

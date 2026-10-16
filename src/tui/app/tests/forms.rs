@@ -1384,7 +1384,6 @@ fn undo_reopens_only_done_steps_with_reverted_recorded_evidence() {
                 title: "unrelated file".into(),
             },
         ],
-        1000,
         &crate::plan::Limits::default(),
     )
     .unwrap();
@@ -1428,7 +1427,6 @@ fn undo_reopens_step_on_any_partial_revert() {
         vec![crate::plan::NewStep {
             title: "two files".into(),
         }],
-        1000,
         &crate::plan::Limits::default(),
     )
     .unwrap();
@@ -1474,7 +1472,6 @@ fn undo_reopened_step_ids_matches_across_path_separators() {
         vec![crate::plan::NewStep {
             title: "changed file".into(),
         }],
-        1000,
         &crate::plan::Limits::default(),
     )
     .unwrap();

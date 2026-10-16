@@ -396,15 +396,11 @@ fn rebuild_created(
         .filter_map(|value| value.as_str().map(str::to_string))
         .collect();
     let steps: Vec<NewStep> = serde_json::from_value(get("steps")?.clone()).ok()?;
-    let budget_limit = get("budget_limit")
-        .and_then(|value| value.as_u64())
-        .unwrap_or(0);
     let mut plan = create(
         goal,
         constraints,
         criteria,
         steps,
-        budget_limit,
         &Limits::default(),
     )
     .ok()?;
@@ -667,10 +663,6 @@ fn rebuild_corrupt(root: &Path, id: &str) -> Option<Plan> {
                 .filter_map(|v| v.as_str().map(str::to_string))
                 .collect(),
             serde_json::from_value(create_fields.get("steps")?.clone()).ok()?,
-            create_fields
-                .get("budget_limit")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0),
             &Limits::default(),
         )
         .ok()?;

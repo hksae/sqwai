@@ -724,7 +724,6 @@ fn nudges_after_unaccounted_step_actions() {
         vec![crate::plan::NewStep {
             title: "step".into(),
         }],
-        1000,
         &crate::plan::Limits::default(),
     )
     .unwrap();
@@ -775,7 +774,6 @@ fn stale_evidence_warnings_checks_sequence_boundary() {
         vec![crate::plan::NewStep {
             title: "step 1".into(),
         }],
-        1000,
         &crate::plan::Limits::default(),
     )
     .unwrap();

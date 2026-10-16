@@ -1,6 +1,5 @@
 use super::dispatch::plan_op;
 use super::*;
-use crate::agent::tools::ctx::MIN_PLAN_BUDGET_TOKENS;
 use crate::plan;
 use serde_json::json;
 use std::fs;
@@ -1200,72 +1199,6 @@ fn tool_schemas_are_mode_independent() {
         &json!({"file_path": "src/a.rs", "content": "x"})
     ));
     assert!(!is_mutating_call("read", &json!({"file_path": "src/a.rs"})));
-}
-
-/// makes the plan budget a host value: model context times
-/// [plan].budget_ratio. It used to be read out of the model's own tool
-/// arguments — `args["context_limit"]` — so the model could raise its own
-/// ceiling and skip the folding. The field is no longer even
-/// advertised.
-#[test]
-fn the_plan_budget_comes_from_the_host_not_the_model() {
-    let (mut ctx, dir) = proj();
-    ctx = ctx.with_plan_limits(
-        crate::config::PlanConfig {
-            budget_ratio: 0.10,
-            ..Default::default()
-        },
-        200_000,
-    );
-
-    // the model asks for a huge budget in its arguments; it is ignored
-    let created = plan_op(
-        &mut ctx,
-        &json!({
-            "op": "create",
-            "goal": "budget from the host",
-            "criteria": ["note"],
-            "steps": [{"title": "one"}],
-            "context_limit": 100_000_000u64,
-        }),
-    );
-    assert!(created.ok, "{}", created.output);
-    let plan = plan::open_active(&dir).unwrap().unwrap();
-    assert_eq!(plan.budget.limit, 20_000, "0.10 of a 200k context");
-
-    assert!(
-        !tool_specs(false)
-            .iter()
-            .find(|spec| spec.name == "plan")
-            .unwrap()
-            .parameters["properties"]
-            .as_object()
-            .unwrap()
-            .contains_key("context_limit"),
-        "the model is not asked for its own context any more"
-    );
-    fs::remove_dir_all(&dir).ok();
-}
-
-/// A tiny context still leaves room for a plan rather than a budget of
-/// zero, which would fold everything on the first injection.
-#[test]
-fn the_plan_budget_has_a_floor() {
-    let (mut ctx, dir) = proj();
-    ctx = ctx.with_plan_limits(crate::config::PlanConfig::default(), 100);
-    assert!(
-        plan_op(
-            &mut ctx,
-            &json!({"op": "create", "goal": "tiny context", "criteria": ["note"],
-                    "steps": [{"title": "one"}]}),
-        )
-        .ok
-    );
-    assert_eq!(
-        plan::open_active(&dir).unwrap().unwrap().budget.limit,
-        MIN_PLAN_BUDGET_TOKENS
-    );
-    fs::remove_dir_all(&dir).ok();
 }
 
 /// [plan].max_steps is the host's limit, not a constant.

@@ -175,12 +175,6 @@ pub struct Step {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Budget {
-    pub tokens: u64,
-    pub limit: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Plan {
     pub version: u32,
     pub id: String,
@@ -213,7 +207,6 @@ pub struct Plan {
     pub criteria: Vec<String>,
     #[serde(default)]
     pub steps: Vec<Step>,
-    pub budget: Budget,
     pub revision: u64,
     #[serde(default)]
     pub rejections_in_a_row: u32,

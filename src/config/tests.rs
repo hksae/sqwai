@@ -506,28 +506,6 @@ fn fetched_catalog_pins_builtin_origins() {
     );
 }
 
-/// Audit H19: NaN survives `clamp` (both comparisons false) and
-/// `NaN as u64` is 0 — a `budget_ratio = nan` override silently
-/// zeroed every plan budget. Non-finite falls back to the default.
-#[test]
-fn non_finite_budget_ratio_falls_back_to_default() {
-    let mut plan = PlanConfig::default();
-    let default_budget = plan.budget_tokens(100_000);
-    assert_eq!(default_budget, 10_000, "default ratio is 0.10");
-    plan.budget_ratio = f64::NAN;
-    assert_eq!(
-        plan.budget_tokens(100_000),
-        default_budget,
-        "NaN must not zero the budget"
-    );
-    plan.budget_ratio = f64::INFINITY;
-    assert_eq!(plan.budget_tokens(100_000), default_budget);
-    plan.budget_ratio = 0.5;
-    assert_eq!(plan.budget_tokens(100_000), 50_000);
-    plan.budget_ratio = -1.0;
-    assert_eq!(plan.budget_tokens(100_000), 0, "clamped, not defaulted");
-}
-
 /// Audit C8: the disk path used to `toml::from_str` whatever sat in
 /// `builtin_providers.toml` — validation ran on the network fetch
 /// only, so a cache rewritten behind the app's back went straight
@@ -623,7 +601,7 @@ fn project_overrides_apply_allowlisted_keys_and_report_the_rest() {
         r#"
 [plan]
 max_steps = 5
-budget_ratio = 0.9
+nudge_after = 7
 plan_first = "off"
 
 [safety]
@@ -641,12 +619,7 @@ provider = "p"
     let mut cfg = Config::default();
     let notes = cfg.apply_project_overrides(dir.path());
     assert_eq!(cfg.plan.max_steps, 5);
-    // allowlisted keys land
-    assert!(
-        (cfg.plan.budget_ratio - 0.9).abs() < 1e-9,
-        "budget_ratio is allowlisted: {}",
-        cfg.plan.budget_ratio
-    );
+    assert_eq!(cfg.plan.nudge_after, 7);
     // not allowlisted: reported, never applied
     assert!(
         notes.iter().any(|n| n.contains("plan.plan_first")),

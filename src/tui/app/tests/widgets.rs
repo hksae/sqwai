@@ -457,7 +457,6 @@ fn undo_step_reports_a_step_with_no_recorded_writes() {
         vec![crate::plan::NewStep {
             title: "the only step".into(),
         }],
-        20_000,
         &crate::plan::Limits::default(),
     )
     .unwrap();

@@ -915,7 +915,6 @@ mod live_cache {
                     title: "test it".into(),
                 },
             ],
-            20_000,
             &plan::Limits::default(),
         )
         .unwrap();

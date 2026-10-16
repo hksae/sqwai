@@ -464,7 +464,3 @@ fn host_owned_denial(relative: &Path, mutating: bool) -> Option<String> {
         relative.display()
     ))
 }
-
-/// Smallest plan budget the host will use, however small the context. A plan
-/// that cannot hold its own goal line is worse than an unbudgeted one.
-pub(crate) const MIN_PLAN_BUDGET_TOKENS: u64 = 256;
