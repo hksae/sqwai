@@ -30,7 +30,45 @@ impl App {
 
     pub(super) fn rebuild_session_environment(&mut self) {
         let root = self.project_root.clone();
-        self.session_environment = crate::prompts::env::session_block(&root);
+        #[cfg(test)]
+        {
+            self.session_env_rx = None;
+            self.session_environment = crate::prompts::env::session_block(&root);
+        }
+        #[cfg(not(test))]
+        {
+            let (tx, rx) = std::sync::mpsc::channel();
+            self.session_env_rx = Some(rx);
+            std::thread::spawn(move || {
+                let _ = tx.send(crate::prompts::env::session_block(&root));
+            });
+        }
+    }
+
+    pub(super) fn poll_session_env(&mut self) {
+        let Some(rx) = self.session_env_rx.take() else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(env) => {
+                self.session_environment = env;
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                self.session_env_rx = Some(rx);
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {}
+        }
+    }
+
+    pub(super) fn ensure_session_environment(&mut self) {
+        if let Some(rx) = self.session_env_rx.take()
+            && let Ok(env) = rx.recv()
+        {
+            self.session_environment = env;
+        }
+        if self.session_environment.is_empty() {
+            self.session_environment = crate::prompts::env::session_block(&self.project_root);
+        }
     }
 
     /// Assemble the system block for one request.
@@ -40,6 +78,7 @@ impl App {
     /// conversation re-reads the whole conversation.
     pub(super) fn system_block(&mut self) -> Vec<crate::providers::SystemPart> {
         use crate::providers::SystemPart;
+        self.ensure_session_environment();
         let mut parts = self.stable_parts.clone();
         if !self.session_environment.is_empty() {
             parts.push(SystemPart::cached(self.session_environment.clone()));

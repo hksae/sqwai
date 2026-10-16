@@ -147,6 +147,10 @@ pub fn trim_for_wire(messages: &mut [Message]) {
 
 /// Replace the old results with stubs, scaled to `context_limit` tokens.
 pub fn trim_for_wire_with_limit(messages: &mut [Message], context_limit: u64) {
+    let indices = cleared_indices_with_limit(messages, context_limit);
+    if indices.is_empty() {
+        return;
+    }
     let mut calls: HashMap<String, (String, String)> = HashMap::new();
     for message in messages.iter() {
         for call in &message.tool_calls {
@@ -159,7 +163,7 @@ pub fn trim_for_wire_with_limit(messages: &mut [Message], context_limit: u64) {
             );
         }
     }
-    for index in cleared_indices_with_limit(messages, context_limit) {
+    for index in indices {
         let message = &messages[index];
         let call_id = message.tool_call_id.clone().unwrap_or_default();
         let (name, target) = calls

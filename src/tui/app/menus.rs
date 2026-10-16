@@ -3136,6 +3136,12 @@ impl App {
         if !self.session_environment.trim().is_empty() {
             out.push_str(self.session_environment.trim());
             out.push_str("\n\n");
+        } else {
+            let env = crate::prompts::env::session_block(&self.project_root);
+            if !env.trim().is_empty() {
+                out.push_str(env.trim());
+                out.push_str("\n\n");
+            }
         }
 
         out.push_str("# Host Block\n\n");

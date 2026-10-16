@@ -227,6 +227,9 @@ pub struct App {
     read_only: bool,
     /// Session-scoped environment facts, rebuilt only at startup and compaction.
     session_environment: String,
+    /// Background builder for `session_environment` so TUI startup and `/new`
+    /// never block on initial toolchain/manifest probes.
+    session_env_rx: Option<std::sync::mpsc::Receiver<String>>,
     /// Whether the current prompt still needs the full tool-oriented context.
     context_bootstrap_pending: bool,
     active_skills: Vec<crate::prompts::skills::Skill>,
@@ -669,6 +672,7 @@ impl App {
             hl: Highlighter::new(),
             stable_parts: Vec::new(),
             session_environment: String::new(),
+            session_env_rx: None,
             context_bootstrap_pending: true,
             active_skills: Vec::new(),
             cfg,
@@ -965,6 +969,7 @@ impl App {
         } else if self.provider_check_rx.is_some()
             || self.builtin_update_rx.is_some()
             || self.maintain_rx.is_some()
+            || self.session_env_rx.is_some()
         {
             consider(now + Duration::from_millis(50));
         }
@@ -1057,6 +1062,7 @@ impl App {
             self.poll_provider_check();
             self.poll_builtin_update();
             self.poll_maintain();
+            self.poll_session_env();
             // typewriter: reveal queued answer text gradually, catching up when
             // the queue grows faster than the reveal speed
             if !self.pending_reveal.is_empty() {

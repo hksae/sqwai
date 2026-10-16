@@ -391,7 +391,12 @@ impl Session {
     /// pin that. `save()` is the same write to the real sessions dir.
     pub fn save_to(&self, path: &std::path::Path) -> Result<()> {
         let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_vec_pretty(self)?)?;
+        {
+            let file = std::fs::File::create(&tmp)?;
+            let mut writer = std::io::BufWriter::with_capacity(64 * 1024, file);
+            serde_json::to_writer(&mut writer, self)?;
+            std::io::Write::flush(&mut writer)?;
+        }
         std::fs::rename(&tmp, path).context("saving session")?;
         Ok(())
     }

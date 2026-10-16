@@ -97,11 +97,18 @@ pub fn outline(ctx: &mut ToolCtx, args: &Value) -> Outcome {
 // ---------------------------------------------------------------------------
 
 fn extract_ts(src: &str, lang: Lang, max_depth: usize) -> Vec<OutlineItem> {
-    let mut parser = tree_sitter::Parser::new();
-    if parser.set_language(&lang.grammar()).is_err() {
-        return Vec::new();
+    thread_local! {
+        static TS_PARSER: std::cell::RefCell<tree_sitter::Parser> =
+            std::cell::RefCell::new(tree_sitter::Parser::new());
     }
-    let Some(tree) = parser.parse(src, None) else {
+    let tree = TS_PARSER.with(|cell| {
+        let mut parser = cell.borrow_mut();
+        if parser.set_language(&lang.grammar()).is_err() {
+            return None;
+        }
+        parser.parse(src, None)
+    });
+    let Some(tree) = tree else {
         return Vec::new();
     };
 

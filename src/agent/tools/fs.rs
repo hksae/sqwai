@@ -46,8 +46,12 @@ pub(super) fn spill_output(ctx: &ToolCtx, tool: &str, text: &str) -> Option<Stri
     if std::fs::create_dir_all(&dir).is_err() {
         return None;
     }
-    // best-effort retention: drop week-old spills on every write
-    if let Ok(entries) = std::fs::read_dir(&dir) {
+    let id = SPILL_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    // best-effort retention: drop week-old spills once on first spill (and
+    // periodically every 32 spills) instead of scanning `read_dir` every call
+    if id.is_multiple_of(32)
+        && let Ok(entries) = std::fs::read_dir(&dir)
+    {
         let now = std::time::SystemTime::now();
         for entry in entries.flatten() {
             let old = entry
@@ -61,7 +65,6 @@ pub(super) fn spill_output(ctx: &ToolCtx, tool: &str, text: &str) -> Option<Stri
             }
         }
     }
-    let id = SPILL_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let name = format!("{tool}-{}-{id}.txt", std::process::id());
     let path = dir.join(&name);
     if std::fs::write(&path, text).is_err() {

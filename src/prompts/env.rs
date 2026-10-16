@@ -55,15 +55,12 @@ pub fn stable_block() -> String {
 /// session as a full re-read of 200–273k tokens on a one-byte drift. They now
 /// come from [`turn_facts`], which trails the history instead.
 pub fn session_block(root: &Path) -> String {
-    let results = run_session_probes(root.to_path_buf(), &["os", "toolchains"]);
-    let mut out = String::from("<session_environment>\n");
-    for key in ["os", "toolchains"] {
-        if let Some(value) = results.get(key) {
-            out.push_str(value);
-        } else {
-            out.push_str(&format!("{}: unavailable (timeout)\n", key_name(key)));
-        }
-    }
+    let os = os_info_cached();
+    let tc = toolchains(root);
+    let mut out = String::with_capacity(os.len() + tc.len() + 48);
+    out.push_str("<session_environment>\n");
+    out.push_str(&os);
+    out.push_str(&tc);
     out.push_str("</session_environment>\n");
     out
 }
@@ -93,15 +90,6 @@ pub fn runtime_context() -> String {
     String::new()
 }
 
-fn key_name(key: &str) -> &str {
-    match key {
-        "os" => "OS",
-        "git" => "Git",
-        "toolchains" => "Toolchains",
-        _ => key,
-    }
-}
-
 /// Runs the requested probes concurrently under one shared budget, so a slow
 /// toolchain check cannot add to a git check's wait.
 fn run_session_probes(root: PathBuf, keys: &[&str]) -> BTreeMap<String, String> {
@@ -119,7 +107,7 @@ fn run_session_probes(root: PathBuf, keys: &[&str]) -> BTreeMap<String, String> 
         let tx = tx.clone();
         thread::spawn(move || {
             let value = match task {
-                ProbeTask::Os => os_info(),
+                ProbeTask::Os => os_info_cached(),
                 ProbeTask::Git(root) => git_info(&root),
                 ProbeTask::Toolchains(root) => toolchains(&root),
             };
@@ -158,6 +146,11 @@ fn shell_name() -> String {
         crate::agent::shell::ShellKind::Cmd => "cmd.exe".into(),
         crate::agent::shell::ShellKind::PowerShell => "PowerShell".into(),
     }
+}
+
+fn os_info_cached() -> String {
+    static OS_CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    OS_CACHE.get_or_init(os_info).clone()
 }
 
 fn os_info() -> String {
@@ -365,10 +358,24 @@ struct Probe {
     from_stderr: bool,
 }
 
+#[derive(Clone)]
 enum ProbeResult {
     Found(String),
     Missing,
     TimedOut,
+}
+
+/// Process-wide cache of installed toolchain version probes (`rustc`, `cargo`,
+/// `node`, `python`, etc.). Installed binaries do not change across `/new`,
+/// session switches, or compactions within one process, so each tool is
+/// spawned at most once; `TimedOut` is not cached so a transient stall can
+/// recover on a later retry.
+fn probe_cache() -> &'static std::sync::Mutex<std::collections::HashMap<&'static str, ProbeResult>>
+{
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<&'static str, ProbeResult>>,
+    > = std::sync::OnceLock::new();
+    CACHE.get_or_init(Default::default)
 }
 
 /// Toolchain facts in the two layers that actually answer different questions
@@ -666,28 +673,51 @@ fn run_probes(probes: Vec<Probe>) -> Vec<String> {
         return Vec::new();
     }
     let labels: Vec<&'static str> = probes.iter().map(|p| p.label).collect();
-    let (tx, rx) = mpsc::channel();
-    for probe in probes {
-        let tx = tx.clone();
-        thread::spawn(move || {
-            let outcome = probe_one(&probe);
-            let _ = tx.send((probe.label, outcome));
-        });
-    }
-    drop(tx);
-
-    let deadline = Instant::now() + SESSION_PROBE_BUDGET;
     let mut results: BTreeMap<&'static str, ProbeResult> = BTreeMap::new();
-    while results.len() < labels.len() {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            break;
-        }
-        match rx.recv_timeout(remaining) {
-            Ok((label, outcome)) => {
-                results.insert(label, outcome);
+    let mut uncached: Vec<Probe> = Vec::new();
+    {
+        let cache = probe_cache()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for probe in probes {
+            if let Some(hit) = cache.get(probe.label) {
+                results.insert(probe.label, hit.clone());
+            } else {
+                uncached.push(probe);
             }
-            Err(_) => break,
+        }
+    }
+    if !uncached.is_empty() {
+        let pending_count = uncached.len();
+        let (tx, rx) = mpsc::channel();
+        for probe in uncached {
+            let tx = tx.clone();
+            thread::spawn(move || {
+                let outcome = probe_one(&probe);
+                let _ = tx.send((probe.label, outcome));
+            });
+        }
+        drop(tx);
+
+        let deadline = Instant::now() + SESSION_PROBE_BUDGET;
+        let mut received = 0usize;
+        while received < pending_count {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            match rx.recv_timeout(remaining) {
+                Ok((label, outcome)) => {
+                    if !matches!(outcome, ProbeResult::TimedOut)
+                        && let Ok(mut cache) = probe_cache().lock()
+                    {
+                        cache.insert(label, outcome.clone());
+                    }
+                    results.insert(label, outcome);
+                    received += 1;
+                }
+                Err(_) => break,
+            }
         }
     }
     labels
@@ -807,6 +837,7 @@ fn capture_inner(
         .spawn()
         .map_err(|error| ProbeError::Spawn(error.kind().to_string()))?;
     let deadline = Instant::now() + PROBE_TIMEOUT;
+    let mut poll_ms = 2u64;
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
@@ -825,7 +856,10 @@ fn capture_inner(
                 };
                 return Ok((clip(output.stdout), clip(output.stderr)));
             }
-            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
+            Ok(None) if Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(poll_ms));
+                poll_ms = (poll_ms * 2).min(16);
+            }
             Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();

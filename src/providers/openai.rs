@@ -17,17 +17,8 @@ pub struct OpenAiProvider {
 
 impl OpenAiProvider {
     pub fn new(p: &ResolvedProvider) -> Result<Self> {
-        let http = reqwest::ClientBuilder::new()
-            .http1_only()
-            .user_agent(super::USER_AGENT)
-            .connect_timeout(std::time::Duration::from_secs(15))
-            .read_timeout(std::time::Duration::from_secs(180))
-            // same stall guard as the Responses client: a headers stall
-            // must fail loudly after 10 min, never hang the run silently.
-            .timeout(std::time::Duration::from_secs(600))
-            .build()?;
         Ok(Self {
-            http,
+            http: super::stream_http_client(),
             base_url: p.base_url.clone(),
             api_key: p.api_key.clone(),
         })

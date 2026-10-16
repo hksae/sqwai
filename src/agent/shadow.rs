@@ -51,15 +51,30 @@ pub fn dir_for(root: &Path, store: ShadowStore) -> Option<PathBuf> {
 }
 
 /// True when the `git` binary answers at all. Layer 2 needs it; layer 1 does
-/// not, and degradation table says so explicitly.
+/// not, and degradation table says so explicitly. Cached per process so
+/// `Shadow::open` does not spawn `git --version` on every snapshot check.
 pub fn git_available() -> bool {
-    Command::new("git")
-        .arg("--version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
+    static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *AVAILABLE.get_or_init(|| {
+        Command::new("git")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    })
+}
+
+/// Shadow `(git_dir, root)` pairs already configured in this process. Avoids
+/// spawning 9 `git config` subprocesses on every `Shadow::open` call once the
+/// shadow repository exists on disk.
+fn configured_shadows() -> &'static std::sync::Mutex<std::collections::HashSet<(PathBuf, PathBuf)>>
+{
+    static SET: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashSet<(PathBuf, PathBuf)>>,
+    > = std::sync::OnceLock::new();
+    SET.get_or_init(Default::default)
 }
 
 impl Shadow {
@@ -116,9 +131,21 @@ impl Shadow {
     }
 
     /// Create the repository and write the configuration prescribes.
-    /// Idempotent: an existing shadow is only reconfigured, never re-created.
+    /// Idempotent: an existing shadow already configured in this process
+    /// skips re-spawning the 9 `git config` processes.
     pub fn ensure(&self) -> Result<()> {
-        if !self.git_dir.join("HEAD").exists() {
+        let head_exists = self.git_dir.join("HEAD").exists();
+        let key = (self.git_dir.clone(), self.root.clone());
+        if head_exists
+            && self.git_dir.join("info/exclude").exists()
+            && configured_shadows()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .contains(&key)
+        {
+            return Ok(());
+        }
+        if !head_exists {
             std::fs::create_dir_all(&self.git_dir).context("creating the shadow git dir")?;
             let out = Command::new("git")
                 .arg("init")
@@ -139,7 +166,7 @@ impl Shadow {
                 );
             }
         }
-        for (key, value) in [
+        for (cfg_key, value) in [
             ("core.worktree", self.root.to_string_lossy().into_owned()),
             // snapshots must preserve raw bytes: a line-ending rewrite would
             // make a restore differ from what was snapshotted
@@ -154,9 +181,13 @@ impl Shadow {
             ("commit.gpgsign", "false".into()),
             ("core.hooksPath", "/dev/null".into()),
         ] {
-            self.git(&["config", key, &value])?;
+            self.git(&["config", cfg_key, &value])?;
         }
         self.write_exclude()?;
+        configured_shadows()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(key);
         Ok(())
     }
 
@@ -187,8 +218,11 @@ impl Shadow {
     }
 
     /// Stage the whole worktree. This is what makes untracked files part of a
-    /// snapshot, and it touches only the shadow index.
+    /// snapshot, and it touches only the shadow index. Refreshes `info/exclude`
+    /// first so any nested git repository or `.gitignore` created since the
+    /// shadow opened is excluded from staging.
     fn stage_all(&self) -> Result<()> {
+        self.write_exclude()?;
         self.git(&["add", "-A", "--", "."]).map(|_| ())
     }
 

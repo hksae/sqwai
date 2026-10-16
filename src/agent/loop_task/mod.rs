@@ -415,35 +415,44 @@ fn repeat_verdict_with_limit(
     if key.is_empty() || output.is_empty() {
         return RepeatVerdict::Fresh;
     }
-    let cleared = crate::agent::tool_output::cleared_indices_with_limit(messages, context_limit);
-    // (call key, output) pairs in order; the current call has no result yet,
-    // so everything collected here is older. Only results still visible on the
-    // wire count: never tell the model "see above" for output that was cleared.
-    let mut matches = 0usize;
+    // Collect matching tool call ids first (filtering by tool name before
+    // serializing arguments) so we only compute `cleared_indices_with_limit`
+    // and scan tool outputs when a prior identical call actually exists.
+    let mut matching_ids: Vec<&str> = Vec::new();
     for message in messages {
         if message.role != Role::Assistant {
             continue;
         }
         for tc in &message.tool_calls {
-            let Some(previous) = call_key_ref(tc) else {
-                continue;
-            };
-            if previous != key {
+            if tc.name != call.name {
                 continue;
             }
-            let out = messages
-                .iter()
-                .enumerate()
-                .find(|(idx, m)| {
-                    m.role == Role::Tool
-                        && m.tool_call_id.as_deref() == Some(&tc.id)
-                        && !cleared.contains(idx)
-                })
-                .map(|(_, m)| strip_host_repeat_marks(&m.content))
-                .unwrap_or("");
-            if out == output {
-                matches += 1;
+            if call_key_ref(tc).as_deref() == Some(key.as_str()) {
+                matching_ids.push(tc.id.as_str());
             }
+        }
+    }
+    if matching_ids.is_empty() {
+        return RepeatVerdict::Fresh;
+    }
+    let cleared = crate::agent::tool_output::cleared_indices_with_limit(messages, context_limit);
+    // (call key, output) pairs in order; the current call has no result yet,
+    // so everything collected here is older. Only results still visible on the
+    // wire count: never tell the model "see above" for output that was cleared.
+    let mut matches = 0usize;
+    for tc_id in matching_ids {
+        let out = messages
+            .iter()
+            .enumerate()
+            .find(|(idx, m)| {
+                m.role == Role::Tool
+                    && m.tool_call_id.as_deref() == Some(tc_id)
+                    && !cleared.contains(idx)
+            })
+            .map(|(_, m)| strip_host_repeat_marks(&m.content))
+            .unwrap_or("");
+        if out == output {
+            matches += 1;
         }
     }
     match matches {
@@ -969,33 +978,24 @@ async fn run_agent(
             continuation_usable,
         );
         let request_messages = request_messages_with_limit(&messages, transport, context_limit);
-        let breakdown = RequestBreakdown::from_request(&ChatRequest {
+        let chat_req = ChatRequest {
             model_id: model_id.clone(),
             system: turn_system.clone(),
-            messages: request_messages.clone(),
+            messages: request_messages,
             effort,
             effort_support,
             max_tokens,
             tools: tools.clone(),
             previous_response_id: previous_response_id.clone(),
             context_transport: transport,
-        });
+        };
+        let breakdown = RequestBreakdown::from_request(&chat_req);
         let _ = tx.send(AgentEvent::RequestBreakdown(breakdown)).await;
 
         // one complete streaming turn
         let turn = match run_turn(
             &provider,
-            &ChatRequest {
-                model_id: model_id.clone(),
-                system: turn_system.clone(),
-                messages: request_messages,
-                effort,
-                effort_support,
-                max_tokens,
-                tools: tools.clone(),
-                previous_response_id: previous_response_id.clone(),
-                context_transport: transport,
-            },
+            &chat_req,
             &tx,
             &mut ctl,
             &mut previous_response_id,

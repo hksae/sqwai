@@ -21,6 +21,7 @@ pub const USER_AGENT: &str = concat!("sqwai/", env!("CARGO_PKG_VERSION"));
 /// diverge. Per-request timeouts stay on the builders; streaming providers
 /// keep their own tuned clients (http1_only, long reads).
 static SHARED_HTTP: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+static SHARED_STREAM_HTTP: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
 
 pub fn http_client() -> reqwest::Client {
     SHARED_HTTP
@@ -32,6 +33,47 @@ pub fn http_client() -> reqwest::Client {
                 .expect("default http client builds")
         })
         .clone()
+}
+
+/// Process-wide streaming HTTP client shared across OpenAI, Anthropic, and
+/// Responses providers so `rebuild_provider()` and fallback chain construction
+/// on every turn reuse warm TCP/TLS Keep-Alive sockets and OS certificate
+/// stores instead of rebuilding `reqwest::Client` from scratch.
+pub fn stream_http_client() -> reqwest::Client {
+    SHARED_STREAM_HTTP
+        .get_or_init(|| {
+            reqwest::ClientBuilder::new()
+                .http1_only()
+                .user_agent(USER_AGENT)
+                .connect_timeout(std::time::Duration::from_secs(15))
+                .read_timeout(std::time::Duration::from_secs(180))
+                .timeout(std::time::Duration::from_secs(600))
+                .build()
+                .expect("streaming http client builds")
+        })
+        .clone()
+}
+
+/// Zero-allocation serialized byte length of a `serde_json::Value`. Avoids
+/// allocating multi-hundred-KB temporary `String`s on every turn just to
+/// measure `provider_state`, `extra_content`, `call.args`, and tool schemas.
+#[inline]
+fn json_byte_len(val: &serde_json::Value) -> u64 {
+    struct ByteCounter(u64);
+    impl std::io::Write for ByteCounter {
+        #[inline]
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0 += buf.len() as u64;
+            Ok(buf.len())
+        }
+        #[inline]
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut counter = ByteCounter(0);
+    let _ = serde_json::to_writer(&mut counter, val);
+    counter.0
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -409,7 +451,7 @@ impl RequestBreakdown {
                 + message
                     .tool_calls
                     .iter()
-                    .map(|call| call.name.len() as u64 + call.args.to_string().len() as u64)
+                    .map(|call| call.name.len() as u64 + json_byte_len(&call.args))
                     .sum::<u64>();
             match message.role {
                 Role::System => out.system_bytes += bytes,
@@ -425,17 +467,12 @@ impl RequestBreakdown {
             out.reasoning_bytes += message
                 .provider_state
                 .as_ref()
-                .map(|state| state.to_string().len() as u64)
+                .map(json_byte_len)
                 .unwrap_or(0)
                 + message
                     .tool_calls
                     .iter()
-                    .map(|call| {
-                        call.extra_content
-                            .as_ref()
-                            .map(|extra| extra.to_string().len() as u64)
-                            .unwrap_or(0)
-                    })
+                    .map(|call| call.extra_content.as_ref().map(json_byte_len).unwrap_or(0))
                     .sum::<u64>();
         }
         out.system_bytes += req
@@ -443,7 +480,7 @@ impl RequestBreakdown {
             .iter()
             .map(|tool| {
                 (tool.name.len() + tool.description.len()) as u64
-                    + tool.parameters.to_string().len() as u64
+                    + json_byte_len(&tool.parameters)
             })
             .sum::<u64>();
         out.total_bytes = out.system_bytes
