@@ -1965,3 +1965,97 @@ async fn same_turn_subagent_calls_overlap() {
         "results address both calls: {results:?}"
     );
 }
+
+#[tokio::test]
+async fn parallel_read_only_batch_merges_read_state_before_following_mutation() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    std::fs::write(root.join("a.txt"), "old a\n").unwrap();
+    std::fs::write(root.join("b.txt"), "old b\n").unwrap();
+
+    // Two parallel reads (`a.txt` and `b.txt`) followed by an overwrite `write`
+    // on `a.txt` in the same turn batch: `write` requires `a.txt` to be in
+    // `ctx.files_read`, proving the parallel batch merged its read state back
+    // before the mutating call ran.
+    let provider = std::sync::Arc::new(MockTestProvider {
+        events: std::sync::Mutex::new(vec![
+            vec![
+                Ok(crate::providers::StreamEvent::ToolCall(
+                    crate::providers::ToolCallReq::new(
+                        "r1",
+                        "read",
+                        serde_json::json!({"file_path": "a.txt"}),
+                    ),
+                )),
+                Ok(crate::providers::StreamEvent::ToolCall(
+                    crate::providers::ToolCallReq::new(
+                        "r2",
+                        "read",
+                        serde_json::json!({"file_path": "b.txt"}),
+                    ),
+                )),
+                Ok(crate::providers::StreamEvent::ToolCall(
+                    crate::providers::ToolCallReq::new(
+                        "w1",
+                        "write",
+                        serde_json::json!({"file_path": "a.txt", "content": "new a\n"}),
+                    ),
+                )),
+            ],
+            vec![Ok(crate::providers::StreamEvent::Text("done".into()))],
+        ]),
+    });
+
+    let input = AgentInput {
+        provider,
+        model_id: "m".into(),
+        model_key: "primary".into(),
+        effort: None,
+        effort_support: Default::default(),
+        max_tokens: None,
+        system: vec![],
+        messages: vec![Message::new(Role::User, "read both and overwrite a.txt")],
+        root: root.clone(),
+        session_id: "test-parallel-ro".into(),
+        blocked_patterns: vec![],
+        web_allow_hosts: vec![],
+        plan_mode: false,
+        context_limit: 10000,
+        enable_tools: true,
+        background_baselines: false,
+        read_only: false,
+        previous_response_id: None,
+        summary: None,
+        mcp: Default::default(),
+        lsp: Default::default(),
+        compact_only: false,
+        memory: Default::default(),
+        compaction: Default::default(),
+        plan_limits: Default::default(),
+        shadow_store: crate::config::ShadowStore::Off,
+        subagent_depth: 0,
+        parent_step: None,
+        parent_session: None,
+        fallback_chain: vec![],
+    };
+
+    let mut handle = spawn_agent(input);
+    let mut notices: Vec<(String, bool)> = Vec::new();
+    while let Some(ev) = handle.rx.recv().await {
+        match ev {
+            AgentEvent::ToolNotice { call_id, ok, .. } => notices.push((call_id, ok)),
+            AgentEvent::Completed(Ok(_)) => break,
+            AgentEvent::Completed(Err(e)) => panic!("unexpected error: {e}"),
+            _ => {}
+        }
+    }
+    assert_eq!(
+        notices,
+        vec![
+            ("r1".to_string(), true),
+            ("r2".to_string(), true),
+            ("w1".to_string(), true),
+        ]
+    );
+    assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "new a\n");
+}

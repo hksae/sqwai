@@ -360,6 +360,28 @@ impl ToolCtx {
             .map(|served| served.served)
             .unwrap_or(0)
     }
+
+    /// Merge `files_read` and `read_windows` accumulated by a parallel
+    /// read-only worker back into the session context in deterministic order.
+    pub(crate) fn merge_read_state(&mut self, child: ToolCtx) {
+        for (path, hash) in child.files_read {
+            self.files_read.insert(path, hash);
+        }
+        for (path, child_served) in child.read_windows {
+            let slot = self.read_windows.entry(path).or_insert_with(Served::new);
+            if slot.hash != child_served.hash {
+                *slot = child_served;
+            } else {
+                for w in child_served.windows {
+                    if !slot.windows.contains(&w) {
+                        slot.windows.push(w);
+                    }
+                }
+                slot.served = slot.windows.len();
+                slot.rebuild_ranges();
+            }
+        }
+    }
 }
 
 /// What `read` has already served from one content version of a file: the hash

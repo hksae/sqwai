@@ -421,6 +421,252 @@ fn normalize_to_lf(s: &str) -> String {
     s.replace("\r\n", "\n")
 }
 
+/// Split `s` into lines while remembering whether the text uses CRLF.
+fn split_lines_lossless(s: &str) -> Vec<&str> {
+    if s.is_empty() {
+        return Vec::new();
+    }
+    let mut lines: Vec<&str> = s.split('\n').collect();
+    // If `s` ends with `\n`, `split('\n')` leaves a trailing `""` element;
+    // keep it out of the line list and track trailing newline separately.
+    if s.ends_with('\n') {
+        lines.pop();
+    }
+    lines
+        .into_iter()
+        .map(|l| l.strip_suffix('\r').unwrap_or(l))
+        .collect()
+}
+
+/// Replace a line range `start..end` in `content` with `replacement_lines`,
+/// preserving the file's newline style (`\r\n` vs `\n`) and final newline.
+fn splice_line_range(
+    content: &str,
+    content_lines: &[&str],
+    start: usize,
+    end: usize,
+    replacement_lines: &[String],
+) -> String {
+    let eol = if content.contains("\r\n") { "\r\n" } else { "\n" };
+    let trailing_nl = content.ends_with('\n');
+    let mut out_lines: Vec<&str> = Vec::with_capacity(
+        content_lines.len().saturating_sub(end - start) + replacement_lines.len(),
+    );
+    out_lines.extend_from_slice(&content_lines[..start]);
+    for r in replacement_lines {
+        out_lines.push(r.as_str());
+    }
+    out_lines.extend_from_slice(&content_lines[end..]);
+    let mut joined = out_lines.join(eol);
+    if trailing_nl && !out_lines.is_empty() {
+        joined.push_str(eol);
+    }
+    joined
+}
+
+/// Stage 2 & 3 fallback matching (Aider / OpenCode style):
+/// 1. Line-trimmed match (ignores trailing spaces/tabs on each line).
+/// 2. Relative-indentation match (preserves relative indentation inside the
+///    block while adapting to the file's outer indentation prefix).
+/// Only succeeds when the match is unambiguous (count == 1).
+fn try_whitespace_or_indent_replace(
+    content: &str,
+    old: &str,
+    new: &str,
+) -> Result<Option<String>, String> {
+    let content_lines = split_lines_lossless(content);
+    let old_lines = split_lines_lossless(old);
+    let new_lines = split_lines_lossless(new);
+    if old_lines.is_empty() || old_lines.len() > content_lines.len() {
+        return Ok(None);
+    }
+    let window = old_lines.len();
+
+    // Pass A: match ignoring trailing whitespace on each line.
+    let mut trimmed_hits: Vec<usize> = Vec::new();
+    for i in 0..=(content_lines.len() - window) {
+        let ok = (0..window).all(|k| {
+            content_lines[i + k].trim_end_matches([' ', '\t'])
+                == old_lines[k].trim_end_matches([' ', '\t'])
+        });
+        if ok {
+            trimmed_hits.push(i);
+        }
+    }
+    if trimmed_hits.len() > 1 {
+        return err(format!(
+            "old_string appears {} times — provide more surrounding context or set replace_all=true",
+            trimmed_hits.len()
+        ));
+    }
+    if let [hit] = trimmed_hits.as_slice() {
+        let rep: Vec<String> = new_lines.iter().map(|s| (*s).to_string()).collect();
+        return Ok(Some(splice_line_range(
+            content,
+            &content_lines,
+            *hit,
+            *hit + window,
+            &rep,
+        )));
+    }
+
+    // Pass B: relative-indentation match (Aider `match_but_for_leading_whitespace`).
+    if !old_lines.iter().any(|l| !l.trim().is_empty()) {
+        return Ok(None);
+    }
+    let min_old_indent = old_lines
+        .iter()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.len() - l.trim_start().len())
+        .min()
+        .unwrap_or(0);
+    let min_new_indent = new_lines
+        .iter()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.len() - l.trim_start().len())
+        .min()
+        .unwrap_or(0);
+    let strip_base = min_old_indent.min(min_new_indent);
+
+    let outdented_old: Vec<&str> = old_lines
+        .iter()
+        .map(|l| {
+            if l.trim().is_empty() {
+                ""
+            } else {
+                &l[strip_base.min(l.len() - l.trim_start().len())..]
+            }
+        })
+        .collect();
+    let outdented_new: Vec<&str> = new_lines
+        .iter()
+        .map(|l| {
+            if l.trim().is_empty() {
+                ""
+            } else {
+                &l[strip_base.min(l.len() - l.trim_start().len())..]
+            }
+        })
+        .collect();
+
+    let mut indent_hits: Vec<(usize, String)> = Vec::new();
+    for i in 0..=(content_lines.len() - window) {
+        let mut prefix_opt: Option<&str> = None;
+        let mut matched = true;
+        for k in 0..window {
+            let c_line = content_lines[i + k].trim_end_matches([' ', '\t']);
+            let o_line = outdented_old[k].trim_end_matches([' ', '\t']);
+            if o_line.trim().is_empty() {
+                if !c_line.trim().is_empty() {
+                    matched = false;
+                    break;
+                }
+                continue;
+            }
+            if c_line.trim_start() != o_line.trim_start() {
+                matched = false;
+                break;
+            }
+            let Some(prefix) = c_line.strip_suffix(o_line) else {
+                matched = false;
+                break;
+            };
+            if !prefix.chars().all(|ch| ch == ' ' || ch == '\t') {
+                matched = false;
+                break;
+            }
+            match prefix_opt {
+                None => prefix_opt = Some(prefix),
+                Some(prev) if prev != prefix => {
+                    matched = false;
+                    break;
+                }
+                Some(_) => {}
+            }
+        }
+        if matched && let Some(prefix) = prefix_opt {
+            indent_hits.push((i, prefix.to_string()));
+        }
+    }
+    if indent_hits.len() > 1 {
+        return err(format!(
+            "old_string appears {} times — provide more surrounding context or set replace_all=true",
+            indent_hits.len()
+        ));
+    }
+    if let [(hit, prefix)] = indent_hits.as_slice() {
+        let rep: Vec<String> = outdented_new
+            .iter()
+            .map(|l| {
+                if l.trim().is_empty() {
+                    String::new()
+                } else {
+                    format!("{prefix}{l}")
+                }
+            })
+            .collect();
+        return Ok(Some(splice_line_range(
+            content,
+            &content_lines,
+            *hit,
+            *hit + window,
+            &rep,
+        )));
+    }
+    Ok(None)
+}
+
+/// Find the closest matching line window in `content` when `old` fails to
+/// match, returning a numbered snippet so the model can fix the edit without
+/// issuing a separate `read` call.
+fn find_similar_window(content: &str, old: &str) -> Option<String> {
+    let content_lines: Vec<&str> = content.lines().collect();
+    let old_trimmed: Vec<&str> = old
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    if content_lines.is_empty() || old_trimmed.is_empty() {
+        return None;
+    }
+    let window = old.lines().count().max(1).min(content_lines.len());
+    let mut best_score = 0usize;
+    let mut best_start = 0usize;
+    for i in 0..=(content_lines.len() - window) {
+        let slice = &content_lines[i..i + window];
+        let score = old_trimmed
+            .iter()
+            .filter(|&&needle| slice.iter().any(|& cand| cand.trim() == needle))
+            .count();
+        if score > best_score {
+            best_score = score;
+            best_start = i;
+        }
+    }
+    if best_score == 0 {
+        // Fallback: search for any line containing the longest non-empty line of `old`.
+        let anchor = old_trimmed.iter().max_by_key(|l| l.len())?;
+        if anchor.len() < 4 {
+            return None;
+        }
+        let pos = content_lines.iter().position(|l| l.contains(anchor))?;
+        best_start = pos.saturating_sub(1);
+    } else if best_score * 2 < old_trimmed.len() && best_score < 2 {
+        return None;
+    }
+    let from = best_start.saturating_sub(2);
+    let to = (best_start + window + 2).min(content_lines.len()).min(from + 12);
+    let mut snippet = format!(
+        "\nClosest lines in file (lines {}–{}):\n",
+        from + 1,
+        to
+    );
+    for (idx, line) in content_lines.iter().enumerate().take(to).skip(from) {
+        snippet.push_str(&format!("{:>6}\t{}\n", idx + 1, line));
+    }
+    Some(snippet.trim_end().to_string())
+}
+
 pub(super) fn apply_one(
     content: &str,
     old: &str,
@@ -460,7 +706,23 @@ pub(super) fn apply_one(
 
     let count = content.matches(target_old.as_ref()).count();
     if count == 0 {
-        return err("old_string not found in file");
+        if !replace_all
+            && let Some(replaced) = try_whitespace_or_indent_replace(content, old, new)?
+        {
+            return Ok(replaced);
+        }
+        let mut msg = String::from("old_string not found in file");
+        if !new.trim().is_empty()
+            && (content.contains(new)
+                || content.contains(&normalize_to_lf(new))
+                || content.contains(&normalize_to_crlf(new)))
+        {
+            msg.push_str(" — note: new_string is already present in the file");
+        }
+        if let Some(similar) = find_similar_window(content, old) {
+            msg.push_str(&similar);
+        }
+        return err(msg);
     }
     if count > 1 && !replace_all {
         return err(format!(
@@ -607,10 +869,10 @@ pub(super) fn multi_edit(
     // validate all replacements against the evolving text before touching disk
     let mut staged = body.to_string();
     for (i, (old, new, all)) in edits.iter().enumerate() {
-        if let Err(e) = apply_one(&staged, old, new, *all) {
-            return Outcome::err(format!("edit #{} failed: {e}", i + 1));
+        match apply_one(&staged, old, new, *all) {
+            Ok(next) => staged = next,
+            Err(e) => return Outcome::err(format!("edit #{} failed: {e}", i + 1)),
         }
-        staged = apply_one(&staged, old, new, *all).unwrap_or(staged.clone());
     }
     let checkpoint_id = Some(checkpoint(ctx, &p, "multi_edit"));
     let updated = restore_bom(staged, had_bom);
@@ -700,16 +962,16 @@ pub(super) fn glob(ctx: &mut ToolCtx, pattern: &str, base: Option<&str>) -> Outc
         Ok(g) => g.compile_matcher(),
         Err(e) => return Outcome::err(format!("bad glob pattern: {e}")),
     };
-    let mut hits: Vec<String> = Vec::new();
-    // host-owned state is never listed, whatever the walker thinks about
-    // hidden files: on Windows `hidden(true)` checks attributes, not dots,
-    // so `.sqwai/` would leak without this explicit skip
+    let basename_glob = if !pattern.contains('/') && !pattern.contains('\\') {
+        GlobBuilder::new(pattern).build().ok().map(|g| g.compile_matcher())
+    } else {
+        None
+    };
+    let mut hits: Vec<(std::time::SystemTime, String)> = Vec::new();
+    // host-owned state and .git internals are never listed, while dot-config
+    // directories (.github/, .cargo/) remain visible.
     let host_owned = ctx.host_state_dir();
-    for entry in WalkBuilder::new(&base_dir).hidden(true).build().flatten() {
-        if hits.len() >= 300 {
-            hits.push("…(more results truncated)".into());
-            break;
-        }
+    for entry in WalkBuilder::new(&base_dir).hidden(false).build().flatten() {
         let path = entry.path();
         if !path.is_file() {
             continue;
@@ -718,14 +980,34 @@ pub(super) fn glob(ctx: &mut ToolCtx, pattern: &str, base: Option<&str>) -> Outc
             continue;
         }
         let rel = path.strip_prefix(&base_dir).unwrap_or(path);
-        if glob.is_match(rel) {
-            hits.push(rel.to_string_lossy().replace('\\', "/"));
+        if rel.components().any(|c| c.as_os_str() == ".git" || c.as_os_str() == ".sqwai") {
+            continue;
+        }
+        let matched = glob.is_match(rel)
+            || basename_glob.as_ref().is_some_and(|bg| {
+                path.file_name()
+                    .is_some_and(|name| bg.is_match(Path::new(name)))
+            });
+        if matched {
+            let mtime = entry
+                .metadata()
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .unwrap_or(std::time::UNIX_EPOCH);
+            hits.push((mtime, rel.to_string_lossy().replace('\\', "/")));
         }
     }
-    Outcome::ok(if hits.is_empty() {
+    // Newest modified files first so active work surfaces before the 300-file cap.
+    hits.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    let truncated = hits.len() > 300;
+    let mut out: Vec<String> = hits.into_iter().take(300).map(|(_, p)| p).collect();
+    if truncated {
+        out.push("…(more results truncated)".into());
+    }
+    Outcome::ok(if out.is_empty() {
         "no matches".into()
     } else {
-        hits.join("\n")
+        out.join("\n")
     })
 }
 
@@ -783,7 +1065,7 @@ pub(super) fn grep(
     // asymmetry `ctx::resolve` grants `read`.
     let spill = host_owned.join("spill");
     let spill_named = base_dir.starts_with(&spill);
-    'outer: for entry in WalkBuilder::new(&base_dir).hidden(true).build().flatten() {
+    'outer: for entry in WalkBuilder::new(&base_dir).hidden(false).build().flatten() {
         let path = entry.path();
         if !path.is_file() {
             continue;
@@ -791,12 +1073,20 @@ pub(super) fn grep(
         if path.starts_with(&host_owned) && !(spill_named && path.starts_with(&spill)) {
             continue;
         }
+        let rel_check = path.strip_prefix(&ctx.root).unwrap_or(path);
+        if rel_check.components().any(|c| c.as_os_str() == ".git")
+            || (!spill_named && rel_check.components().any(|c| c.as_os_str() == ".sqwai"))
+        {
+            continue;
+        }
+        let disp = path.strip_prefix(&ctx.root).unwrap_or(path);
+        let shown = disp.display().to_string().replace('\\', "/");
         if let Some(f) = &inc {
             let name = path
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            if !f.is_match(&name) {
+            if !f.is_match(&name) && !f.is_match(&shown) {
                 continue;
             }
         }
@@ -812,21 +1102,15 @@ pub(super) fn grep(
         }
         let text = String::from_utf8_lossy(&raw);
         let lines: Vec<&str> = text.lines().collect();
-        let disp = path.strip_prefix(&ctx.root).unwrap_or(path);
-        let shown = disp.display().to_string().replace('\\', "/");
         let mut hits: Vec<usize> = Vec::new();
+        let mut hit_cap = false;
         for (i, line) in lines.iter().enumerate() {
             if re.is_match(line) {
                 hits.push(i);
                 matches += 1;
                 if matches >= 200 {
-                    match spill_output(ctx, "grep", &out) {
-                        Some(rel) => out.push_str(&format!(
-                            "…(more matches truncated: first 200 shown, full list in {rel} — grep it with a narrower pattern instead of re-running broad)\n"
-                        )),
-                        None => out.push_str("…(more matches truncated)\n"),
-                    }
-                    break 'outer;
+                    hit_cap = true;
+                    break;
                 }
             }
         }
@@ -852,6 +1136,15 @@ pub(super) fn grep(
                 out.push_str("…(output truncated)\n");
                 break 'outer;
             }
+        }
+        if hit_cap {
+            match spill_output(ctx, "grep", &out) {
+                Some(rel) => out.push_str(&format!(
+                    "…(more matches truncated: first 200 shown, full list in {rel} — grep it with a narrower pattern instead of re-running broad)\n"
+                )),
+                None => out.push_str("…(more matches truncated)\n"),
+            }
+            break 'outer;
         }
     }
     Outcome::ok(if out.is_empty() {
@@ -1228,5 +1521,116 @@ mod tests {
             std::fs::read_to_string(dir.path().join("u.txt")).unwrap(),
             "cba"
         );
+    }
+
+    #[test]
+    fn apply_one_tolerates_trailing_whitespace_and_relative_indentation() {
+        // 1. Trailing whitespace on lines in the file
+        let content = "fn foo() {   \n    let x = 1;  \n}\n";
+        let edited = apply_one(
+            content,
+            "fn foo() {\n    let x = 1;\n}",
+            "fn foo() {\n    let x = 2;\n}",
+            false,
+        )
+        .unwrap();
+        assert_eq!(edited, "fn foo() {\n    let x = 2;\n}\n");
+
+        // 2. Relative indentation: model omitted 4 spaces of outer indentation
+        let indented = "impl S {\n    fn calc(&self) {\n        if true {\n            work();\n        }\n    }\n}\n";
+        let edited_indent = apply_one(
+            indented,
+            "fn calc(&self) {\n    if true {\n        work();\n    }\n}",
+            "fn calc(&self) {\n    if false {\n        work();\n    }\n}",
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            edited_indent,
+            "impl S {\n    fn calc(&self) {\n        if false {\n            work();\n        }\n    }\n}\n"
+        );
+    }
+
+    #[test]
+    fn apply_one_reports_already_applied_and_closest_lines_on_mismatch() {
+        let content = "line 1\nfn compute_value(a: i32) -> i32 {\n    a + 42\n}\nline 5\n";
+        let err_msg = apply_one(
+            content,
+            "fn compute_value(a: i32) -> i32 {\n    a + 1\n}",
+            "fn compute_value(a: i32) -> i32 {\n    a + 42\n}",
+            false,
+        )
+        .unwrap_err();
+        assert!(err_msg.contains("old_string not found in file"), "{err_msg}");
+        assert!(
+            err_msg.contains("new_string is already present"),
+            "{err_msg}"
+        );
+        assert!(
+            err_msg.contains("Closest lines in file"),
+            "must show closest snippet with line numbers: {err_msg}"
+        );
+        assert!(err_msg.contains("a + 42"), "{err_msg}");
+    }
+
+    #[test]
+    fn grep_200_match_cap_formats_and_spills_first_200_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        let body: String = (1..=250).map(|i| format!("hit_line_{i}\n")).collect();
+        std::fs::write(dir.path().join("many_hits.txt"), body).unwrap();
+        let mut ctx = ToolCtx::new(dir.path());
+
+        let outcome = grep(&mut ctx, "hit_line_", None, None, 0);
+        assert!(outcome.ok, "{}", outcome.output);
+        assert!(
+            outcome.output.contains("many_hits.txt:1: hit_line_1"),
+            "first match must be present: {}",
+            outcome.output
+        );
+        assert!(
+            outcome.output.contains("many_hits.txt:200: hit_line_200"),
+            "200th match must be formatted before truncation: {}",
+            outcome.output
+        );
+        assert!(
+            outcome.output.contains("first 200 shown"),
+            "{}",
+            outcome.output
+        );
+    }
+
+    #[test]
+    fn glob_and_grep_support_bare_filenames_path_includes_and_dot_config_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".github/workflows")).unwrap();
+        std::fs::write(
+            dir.path().join(".github/workflows/ci.yml"),
+            "name: CI_MARKER\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.path().join("src/nested")).unwrap();
+        std::fs::write(dir.path().join("src/nested/mod.rs"), "pub fn inner() {}\n").unwrap();
+        let mut ctx = ToolCtx::new(dir.path());
+
+        // Bare filename glob `*.rs` finds nested `src/nested/mod.rs`
+        let g = glob(&mut ctx, "*.rs", None);
+        assert!(g.ok);
+        assert!(g.output.contains("src/nested/mod.rs"), "{}", g.output);
+
+        // Dot-config `.github/workflows/ci.yml` is visible to glob and grep
+        let g_ci = glob(&mut ctx, "ci.yml", None);
+        assert!(g_ci.ok);
+        assert!(g_ci.output.contains(".github/workflows/ci.yml"), "{}", g_ci.output);
+
+        // Path-based include in grep matches relative path
+        let gr = grep(
+            &mut ctx,
+            "CI_MARKER",
+            None,
+            Some(".github/**/*.yml"),
+            0,
+        );
+        assert!(gr.ok);
+        assert!(gr.output.contains("CI_MARKER"), "{}", gr.output);
     }
 }

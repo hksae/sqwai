@@ -543,6 +543,62 @@ fn call_key_ref(call: &ToolCallReq) -> Option<String> {
     ))
 }
 
+/// Whether `call` is a pure read-only tool that can safely execute in parallel
+/// with adjacent read-only calls (Codex-style shared read lock).
+fn is_parallel_read_only_call(call: &ToolCallReq) -> bool {
+    matches!(
+        call.name.as_str(),
+        "read"
+            | "grep"
+            | "glob"
+            | "outline"
+            | "ls"
+            | "git_status"
+            | "git_diff"
+            | "git_log"
+            | "git_show"
+            | "webfetch"
+            | "websearch"
+    )
+}
+
+/// Find the end index `batch_end` of a parallelizable consecutive read-only run
+/// starting at `start_idx`. Stops before any mutating/interactive tool, before
+/// a duplicate `call_key` (so `repeat_verdict` can catch identical re-runs
+/// sequentially), or before a second `read` on the same `file_path` (so window
+/// coverage from the first `read` is visible to the second).
+fn parallel_read_only_batch_end(calls: &[ToolCallReq], start_idx: usize) -> usize {
+    const MAX_PARALLEL_TOOLS: usize = 8;
+    let mut keys: Vec<String> = Vec::new();
+    let mut read_paths: Vec<String> = Vec::new();
+    let mut end = start_idx;
+    while end < calls.len() && (end - start_idx) < MAX_PARALLEL_TOOLS {
+        let call = &calls[end];
+        if !is_parallel_read_only_call(call) {
+            break;
+        }
+        let k = call_key(call);
+        if !k.is_empty() && keys.contains(&k) {
+            break;
+        }
+        if call.name == "read" {
+            let p = call.args["file_path"]
+                .as_str()
+                .unwrap_or_default()
+                .replace('\\', "/");
+            if read_paths.contains(&p) {
+                break;
+            }
+            read_paths.push(p);
+        }
+        if !k.is_empty() {
+            keys.push(k);
+        }
+        end += 1;
+    }
+    end
+}
+
 /// Sessions this process already opened an agent run for. `run_agent` is
 /// spawned per turn, but `session_start` plus the resume record describe a
 /// run's beginning: writing them every turn journaled a phantom "Session
@@ -1287,7 +1343,84 @@ async fn run_agent(
             )
             .await;
         } else {
+            let mut parallel_outcomes: std::collections::HashMap<
+                usize,
+                (u128, tools::Outcome, Option<ToolCtx>),
+            > = std::collections::HashMap::new();
             for (call_index, call) in turn.calls.iter().enumerate() {
+                if !parallel_outcomes.contains_key(&call_index)
+                    && !ctx.cancel.load(std::sync::atomic::Ordering::Relaxed)
+                {
+                    let batch_end = parallel_read_only_batch_end(&turn.calls, call_index);
+                    if batch_end - call_index > 1 {
+                        if turn.calls[call_index..batch_end]
+                            .iter()
+                            .any(|c| c.name == "read")
+                        {
+                            let cleared = crate::agent::tool_output::cleared_indices_with_limit(
+                                &messages,
+                                context_limit,
+                            );
+                            let visible_ids: std::collections::HashSet<String> = messages
+                                .iter()
+                                .enumerate()
+                                .filter(|(idx, m)| m.role == Role::Tool && !cleared.contains(idx))
+                                .filter_map(|(_, m)| m.tool_call_id.clone())
+                                .collect();
+                            ctx.retain_visible_read_windows(&visible_ids);
+                        }
+                        use futures::{StreamExt, stream};
+                        let tasks: Vec<(usize, ToolCallReq, ToolCtx, Vec<String>)> = (call_index
+                            ..batch_end)
+                            .map(|idx| {
+                                let c = turn.calls[idx].clone();
+                                let mut child_ctx = ctx.clone();
+                                child_ctx.current_call_id = Some(c.id.clone());
+                                (idx, c, child_ctx, web_allow_hosts.clone())
+                            })
+                            .collect();
+                        let results: Vec<(usize, u128, tools::Outcome, Option<ToolCtx>)> =
+                            stream::iter(tasks)
+                                .map(|(idx, c, mut child_ctx, allow_hosts)| async move {
+                                    let started = Instant::now();
+                                    match c.name.as_str() {
+                                        "webfetch" | "websearch" => {
+                                            let mut out = if c.name == "webfetch" {
+                                                tools::web::fetch(&c.args, &allow_hosts).await
+                                            } else {
+                                                tools::web::search(&c.args).await
+                                            };
+                                            if out.ok {
+                                                out.output =
+                                                    crate::agent::trust::banner_wrap(&out.output);
+                                            }
+                                            (idx, started.elapsed().as_millis(), out, None)
+                                        }
+                                        _ => {
+                                            let out = run_tool_blocking(
+                                                &mut child_ctx,
+                                                &c.name,
+                                                &c.args,
+                                            )
+                                            .await;
+                                            child_ctx.current_call_id = None;
+                                            (
+                                                idx,
+                                                started.elapsed().as_millis(),
+                                                out,
+                                                Some(child_ctx),
+                                            )
+                                        }
+                                    }
+                                })
+                                .buffer_unordered(8)
+                                .collect()
+                                .await;
+                        for (idx, dur_ms, out, child_ctx) in results {
+                            parallel_outcomes.insert(idx, (dur_ms, out, child_ctx));
+                        }
+                    }
+                }
                 // A cancellation from the previous call must not leak into this
                 // one: the flag is per-request, reset right before dispatch —
                 // but the reset must not swallow an Esc that landed between
@@ -1298,6 +1431,7 @@ async fn run_agent(
                 let pre_cancelled = ctx.cancel.swap(false, std::sync::atomic::Ordering::Relaxed);
                 let journal_mark = ctx.journal.len();
                 let tool_started = Instant::now();
+                let mut precomputed_duration_ms: Option<u128> = None;
                 if let Some(writer) = journal.as_mut() {
                     let active = plan::open_active_for_session(&root, Some(&session_id))
                         .ok()
@@ -1340,7 +1474,16 @@ async fn run_agent(
                     .await;
 
                 let mut outcome = if pre_cancelled {
+                    parallel_outcomes.clear();
                     tools::Outcome::cancelled()
+                } else if let Some((dur_ms, pre_out, child_ctx_opt)) =
+                    parallel_outcomes.remove(&call_index)
+                {
+                    if let Some(child_ctx) = child_ctx_opt {
+                        ctx.merge_read_state(child_ctx);
+                    }
+                    precomputed_duration_ms = Some(dur_ms);
+                    pre_out
                 } else if read_only && tools::is_mutating_call(&call.name, &call.args) {
                     tools::Outcome::err(
                         "project is read-only because another sqwai instance owns the lock; use --force to enable writes",
@@ -1683,6 +1826,8 @@ async fn run_agent(
                         "resolves": call.args.get("resolves").and_then(|v| v.as_u64()),
                     }));
                     }
+                    let duration_ms =
+                        precomputed_duration_ms.unwrap_or_else(|| tool_started.elapsed().as_millis());
                     let result_seq = if call.name == "plan" {
                         writer
                         .append(
@@ -1691,7 +1836,7 @@ async fn run_agent(
                                 "tool": call.name,
                                 "call_id": call.id,
                                 "ok": outcome.ok,
-                                "duration_ms": tool_started.elapsed().as_millis(),
+                                "duration_ms": duration_ms,
                                 "summary": outcome.output.chars().take(200).collect::<String>(),
                                 "trust": "high",
                                 "code": if outcome.cancelled { Some("cancelled") } else { None },
@@ -1715,7 +1860,7 @@ async fn run_agent(
                                 "tool": call.name,
                                 "call_id": call.id,
                                 "ok": outcome.ok,
-                                "duration_ms": tool_started.elapsed().as_millis(),
+                                "duration_ms": duration_ms,
                                 "summary": outcome.output.chars().take(200).collect::<String>(),
                                 "trust": if taint.is_some() { "low" } else { "high" },
                                 "taint": match taint {
