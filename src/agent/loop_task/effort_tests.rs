@@ -1,7 +1,6 @@
 use super::loop_compact::{
     CompactionPrefix, MIN_ZERO_TURNS_BEFORE_REPORTING, compact_history, compaction_request,
-    effort_ignored_reason, plan_hint_with_focus, record_compaction, rejects_effort_parameter,
-    turn_shows_no_reasoning,
+    effort_ignored_reason, record_compaction, rejects_effort_parameter, turn_shows_no_reasoning,
 };
 use super::loop_subagent::{SUBAGENT_TIMEOUT_SECS, adopt_in_progress_step};
 use super::loop_turn::{TurnOutcome, run_turn};
@@ -569,7 +568,7 @@ fn summary_policy() -> context::Policy {
     // limit 16k: threshold binds (0.8 × 16k = 12800 < 16k − 8k
     // reserve), the ~9900-token fixture is over, the ~6600-token kept
     // tail plus summary still fits — so stage 4 must not run
-    context::Policy::with_compaction(16_000, 0.08, 2, 0.80, true)
+    context::Policy::with_compaction(16_000, 0.08, 2, 0.80)
 }
 
 /// First identical re-run: reported with a note. Second one: the bytes are
@@ -777,8 +776,17 @@ fn compaction_request_reuses_the_parent_prefix() {
         Message::new(Role::Assistant, "done"),
     ];
     let prefix = parent_prefix(&system, &tools);
-    let (req, cache_aware) =
-        compaction_request(Some(&prefix), &history[..1], &history, 1, None, "", "m", false);
+    let (req, cache_aware) = compaction_request(
+        Some(&prefix),
+        &history[..1],
+        &history,
+        1,
+        None,
+        "",
+        None,
+        "m",
+        false,
+    );
     assert!(cache_aware);
     assert_eq!(req.system, system, "prefix must be byte-identical");
     let req_tools: Vec<&str> = req.tools.iter().map(|t| t.name.as_str()).collect();
@@ -810,23 +818,23 @@ fn compaction_request_instructs_the_model_about_the_kept_tail() {
         Message::new(Role::User, "do it"),
         Message::new(Role::Assistant, "done"),
     ];
-    let (req, cache_aware) =
-        compaction_request(Some(&prefix), &history[..1], &history, 1, None, "", "m", false);
+    let (req, cache_aware) = compaction_request(
+        Some(&prefix),
+        &history[..1],
+        &history,
+        1,
+        None,
+        "Goal: fix the bug\nConstraints:\n- keep API stable",
+        Some("keep the parser details"),
+        "m",
+        false,
+    );
     assert!(cache_aware);
     let prompt = req.messages.last().unwrap().content.clone();
     assert!(prompt.contains("1 message(s) stay verbatim"), "{prompt}");
     assert!(prompt.contains("do not repeat the kept tail"), "{prompt}");
-}
-
-/// `/compact <focus>` folds into the plan hint without changing any caller.
-#[test]
-fn plan_hint_with_focus_is_folded_into_the_prompt() {
-    let base = "Goal: fix the bug\nConstraints:\n- keep API stable";
-    assert_eq!(plan_hint_with_focus(base, "  "), base);
-    let focused = plan_hint_with_focus(base, "keep the parser details");
-    assert!(focused.contains("<user-compaction-focus>"), "{focused}");
-    assert!(focused.contains("keep the parser details"), "{focused}");
-    assert!(focused.contains("keep API stable"), "{focused}");
+    assert!(prompt.contains("<user-compaction-focus>"), "{prompt}");
+    assert!(prompt.contains("keep the parser details"), "{prompt}");
 }
 
 /// No prefix handed over (tests, side calls): the compact standalone
@@ -834,7 +842,8 @@ fn plan_hint_with_focus_is_folded_into_the_prompt() {
 #[test]
 fn compaction_request_falls_back_to_standalone_without_a_prefix() {
     let older = vec![Message::new(Role::User, "do it")];
-    let (req, cache_aware) = compaction_request(None, &older, &older, 0, None, "", "m", false);
+    let (req, cache_aware) =
+        compaction_request(None, &older, &older, 0, None, "", None, "m", false);
     assert!(!cache_aware);
     assert!(req.tools.is_empty());
     assert_eq!(req.messages.len(), 1);
@@ -865,7 +874,7 @@ fn compaction_request_dodges_thinking_histories() {
     let tools = vec![];
     let prefix = parent_prefix(&system, &tools);
     let (req, cache_aware) =
-        compaction_request(Some(&prefix), &history, &history, 0, None, "", "m", false);
+        compaction_request(Some(&prefix), &history, &history, 0, None, "", None, "m", false);
     assert!(!cache_aware, "thinking histories take the text path");
     assert!(req.tools.is_empty());
     assert_eq!(req.messages.len(), 1);
@@ -996,6 +1005,7 @@ async fn live_compaction_request_reuses_prefix() {
         history.len() - older.len(),
         None,
         "",
+        None,
         &live_model_id,
         false,
     );
@@ -1005,7 +1015,7 @@ async fn live_compaction_request_reuses_prefix() {
 
     // standalone: tiny system + rendered transcript
     let (alone, is_aware) =
-        compaction_request(None, older, &history, 0, None, "", &live_model_id, false);
+        compaction_request(None, older, &history, 0, None, "", None, &live_model_id, false);
     assert!(!is_aware);
     let u = send(&live_provider, alone).await;
     report("alone", &u);
@@ -1021,7 +1031,7 @@ async fn compact_history_leaves_full_history_alone_without_pressure() {
     let provider: SharedProvider = std::sync::Arc::new(MockTestProvider {
         events: std::sync::Mutex::new(Vec::new()),
     });
-    let policy = context::Policy::with_compaction(1_000_000, 0.08, 4, 0.5, false);
+    let policy = context::Policy::with_compaction(1_000_000, 0.08, 4, 0.5);
     let mut messages = Vec::new();
     for i in 0..30 {
         messages.push(Message::new(Role::User, format!("task {i}")));
@@ -1044,6 +1054,7 @@ async fn compact_history_leaves_full_history_alone_without_pressure() {
         false,
         "",
         None,
+        None,
     )
     .await;
     assert!(out.is_none(), "no pressure → no compaction: {out:?}");
@@ -1053,7 +1064,7 @@ async fn compact_history_leaves_full_history_alone_without_pressure() {
 }
 
 /// Prod-shape replication: 95 mixed messages (~46k tokens, like the
-/// T1 shakedown transcript), 1M limit, 0.01 threshold, summary off.
+/// T1 shakedown transcript), 1M limit, 0.01 threshold.
 /// compact_history must shrink and report — not silently pass through.
 
 #[tokio::test]
@@ -1061,7 +1072,7 @@ async fn compact_history_trims_a_long_plain_transcript() {
     let provider: SharedProvider = std::sync::Arc::new(MockTestProvider {
         events: std::sync::Mutex::new(Vec::new()),
     });
-    let policy = context::Policy::with_compaction(1_000_000, 0.08, 4, 0.01, false);
+    let policy = context::Policy::with_compaction(1_000_000, 0.08, 4, 0.01);
     assert_eq!(policy.budget(), 10_000);
     let mut messages = Vec::new();
     for i in 0..30 {
@@ -1095,6 +1106,7 @@ async fn compact_history_trims_a_long_plain_transcript() {
         false,
         "",
         None,
+        None,
     )
     .await
     .expect("must compact a 4x-over-budget transcript");
@@ -1110,7 +1122,7 @@ async fn compact_history_fires_repeatedly_as_history_grows() {
     let provider: SharedProvider = std::sync::Arc::new(MockTestProvider {
         events: std::sync::Mutex::new(Vec::new()),
     });
-    let policy = context::Policy::with_compaction(1_000_000, 0.08, 4, 0.01, false);
+    let policy = context::Policy::with_compaction(1_000_000, 0.08, 4, 0.01);
     let mut messages = Vec::new();
     let mut summary = None;
     let mut trims = 0;
@@ -1136,6 +1148,7 @@ async fn compact_history_fires_repeatedly_as_history_grows() {
             false,
             "",
             None,
+            None,
         )
         .await
         .is_some()
@@ -1158,15 +1171,15 @@ async fn compact_history_fires_repeatedly_as_history_grows() {
     );
 }
 
-/// Bench shape: ONE user prompt followed by assistant/tool cycles, summary
-/// off. Regression test: the user-boundary-only cut never fired here, so
+/// Bench shape: ONE user prompt followed by assistant/tool cycles.
+/// Regression test: the user-boundary-only cut never fired here, so
 /// compactions stayed 0 while measured grew past the budget every turn.
 #[tokio::test]
 async fn compact_history_trims_a_single_prompt_tool_loop() {
     let provider: SharedProvider = std::sync::Arc::new(MockTestProvider {
         events: std::sync::Mutex::new(Vec::new()),
     });
-    let policy = context::Policy::with_compaction(1_000_000, 0.08, 4, 0.01, false);
+    let policy = context::Policy::with_compaction(1_000_000, 0.08, 4, 0.01);
     let mut messages = vec![Message::new(Role::User, "do the thing")];
     let mut summary = None;
     let mut trims = 0;
@@ -1199,6 +1212,7 @@ async fn compact_history_trims_a_single_prompt_tool_loop() {
             &policy,
             false,
             "",
+            None,
             None,
         )
         .await
@@ -1308,6 +1322,7 @@ async fn compact_history_summarizes_through_the_model() {
         false,
         "",
         None,
+        None,
     )
     .await
     .expect("pressure is over: must compact");
@@ -1344,6 +1359,7 @@ async fn compact_history_never_stacks_two_summaries() {
         false,
         "",
         None,
+        None,
     )
     .await;
     // force again: history is small now, but the old summary message
@@ -1356,6 +1372,7 @@ async fn compact_history_never_stacks_two_summaries() {
         &policy,
         true,
         "",
+        None,
         None,
     )
     .await;
@@ -1385,6 +1402,7 @@ async fn compact_history_falls_back_to_local_summary() {
         &policy,
         false,
         "",
+        None,
         None,
     )
     .await
@@ -1423,6 +1441,7 @@ async fn compact_history_retries_a_blown_summary_budget() {
         false,
         "",
         None,
+        None,
     )
     .await
     .expect("pressure is over: must compact");
@@ -1453,6 +1472,7 @@ async fn compact_history_truncates_without_retry_near_the_cap() {
         &policy,
         false,
         "",
+        None,
         None,
     )
     .await;

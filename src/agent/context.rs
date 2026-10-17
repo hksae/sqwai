@@ -325,7 +325,6 @@ pub struct Policy {
     /// the host-generated anchor policy.
     pub anchor_ratio: Option<f64>,
     pub keep_turns: Option<usize>,
-    pub summary_enabled: bool,
     /// Fraction of the context at which compaction triggers
     /// (`[compaction].threshold`, 0.80). Combined with the reserve below:
     /// the trigger is whichever bites first, so a large reserve on a small
@@ -340,7 +339,6 @@ impl Policy {
             context_limit,
             anchor_ratio: None,
             keep_turns: None,
-            summary_enabled: true,
             threshold: None,
         }
     }
@@ -350,13 +348,11 @@ impl Policy {
         anchor_ratio: f64,
         keep_turns: usize,
         threshold: f64,
-        summary_enabled: bool,
     ) -> Self {
         Self {
             context_limit,
             anchor_ratio: Some(anchor_ratio),
             keep_turns: Some(keep_turns),
-            summary_enabled,
             threshold: Some(threshold),
         }
     }
@@ -676,7 +672,12 @@ pub fn truncate_summary(text: &str) -> String {
 /// where the conversation lives — rendered inline below (standalone
 /// request) or travelling as the request's own messages above (cache-aware
 /// request, where repeating it would pay twice).
-fn summary_head(previous: Option<&str>, plan_hint: &str, setting: &str) -> String {
+fn summary_head(
+    previous: Option<&str>,
+    plan_hint: &str,
+    focus: Option<&str>,
+    setting: &str,
+) -> String {
     let mut out = format!(
         "Summarize ONLY what the user explicitly asked, forbade, or stated \
          as fact, plus key technical findings, root causes discovered, and \
@@ -690,15 +691,7 @@ fn summary_head(previous: Option<&str>, plan_hint: &str, setting: &str) -> Strin
          - Work completed, verified, or rejected\n\
          - Current state & next step at the cut\n\n<durable-plan>\n",
     );
-    let (plan_part, focus_part) = match plan_hint.split_once("\n<user-compaction-focus>\n") {
-        Some((p, f)) => (
-            p.trim(),
-            f.strip_suffix("</user-compaction-focus>")
-                .unwrap_or(f)
-                .trim(),
-        ),
-        None => (plan_hint.trim(), ""),
-    };
+    let plan_part = plan_hint.trim();
     if plan_part.is_empty() {
         out.push_str("(no durable plan: include all user requests)\n");
     } else {
@@ -706,9 +699,9 @@ fn summary_head(previous: Option<&str>, plan_hint: &str, setting: &str) -> Strin
         out.push('\n');
     }
     out.push_str("</durable-plan>\n");
-    if !focus_part.is_empty() {
+    if let Some(focus_text) = focus.map(str::trim).filter(|s| !s.is_empty()) {
         out.push_str("\n<user-compaction-focus>\n");
-        out.push_str(focus_part);
+        out.push_str(focus_text);
         out.push_str("\n</user-compaction-focus>\n");
     }
     if let Some(prev) = previous.filter(|s| !s.trim().is_empty()) {
@@ -742,9 +735,15 @@ pub fn summary_short_input(
     older: &[Message],
     previous: Option<&str>,
     plan_hint: &str,
+    focus: Option<&str>,
     retry: bool,
 ) -> String {
-    let mut out = summary_head(previous, plan_hint, "in the dropped conversation below");
+    let mut out = summary_head(
+        previous,
+        plan_hint,
+        focus,
+        "in the dropped conversation below",
+    );
     out.push_str("\n<conversation>\n");
     out.push_str(&transcript(older));
     out.push_str("</conversation>\n\n");
@@ -755,18 +754,14 @@ pub fn summary_short_input(
 /// The summarization prompt without the transcript: for the cache-aware
 /// request, where the conversation travels as the request's own messages
 /// and the prompt is appended last. Same head, same rules, nothing repeated.
-#[allow(dead_code)]
-pub fn summary_short_prompt(previous: Option<&str>, plan_hint: &str, retry: bool) -> String {
-    summary_short_prompt_with_keep(previous, plan_hint, retry, 0)
-}
-
-pub fn summary_short_prompt_with_keep(
+pub fn summary_short_prompt(
     previous: Option<&str>,
     plan_hint: &str,
+    focus: Option<&str>,
     retry: bool,
     kept_tail_messages: usize,
 ) -> String {
-    let mut out = summary_head(previous, plan_hint, "in the conversation above");
+    let mut out = summary_head(previous, plan_hint, focus, "in the conversation above");
     if kept_tail_messages > 0 {
         out.push_str(&format!(
             "\nThat conversation is the messages of this request, above this \

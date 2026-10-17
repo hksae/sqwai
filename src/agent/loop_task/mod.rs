@@ -23,7 +23,7 @@ use crate::plan;
 use loop_ask::{ask_user, bash_call, run_tool_blocking};
 use loop_compact::{
     CompactionPrefix, compact_history, effort_ignored_reason, plan_hint_for_summary,
-    plan_hint_with_focus, record_compaction, turn_shows_no_reasoning,
+    record_compaction, turn_shows_no_reasoning,
 };
 pub(crate) use loop_compact::{capture_nudge, has_restriction_marker};
 use loop_subagent::{
@@ -718,7 +718,6 @@ async fn run_agent(
         compaction.anchor_ratio,
         compaction.keep_turns,
         compaction.threshold,
-        true,
     );
     // Tools are part of the request prefix: sorted for stability, narrowed in
     // PLAN mode, and omitted entirely for requests that cannot call them.
@@ -774,7 +773,7 @@ async fn run_agent(
             let _ = writer.append("compaction", serde_json::json!({"phase": "begin"}));
         }
         let message_count_before = messages.len();
-        let plan_hint = plan_hint_with_focus(&plan_hint_for_summary(&root, &session_id), &compact_focus);
+        let plan_hint = plan_hint_for_summary(&root, &session_id);
         let prefix = CompactionPrefix {
             system: &system,
             tools: &tools,
@@ -787,6 +786,7 @@ async fn run_agent(
             &policy,
             true,
             &plan_hint,
+            Some(compact_focus.as_str()).filter(|s| !s.trim().is_empty()),
             Some(&prefix),
         )
         .await;
@@ -1003,6 +1003,7 @@ async fn run_agent(
             &policy,
             false,
             &plan_hint,
+            None,
             Some(&prefix),
         )
         .await
@@ -1195,6 +1196,7 @@ async fn run_agent(
                         &policy,
                         true,
                         &overflow_plan_hint,
+                        None,
                         Some(&prefix),
                     )
                     .await
@@ -1274,7 +1276,6 @@ async fn run_agent(
                         compaction.anchor_ratio,
                         compaction.keep_turns,
                         compaction.threshold,
-                        true,
                     );
                     previous_response_id = None;
                     // The new provider gets its own overflow budget: its

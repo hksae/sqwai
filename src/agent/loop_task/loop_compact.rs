@@ -140,16 +140,6 @@ pub struct CompactionPrefix<'a> {
     pub tools: &'a [crate::providers::ToolSpec],
 }
 
-/// A `/compact <focus>` tail, folded into the plan hint so the summarizer
-/// gives those details priority without changing any function signature.
-pub(crate) fn plan_hint_with_focus(base: &str, focus: &str) -> String {
-    let focus = focus.trim();
-    if focus.is_empty() {
-        return base.to_string();
-    }
-    format!("{base}\n<user-compaction-focus>\n{focus}\n</user-compaction-focus>")
-}
-
 /// Saved thinking blocks replay only while thinking is on for the request.
 /// The summary request thinks nothing (effort off, tiny budget), so a
 /// history that carries thinking blocks cannot travel as structured
@@ -175,6 +165,7 @@ fn history_has_thinking(messages: &[Message]) -> bool {
 /// `keep_len` is how many trailing messages stay verbatim after compaction:
 /// the prompt names them so the model summarizes the earlier part and does
 /// not restate the kept tail.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn compaction_request(
     prefix: Option<&CompactionPrefix<'_>>,
     older: &[Message],
@@ -182,6 +173,7 @@ pub(crate) fn compaction_request(
     keep_len: usize,
     previous: Option<&str>,
     plan_hint: &str,
+    focus: Option<&str>,
     model_id: &str,
     retry: bool,
 ) -> (ChatRequest, bool) {
@@ -195,7 +187,7 @@ pub(crate) fn compaction_request(
                 system: vec![SystemPart::volatile(context::SUMMARY_SYSTEM)],
                 messages: vec![Message::new(
                     Role::User,
-                    context::summary_short_input(older, previous, plan_hint, retry),
+                    context::summary_short_input(older, previous, plan_hint, focus, retry),
                 )],
                 effort: None,
                 effort_support: Default::default(),
@@ -216,7 +208,7 @@ pub(crate) fn compaction_request(
     let mut messages = history.to_vec();
     messages.push(Message::new(
         Role::User,
-        context::summary_short_prompt_with_keep(previous, plan_hint, retry, keep_len),
+        context::summary_short_prompt(previous, plan_hint, focus, retry, keep_len),
     ));
     (
         ChatRequest {
@@ -234,8 +226,6 @@ pub(crate) fn compaction_request(
     )
 }
 
-/// 8 args is the compaction call shape (provider, request, policy, hints);
-/// splitting it into a params struct would churn every caller for no gain.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn compact_history(
     provider: &SharedProvider,
@@ -245,6 +235,7 @@ pub(crate) async fn compact_history(
     policy: &context::Policy,
     force: bool,
     plan_hint: &str,
+    focus: Option<&str>,
     prefix: Option<&CompactionPrefix<'_>>,
 ) -> Option<(u64, u64, bool)> {
     let measured = |m: &[Message]| context::estimated_tokens(m);
@@ -274,7 +265,7 @@ pub(crate) async fn compact_history(
     let keep: Vec<Message> = keep.to_vec();
     let keep_len = keep.len();
     let mut summarized = false;
-    if !older.is_empty() && policy.summary_enabled {
+    if !older.is_empty() {
         let mut wire_history = messages.clone();
         crate::agent::tool_output::trim_for_wire_with_limit(
             &mut wire_history,
@@ -287,6 +278,7 @@ pub(crate) async fn compact_history(
             keep_len,
             summary.as_deref(),
             plan_hint,
+            focus,
             model_id,
             false,
         );
@@ -313,6 +305,7 @@ pub(crate) async fn compact_history(
                 keep_len,
                 summary.as_deref(),
                 plan_hint,
+                focus,
                 model_id,
                 true,
             );

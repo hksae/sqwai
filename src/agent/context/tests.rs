@@ -375,11 +375,10 @@ fn reserve_is_clamped_and_budget_follows() {
 }
 
 #[test]
-fn configured_policy_controls_reserve_tail_and_summary() {
-    let policy = Policy::with_compaction(100_000, 0.08, 4, 0.80, false);
+fn configured_policy_controls_reserve_and_tail() {
+    let policy = Policy::with_compaction(100_000, 0.08, 4, 0.80);
     assert_eq!(policy.reserve(), 8_000);
     assert_eq!(policy.keep_turns(), 4);
-    assert!(!policy.summary_enabled);
     // threshold bites first here: 80% of 100k beats 100k − 8k reserve
     assert_eq!(policy.budget(), 80_000);
 
@@ -408,7 +407,7 @@ fn keep_turns_counts_user_turns_not_messages() {
 #[test]
 fn reserve_caps_the_threshold_on_small_contexts() {
     // 20k limit: 80% would be 16k, but the 8k minimum reserve wins
-    let policy = Policy::with_compaction(20_000, 0.08, 4, 0.80, false);
+    let policy = Policy::with_compaction(20_000, 0.08, 4, 0.80);
     assert_eq!(policy.budget(), 12_000);
     assert_eq!(policy.pressure(12_000), Pressure::Ok);
     assert_eq!(policy.pressure(12_001), Pressure::Summarize);
@@ -454,22 +453,27 @@ fn wire_estimated_tokens_counts_cleared_results_as_stubs() {
 
 #[test]
 fn summary_prompt_names_the_kept_tail() {
-    let prompt = summary_short_prompt_with_keep(Some("earlier"), "", false, 3);
+    let prompt = summary_short_prompt(Some("earlier"), "", None, false, 3);
     assert!(prompt.contains("3 message(s) stay verbatim"), "{prompt}");
     assert!(prompt.contains("do not repeat the kept tail"), "{prompt}");
     // keep_len 0 keeps the old wording
-    let plain = summary_short_prompt_with_keep(Some("earlier"), "", false, 0);
+    let plain = summary_short_prompt(Some("earlier"), "", None, false, 0);
     assert!(plain.contains("Do not repeat any of it"), "{plain}");
 }
 
 #[test]
 fn summary_head_renders_the_user_compaction_focus() {
-    let hint = "Goal: fix the bug\n<user-compaction-focus>\nkeep the parser details\n</user-compaction-focus>";
-    let input = summary_short_input(&[user("do it")], None, hint, false);
+    let hint = "Goal: fix the bug";
+    let input = summary_short_input(
+        &[user("do it")],
+        None,
+        hint,
+        Some("keep the parser details"),
+        false,
+    );
     assert!(input.contains("<user-compaction-focus>"), "{input}");
     assert!(input.contains("keep the parser details"), "{input}");
     assert!(input.contains("Goal: fix the bug"), "{input}");
-    // the marker itself is not leaked into the plan block
     assert!(!input.contains("<user-compaction-focus>\nGoal"), "{input}");
 }
 
@@ -592,14 +596,14 @@ fn truncate_summary_caps_with_marker() {
 #[test]
 fn summary_short_prompt_points_at_messages_above() {
     let plan = "Goal: fix the bug\nConstraints:\n- keep API stable";
-    let prompt = summary_short_prompt(Some("earlier facts"), plan, false);
+    let prompt = summary_short_prompt(Some("earlier facts"), plan, None, false, 0);
     assert!(prompt.contains("earlier facts"));
     assert!(prompt.contains("keep API stable"));
     assert!(prompt.contains("no tool calls"));
     assert!(prompt.contains("above"));
     assert!(!prompt.contains("<conversation>"), "{prompt}");
     assert!(!prompt.contains("HARD LIMIT"));
-    let retry = summary_short_prompt(None, "", true);
+    let retry = summary_short_prompt(None, "", None, true, 0);
     assert!(retry.contains("HARD LIMIT"));
     assert!(retry.contains("no durable plan"));
 }
@@ -608,7 +612,7 @@ fn summary_short_prompt_points_at_messages_above() {
 fn summary_short_input_restricts_to_uncovered_asks() {
     let older = vec![user("do not touch btree"), user("fix the bug")];
     let plan = "Goal: fix the bug\nConstraints:\n- keep API stable";
-    let input = summary_short_input(&older, Some("earlier facts"), plan, false);
+    let input = summary_short_input(&older, Some("earlier facts"), plan, None, false);
     // chains, renders the asks, carries the plan for exclusion
     assert!(input.contains("earlier facts"));
     assert!(input.contains("do not touch btree"));
@@ -616,11 +620,11 @@ fn summary_short_input_restricts_to_uncovered_asks() {
     assert!(input.contains("not already covered"));
     assert!(!input.contains("HARD LIMIT"));
     // no plan: everything counts as uncovered, said explicitly
-    let noplan = summary_short_input(&older, None, "", false);
+    let noplan = summary_short_input(&older, None, "", None, false);
     assert!(noplan.contains("no durable plan"));
     assert!(!noplan.contains("earlier facts"));
     // retry appends the hard limit and nothing else changes
-    let retry = summary_short_input(&older, Some("earlier facts"), plan, true);
+    let retry = summary_short_input(&older, Some("earlier facts"), plan, None, true);
     assert!(retry.contains("HARD LIMIT"));
     assert!(retry.contains("do not touch btree"));
 }
