@@ -47,10 +47,10 @@ impl Registry {
                     match connect_stdio(command, args, env).await {
                         Ok(conn) => conn,
                         Err(e) => {
-                            eprintln!(
-                                "Warning: failed to connect to MCP server '{}': {e}",
+                            crate::providers::log_http(&format!(
+                                "MCP warning: failed to connect to server '{}': {e}",
                                 server.name
-                            );
+                            ));
                             continue;
                         }
                     }
@@ -59,10 +59,10 @@ impl Registry {
                     match connect_http(url, headers).await {
                         Ok(conn) => conn,
                         Err(e) => {
-                            eprintln!(
-                                "Warning: failed to connect to MCP server '{}': {e}",
+                            crate::providers::log_http(&format!(
+                                "MCP warning: failed to connect to server '{}': {e}",
                                 server.name
-                            );
+                            ));
                             continue;
                         }
                     }
@@ -71,10 +71,10 @@ impl Registry {
             let discovered = match list_tools(&connection).await {
                 Ok(tools) => tools,
                 Err(e) => {
-                    eprintln!(
-                        "Warning: failed to list tools from MCP server '{}': {e}",
+                    crate::providers::log_http(&format!(
+                        "MCP warning: failed to list tools from server '{}': {e}",
                         server.name
-                    );
+                    ));
                     continue;
                 }
             };

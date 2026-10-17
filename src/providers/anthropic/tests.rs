@@ -406,9 +406,6 @@ fn body_maps_tools_and_results() {
     };
     let b = build_body(&req, 8192, true);
 
-    if std::env::var("SQWAI_DEBUG_BODY").is_ok() {
-        eprintln!("{}", serde_json::to_string_pretty(&b).unwrap());
-    }
     assert_eq!(b["tools"][0]["name"], "ls");
     assert_eq!(b["tools"][0]["input_schema"]["type"], "object");
 
