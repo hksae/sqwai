@@ -330,14 +330,50 @@ Pass context:N for N surrounding lines per match (like grep -C) so a follow-up r
         ToolDef {
             name: "websearch",
             kind: Kind::ReadOnly,
-            description: "Search the web for a coding-related query and return a small set of normalized results.",
-            parameters: json!({"type":"object","properties":{"query":{"type":"string"},"count":{"type":"integer","minimum":1,"maximum":10},"timeout":{"type":"integer","minimum":1,"maximum":60}},"required":["query"]}),
+            description: "Multi-source web & developer meta-search (Google/Startpage, Bing, DuckDuckGo, StackOverflow, GitHub, crates.io, npm, HackerNews, Wikipedia, ArXiv) fused via Reciprocal Rank Fusion and BM25. By default (`deep: true`) also fetches the top results in parallel, caches them locally, and returns the most relevant Markdown sections and code blocks in a single call.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "search query"},
+                    "category": {
+                        "type": "string",
+                        "enum": ["auto", "docs", "code", "packages", "discussions", "papers"],
+                        "description": "search focus: 'auto' (default: web + StackOverflow + GitHub + packages), 'docs' (official docs + docs.rs), 'code' (GitHub repos/issues + StackOverflow), 'packages' (crates.io + npm + PyPI), 'discussions' (HN + StackOverflow + GitHub issues), 'papers' (ArXiv + Wikipedia)"
+                    },
+                    "deep": {
+                        "type": "boolean",
+                        "description": "when true (default), automatically fetches and extracts relevant Markdown & code sections from the top results"
+                    },
+                    "count": {"type": "integer", "minimum": 1, "maximum": 10},
+                    "timeout": {"type": "integer", "minimum": 1, "maximum": 60}
+                },
+                "required": ["query"]
+            }),
         },
         ToolDef {
             name: "webfetch",
             kind: Kind::ReadOnly,
-            description: "Fetch a bounded HTTP(S) page or text response and return readable text. Use only user-provided or task-relevant URLs. On HTML pages pass a CSS selector to extract just the matching elements instead of the whole page.",
-            parameters: json!({"type":"object","properties":{"url":{"type":"string"},"selector":{"type":"string","description":"CSS selector: return only the text of matching elements (HTML pages only)"},"timeout":{"type":"integer","minimum":1,"maximum":60}},"required":["url"]}),
+            description: "Fetch an HTTP(S) URL and convert it into structured Markdown (preserving headings, fenced code blocks, tables, and links) with native adapters for GitHub (files, repos, issues, PRs), StackOverflow, crates.io, npm, PyPI, Reddit, Wikipedia, and `/llms.txt` v2. Pages are cached locally by section: pass `query` to rank and extract the most relevant sections & code blocks via BM25, or `section` to read a specific heading from the page outline.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string"},
+                    "query": {
+                        "type": "string",
+                        "description": "optional search keywords to rank and extract the most relevant sections and code blocks from the page"
+                    },
+                    "section": {
+                        "type": "string",
+                        "description": "optional heading name from the page's Document Outline to read a specific section (served instantly from cache)"
+                    },
+                    "selector": {
+                        "type": "string",
+                        "description": "optional CSS selector to extract only matching HTML elements"
+                    },
+                    "timeout": {"type": "integer", "minimum": 1, "maximum": 60}
+                },
+                "required": ["url"]
+            }),
         },
         ToolDef {
             name: "subagent",

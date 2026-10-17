@@ -1,12 +1,18 @@
-//! Bounded web retrieval for coding research.
+//! Local Web Research Engine: multi-source meta-search (RRF + BM25),
+//! smart domain adapters, LLM-native Markdown negotiation (`llms.txt` v2),
+//! DOM Readability HTML-to-Markdown conversion, and section-cached BM25 navigation.
+
+pub mod markdown;
+pub mod meta_search;
+pub mod ranker;
+pub mod router;
 
 use super::Outcome;
 use reqwest::{Client, Url};
 use serde_json::Value;
 use std::time::Duration;
 
-const MAX_BODY_BYTES: usize = 1_000_000;
-/// output cap in chars: head+tail mid-trim, same budget as exec/git
+/// Output cap in chars: head+tail mid-trim, same budget as exec/git.
 const MAX_OUTPUT_CHARS: usize = 30_000;
 
 fn url_arg(args: &Value, allow_hosts: &[String]) -> Result<Url, String> {
@@ -36,7 +42,11 @@ fn host_allowed(url: &Url, allow_hosts: &[String]) -> Result<(), String> {
     crate::config::url_host_allowed(url, allow_hosts).map_err(|detail| format!("webfetch {detail}"))
 }
 
-fn client(timeout: u64, agent: &'static str, allow_hosts: Vec<String>) -> Result<Client, String> {
+pub(crate) fn client(
+    timeout: u64,
+    agent: &'static str,
+    allow_hosts: Vec<String>,
+) -> Result<Client, String> {
     Client::builder()
         .timeout(Duration::from_secs(timeout.clamp(1, 60)))
         .redirect(redirect_policy(allow_hosts))
@@ -66,92 +76,67 @@ pub async fn fetch(args: &Value, allow_hosts: &[String]) -> Outcome {
         Ok(url) => url,
         Err(error) => return Outcome::err(error),
     };
-    let timeout = args.get("timeout").and_then(Value::as_u64).unwrap_or(15);
-    let client = match client(timeout, crate::providers::USER_AGENT, allow_hosts.to_vec()) {
-        Ok(c) => c,
-        Err(e) => return Outcome::err(format!("webfetch {e}")),
-    };
-    let response = match client.get(url).send().await {
-        Ok(r) => r,
-        Err(e) => return Outcome::err(format!("webfetch request failed: {e}")),
-    };
-    let status = response.status();
-    if !status.is_success() {
-        return Outcome::err(format!("webfetch HTTP error: {status}"));
-    }
-    let is_html = response
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|v| v.to_ascii_lowercase().contains("text/html"));
-    if response
-        .content_length()
-        .is_some_and(|n| n as usize > MAX_BODY_BYTES)
-    {
-        return Outcome::err("webfetch response is too large (maximum 1 MB)");
-    }
-    let bytes = match response.bytes().await {
-        Ok(b) if b.len() <= MAX_BODY_BYTES => b,
-        Ok(_) => return Outcome::err("webfetch response is too large (maximum 1 MB)"),
-        Err(e) => return Outcome::err(format!("webfetch read failed: {e}")),
-    };
-    let raw = String::from_utf8_lossy(&bytes);
-    let is_html_page = is_html || looks_like_html(&raw);
     let selector = args
         .get("selector")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|s| !s.is_empty());
-    if let Some(selector) = selector {
-        if !is_html_page {
+    let query = args
+        .get("query")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let section = args
+        .get("section")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let force_refresh = args
+        .get("refresh")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
+    // Fast path: if no raw CSS selector is requested and the page is already in
+    // our session LRU cache (from an earlier webfetch or deep websearch), serve
+    // the requested section/query projection immediately in 0ms.
+    if selector.is_none()
+        && !force_refresh
+        && let Some(cached) = ranker::get_cached_page(url.as_str())
+    {
+        return Outcome::ok(ranker::project_page(&cached, query, section));
+    }
+
+    let timeout = args.get("timeout").and_then(Value::as_u64).unwrap_or(15);
+    let client = match client(timeout, crate::providers::USER_AGENT, allow_hosts.to_vec()) {
+        Ok(c) => c,
+        Err(e) => return Outcome::err(format!("webfetch {e}")),
+    };
+
+    let doc = match router::fetch_smart(&client, &url, allow_hosts, selector.is_some()).await {
+        Ok(d) => d,
+        Err(e) => return Outcome::err(e),
+    };
+
+    if let Some(sel) = selector {
+        let Some(raw_html) = doc.raw_html.as_deref() else {
             return Outcome::err(
                 "webfetch selector requires an HTML page; drop the selector for plain text",
             );
-        }
-        let fragments = match select_fragments(&raw, selector) {
-            Ok(f) => f,
-            Err(e) => return Outcome::err(format!("webfetch: {e}")),
         };
-        return Outcome::ok(truncate(&fragments));
+        match select_fragments(raw_html, sel) {
+            Ok(fragments) => return Outcome::ok(truncate(&fragments)),
+            Err(e) => return Outcome::err(format!("webfetch: {e}")),
+        }
     }
-    let text = if is_html_page {
-        html_to_text(&raw)
-    } else {
-        raw.to_string()
-    };
-    Outcome::ok(truncate(&text))
+
+    let cached = ranker::put_cached_page(url.as_str(), doc.title, doc.markdown);
+    Outcome::ok(ranker::project_page(&cached, query, section))
 }
 
-/// Extract the text of every element matching a CSS selector, one block per
-/// element. Errors on a malformed selector or when nothing matches, so the
-/// model can retry instead of staring at an empty result.
+/// Extract the structured Markdown/text of every element matching a CSS selector,
+/// one block per element. Errors on a malformed selector or when nothing matches.
 fn select_fragments(html: &str, selector: &str) -> Result<String, String> {
-    use scraper::{Html, Selector};
-    let parsed =
-        Selector::parse(selector).map_err(|e| format!("invalid selector '{selector}': {e}"))?;
-    let doc = Html::parse_document(html);
-    let mut blocks: Vec<String> = Vec::new();
-    for element in doc.select(&parsed) {
-        let text: String = element
-            .text()
-            .collect::<String>()
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
-        if !text.is_empty() {
-            blocks.push(text);
-        }
-        if blocks.len() >= 200 {
-            break;
-        }
-    }
-    if blocks.is_empty() {
-        Err(format!(
-            "selector '{selector}' matched nothing (or only empty elements)"
-        ))
-    } else {
-        Ok(blocks.join("\n\n"))
-    }
+    markdown::extract_selector_markdown(html, selector, None)
 }
 
 pub async fn search(args: &Value) -> Outcome {
@@ -169,81 +154,32 @@ pub async fn search(args: &Value) -> Outcome {
     let count = args
         .get("count")
         .and_then(Value::as_u64)
-        .unwrap_or(5)
+        .unwrap_or(6)
         .clamp(1, 10) as usize;
     let timeout = args.get("timeout").and_then(Value::as_u64).unwrap_or(15);
-    let client = match client(timeout, "sqwai/0.1 websearch", Vec::new()) {
-        Ok(c) => c,
-        Err(e) => return Outcome::err(format!("websearch {e}")),
-    };
-    let response = match client
-        .get("https://html.duckduckgo.com/html/")
-        .query(&[("q", query)])
-        .send()
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => return Outcome::err(format!("websearch request failed: {e}")),
-    };
-    if !response.status().is_success() {
-        return Outcome::err(format!("websearch HTTP error: {}", response.status()));
+    let category = meta_search::SearchCategory::parse(args.get("category").and_then(Value::as_str));
+    let deep = args.get("deep").and_then(Value::as_bool).unwrap_or(true);
+
+    match meta_search::run_meta_search(query, count, timeout, category, deep, &[]).await {
+        Ok(output) => Outcome::ok(truncate(&output)),
+        Err(err) => Outcome::err(format!("websearch {err}")),
     }
-    let bytes = match response.bytes().await {
-        Ok(b) if b.len() <= MAX_BODY_BYTES => b,
-        Ok(_) => return Outcome::err("websearch response is too large (maximum 1 MB)"),
-        Err(e) => return Outcome::err(format!("websearch read failed: {e}")),
-    };
-    let results = parse_search_results(&String::from_utf8_lossy(&bytes), count);
-    Outcome::ok(if results.is_empty() {
-        "No search results found.".into()
-    } else {
-        results
-    })
 }
 
-fn looks_like_html(raw: &str) -> bool {
+pub(crate) fn looks_like_html(raw: &str) -> bool {
     let head = raw
         .trim_start()
-        .get(..256)
+        .get(..512)
         .unwrap_or(raw.trim_start())
         .to_ascii_lowercase();
-    head.starts_with("<!doctype html") || head.starts_with("<html") || head.contains("<body")
+    head.starts_with("<!doctype html")
+        || head.starts_with("<html")
+        || head.contains("<body")
+        || head.contains("<head")
+        || head.contains("<div")
 }
 
-fn parse_search_results(html: &str, count: usize) -> String {
-    let block_re = regex::Regex::new(
-        r#"(?is)<div[^>]+class=[\"'][^\"']*result[^\"']*[\"'][^>]*>(.*?)</div>\s*</div>"#,
-    )
-    .unwrap();
-    let title_re = regex::Regex::new(r#"(?is)<a[^>]+class=[\"'][^\"']*result__a[^\"']*[\"'][^>]*href=[\"']([^\"']+)[\"'][^>]*>(.*?)</a>"#).unwrap();
-    let snippet_re = regex::Regex::new(r#"(?is)<(?:a|div)[^>]+class=[\"'][^\"']*result__snippet[^\"']*[\"'][^>]*>(.*?)</(?:a|div)>"#).unwrap();
-    let mut out = Vec::new();
-    for block in block_re.captures_iter(html).take(count) {
-        let body = &block[1];
-        let Some(title) = title_re.captures(body) else {
-            continue;
-        };
-        let raw_url = decode_entities(&title[1]);
-        let url = unwrap_duckduckgo_url(&raw_url);
-        let name = clean_fragment(&title[2]);
-        let snippet = snippet_re
-            .captures(body)
-            .map(|c| clean_fragment(&c[1]))
-            .unwrap_or_default();
-        out.push(format!(
-            "{}. {}\n   {}\n   {}",
-            out.len() + 1,
-            name,
-            url,
-            snippet
-        ));
-    }
-    out.join("\n")
-}
-
-fn unwrap_duckduckgo_url(raw: &str) -> String {
-    // DuckDuckGo redirects typically look like:
-    // /l/?uddg=https%3A%2F%2Fexample.com%2F... or //duckduckgo.com/l/?uddg=...
+pub(crate) fn unwrap_duckduckgo_url(raw: &str) -> String {
     let candidate = if raw.starts_with("//") {
         format!("https:{raw}")
     } else if raw.starts_with('/') {
@@ -261,7 +197,7 @@ fn unwrap_duckduckgo_url(raw: &str) -> String {
     raw.to_string()
 }
 
-fn clean_fragment(html: &str) -> String {
+pub(crate) fn clean_fragment(html: &str) -> String {
     let tags = regex::Regex::new(r"(?s)<[^>]+>").unwrap();
     decode_entities(&tags.replace_all(html, " "))
         .split_whitespace()
@@ -269,6 +205,7 @@ fn clean_fragment(html: &str) -> String {
         .join(" ")
 }
 
+#[cfg(test)]
 fn html_to_text(html: &str) -> String {
     let no_script =
         regex::Regex::new(r"(?is)<(?:script|style|noscript)[^>]*>.*?</(?:script|style|noscript)>")
@@ -282,12 +219,23 @@ fn html_to_text(html: &str) -> String {
         .join(" ")
 }
 
-fn decode_entities(text: &str) -> String {
+#[cfg(test)]
+fn parse_search_results(html: &str, count: usize) -> String {
+    let hits = meta_search::parse_ddg_hits(html, count);
+    hits.iter()
+        .enumerate()
+        .map(|(i, h)| format!("{}. {}\n   {}\n   {}", i + 1, h.title, h.url, h.snippet))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+pub(crate) fn decode_entities(text: &str) -> String {
     text.replace("&nbsp;", " ")
         .replace("&lt;", "<")
         .replace("&gt;", ">")
         .replace("&quot;", "\"")
         .replace("&#39;", "'")
+        .replace("&#x27;", "'")
         .replace("&amp;", "&")
 }
 
@@ -316,9 +264,6 @@ mod tests {
         }
     }
 
-    /// SSRF gate, no network: loopback/private/link-local literals (plain
-    /// and WHATWG-obfuscated), local and metadata names are refused;
-    /// public names and public literals pass.
     #[test]
     fn refuses_non_public_hosts() {
         for value in [
@@ -357,16 +302,12 @@ mod tests {
                 "SSRF gate blocked {value:?}"
             );
         }
-        // redirect hops re-enter the same gate
         let bounced: Url = "http://127.0.0.1:8080/".parse().unwrap();
         assert!(host_allowed(&bounced, &[]).is_err());
         let fine: Url = "https://example.com/target".parse().unwrap();
         assert!(host_allowed(&fine, &[]).is_ok());
     }
 
-    /// with `[web].allow_hosts` the loopback class becomes reachable
-    /// through webfetch — the honest path to a dev server. The gate's own
-    /// spelling is what the redirect policy uses, so hops obey the same list.
     #[test]
     fn a_listed_loopback_host_passes_the_gate() {
         let allow: Vec<String> = ["localhost:3000", "127.0.0.1"]
@@ -383,7 +324,6 @@ mod tests {
                 "listed loopback must pass: {value}"
             );
         }
-        // unlisted loopback and everything else stay shut
         for value in [
             "http://localhost:3001/",
             "http://api.localhost/",
@@ -479,16 +419,253 @@ mod tests {
         assert!(out.contains("alpha"), "{}", out);
         assert!(out.contains("2"), "{}", out);
         assert!(!out.contains("outside"), "{}", out);
-        // blocks are separated, not glued into one line
         assert!(out.contains("\n\n"), "{}", out);
 
-        // attribute selectors work
         let out = select_fragments(html, "tr td:first-child").unwrap();
         assert!(out.contains("alpha") && out.contains("beta"), "{}", out);
         assert!(!out.contains("\n1"), "{}", out);
 
-        // malformed selector and empty match are errors, not empty output
         assert!(select_fragments(html, "td[").is_err());
         assert!(select_fragments(html, ".does-not-exist").is_err());
+    }
+
+    #[test]
+    fn html_to_markdown_preserves_code_blocks_headings_tables_and_strips_nav() {
+        let html = r#"
+        <!doctype html>
+        <html>
+        <head>
+            <title>Tokio Spawn Guide</title>
+            <link rel="alternate" type="text/markdown" href="/docs/spawn.md" />
+        </head>
+        <body>
+            <nav><a href="/home">Home</a><a href="/pricing">Pricing</a></nav>
+            <div class="cookie-banner">Accept all cookies</div>
+            <main>
+                <h1>Spawning Tasks ¶</h1>
+                <p>Use <code>tokio::spawn</code> to run an async task concurrently. See <a href="/api/task">Task API</a>.</p>
+                <pre><code class="language-rust">#[tokio::main]
+async fn main() {
+    let handle = tokio::spawn(async {
+        // indented comment inside code
+        println!("hello");
+    });
+    handle.await.unwrap();
+}</code></pre>
+                <h2>Comparison</h2>
+                <table>
+                    <tr><th>Function</th><th>Pool</th></tr>
+                    <tr><td>spawn</td><td>Async worker</td></tr>
+                    <tr><td>spawn_blocking</td><td>Blocking pool</td></tr>
+                </table>
+            </main>
+            <footer>Copyright 2026</footer>
+        </body>
+        </html>
+        "#;
+        let base = Url::parse("https://tokio.rs/tokio/tutorial/spawning").unwrap();
+        let doc = markdown::html_to_markdown(html, Some(&base));
+
+        assert_eq!(
+            doc.alternate_markdown_url.as_deref(),
+            Some("https://tokio.rs/docs/spawn.md")
+        );
+        assert!(!doc.markdown.contains("Pricing"), "nav must be stripped");
+        assert!(
+            !doc.markdown.contains("Accept all cookies"),
+            "cookie banner must be stripped"
+        );
+        assert!(
+            !doc.markdown.contains("Copyright 2026"),
+            "footer must be stripped"
+        );
+        assert!(doc.markdown.contains("# Spawning Tasks"));
+        assert!(doc.markdown.contains("`tokio::spawn`"));
+        assert!(doc.markdown.contains("[Task API](https://tokio.rs/api/task)"));
+        assert!(doc.markdown.contains("```rust\n#[tokio::main]\nasync fn main() {\n    let handle = tokio::spawn(async {\n        // indented comment inside code"));
+        assert!(doc.markdown.contains("| Function | Pool |"));
+        assert!(doc.markdown.contains("| spawn_blocking | Blocking pool |"));
+    }
+
+    #[test]
+    fn ranker_splits_sections_and_ranks_code_and_identifiers() {
+        let md = r#"# Crate Overview
+
+Introductory paragraph about the HTTP client.
+
+## Installation
+
+Add `reqwest` to Cargo.toml.
+
+## Authentication & Bearer Headers
+
+To send a bearer token or custom authorization header, use `RequestBuilder::bearer_auth`:
+
+```rust
+let res = client
+    .get("https://api.example.com/data")
+    .bearer_auth("secret_token")
+    .send()
+    .await?;
+```
+
+## Timeouts
+
+Configure connection and request timeouts with `Duration::from_secs`.
+"#;
+        let sections = ranker::parse_sections(md);
+        assert_eq!(sections.len(), 4);
+        // Ensure `#` inside code blocks never creates fake sections.
+        let ranked = ranker::rank_sections(&sections, "bearer_auth header");
+        assert!(!ranked.is_empty());
+        assert_eq!(sections[ranked[0].0].heading, "Authentication & Bearer Headers");
+
+        let page = ranker::put_cached_page(
+            "https://example.com/docs/reqwest?utm_source=test#top",
+            Some("Reqwest Docs".into()),
+            md.into(),
+        );
+        // Canonical URL lookup hits cache even without tracking params.
+        let cached = ranker::get_cached_page("https://www.example.com/docs/reqwest/").unwrap();
+        assert_eq!(cached.canonical_url, "https://example.com/docs/reqwest");
+
+        let sec_proj = ranker::project_page(&page, None, Some("Timeouts"));
+        assert!(sec_proj.contains("Duration::from_secs"));
+        assert!(!sec_proj.contains("Cargo.toml"));
+    }
+
+    #[test]
+    fn router_classifies_developer_urls_accurately() {
+        let gh_blob = Url::parse("https://github.com/tokio-rs/tokio/blob/master/tokio/src/lib.rs").unwrap();
+        assert_eq!(
+            router::classify_url(&gh_blob),
+            router::DomainRoute::GitHubBlob {
+                owner: "tokio-rs".into(),
+                repo: "tokio".into(),
+                rest: "master/tokio/src/lib.rs".into(),
+            }
+        );
+
+        let gh_issue = Url::parse("https://github.com/ratatui/ratatui/issues/1024").unwrap();
+        assert_eq!(
+            router::classify_url(&gh_issue),
+            router::DomainRoute::GitHubIssueOrPr {
+                owner: "ratatui".into(),
+                repo: "ratatui".into(),
+                kind: "Issue",
+                number: 1024,
+            }
+        );
+
+        let crate_url = Url::parse("https://crates.io/crates/serde/1.0.210").unwrap();
+        assert_eq!(
+            router::classify_url(&crate_url),
+            router::DomainRoute::CratesIo {
+                crate_name: "serde".into(),
+            }
+        );
+
+        let so_url = Url::parse("https://stackoverflow.com/questions/123456/how-to-spawn-in-tokio").unwrap();
+        assert_eq!(
+            router::classify_url(&so_url),
+            router::DomainRoute::StackExchangeQuestion {
+                site: "stackoverflow".into(),
+                question_id: 123456,
+            }
+        );
+    }
+
+    #[test]
+    fn meta_search_parsers_and_rrf_fusion_merge_duplicates() {
+        let sp_html = r#"
+            <div class="result">
+                <a class="result-title result-link" href="https://tokio.rs/tokio/tutorial/spawning">
+                    <h2 class="wgl-title">Spawning | Tokio</h2>
+                </a>
+                <p class="description">Tasks are created with tokio::spawn.</p>
+            </div>
+        "#;
+        let sp_hits = meta_search::parse_startpage_results(sp_html, 5);
+        assert_eq!(sp_hits.len(), 1);
+        assert_eq!(sp_hits[0].url, "https://tokio.rs/tokio/tutorial/spawning");
+
+        let bing_html = r#"
+            <li class="b_algo">
+                <h2><a href="https://www.bing.com/ck/a?!&amp;&amp;p=123&amp;u=a1aHR0cHM6Ly90b2tpby5ycy90b2tpby90dXRvcmlhbC9zcGF3bmluZw&amp;ntb=1">Spawning | Tokio Runtime</a></h2>
+                <div class="b_caption"><p>Spawning submits the task to the Tokio scheduler.</p></div>
+            </li>
+        "#;
+        let bing_hits = meta_search::parse_bing_results(bing_html, 5);
+        assert_eq!(bing_hits.len(), 1);
+        assert_eq!(bing_hits[0].url, "https://tokio.rs/tokio/tutorial/spawning");
+
+        let merged = meta_search::fuse_and_rank(
+            vec![sp_hits, bing_hits],
+            "tokio spawn",
+            meta_search::SearchCategory::Auto,
+            5,
+        );
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].sources, vec!["google", "bing"]);
+    }
+
+    #[test]
+    fn ddg_captcha_is_detected_and_rejected() {
+        let captcha = r#"<html><body><form id="challenge-form">Select all squares containing a duck</form></body></html>"#;
+        assert!(meta_search::is_ddg_captcha(captcha));
+    }
+
+    #[test]
+    fn code_table_and_definition_list_convert_cleanly() {
+        let html = r#"
+        <main>
+            <h2>API Items</h2>
+            <dl>
+                <dt><code>pub fn spawn&lt;F&gt;(future: F) -&gt; JoinHandle&lt;F::Output&gt;</code></dt>
+                <dd>Spawns a new asynchronous task, returning a <code>JoinHandle</code> for it.</dd>
+            </dl>
+            <table class="highlight">
+                <tr>
+                    <td class="lineno"><pre>1
+2</pre></td>
+                    <td class="code"><pre class="rust">let x = 1;
+let y = 2;</pre></td>
+                </tr>
+            </table>
+        </main>
+        "#;
+        let doc = markdown::html_to_markdown(html, None);
+        assert!(doc.markdown.contains("**`pub fn spawn<F>(future: F) -> JoinHandle<F::Output>`**"));
+        assert!(doc.markdown.contains(": Spawns a new asynchronous task"));
+        assert!(doc.markdown.contains("```rust\nlet x = 1;\nlet y = 2;\n```"));
+        assert!(!doc.markdown.contains("| 1"), "line-number table should render as fenced code, not pipe table");
+    }
+
+    #[tokio::test]
+    #[ignore = "hits live internet endpoints; run with --ignored"]
+    async fn live_meta_search_and_cached_section_fetch_smoke() {
+        let search_out = search(&json!({
+            "query": "rust tokio spawn",
+            "count": 5,
+            "deep": true
+        }))
+        .await;
+        assert!(search_out.ok, "search failed: {}", search_out.output);
+        println!("=== LIVE META-SEARCH OUTPUT ===\n{}\n", search_out.output);
+        assert!(search_out.output.contains("tokio"));
+        assert!(search_out.output.contains("## Deep Page Excerpts"));
+
+        // Now fetch a specific section from tokio tutorial (should hit the local LRU cache in 0ms!).
+        let fetch_out = fetch(
+            &json!({
+                "url": "https://tokio.rs/tokio/tutorial/spawning",
+                "query": "JoinHandle await"
+            }),
+            &[],
+        )
+        .await;
+        assert!(fetch_out.ok, "fetch failed: {}", fetch_out.output);
+        println!("=== LIVE WEBFETCH CACHED QUERY OUTPUT ===\n{}\n", fetch_out.output);
+        assert!(fetch_out.output.contains("JoinHandle"));
     }
 }
