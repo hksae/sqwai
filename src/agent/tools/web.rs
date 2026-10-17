@@ -641,6 +641,132 @@ let y = 2;</pre></td>
         assert!(!doc.markdown.contains("| 1"), "line-number table should render as fenced code, not pipe table");
     }
 
+    #[test]
+    fn pre_nested_spans_table_multiline_cells_and_slashed_branches() {
+        // 1. Slashed branch names in GitHub blob URLs map 1:1.
+        let slashed = Url::parse("https://github.com/org/vm/blob/feature/gc-opt/src/vm.rs").unwrap();
+        assert_eq!(
+            router::classify_url(&slashed),
+            router::DomainRoute::GitHubBlob {
+                owner: "org".into(),
+                repo: "vm".into(),
+                rest: "feature/gc-opt/src/vm.rs".into(),
+            }
+        );
+
+        // 2. Nested <span> inside <pre><code> must not insert spaces between tokens,
+        //    and line-number gutters (.src-line-numbers) must be stripped.
+        // 3. Multi-line <p> and <br> inside <td> must convert to <br> on a single table row.
+        let html = r#"
+        <main>
+            <pre class="rust"><span class="src-line-numbers">1
+2</span><code><span>pub</span> <span>fn</span> <span>main</span><span>()</span> <span>{</span>
+    <span>ImmixAllocator</span><span>::</span><span>alloc_frame</span><span>();</span>
+<span>}</span></code></pre>
+            <table>
+                <tr><th>Method</th><th>Details</th></tr>
+                <tr>
+                    <td><code>alloc_frame</code></td>
+                    <td><p>First line of cell.</p><p>Second line with <code>a | b</code> pipe.</p></td>
+                </tr>
+            </table>
+        </main>
+        "#;
+        let doc = markdown::html_to_markdown(html, None);
+        assert!(
+            doc.markdown.contains("pub fn main() {\n    ImmixAllocator::alloc_frame();\n}"),
+            "nested spans must not add spaces and gutter numbers must be stripped:\n{}",
+            doc.markdown
+        );
+        assert!(
+            doc.markdown.contains("| `alloc_frame` | First line of cell. <br> Second line with `a \\| b` pipe. |"),
+            "table cell newlines must become <br> and pipes must be escaped:\n{}",
+            doc.markdown
+        );
+    }
+
+    #[test]
+    fn identifier_tokenizer_breadcrumbs_url_canonicalization_and_global_deep_pool() {
+        // 1. Multi-level identifier tokenization (`ImmixAllocator::alloc_frame()`).
+        let tokens = ranker::tokenize_for_bm25("ImmixAllocator::alloc_frame() where T: From<U>");
+        assert!(tokens.contains(&"immixallocator::alloc_frame".to_string()));
+        assert!(tokens.contains(&"immixallocator".to_string()));
+        assert!(tokens.contains(&"alloc_frame".to_string()));
+        assert!(tokens.contains(&"immix".to_string()));
+        assert!(tokens.contains(&"alloc".to_string()));
+        assert!(tokens.contains(&"frame".to_string()));
+        // Programming keywords `where` and `from` are preserved!
+        assert!(tokens.contains(&"where".to_string()));
+        assert!(tokens.contains(&"from".to_string()));
+
+        // 2. Deep URL canonicalization (old.reddit.com, www., .git, #fragment).
+        assert_eq!(
+            ranker::canonicalize_url("https://old.reddit.com/r/rust/comments/abc/title/?utm_source=share#t1"),
+            "https://reddit.com/r/rust/comments/abc/title"
+        );
+        assert_eq!(
+            ranker::canonicalize_url("https://www.github.com/ratatui/ratatui.git/"),
+            "https://github.com/ratatui/ratatui"
+        );
+
+        // 3. Package-to-GitHub-repo cross-linking in RRF.
+        let gh_hit = meta_search::RawSearchHit {
+            title: "ratatui/ratatui".into(),
+            url: "https://github.com/ratatui/ratatui".into(),
+            snippet: "TUI library".into(),
+            source: "google",
+            badge: Some("★ 22996".into()),
+            boost: 0.0,
+            repo_url: None,
+        };
+        let crate_hit = meta_search::RawSearchHit {
+            title: "ratatui (Rust crate v0.30.2)".into(),
+            url: "https://crates.io/crates/ratatui".into(),
+            snippet: "TUI library".into(),
+            source: "crates.io",
+            badge: Some("v0.30.2".into()),
+            boost: 0.0,
+            repo_url: Some("https://github.com/ratatui/ratatui.git".into()),
+        };
+        let fused = meta_search::fuse_and_rank(
+            vec![vec![gh_hit], vec![crate_hit]],
+            "ratatui",
+            meta_search::SearchCategory::Auto,
+            5,
+        );
+        let gh_merged = fused.iter().find(|h| h.url.contains("github.com")).unwrap();
+        assert!(gh_merged.sources.contains(&"google") && gh_merged.sources.contains(&"crates.io"));
+        assert!(gh_merged.badges.contains(&"v0.30.2".to_string()));
+
+        // 4. Breadcrumbs (`<!-- Section: # Struct Tokio / ## fn spawn / ### Panics -->`)
+        //    and Global Cross-Page BM25 Pool lifting Page 3's exact code match over Page 1's generic prose.
+        let page1 = ranker::put_cached_page(
+            "https://example.com/blog/intro",
+            Some("General Intro".into()),
+            "# General Intro\n\nThis blog talks generally about memory management in many languages.".into(),
+        );
+        let page3 = ranker::put_cached_page(
+            "https://example.com/docs/vm",
+            Some("VM Internals".into()),
+            "# Struct Immix\n\nOverview.\n\n## fn alloc_frame\n\nAllocates.\n\n### Safety & Panics\n\n```rust\nImmixAllocator::alloc_frame(size);\n```".into(),
+        );
+        let u1 = Url::parse("https://example.com/blog/intro").unwrap();
+        let u3 = Url::parse("https://example.com/docs/vm").unwrap();
+        let global = ranker::extract_global_deep_excerpts(
+            &[(u1, page1, 0), (u3, page3, 2)],
+            "ImmixAllocator alloc_frame",
+            800,
+        );
+        assert!(
+            global.contains("<!-- Section: # Struct Immix / ## fn alloc_frame / ### Safety & Panics -->"),
+            "missing ancestor breadcrumb comment in:\n{global}"
+        );
+        assert!(
+            global.contains("ImmixAllocator::alloc_frame(size);"),
+            "global BM25 pool must pick Page 3's exact code match:\n{global}"
+        );
+    }
+
     #[tokio::test]
     #[ignore = "hits live internet endpoints; run with --ignored"]
     async fn live_meta_search_and_cached_section_fetch_smoke() {

@@ -1,17 +1,23 @@
 //! Multi-Source Meta-Search Engine with Reciprocal Rank Fusion (RRF),
-//! hybrid BM25 reranking, and parallel Deep Page Extraction.
+//! per-provider hard timeouts, GitHub rate-limit fallback, package-to-repo
+//! cross-linking, and global cross-page BM25 Deep Extraction.
 
 use super::ranker::{
-    self, canonicalize_url, extract_relevant_excerpts, put_cached_page, score_search_hit,
+    self, canonicalize_url, extract_global_deep_excerpts, put_cached_page, score_search_hit,
 };
 use super::router;
 use reqwest::{Client, Url};
 use scraper::{Html, Selector};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::time::Duration;
+use std::future::Future;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const BROWSER_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+
+/// Epoch timestamp (seconds) until which unauthenticated GitHub Search API is known to be rate-limited.
+static GITHUB_SEARCH_COOLDOWN_UNTIL: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SearchCategory {
@@ -49,6 +55,9 @@ pub struct RawSearchHit {
     pub source: &'static str,
     pub badge: Option<String>,
     pub boost: f64,
+    /// Optional canonical repository URL (e.g. from crates.io / npm / PyPI metadata)
+    /// used during RRF fusion to link package hits with their GitHub repository hits.
+    pub repo_url: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -59,6 +68,18 @@ pub struct MergedSearchHit {
     pub sources: Vec<&'static str>,
     pub badges: Vec<String>,
     pub score: f64,
+    pub linked_repo: Option<String>,
+}
+
+/// Hard per-provider timeout wrapper so one slow/hanging endpoint inside `tokio::join!`
+/// never delays fast results from the remaining providers.
+async fn cap_provider<F>(fut: F, budget: Duration) -> Vec<RawSearchHit>
+where
+    F: Future<Output = Vec<RawSearchHit>>,
+{
+    tokio::time::timeout(budget, fut)
+        .await
+        .unwrap_or_default()
 }
 
 pub async fn run_meta_search(
@@ -69,15 +90,18 @@ pub async fn run_meta_search(
     deep: bool,
     allow_hosts: &[String],
 ) -> Result<String, String> {
-    let provider_timeout = timeout_secs.clamp(4, 25);
+    // Individual provider budget: 2.5s default (up to 4s if user explicitly requested a long timeout),
+    // preventing a single stalled TLS handshake from blocking the whole meta-search.
+    let per_provider = Duration::from_millis((timeout_secs.clamp(2, 20) * 200).clamp(2_200, 4_000));
+
     let client = Client::builder()
-        .timeout(Duration::from_secs(provider_timeout))
+        .timeout(per_provider)
         .user_agent(BROWSER_UA)
         .build()
         .map_err(|e| format!("client error: {e}"))?;
 
     let api_client = Client::builder()
-        .timeout(Duration::from_secs(provider_timeout.min(10)))
+        .timeout(per_provider)
         .user_agent(crate::providers::USER_AGENT)
         .build()
         .map_err(|e| format!("client error: {e}"))?;
@@ -88,18 +112,24 @@ pub async fn run_meta_search(
         SearchCategory::Auto => {
             let include_pkgs = looks_like_package_query(query);
             let (sp, bing, ddg, so, gh, pkgs) = tokio::join!(
-                search_startpage(&client, query),
-                search_bing(&client, query),
-                search_duckduckgo(&client, query),
-                search_stackoverflow(&api_client, query, 6),
-                search_github(&api_client, query, 5),
-                async {
-                    if include_pkgs {
-                        search_packages(&api_client, query, 3).await
-                    } else {
-                        Vec::new()
-                    }
-                }
+                cap_provider(search_startpage(&client, query), per_provider),
+                cap_provider(search_bing(&client, query), per_provider),
+                cap_provider(search_duckduckgo(&client, query), per_provider),
+                cap_provider(search_stackoverflow(&api_client, query, 6), per_provider),
+                cap_provider(
+                    search_github_with_fallback(&api_client, &client, query, 5),
+                    per_provider
+                ),
+                cap_provider(
+                    async {
+                        if include_pkgs {
+                            search_packages(&api_client, query, 3).await
+                        } else {
+                            Vec::new()
+                        }
+                    },
+                    per_provider
+                )
             );
             provider_lists.extend([sp, bing, ddg, so, gh, pkgs]);
         }
@@ -110,49 +140,58 @@ pub async fn run_meta_search(
                 format!("{query} documentation")
             };
             let (sp, bing, ddg, crates, wiki) = tokio::join!(
-                search_startpage(&client, &docs_q),
-                search_bing(&client, &docs_q),
-                search_duckduckgo(&client, &docs_q),
-                search_crates_io(&api_client, query, 4),
-                search_wikipedia(&api_client, query, 3),
+                cap_provider(search_startpage(&client, &docs_q), per_provider),
+                cap_provider(search_bing(&client, &docs_q), per_provider),
+                cap_provider(search_duckduckgo(&client, &docs_q), per_provider),
+                cap_provider(search_crates_io(&api_client, query, 4), per_provider),
+                cap_provider(search_wikipedia(&api_client, query, 3), per_provider),
             );
             provider_lists.extend([sp, bing, ddg, crates, wiki]);
         }
         SearchCategory::Code => {
             let (gh, so, sp, bing, crates) = tokio::join!(
-                search_github(&api_client, query, 8),
-                search_stackoverflow(&api_client, query, 8),
-                search_startpage(&client, query),
-                search_bing(&client, query),
-                search_crates_io(&api_client, query, 4),
+                cap_provider(
+                    search_github_with_fallback(&api_client, &client, query, 8),
+                    per_provider
+                ),
+                cap_provider(search_stackoverflow(&api_client, query, 8), per_provider),
+                cap_provider(search_startpage(&client, query), per_provider),
+                cap_provider(search_bing(&client, query), per_provider),
+                cap_provider(search_crates_io(&api_client, query, 4), per_provider),
             );
             provider_lists.extend([gh, so, sp, bing, crates]);
         }
         SearchCategory::Packages => {
             let (pkgs, gh, sp, bing) = tokio::join!(
-                search_packages(&api_client, query, 6),
-                search_github(&api_client, query, 5),
-                search_startpage(&client, query),
-                search_bing(&client, query),
+                cap_provider(search_packages(&api_client, query, 6), per_provider),
+                cap_provider(
+                    search_github_with_fallback(&api_client, &client, query, 5),
+                    per_provider
+                ),
+                cap_provider(search_startpage(&client, query), per_provider),
+                cap_provider(search_bing(&client, query), per_provider),
             );
             provider_lists.extend([pkgs, gh, sp, bing]);
         }
         SearchCategory::Discussions => {
             let (hn, so, gh, sp, bing) = tokio::join!(
-                search_hackernews(&api_client, query, 6),
-                search_stackoverflow(&api_client, query, 6),
-                search_github_issues(&api_client, query, 5),
-                search_startpage(&client, query),
-                search_bing(&client, query),
+                cap_provider(search_hackernews(&api_client, query, 6), per_provider),
+                cap_provider(search_stackoverflow(&api_client, query, 6), per_provider),
+                cap_provider(
+                    search_github_issues_with_fallback(&api_client, &client, query, 5),
+                    per_provider
+                ),
+                cap_provider(search_startpage(&client, query), per_provider),
+                cap_provider(search_bing(&client, query), per_provider),
             );
             provider_lists.extend([hn, so, gh, sp, bing]);
         }
         SearchCategory::Papers => {
             let (arxiv, wiki, sp, bing) = tokio::join!(
-                search_arxiv(&api_client, query, 6),
-                search_wikipedia(&api_client, query, 4),
-                search_startpage(&client, query),
-                search_bing(&client, query),
+                cap_provider(search_arxiv(&api_client, query, 6), per_provider),
+                cap_provider(search_wikipedia(&api_client, query, 4), per_provider),
+                cap_provider(search_startpage(&client, query), per_provider),
+                cap_provider(search_bing(&client, query), per_provider),
             );
             provider_lists.extend([arxiv, wiki, sp, bing]);
         }
@@ -210,7 +249,9 @@ fn looks_like_package_query(query: &str) -> bool {
     false
 }
 
-/// Merge multi-engine search lists via Reciprocal Rank Fusion (RRF) + BM25 + Domain Boosts.
+/// Merge multi-engine search lists via Reciprocal Rank Fusion (RRF) + BM25 + Domain Boosts,
+/// and cross-link package registry hits (`crates.io` / `npm` / `PyPI`) with their GitHub
+/// repository hits so shared signals reinforce each other.
 pub fn fuse_and_rank(
     provider_lists: Vec<Vec<RawSearchHit>>,
     query: &str,
@@ -229,6 +270,12 @@ pub fn fuse_and_rank(
                 continue;
             }
             let rrf = 1.0 / (35.0 + (rank as f64) + 1.0);
+            let linked_repo = hit
+                .repo_url
+                .as_deref()
+                .filter(|u| !u.is_empty())
+                .map(canonicalize_url);
+
             let entry = map.entry(canonical).or_insert_with(|| MergedSearchHit {
                 title: hit.title.clone(),
                 url: hit.url.clone(),
@@ -236,9 +283,13 @@ pub fn fuse_and_rank(
                 sources: Vec::new(),
                 badges: Vec::new(),
                 score: 0.0,
+                linked_repo: None,
             });
 
             entry.score += rrf + hit.boost;
+            if entry.linked_repo.is_none() && linked_repo.is_some() {
+                entry.linked_repo = linked_repo;
+            }
             if !entry.sources.contains(&hit.source) {
                 entry.sources.push(hit.source);
             }
@@ -257,14 +308,63 @@ pub fn fuse_and_rank(
         }
     }
 
+    // Cross-link package registry entries with their canonical GitHub repository entry:
+    // if both `crates.io/crates/foo` (with `repo_url = github.com/org/foo`) and
+    // `github.com/org/foo` were found, fold the package's RRF/version badge into the repo
+    // and vice versa so the shared project gets the combined multi-source RRF boost!
+    let repo_links: Vec<(String, String, Vec<&'static str>, Vec<String>, f64)> = map
+        .iter()
+        .filter_map(|(canon_key, item)| {
+            let repo_canon = item.linked_repo.as_ref()?;
+            if repo_canon != canon_key && map.contains_key(repo_canon) {
+                Some((
+                    canon_key.clone(),
+                    repo_canon.clone(),
+                    item.sources.clone(),
+                    item.badges.clone(),
+                    item.score * 0.35,
+                ))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    for (pkg_key, repo_key, pkg_sources, pkg_badges, bonus) in repo_links {
+        let repo_badges = map
+            .get(&repo_key)
+            .map(|r| r.badges.clone())
+            .unwrap_or_default();
+        if let Some(repo_entry) = map.get_mut(&repo_key) {
+            repo_entry.score += bonus;
+            for s in &pkg_sources {
+                if !repo_entry.sources.contains(s) {
+                    repo_entry.sources.push(s);
+                }
+            }
+            for b in &pkg_badges {
+                if !repo_entry.badges.contains(b) {
+                    repo_entry.badges.push(b.clone());
+                }
+            }
+        }
+        if let Some(pkg_entry) = map.get_mut(&pkg_key) {
+            pkg_entry.score += bonus;
+            for b in repo_badges {
+                if !pkg_entry.badges.contains(&b) {
+                    pkg_entry.badges.push(b);
+                }
+            }
+        }
+    }
+
     let mut results: Vec<MergedSearchHit> = map
         .into_values()
         .map(|mut item| {
             let bm25 = score_search_hit(&item.title, &item.snippet, &item.url, query);
             let dom_boost = domain_quality_boost(&item.url, category);
-            // Multi-source agreement bonus.
             let agreement_bonus = if item.sources.len() >= 2 {
-                (item.sources.len() - 1) as f64 * 0.012
+                (item.sources.len() - 1) as f64 * 0.014
             } else {
                 0.0
             };
@@ -304,7 +404,6 @@ fn domain_quality_boost(url: &str, category: SearchCategory) -> f64 {
     {
         boost += 0.008;
     }
-    // Slight penalty for video-only pages where text extraction yields minimal code/docs.
     if lower.contains("youtube.com/watch") || lower.contains("tiktok.com/") {
         boost -= 0.025;
     }
@@ -317,14 +416,15 @@ async fn fetch_deep_excerpts(
     max_pages: usize,
     allow_hosts: &[String],
 ) -> String {
-    let targets: Vec<Url> = hits
+    let targets: Vec<(usize, Url)> = hits
         .iter()
-        .filter(|h| {
+        .enumerate()
+        .filter(|(_, h)| {
             let u = h.url.to_ascii_lowercase();
             !u.contains("youtube.com/watch") && !u.ends_with(".pdf")
         })
-        .filter_map(|h| Url::parse(&h.url).ok())
-        .filter(|u| crate::config::url_host_allowed(u, allow_hosts).is_ok())
+        .filter_map(|(rank, h)| Url::parse(&h.url).ok().map(|u| (rank, u)))
+        .filter(|(_, u)| crate::config::url_host_allowed(u, allow_hosts).is_ok())
         .take(max_pages)
         .collect();
 
@@ -332,43 +432,36 @@ async fn fetch_deep_excerpts(
         return String::new();
     }
 
-    let Ok(deep_client) = super::client(6, crate::providers::USER_AGENT, allow_hosts.to_vec())
+    let Ok(deep_client) = super::client(4, crate::providers::USER_AGENT, allow_hosts.to_vec())
     else {
         return String::new();
     };
 
-    let futs = targets.iter().map(|url| {
+    let futs = targets.into_iter().map(|(page_rank, url)| {
         let client = deep_client.clone();
-        let u = url.clone();
         async move {
-            if let Some(cached) = ranker::get_cached_page(u.as_str()) {
-                return Some((u, cached));
+            if let Some(cached) = ranker::get_cached_page(url.as_str()) {
+                return Some((url, cached, page_rank));
             }
-            let doc = router::fetch_smart(&client, &u, allow_hosts, false)
-                .await
-                .ok()?;
+            let doc = tokio::time::timeout(
+                Duration::from_millis(3_500),
+                router::fetch_smart(&client, &url, allow_hosts, false),
+            )
+            .await
+            .ok()?
+            .ok()?;
             if doc.markdown.trim().len() < 40 {
                 return None;
             }
             let cached = put_cached_page(doc.final_url.as_str(), doc.title, doc.markdown);
-            Some((u, cached))
+            Some((url, cached, page_rank))
         }
     });
 
-    let fetched = futures::future::join_all(futs).await;
-    let mut blocks = Vec::new();
-    for item in fetched.into_iter().flatten() {
-        let (url, page) = item;
-        let excerpt = extract_relevant_excerpts(&page, query, 2_000);
-        if !excerpt.trim().is_empty() {
-            let heading = page
-                .title
-                .as_deref()
-                .unwrap_or_else(|| url.as_str());
-            blocks.push(format!("### From [{heading}]({url})\n\n{excerpt}"));
-        }
-    }
-    blocks.join("\n\n---\n\n")
+    let fetched: Vec<(Url, ranker::CachedPage, usize)> =
+        futures::future::join_all(futs).await.into_iter().flatten().collect();
+
+    extract_global_deep_excerpts(&fetched, query, 6_000)
 }
 
 // ── Web Search Providers (Startpage, Bing, DuckDuckGo) ───────────────────────
@@ -451,6 +544,7 @@ pub fn parse_startpage_results(html: &str, max_count: usize) -> Vec<RawSearchHit
             source: "google",
             badge: None,
             boost: 0.0,
+            repo_url: None,
         });
         if hits.len() >= max_count {
             break;
@@ -529,6 +623,7 @@ pub fn parse_bing_results(html: &str, max_count: usize) -> Vec<RawSearchHit> {
             source: "bing",
             badge: None,
             boost: 0.0,
+            repo_url: None,
         });
         if hits.len() >= max_count {
             break;
@@ -595,7 +690,6 @@ async fn search_duckduckgo(client: &Client, query: &str) -> Vec<RawSearchHit> {
     else {
         return Vec::new();
     };
-    // DDG bot challenge returns HTTP 202 Accepted or a challenge-form page.
     if resp.status().as_u16() == 202 || !resp.status().is_success() {
         return Vec::new();
     }
@@ -666,6 +760,7 @@ pub fn parse_ddg_hits(html: &str, max_count: usize) -> Vec<RawSearchHit> {
             source: "ddg",
             badge: None,
             boost: 0.0,
+            repo_url: None,
         });
         if hits.len() >= max_count {
             break;
@@ -674,7 +769,7 @@ pub fn parse_ddg_hits(html: &str, max_count: usize) -> Vec<RawSearchHit> {
     hits
 }
 
-// ── Developer & Knowledge APIs (Zero-Key JSON/Atom) ──────────────────────────
+// ── Developer & Knowledge APIs (Zero-Key JSON/Atom + Rate-Limit Fallbacks) ───
 
 async fn search_stackoverflow(client: &Client, query: &str, limit: usize) -> Vec<RawSearchHit> {
     let page_size = limit.clamp(1, 10).to_string();
@@ -736,32 +831,100 @@ async fn search_stackoverflow(client: &Client, query: &str, limit: usize) -> Vec
             source: "stackoverflow",
             badge,
             boost,
+            repo_url: None,
         });
     }
     hits
 }
 
-async fn search_github(client: &Client, query: &str, limit: usize) -> Vec<RawSearchHit> {
-    let (repos, issues) = tokio::join!(
-        search_github_repos(client, query, limit),
-        search_github_issues(client, query, limit)
-    );
-    let mut out = repos;
-    out.extend(issues);
-    out
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn github_in_cooldown() -> bool {
+    now_secs() < GITHUB_SEARCH_COOLDOWN_UNTIL.load(Ordering::Relaxed)
+}
+
+fn mark_github_rate_limited() {
+    GITHUB_SEARCH_COOLDOWN_UNTIL.store(now_secs() + 60, Ordering::Relaxed);
+}
+
+/// Query GitHub Search API (using `GITHUB_TOKEN`/`GH_TOKEN` if present); if GitHub
+/// returns 403/429 (10 req/min unauthenticated limit), transparently fall back to
+/// `site:github.com <query>` via Bing/Startpage.
+async fn search_github_with_fallback(
+    api_client: &Client,
+    web_client: &Client,
+    query: &str,
+    limit: usize,
+) -> Vec<RawSearchHit> {
+    if !github_in_cooldown() {
+        let (repos, issues) = tokio::join!(
+            search_github_repos(api_client, query, limit),
+            search_github_issues(api_client, query, limit)
+        );
+        let mut out = repos;
+        out.extend(issues);
+        if !out.is_empty() || !github_in_cooldown() {
+            return out;
+        }
+    }
+    search_site_github_fallback(web_client, query, limit).await
+}
+
+async fn search_github_issues_with_fallback(
+    api_client: &Client,
+    web_client: &Client,
+    query: &str,
+    limit: usize,
+) -> Vec<RawSearchHit> {
+    if !github_in_cooldown() {
+        let issues = search_github_issues(api_client, query, limit).await;
+        if !issues.is_empty() || !github_in_cooldown() {
+            return issues;
+        }
+    }
+    search_site_github_fallback(web_client, &format!("{query} issues"), limit).await
+}
+
+async fn search_site_github_fallback(
+    web_client: &Client,
+    query: &str,
+    limit: usize,
+) -> Vec<RawSearchHit> {
+    let site_q = format!("site:github.com {query}");
+    let mut hits = search_bing(web_client, &site_q).await;
+    if hits.is_empty() {
+        hits = search_startpage(web_client, &site_q).await;
+    }
+    hits.into_iter()
+        .filter(|h| h.url.contains("github.com/"))
+        .take(limit)
+        .map(|mut h| {
+            h.source = "github";
+            h
+        })
+        .collect()
 }
 
 async fn search_github_repos(client: &Client, query: &str, limit: usize) -> Vec<RawSearchHit> {
     let per_page = limit.clamp(1, 10).to_string();
-    let Ok(resp) = client
-        .get("https://api.github.com/search/repositories")
-        .header(reqwest::header::ACCEPT, "application/vnd.github+json")
-        .query(&[("q", query), ("per_page", per_page.as_str())])
-        .send()
-        .await
-    else {
+    let req = router::apply_github_headers(
+        client
+            .get("https://api.github.com/search/repositories")
+            .query(&[("q", query), ("per_page", per_page.as_str())]),
+        "application/vnd.github+json",
+    );
+    let Ok(resp) = req.send().await else {
         return Vec::new();
     };
+    if matches!(resp.status().as_u16(), 403 | 429) {
+        mark_github_rate_limited();
+        return Vec::new();
+    }
     if !resp.status().is_success() {
         return Vec::new();
     }
@@ -800,6 +963,7 @@ async fn search_github_repos(client: &Client, query: &str, limit: usize) -> Vec<
             source: "github",
             badge,
             boost: if stars >= 100 { 0.008 } else { 0.0 },
+            repo_url: None,
         });
     }
     hits
@@ -807,15 +971,19 @@ async fn search_github_repos(client: &Client, query: &str, limit: usize) -> Vec<
 
 async fn search_github_issues(client: &Client, query: &str, limit: usize) -> Vec<RawSearchHit> {
     let per_page = limit.clamp(1, 10).to_string();
-    let Ok(resp) = client
-        .get("https://api.github.com/search/issues")
-        .header(reqwest::header::ACCEPT, "application/vnd.github+json")
-        .query(&[("q", query), ("per_page", per_page.as_str())])
-        .send()
-        .await
-    else {
+    let req = router::apply_github_headers(
+        client
+            .get("https://api.github.com/search/issues")
+            .query(&[("q", query), ("per_page", per_page.as_str())]),
+        "application/vnd.github+json",
+    );
+    let Ok(resp) = req.send().await else {
         return Vec::new();
     };
+    if matches!(resp.status().as_u16(), 403 | 429) {
+        mark_github_rate_limited();
+        return Vec::new();
+    }
     if !resp.status().is_success() {
         return Vec::new();
     }
@@ -844,6 +1012,7 @@ async fn search_github_issues(client: &Client, query: &str, limit: usize) -> Vec
             source: "gh-issue",
             badge: Some(format!("{state}, {comments} comments")),
             boost: 0.0,
+            repo_url: None,
         });
     }
     hits
@@ -893,6 +1062,7 @@ async fn search_crates_io(client: &Client, query: &str, limit: usize) -> Vec<Raw
             .as_str()
             .map(String::from)
             .unwrap_or_else(|| format!("https://docs.rs/{name}/latest/{name}/"));
+        let repo_url = c["repository"].as_str().map(String::from);
         let exact = c["exact_match"].as_bool().unwrap_or(false);
 
         hits.push(RawSearchHit {
@@ -902,6 +1072,7 @@ async fn search_crates_io(client: &Client, query: &str, limit: usize) -> Vec<Raw
             source: "crates.io",
             badge: Some(format!("v{version}")),
             boost: if exact { 0.020 } else { 0.005 },
+            repo_url,
         });
     }
     hits
@@ -939,6 +1110,7 @@ async fn search_npm(client: &Client, query: &str, limit: usize) -> Vec<RawSearch
             .as_str()
             .map(String::from)
             .unwrap_or_else(|| format!("https://www.npmjs.com/package/{name}"));
+        let repo_url = pkg["links"]["repository"].as_str().map(String::from);
 
         hits.push(RawSearchHit {
             title: format!("{name} (npm v{ver})"),
@@ -947,6 +1119,7 @@ async fn search_npm(client: &Client, query: &str, limit: usize) -> Vec<RawSearch
             source: "npm",
             badge: Some(format!("v{ver}")),
             boost: 0.005,
+            repo_url,
         });
     }
     hits
@@ -968,7 +1141,7 @@ async fn search_hackernews(client: &Client, query: &str, limit: usize) -> Vec<Ra
     };
     if !resp.status().is_success() {
         return Vec::new();
-    }
+    };
     let Ok(data) = resp.json::<Value>().await else {
         return Vec::new();
     };
@@ -993,10 +1166,13 @@ async fn search_hackernews(client: &Client, query: &str, limit: usize) -> Vec<Ra
         hits.push(RawSearchHit {
             title: title.to_string(),
             url: url.to_string(),
-            snippet: format!("HackerNews discussion: {hn_url} ({points} points, {comments} comments)"),
+            snippet: format!(
+                "HackerNews discussion: {hn_url} ({points} points, {comments} comments)"
+            ),
             source: "hn",
             badge: Some(format!("{points}pts, {comments}c")),
             boost: 0.0,
+            repo_url: None,
         });
     }
     hits
@@ -1043,6 +1219,7 @@ async fn search_wikipedia(client: &Client, query: &str, limit: usize) -> Vec<Raw
             source: "wikipedia",
             badge: None,
             boost: 0.0,
+            repo_url: None,
         });
     }
     hits
@@ -1099,6 +1276,7 @@ pub fn parse_arxiv_atom(xml: &str, limit: usize) -> Vec<RawSearchHit> {
             source: "arxiv",
             badge: Some("paper".into()),
             boost: 0.005,
+            repo_url: None,
         });
     }
     hits

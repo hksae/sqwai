@@ -34,10 +34,12 @@ pub fn html_to_markdown(html: &str, base_url: Option<&Url>) -> ExtractedDoc {
 
     let mut markdown = conv.finish();
 
-    // Prepend document title as H1 if the body did not already start with H1.
+    // Prepend document title as H1 only if the body does not already contain a top-level H1 near the start.
+    let has_leading_h1 = markdown.starts_with("# ")
+        || markdown.lines().take(8).any(|l| l.starts_with("# "));
     if let Some(ref t) = title
         && !t.is_empty()
-        && !markdown.starts_with("# ")
+        && !has_leading_h1
     {
         if markdown.is_empty() {
             markdown = format!("# {t}");
@@ -713,10 +715,7 @@ impl<'a> DomConverter<'a> {
         for tr in el.select(&tr_sel) {
             let mut row: Vec<String> = Vec::new();
             for cell in tr.select(&cell_sel) {
-                let text = self
-                    .collect_inline_clean(cell)
-                    .replace('|', "\\|")
-                    .replace('\n', " ");
+                let text = self.collect_table_cell(cell);
                 row.push(text);
             }
             if row.iter().any(|c| !c.is_empty()) {
@@ -756,6 +755,22 @@ impl<'a> DomConverter<'a> {
             }
         }
         self.ensure_blank_line();
+    }
+
+    /// Render a `<th>` or `<td>` cell: preserves inline `code`, **bold**, and
+    /// `[links](url)`, and converts internal block breaks (`<br>`, `<p>`, `<li>`)
+    /// into `<br>` so multi-line cell content never breaks Markdown table rows.
+    fn collect_table_cell(&self, cell: ElementRef<'_>) -> String {
+        let mut sub = DomConverter::new(self.base_url);
+        sub.walk_children(cell);
+        let raw = sub.finish();
+        let lines: Vec<String> = raw
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(|l| l.replace('|', "\\|"))
+            .collect();
+        lines.join(" <br> ")
     }
 
     fn collect_inline_clean(&self, el: ElementRef<'_>) -> String {
@@ -864,6 +879,9 @@ fn collect_pre_text(el: ElementRef<'_>, out: &mut String) {
                 if e.name() == "br" {
                     out.push('\n');
                 } else if let Some(child_el) = ElementRef::wrap(child) {
+                    if is_noise_element(child_el) || is_code_gutter(e) {
+                        continue;
+                    }
                     // Some syntax highlighters put each line in a `<span class="line">` or `<div>` without `\n`.
                     let is_line_block = matches!(e.name(), "div" | "p")
                         || e.attr("class")
@@ -877,6 +895,26 @@ fn collect_pre_text(el: ElementRef<'_>, out: &mut String) {
             _ => {}
         }
     }
+}
+
+fn is_code_gutter(e: &scraper::node::Element) -> bool {
+    if e.attr("data-nosnippet").is_some() || e.attr("data-line-number").is_some() {
+        return true;
+    }
+    let Some(class) = e.attr("class") else {
+        return false;
+    };
+    class.split_whitespace().any(|c| {
+        matches!(
+            c,
+            "lineno"
+                | "linenos"
+                | "line-number"
+                | "line-numbers"
+                | "src-line-numbers"
+                | "hljs-ln-numbers"
+        )
+    })
 }
 
 fn detect_code_language(pre: ElementRef<'_>) -> Option<String> {
@@ -1027,6 +1065,12 @@ pub fn normalize_markdown(raw: &str) -> String {
         }
 
         let trimmed = line.trim_end();
+        // Skip raw HTML container tags (`<div ...>`, `</div>`) that some servers
+        // (e.g. Discourse `text/markdown`) emit outside code fences.
+        let t_both = trimmed.trim();
+        if (t_both.starts_with("<div") && t_both.ends_with('>')) || t_both == "</div>" {
+            continue;
+        }
         if trimmed.is_empty() {
             blank_run += 1;
             if blank_run <= 1 && !out.is_empty() {

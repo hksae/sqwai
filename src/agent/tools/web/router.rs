@@ -11,6 +11,24 @@ use scraper::{Html, Selector};
 use serde_json::Value;
 
 pub const MAX_BODY_BYTES: usize = 1_500_000;
+const REDDIT_API_UA: &str = "linux:sqwai:v0.1.0 (by /u/sqwai_cli)";
+
+/// Attach `Accept: application/vnd.github+json` and optional `Authorization: Bearer`
+/// from `GITHUB_TOKEN` or `GH_TOKEN` (raises unauthenticated 10 req/min search limit to 30 req/min
+/// and 60 req/hr core limit to 5000 req/hr).
+pub(crate) fn apply_github_headers(
+    req: reqwest::RequestBuilder,
+    accept: &'static str,
+) -> reqwest::RequestBuilder {
+    let req = req.header(reqwest::header::ACCEPT, accept);
+    if let Ok(token) = std::env::var("GITHUB_TOKEN").or_else(|_| std::env::var("GH_TOKEN")) {
+        let trimmed = token.trim();
+        if !trimmed.is_empty() {
+            return req.header(reqwest::header::AUTHORIZATION, format!("Bearer {trimmed}"));
+        }
+    }
+    req
+}
 
 /// Result of fetching and converting a URL into clean Markdown.
 #[derive(Debug, Clone)]
@@ -74,11 +92,15 @@ pub fn classify_url(url: &Url) -> DomainRoute {
 
     match host_clean {
         "github.com" => match segments.as_slice() {
-            [owner, repo, "blob", rest @ ..] if !rest.is_empty() => DomainRoute::GitHubBlob {
-                owner: (*owner).to_string(),
-                repo: (*repo).to_string(),
-                rest: rest.join("/"),
-            },
+            // Takes the entire tail after `/blob/` or `/raw/` verbatim so branch names
+            // containing slashes (e.g. `feature/gc-opt/src/vm.rs`) map 1:1 to raw.githubusercontent.com.
+            [owner, repo, "blob" | "raw", rest @ ..] if !rest.is_empty() => {
+                DomainRoute::GitHubBlob {
+                    owner: (*owner).to_string(),
+                    repo: (*repo).to_string(),
+                    rest: rest.join("/"),
+                }
+            }
             [owner, repo, "issues", num] => {
                 if let Ok(n) = num.parse::<u64>() {
                     DomainRoute::GitHubIssueOrPr {
@@ -382,6 +404,23 @@ async fn fetch_standard_http(
         llms_txt_url,
     } = markdown::html_to_markdown(&raw, Some(&final_url));
 
+    // Ensure `docs.rs` / rustdoc `.item-decl` type/function signature and `where` bounds
+    // are always present right at the top of the Markdown before `.docblock`.
+    if !need_raw_html
+        && final_url
+            .host_str()
+            .is_some_and(|h| h.contains("docs.rs") || h.contains("doc.rust-lang.org"))
+        && let Some(sig_block) = extract_rustdoc_item_decl(&raw)
+        && !markdown.contains(&sig_block)
+    {
+        if let Some(nl_pos) = markdown.find('\n') {
+            let (head, rest) = markdown.split_at(nl_pos);
+            markdown = format!("{head}\n\n```rust\n{sig_block}\n```\n{}", rest);
+        } else {
+            markdown = format!("```rust\n{sig_block}\n```\n\n{markdown}");
+        }
+    }
+
     if let Some(ref llms_url) = llms_txt_url
         && !markdown.contains(llms_url)
     {
@@ -511,14 +550,8 @@ async fn fetch_github_issue(
         format!("https://api.github.com/repos/{owner}/{repo}/issues/{number}/comments?per_page=25");
 
     let (issue_res, comments_res) = tokio::join!(
-        client
-            .get(&issue_api)
-            .header(reqwest::header::ACCEPT, "application/vnd.github+json")
-            .send(),
-        client
-            .get(&comments_api)
-            .header(reqwest::header::ACCEPT, "application/vnd.github+json")
-            .send()
+        apply_github_headers(client.get(&issue_api), "application/vnd.github+json").send(),
+        apply_github_headers(client.get(&comments_api), "application/vnd.github+json").send()
     );
 
     let issue_resp = issue_res.map_err(|e| e.to_string())?;
@@ -583,14 +616,8 @@ async fn fetch_github_repo(
     let readme_api = format!("https://api.github.com/repos/{owner}/{repo}/readme");
 
     let (repo_res, readme_res) = tokio::join!(
-        client
-            .get(&repo_api)
-            .header(reqwest::header::ACCEPT, "application/vnd.github+json")
-            .send(),
-        client
-            .get(&readme_api)
-            .header(reqwest::header::ACCEPT, "application/vnd.github.raw+json")
-            .send()
+        apply_github_headers(client.get(&repo_api), "application/vnd.github+json").send(),
+        apply_github_headers(client.get(&readme_api), "application/vnd.github.raw+json").send()
     );
 
     let mut md = String::new();
@@ -738,11 +765,10 @@ async fn fetch_crates_io(
                 parts[0],
                 parts[1].trim_end_matches(".git")
             );
-            if let Ok(rd_resp) = client
-                .get(&readme_api)
-                .header(reqwest::header::ACCEPT, "application/vnd.github.raw+json")
-                .send()
-                .await
+            if let Ok(rd_resp) =
+                apply_github_headers(client.get(&readme_api), "application/vnd.github.raw+json")
+                    .send()
+                    .await
                 && rd_resp.status().is_success()
                 && let Ok(bytes) = rd_resp.bytes().await
                 && bytes.len() <= MAX_BODY_BYTES
@@ -876,8 +902,20 @@ async fn fetch_reddit_thread(
     original_url: &Url,
     json_url: &str,
 ) -> Result<FetchedDocument, String> {
+    if let Ok(doc) = fetch_reddit_json(client, original_url, json_url).await {
+        return Ok(doc);
+    }
+    fetch_old_reddit_html(client, original_url).await
+}
+
+async fn fetch_reddit_json(
+    client: &Client,
+    original_url: &Url,
+    json_url: &str,
+) -> Result<FetchedDocument, String> {
     let resp = client
         .get(json_url)
+        .header(reqwest::header::USER_AGENT, REDDIT_API_UA)
         .header(reqwest::header::ACCEPT, "application/json")
         .send()
         .await
@@ -928,7 +966,6 @@ async fn fetch_reddit_thread(
                 "### u/{c_author} ({c_score} pts)\n\n{}\n\n",
                 body.trim()
             ));
-            // Include first-level replies if present.
             if let Some(replies) = cd["replies"]["data"]["children"].as_array() {
                 for r in replies.iter().take(3) {
                     let rd = &r["data"];
@@ -960,6 +997,106 @@ async fn fetch_reddit_thread(
         raw_html: None,
         final_url: original_url.clone(),
     })
+}
+
+async fn fetch_old_reddit_html(
+    client: &Client,
+    original_url: &Url,
+) -> Result<FetchedDocument, String> {
+    let path = original_url.path().trim_end_matches(".json");
+    let old_url = format!("https://old.reddit.com{path}");
+    let resp = client
+        .get(&old_url)
+        .header(reqwest::header::USER_AGENT, REDDIT_API_UA)
+        .header(reqwest::header::ACCEPT, "text/html")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("old.reddit status {}", resp.status()));
+    }
+    let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
+    if bytes.len() > MAX_BODY_BYTES {
+        return Err("old.reddit response too large".into());
+    }
+    let html = String::from_utf8_lossy(&bytes);
+    let md = extract_old_reddit_dom(&html, original_url)
+        .ok_or_else(|| "failed to parse old.reddit html".to_string())?;
+    Ok(FetchedDocument {
+        title: None,
+        markdown: md,
+        raw_html: None,
+        final_url: original_url.clone(),
+    })
+}
+
+pub fn extract_old_reddit_dom(html: &str, base_url: &Url) -> Option<String> {
+    let doc = Html::parse_document(html);
+    let title_sel = Selector::parse("a.title, p.title a").ok()?;
+    let post_sel = Selector::parse(".thing.link .usertext-body").ok()?;
+    let comment_sel = Selector::parse(".commentarea .thing.comment").ok()?;
+    let author_sel = Selector::parse("a.author").ok()?;
+    let score_sel = Selector::parse(".score.unvoted, .score").ok()?;
+    let body_sel = Selector::parse(".usertext-body").ok()?;
+
+    let title: String = doc.select(&title_sel).next()?.text().collect();
+    let title = title.trim();
+    if title.is_empty() {
+        return None;
+    }
+
+    let mut md = format!("# {title}\n\n");
+    if let Some(post_body) = doc.select(&post_sel).next() {
+        let post_md = markdown::html_to_markdown(&post_body.html(), Some(base_url)).markdown;
+        if !post_md.is_empty() {
+            md.push_str(&post_md);
+            md.push_str("\n\n");
+        }
+    }
+
+    let comments: Vec<_> = doc.select(&comment_sel).take(20).collect();
+    if !comments.is_empty() {
+        md.push_str("## Top Comments\n\n");
+        for c in comments {
+            let author = c
+                .select(&author_sel)
+                .next()
+                .map(|a| a.text().collect::<String>())
+                .unwrap_or_else(|| "unknown".into());
+            let score = c
+                .select(&score_sel)
+                .next()
+                .map(|s| s.text().collect::<String>())
+                .unwrap_or_default();
+            if let Some(b) = c.select(&body_sel).next() {
+                let b_md = markdown::html_to_markdown(&b.html(), Some(base_url)).markdown;
+                if !b_md.is_empty() {
+                    let score_tag = if score.trim().is_empty() {
+                        String::new()
+                    } else {
+                        format!(" ({})", score.trim())
+                    };
+                    md.push_str(&format!("### u/{}{score_tag}\n\n{b_md}\n\n", author.trim()));
+                }
+            }
+        }
+    }
+    Some(markdown::normalize_markdown(&md))
+}
+
+/// Extract `.item-decl` / `pre.rust.item-decl` from a `docs.rs` / rustdoc HTML page.
+pub fn extract_rustdoc_item_decl(html: &str) -> Option<String> {
+    let doc = Html::parse_document(html);
+    let sel = Selector::parse("pre.item-decl, .item-decl pre, div.item-decl").ok()?;
+    let el = doc.select(&sel).next()?;
+    let raw: String = el.text().collect();
+    let cleaned = raw.replace('ⓘ', "");
+    let trimmed = cleaned.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 async fn fetch_stackexchange_question(

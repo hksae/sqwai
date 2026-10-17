@@ -1,5 +1,6 @@
 //! Section chunking, document outline generation, in-memory LRU page cache,
-//! URL canonicalization, and local Okapi BM25 ranking with code-block boosting.
+//! deep URL canonicalization, and local Okapi BM25 ranking (per-page and
+//! cross-page global pool) with code-identifier tokenization.
 
 use crate::agent::tools::trim_middle;
 use reqwest::Url;
@@ -14,13 +15,14 @@ pub const FULL_PAGE_CHARS: usize = 22_000;
 /// Maximum characters returned from `project_page`.
 pub const MAX_PROJECTED_CHARS: usize = 28_000;
 /// Maximum size of a single chunk before paragraph subdivision.
-const MAX_SECTION_CHARS: usize = 5_500;
+const MAX_SECTION_CHARS: usize = 5_000;
 
 #[derive(Debug, Clone)]
 pub struct PageSection {
     pub index: usize,
     pub level: u8,
     pub heading: String,
+    /// Full ancestor chain with Markdown hashes, e.g. `# Struct Tokio / ## fn spawn / ### Panics`.
     pub breadcrumb: String,
     pub body: String,
     pub char_len: usize,
@@ -75,8 +77,13 @@ pub fn put_cached_page(url: &str, title: Option<String>, markdown: String) -> Ca
     page
 }
 
-/// Normalize a URL for deduplication and cache keys: strips tracking query
-/// parameters, `#fragment`, `www.` prefix, and trailing slashes.
+/// Normalize a URL for deduplication, RRF fusion, and cache keys:
+/// - upgrades `http` -> `https`
+/// - strips `www.`, `old.`, `np.`, `m.`, `mobile.` host prefixes
+/// - strips `#fragment`
+/// - strips `.git` suffix on GitHub repo URLs
+/// - strips tracking parameters (`utm_*`, `fbclid`, `gclid`, `ref`, etc.)
+/// - strips trailing slashes
 pub fn canonicalize_url(raw: &str) -> String {
     let trimmed = raw.trim();
     let Ok(mut parsed) = Url::parse(trimmed) else {
@@ -87,8 +94,26 @@ pub fn canonicalize_url(raw: &str) -> String {
         let _ = parsed.set_scheme("https");
     }
     if let Some(host) = parsed.host_str().map(|h| h.to_ascii_lowercase()) {
-        let stripped = host.strip_prefix("www.").unwrap_or(&host).to_string();
-        let _ = parsed.set_host(Some(&stripped));
+        let mut stripped = host.as_str();
+        for prefix in ["www.", "old.", "np.", "m.", "mobile."] {
+            if let Some(rest) = stripped.strip_prefix(prefix)
+                && rest.contains('.')
+            {
+                stripped = rest;
+                break;
+            }
+        }
+        let host_owned = stripped.to_string();
+        let _ = parsed.set_host(Some(&host_owned));
+    }
+
+    // Normalize GitHub `.git` suffix on repo links so Crates.io/PyPI/npm repo metadata
+    // collapses with organic GitHub URLs during RRF fusion.
+    if parsed.host_str() == Some("github.com") {
+        let path = parsed.path().trim_end_matches('/').to_string();
+        if let Some(without_git) = path.strip_suffix(".git") {
+            parsed.set_path(without_git);
+        }
     }
 
     let kept_pairs: Vec<(String, String)> = parsed
@@ -108,6 +133,7 @@ pub fn canonicalize_url(raw: &str) -> String {
                         | "ref"
                         | "ref_src"
                         | "spm"
+                        | "si"
                 )
         })
         .map(|(k, v)| (k.into_owned(), v.into_owned()))
@@ -116,13 +142,12 @@ pub fn canonicalize_url(raw: &str) -> String {
     if kept_pairs.is_empty() {
         parsed.set_query(None);
     } else {
-        let mut ser = url_query_string(&kept_pairs);
+        let ser = url_query_string(&kept_pairs);
         if ser.is_empty() {
             parsed.set_query(None);
         } else {
             parsed.set_query(Some(&ser));
         }
-        let _ = &mut ser;
     }
 
     let mut out = parsed.to_string();
@@ -153,7 +178,7 @@ pub fn parse_sections(markdown: &str) -> Vec<PageSection> {
 
     let mut cur_level = 0u8;
     let mut cur_heading = "Overview".to_string();
-    let mut cur_breadcrumb = "Overview".to_string();
+    let mut cur_breadcrumb = "# Overview".to_string();
     let mut cur_body = String::new();
     let mut in_fence: Option<&str> = None;
 
@@ -198,9 +223,9 @@ pub fn parse_sections(markdown: &str) -> Vec<PageSection> {
             cur_heading = heading_text;
             cur_breadcrumb = stack
                 .iter()
-                .map(|(_, h)| h.as_str())
+                .map(|(lvl, h)| format!("{} {}", "#".repeat(*lvl as usize), h))
                 .collect::<Vec<_>>()
-                .join(" > ");
+                .join(" / ");
         }
 
         cur_body.push_str(line);
@@ -283,6 +308,8 @@ fn parse_heading_line(line: &str) -> Option<(u8, String)> {
     Some((hashes as u8, title.to_string()))
 }
 
+/// Split an oversized section along paragraph boundaries (`\n\n`) without
+/// ever cutting inside a fenced code block (` ``` ` or ` ~~~~ `).
 fn split_large_section(body: &str, max_chars: usize) -> Vec<String> {
     let mut chunks = Vec::new();
     let mut current = String::new();
@@ -386,7 +413,6 @@ pub fn project_page(page: &CachedPage, query: Option<&str>, section: Option<&str
             );
         }
 
-        // Fallback if exact heading substring didn't match: rank by BM25 + show Outline.
         let ranked = rank_sections(&page.sections, sec_q);
         let top_indices: Vec<usize> = ranked.into_iter().take(4).map(|(i, _)| i).collect();
         return assemble_selected_sections(
@@ -407,7 +433,6 @@ pub fn project_page(page: &CachedPage, query: Option<&str>, section: Option<&str
             return page.markdown.clone();
         }
         let mut selected: Vec<usize> = Vec::new();
-        // Always include section 0 (title / overview) if reasonably small so context is clear.
         if let Some(first) = page.sections.first()
             && first.char_len <= 2_500
         {
@@ -443,7 +468,6 @@ pub fn project_page(page: &CachedPage, query: Option<&str>, section: Option<&str
         return trim_middle(page.markdown.trim(), MAX_PROJECTED_CHARS);
     }
 
-    // Large page without filter: show Outline + Overview + highest-density sections in order.
     let mut selected: Vec<usize> = Vec::new();
     let mut used = 0usize;
     for (idx, sec) in page.sections.iter().enumerate() {
@@ -494,8 +518,10 @@ fn assemble_selected_sections(
             omitted += 1;
             continue;
         }
-        if !sec.breadcrumb.is_empty() && sec.level > 1 && !sec.body.starts_with('#') {
-            out.push_str(&format!("### {}\n\n", sec.breadcrumb));
+        // Always include ancestor breadcrumb comment when a nested section or split
+        // part is rendered, so `### Examples` or `### Panics` never loses its parent context.
+        if sec.breadcrumb.contains(" / ") || sec.heading.contains("(part ") {
+            out.push_str(&format!("<!-- Section: {} -->\n", sec.breadcrumb));
         }
         out.push_str(&sec.body);
         out.push_str("\n\n");
@@ -511,40 +537,145 @@ fn assemble_selected_sections(
     trim_middle(out.trim(), MAX_PROJECTED_CHARS)
 }
 
-/// Extract compact, high-signal excerpts from a page for `websearch(deep=true)`.
-pub fn extract_relevant_excerpts(page: &CachedPage, query: &str, max_chars: usize) -> String {
-    if page.sections.is_empty() {
+/// Global cross-page BM25 pool ranker for `websearch(deep=true)`:
+/// Scores all sections across all top pages together in one unified BM25 corpus
+/// with a gentle RRF page-rank prior, so a high-signal code block on Page 3
+/// beats generic prose on Page 1 instead of wasting budget per page.
+pub fn extract_global_deep_excerpts(
+    pages: &[(Url, CachedPage, usize)],
+    query: &str,
+    total_budget_chars: usize,
+) -> String {
+    if pages.is_empty() {
         return String::new();
     }
-    let ranked = rank_sections(&page.sections, query);
-    let mut chosen: Vec<usize> = ranked.into_iter().take(2).map(|(i, _)| i).collect();
-    if chosen.is_empty() {
-        chosen.push(0);
-    }
-    chosen.sort_unstable();
 
-    let mut parts = Vec::new();
-    let mut used = 0usize;
-    for idx in chosen {
-        let sec = &page.sections[idx];
-        let remain = max_chars.saturating_sub(used);
-        if remain < 120 {
+    // Build global section pool: `(page_array_idx, section_idx, page_rank)`.
+    let mut pool: Vec<(usize, usize, usize)> = Vec::new();
+    let mut flat_sections: Vec<PageSection> = Vec::new();
+    for (p_idx, (_, page, page_rank)) in pages.iter().enumerate() {
+        let title_prefix = page.title.as_deref().unwrap_or_default();
+        for sec in &page.sections {
+            pool.push((p_idx, sec.index, *page_rank));
+            let mut enriched = sec.clone();
+            if !title_prefix.is_empty() && !enriched.breadcrumb.contains(title_prefix) {
+                enriched.breadcrumb = format!("{title_prefix} / {}", enriched.breadcrumb);
+            }
+            flat_sections.push(enriched);
+        }
+    }
+
+    if flat_sections.is_empty() {
+        return String::new();
+    }
+
+    let mut global_scored = rank_sections(&flat_sections, query);
+    // Apply RRF page-rank prior (`1.15x` for rank 0, `1.075x` for rank 1, `1.05x` for rank 2).
+    for (pool_idx, score) in &mut global_scored {
+        let (_, _, page_rank) = pool[*pool_idx];
+        let page_prior = 1.0 + 0.15 / (1.0 + page_rank as f64);
+        *score *= page_prior;
+    }
+    global_scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    // If no query tokens matched (rare), fall back to section 0 of each page.
+    if global_scored.is_empty() {
+        for (pool_idx, (_, sec_idx, _)) in pool.iter().enumerate() {
+            if *sec_idx == 0 {
+                global_scored.push((pool_idx, 1.0));
+            }
+        }
+    }
+
+    // Greedily pick the best sections globally up to `total_budget_chars`.
+    // Cap each page at 2 sections and ~55% of total budget so one long forum page
+    // never starves official API documentation pages.
+    let per_page_char_cap = (total_budget_chars * 11) / 20;
+    let mut chosen_per_page: HashMap<usize, Vec<usize>> = HashMap::new();
+    let mut chars_per_page: HashMap<usize, usize> = HashMap::new();
+    let mut used_chars = 0usize;
+
+    for (pool_idx, _) in global_scored {
+        if used_chars >= total_budget_chars {
             break;
         }
-        let body = if sec.char_len <= remain {
-            sec.body.clone()
-        } else {
-            truncate_preserving_code(&sec.body, remain)
-        };
-        let header = if sec.breadcrumb != "Overview" && !body.starts_with('#') {
-            format!("**[{}]**\n{}", sec.breadcrumb, body)
-        } else {
-            body
-        };
-        used += header.chars().count();
-        parts.push(header);
+        let (p_idx, sec_idx, _) = pool[pool_idx];
+        let page = &pages[p_idx].1;
+        let page_used = *chars_per_page.get(&p_idx).unwrap_or(&0);
+        let entry = chosen_per_page.entry(p_idx).or_default();
+        if entry.len() >= 2 || entry.contains(&sec_idx) || page_used >= per_page_char_cap {
+            continue;
+        }
+
+        // If this is a deep section on an API reference page where an early section (0 or 1)
+        // holds the compact item declaration/signature (`<= 2_400` chars with a code block),
+        // automatically include that signature section so the type/function declaration is kept!
+        if let Some(sig_sec) = page
+            .sections
+            .iter()
+            .take(2)
+            .find(|s| s.index < sec_idx && s.has_code_block && s.char_len <= 2_400)
+            && !entry.contains(&sig_sec.index)
+        {
+            let sig_cost = sig_sec.char_len.min(1_200);
+            if used_chars + sig_cost <= total_budget_chars {
+                entry.push(sig_sec.index);
+                used_chars += sig_cost;
+                *chars_per_page.entry(p_idx).or_insert(0) += sig_cost;
+            }
+        }
+
+        let sec_len = page.sections[sec_idx].char_len.min(2_200);
+        if used_chars + sec_len > total_budget_chars && used_chars >= 1_500 {
+            continue;
+        }
+        entry.push(sec_idx);
+        used_chars += sec_len;
+        *chars_per_page.entry(p_idx).or_insert(0) += sec_len;
     }
-    parts.join("\n\n")
+
+    let mut page_blocks = Vec::new();
+    let mut remaining = total_budget_chars;
+    for (p_idx, (url, page, _)) in pages.iter().enumerate() {
+        let Some(mut sec_indices) = chosen_per_page.remove(&p_idx) else {
+            continue;
+        };
+        if sec_indices.is_empty() || remaining < 150 {
+            continue;
+        }
+        sec_indices.sort_unstable();
+
+        let mut sec_renders = Vec::new();
+        for sec_idx in sec_indices {
+            if remaining < 120 {
+                break;
+            }
+            let sec = &page.sections[sec_idx];
+            let cap = remaining.min(2_400);
+            let body = if sec.char_len <= cap {
+                sec.body.clone()
+            } else {
+                truncate_preserving_code(&sec.body, cap)
+            };
+            let rendered = if sec.breadcrumb.contains(" / ") || sec.heading.contains("(part ") {
+                format!("<!-- Section: {} -->\n{}", sec.breadcrumb, body)
+            } else {
+                body
+            };
+            remaining = remaining.saturating_sub(rendered.chars().count());
+            sec_renders.push(rendered);
+        }
+
+        if !sec_renders.is_empty() {
+            let heading = page.title.as_deref().unwrap_or_else(|| url.as_str());
+            page_blocks.push(format!(
+                "### From [{heading}]({url})\n\n{}",
+                sec_renders.join("\n\n")
+            ));
+        }
+    }
+
+    page_blocks.join("\n\n---\n\n")
 }
 
 fn truncate_preserving_code(text: &str, max_chars: usize) -> String {
@@ -583,13 +714,15 @@ pub fn rank_sections(sections: &[PageSection], query: &str) -> Vec<(usize, f64)>
 
     let doc_tokens: Vec<Vec<String>> = sections
         .iter()
-        .map(|s| tokenize_for_bm25(&format!("{} {}", s.breadcrumb, s.body)))
+        .map(|s| {
+            let clean_body = strip_url_targets_for_bm25(&s.body);
+            tokenize_for_bm25(&format!("{} {}", s.breadcrumb, clean_body))
+        })
         .collect();
 
     let n_docs = sections.len() as f64;
     let avg_dl = (doc_tokens.iter().map(Vec::len).sum::<usize>() as f64 / n_docs).max(1.0);
 
-    // Document frequencies per query term.
     let mut df: HashMap<&str, usize> = HashMap::new();
     for q in &q_tokens {
         let count = doc_tokens
@@ -635,6 +768,10 @@ pub fn rank_sections(sections: &[PageSection], query: &str) -> Vec<(usize, f64)>
             if query_lower.len() >= 4 && sec.body.to_ascii_lowercase().contains(&query_lower) {
                 score += 3.0;
             }
+            // Boost primary H1/signature section (e.g. `# Function spawn` with `.item-decl` on docs.rs).
+            if sec.level <= 1 && sec.index <= 1 {
+                score += 2.0;
+            }
             if sec.has_code_block {
                 score *= 1.25;
             }
@@ -644,6 +781,30 @@ pub fn rank_sections(sections: &[PageSection], query: &str) -> Vec<(usize, f64)>
 
     scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     scored
+}
+
+/// Strip `(https://...)` targets from Markdown links before BM25 tokenization
+/// so repeated domain tokens inside hrefs (e.g. `users.rust-lang.org`) do not
+/// artificially inflate term frequency over actual prose and code.
+fn strip_url_targets_for_bm25(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b']'
+            && i + 1 < bytes.len()
+            && bytes[i + 1] == b'('
+            && let Some(close) = text[i + 2..].find(')')
+        {
+            out.push(']');
+            i += 2 + close + 1;
+            continue;
+        }
+        let ch = text[i..].chars().next().unwrap();
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
 }
 
 /// Score a snippet/title pair against `query` for search result hybrid reranking.
@@ -682,18 +843,19 @@ pub fn score_search_hit(title: &str, snippet: &str, url: &str, query: &str) -> f
         }
     }
 
-    // Coverage bonus when most or all query terms match.
     let coverage = (matched_unique as f64) / (q_tokens.len() as f64);
     score * (0.5 + 0.5 * coverage)
 }
 
-/// Tokenize text for BM25: splits both prose words and code identifiers
-/// (`tokio::spawn_blocking` -> `tokio::spawn_blocking`, `tokio`, `spawn`, `blocking`,
-/// `useEffect` -> `useeffect`, `use`, `effect`) and applies light suffix stemming.
+/// Multi-level code-aware tokenizer for BM25:
+/// For `ImmixAllocator::alloc_frame()`, emits:
+/// 1. Full compound token: `immixallocator::alloc_frame`
+/// 2. Path/namespace segments (`::`, `.`, `/`): `immixallocator`, `alloc_frame`
+/// 3. Atomic `snake_case`, `kebab-case`, and `camelCase` sub-tokens: `immix`, `allocator`, `alloc`, `frame`
 pub fn tokenize_for_bm25(text: &str) -> Vec<String> {
     let mut out = Vec::new();
     for raw_word in text.split(|c: char| {
-        !c.is_alphanumeric() && c != '_' && c != '-' && c != ':' && c != '.' && c != '+'
+        !c.is_alphanumeric() && c != '_' && c != '-' && c != ':' && c != '.' && c != '/' && c != '+'
     }) {
         let trimmed = raw_word.trim_matches(|c: char| !c.is_alphanumeric());
         if trimmed.is_empty() {
@@ -704,38 +866,58 @@ pub fn tokenize_for_bm25(text: &str) -> Vec<String> {
             continue;
         }
 
-        // Keep compound technical symbol (e.g. `tokio::spawn`, `v0.30`) if it has separators.
+        // Level 1: Full compound symbol (e.g. `immixallocator::alloc_frame`, `tokio::spawn`).
         if (lower.contains("::") || lower.contains('_') || lower.contains('.')) && lower.len() >= 3
         {
             out.push(lower.clone());
         }
 
-        // Also split compound identifiers and camelCase into atomic subtokens.
-        for sub in split_identifier(trimmed) {
-            let sub_lower = sub.to_ascii_lowercase();
-            if sub_lower.len() >= 2 && !is_stop_word(&sub_lower) {
-                let stemmed = stem_token(&sub_lower);
-                out.push(stemmed);
+        // Level 2: Segments separated by `::`, `.`, `/` (preserves `alloc_frame` and `immixallocator` whole).
+        for seg in trimmed.split([':', '.', '/']) {
+            let seg = seg.trim_matches(|c: char| !c.is_alphanumeric());
+            if seg.is_empty() {
+                continue;
+            }
+            let seg_lower = seg.to_ascii_lowercase();
+            if seg_lower.len() >= 2 && seg_lower != lower && !is_stop_word(&seg_lower) {
+                out.push(seg_lower);
+            }
+
+            // Level 3: Split `snake_case`, `kebab-case`, and `camelCase` (`ImmixAllocator` -> `immix`, `allocator`).
+            for sub in split_camel_and_snake(seg) {
+                let sub_lower = sub.to_ascii_lowercase();
+                if sub_lower.len() >= 2 && !is_stop_word(&sub_lower) {
+                    let stemmed = stem_token(&sub_lower);
+                    out.push(stemmed);
+                }
             }
         }
     }
     out
 }
 
-fn split_identifier(ident: &str) -> Vec<String> {
+fn split_camel_and_snake(segment: &str) -> Vec<String> {
     let mut parts = Vec::new();
-    for segment in ident.split([':', '_', '-', '.', '/']) {
-        if segment.is_empty() {
+    for part in segment.split(['_', '-']) {
+        if part.is_empty() {
             continue;
         }
-        // Split camelCase (`useEffect` -> `use`, `Effect`).
+        let chars: Vec<char> = part.chars().collect();
         let mut cur = String::new();
-        let mut prev_lower = false;
-        for ch in segment.chars() {
-            if ch.is_uppercase() && prev_lower && !cur.is_empty() {
-                parts.push(std::mem::take(&mut cur));
+        for i in 0..chars.len() {
+            let ch = chars[i];
+            if i > 0 {
+                let prev = chars[i - 1];
+                let next_is_lower = chars.get(i + 1).is_some_and(|c| c.is_lowercase());
+                // Split on `aB` (`camelCase`) or `ABc` (`HTTPClient` -> `HTTP` + `Client`).
+                if (ch.is_uppercase() && prev.is_lowercase())
+                    || (ch.is_uppercase() && prev.is_uppercase() && next_is_lower)
+                {
+                    if !cur.is_empty() {
+                        parts.push(std::mem::take(&mut cur));
+                    }
+                }
             }
-            prev_lower = ch.is_lowercase();
             cur.push(ch);
         }
         if !cur.is_empty() {
@@ -779,52 +961,37 @@ fn stem_token(token: &str) -> String {
     token.to_string()
 }
 
+/// Only pure conversational filler words are filtered; programming keywords and
+/// trait/method names (`from`, `into`, `where`, `for`, `with`, `some`, `any`, `all`, `not`)
+/// are intentionally kept so code queries match accurately.
 fn is_stop_word(w: &str) -> bool {
     matches!(
         w,
         "the"
-            | "and"
-            | "for"
-            | "with"
-            | "that"
             | "this"
-            | "from"
-            | "are"
-            | "was"
-            | "were"
-            | "have"
-            | "has"
-            | "had"
-            | "into"
-            | "about"
-            | "what"
-            | "when"
-            | "where"
-            | "which"
-            | "who"
-            | "how"
-            | "why"
-            | "can"
-            | "will"
-            | "would"
-            | "should"
-            | "could"
+            | "that"
+            | "these"
+            | "those"
             | "their"
             | "there"
+            | "they"
+            | "them"
+            | "your"
+            | "you"
+            | "about"
             | "been"
             | "being"
             | "also"
             | "than"
-            | "then"
-            | "them"
-            | "they"
-            | "your"
-            | "you"
-            | "not"
-            | "but"
-            | "all"
-            | "any"
-            | "some"
-            | "more"
+            | "very"
+            | "just"
+            | "would"
+            | "should"
+            | "could"
+            | "what"
+            | "which"
+            | "who"
+            | "how"
+            | "why"
     )
 }
