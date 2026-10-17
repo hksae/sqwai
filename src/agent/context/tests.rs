@@ -415,11 +415,62 @@ fn reserve_caps_the_threshold_on_small_contexts() {
 }
 
 #[test]
-fn summary_short_is_the_default() {
-    assert_eq!(
-        crate::config::CompactionConfig::default().summary.as_str(),
-        "short"
+fn split_for_summary_adaptive_force_compacts_a_short_conversation() {
+    // Two user turns with keep_turns=4 leave nothing to summarize, so a
+    // manual `/compact` used to no-op. With force=true the tail shrinks to the
+    // last turn and the earlier exchange is summarized.
+    let messages = vec![
+        user("first request"),
+        Message::new(Role::Assistant, "did the first thing"),
+        user("second request"),
+    ];
+    let (older, _keep) = split_for_summary_with_keep(&messages, 4);
+    assert!(older.is_empty(), "configured keep_turns leaves nothing: {older:?}");
+    let (older, keep) = split_for_summary_adaptive(&messages, 4, true);
+    assert_eq!(older.len(), 2, "the earlier exchange is summarized");
+    assert_eq!(keep.len(), 1, "the last turn stays verbatim");
+    assert_eq!(keep[0].content, "second request");
+    // without force the configured keep_turns is respected
+    let (older, _) = split_for_summary_adaptive(&messages, 4, false);
+    assert!(older.is_empty());
+}
+
+#[test]
+fn wire_estimated_tokens_counts_cleared_results_as_stubs() {
+    // Aged-out tool output is already a stub on the wire; counting raw stored
+    // bytes would keep firing compaction long after the request stopped growing.
+    let mut messages = Vec::new();
+    for i in 0..40 {
+        messages.push(Message::tool_result(format!("c{i}"), "x".repeat(8 * 1024), false));
+    }
+    let raw = estimated_tokens(&messages);
+    let wire = wire_estimated_tokens(&messages, 0);
+    assert!(wire < raw, "wire {wire} must be below raw {raw}");
+    assert!(
+        wire < raw / 4,
+        "most of the pool is stubbed on the wire: wire={wire} raw={raw}"
     );
+}
+
+#[test]
+fn summary_prompt_names_the_kept_tail() {
+    let prompt = summary_short_prompt_with_keep(Some("earlier"), "", false, 3);
+    assert!(prompt.contains("3 message(s) stay verbatim"), "{prompt}");
+    assert!(prompt.contains("do not repeat the kept tail"), "{prompt}");
+    // keep_len 0 keeps the old wording
+    let plain = summary_short_prompt_with_keep(Some("earlier"), "", false, 0);
+    assert!(plain.contains("Do not repeat any of it"), "{plain}");
+}
+
+#[test]
+fn summary_head_renders_the_user_compaction_focus() {
+    let hint = "Goal: fix the bug\n<user-compaction-focus>\nkeep the parser details\n</user-compaction-focus>";
+    let input = summary_short_input(&[user("do it")], None, hint, false);
+    assert!(input.contains("<user-compaction-focus>"), "{input}");
+    assert!(input.contains("keep the parser details"), "{input}");
+    assert!(input.contains("Goal: fix the bug"), "{input}");
+    // the marker itself is not leaked into the plan block
+    assert!(!input.contains("<user-compaction-focus>\nGoal"), "{input}");
 }
 
 /// Full fidelity by design (Codex shape): aged-out tool output is

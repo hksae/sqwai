@@ -761,7 +761,7 @@ fn settings_hub_reuses_existing_menus() {
     assert!(labels[0].contains("Search"));
     assert!(labels.iter().any(|row| row.contains("typewriter")));
     assert!(labels.iter().any(|row| row.contains("plan max steps")));
-    assert!(labels.iter().any(|row| row.contains("compaction summary")));
+    assert!(labels.iter().any(|row| row.contains("compaction threshold")));
     assert!(labels.iter().any(|row| row.contains("undo shadow")));
 }
 
@@ -808,15 +808,15 @@ fn providers_surface_is_a_plain_row_list() {
 }
 
 #[test]
-fn provider_actions_live_in_commands_not_in_the_list() {
+fn provider_actions_live_in_keyboard_shortcuts_not_commands() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
-    // `/providers add` opens the blank form the old row used to open
+    // `/providers add` was retired with the command list: the surface opens
+    // instead, and adding is a keyboard shortcut (ctrl+n) from there.
     app.command("providers add");
     assert!(
-        matches!(app.cur_menu(), Some(Menu::EditProvider { name: None })),
-        "add is a command now"
+        matches!(app.cur_menu(), Some(Menu::Providers)),
+        "the provider surface opens, not a command form"
     );
-    // `/providers` alone is still the list
     app.menu_back();
     app.command("providers");
     assert!(matches!(app.cur_menu(), Some(Menu::Providers)));
@@ -1049,15 +1049,6 @@ fn providers_hints_stand_as_a_right_column() {
 fn settings_hub_lists_agent_safety_undo_sections() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.open_menu(Menu::Settings);
-    // CompactionSummary opens a 2-row surface picker and commits back to Config
-    app.run_action(MenuAction::OpenCompactionSummary);
-    assert!(matches!(app.cur_menu(), Some(Menu::CompactionSummary)));
-    assert_eq!(app.menu_rows.len(), 2);
-    app.menu_sel = 0; // off
-    app.menu_activate();
-    assert!(matches!(app.cur_menu(), Some(Menu::Settings)));
-    assert_eq!(app.cfg.compaction.summary.as_str(), "off");
-
     // UndoShadow opens a 3-row surface picker and commits back to Config
     app.run_action(MenuAction::OpenUndoShadow);
     assert!(matches!(app.cur_menu(), Some(Menu::UndoShadow)));
@@ -1096,11 +1087,6 @@ fn settings_scalar_edit_valid_and_invalid_reset() {
 #[test]
 fn settings_cycles_and_toggles() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
-    app.run_action(MenuAction::CycleCompactionSummary);
-    assert_eq!(app.cfg.compaction.summary.as_str(), "off");
-    app.run_action(MenuAction::CycleCompactionSummary);
-    assert_eq!(app.cfg.compaction.summary.as_str(), "short");
-
     app.run_action(MenuAction::CycleUndoShadow);
     assert_eq!(app.cfg.undo.shadow.as_str(), "user");
 

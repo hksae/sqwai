@@ -1023,16 +1023,6 @@ pub struct CompactionConfig {
     pub keep_turns: usize,
     #[serde(default = "default_compaction_anchor_ratio")]
     pub anchor_ratio: f64,
-    #[serde(default)]
-    pub summary: CompactionSummary,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum CompactionSummary {
-    Off,
-    #[default]
-    Short,
 }
 
 impl Default for CompactionConfig {
@@ -1041,7 +1031,6 @@ impl Default for CompactionConfig {
             threshold: default_compaction_threshold(),
             keep_turns: default_compaction_keep_turns(),
             anchor_ratio: default_compaction_anchor_ratio(),
-            summary: CompactionSummary::default(),
         }
     }
 }
@@ -1082,7 +1071,6 @@ struct CompactionOverride {
     threshold: Option<f64>,
     keep_turns: Option<usize>,
     anchor_ratio: Option<f64>,
-    summary: Option<CompactionSummary>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -1118,7 +1106,7 @@ const PROJECT_ALLOWLIST: &[(&str, &[&str])] = &[
     ("ui", &["typewriter", "http_log", "experimental_test"]),
     (
         "compaction",
-        &["threshold", "keep_turns", "anchor_ratio", "summary"],
+        &["threshold", "keep_turns", "anchor_ratio"],
     ),
     (
         "undo",
@@ -1141,16 +1129,6 @@ const PROJECT_ALLOWLIST: &[(&str, &[&str])] = &[
         ],
     ),
 ];
-
-impl CompactionSummary {
-    pub const ALL: [CompactionSummary; 2] = [CompactionSummary::Off, CompactionSummary::Short];
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Off => "off",
-            Self::Short => "short",
-        }
-    }
-}
 
 impl ShadowStore {
     pub const ALL: [ShadowStore; 3] = [ShadowStore::Local, ShadowStore::User, ShadowStore::Off];
@@ -1497,9 +1475,6 @@ impl Config {
         }
         if let Some(v) = o.anchor_ratio {
             compaction.anchor_ratio = v;
-        }
-        if let Some(v) = o.summary {
-            compaction.summary = v;
         }
         let undo = &mut self.undo;
         let o = &overrides.undo;

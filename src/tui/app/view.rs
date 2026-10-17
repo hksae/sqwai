@@ -2453,7 +2453,6 @@ impl App {
             | Some(Menu::TestArt)
             | Some(Menu::TestColors)
             | Some(Menu::TestMd)
-            | Some(Menu::CompactionSummary)
             | Some(Menu::UndoShadow)
             | Some(Menu::UndoList)
             | Some(Menu::Providers)
@@ -2491,7 +2490,6 @@ impl App {
                 | Some(Menu::Debug)
                 | Some(Menu::Plan)
                 | Some(Menu::EditScalar(..))
-                | Some(Menu::CompactionSummary)
                 | Some(Menu::UndoShadow)
                 | Some(Menu::UndoList)
                 | Some(Menu::Providers)
@@ -2784,7 +2782,6 @@ impl App {
                         | Some(Menu::TestColors)
                         | Some(Menu::TestMd)
                         | Some(Menu::EditScalar(..))
-                        | Some(Menu::CompactionSummary)
                         | Some(Menu::UndoShadow)
                         | Some(Menu::UndoList)
                         | Some(Menu::Providers)
@@ -3103,7 +3100,6 @@ impl App {
                 | Some(Menu::Debug)
                 | Some(Menu::Plan)
                 | Some(Menu::EditScalar(..))
-                | Some(Menu::CompactionSummary)
                 | Some(Menu::UndoShadow)
                 | Some(Menu::UndoList)
                 | Some(Menu::Providers)
@@ -3929,7 +3925,6 @@ impl App {
                 };
                 (0, full_win, "lines")
             }
-            Some(Menu::CompactionSummary) => (0, 2, ""),
             Some(Menu::UndoShadow) => (0, 3, ""),
             Some(Menu::Providers) => (1, dyn_win, "providers"),
             Some(Menu::EditProvider { .. }) => (0, 5, ""),
@@ -4002,7 +3997,6 @@ impl App {
             ],
             Some(
                 Menu::ProviderFormat { .. }
-                | Menu::CompactionSummary
                 | Menu::UndoShadow
                 | Menu::UndoList,
             ) => vec![

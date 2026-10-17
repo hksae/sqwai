@@ -557,7 +557,7 @@ pub(crate) async fn run_subagent(
         summary: None,
         mcp,
         lsp,
-        compact_only: false,
+        compact_only: false, compact_focus: String::new(),
         memory,
         compaction,
         plan_limits,

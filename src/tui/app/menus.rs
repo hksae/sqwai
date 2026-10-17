@@ -214,8 +214,6 @@ pub(super) enum Menu {
     Controls,
     /// single-field form editing one numeric host setting
     EditScalar(ScalarSetting),
-    /// picker for `[compaction].summary`
-    CompactionSummary,
     /// picker for `[undo].shadow`
     UndoShadow,
     /// `/undo list`: interactive checkpoint & redo history picker
@@ -349,10 +347,6 @@ pub(super) enum MenuAction {
     #[allow(dead_code)]
     OpenControls,
     #[allow(dead_code)]
-    CycleCompactionSummary,
-    OpenCompactionSummary,
-    SetCompactionSummary(crate::config::CompactionSummary),
-    #[allow(dead_code)]
     CycleUndoShadow,
     OpenUndoShadow,
     SetUndoShadow(crate::config::ShadowStore),
@@ -362,8 +356,8 @@ pub(super) enum MenuAction {
     EditScalar(ScalarSetting),
 }
 
-/// One numeric host setting editable from /settings. Enums (effort,
-/// compaction summary, undo shadow) are cycle rows, not scalars.
+/// One numeric host setting editable from /settings. Enums (effort, undo
+/// shadow) are cycle rows, not scalars.
 #[derive(Clone, Copy)]
 pub(super) enum ScalarSetting {
     PlanMaxSteps,
@@ -536,7 +530,6 @@ impl App {
                 | Some(Menu::ContextView)
                 | Some(Menu::Settings)
                 | Some(Menu::EditScalar(..))
-                | Some(Menu::CompactionSummary)
                 | Some(Menu::UndoShadow)
                 | Some(Menu::UndoList)
                 | Some(Menu::Providers)
@@ -566,13 +559,6 @@ impl App {
         }
         if matches!(self.cur_menu(), Some(Menu::ContextView | Menu::TestMd)) {
             self.md_built_w = 0;
-        }
-        if matches!(self.cur_menu(), Some(Menu::CompactionSummary)) {
-            let cur = self.cfg.compaction.summary;
-            self.menu_sel = crate::config::CompactionSummary::ALL
-                .iter()
-                .position(|s| s.as_str() == cur.as_str())
-                .unwrap_or(0);
         }
         if matches!(self.cur_menu(), Some(Menu::UndoShadow)) {
             let cur = self.cfg.undo.shadow;
@@ -726,10 +712,6 @@ impl App {
                 Some(Menu::EditScalar(s)) => self.menu_rows.iter().position(|(_, a)| {
                     matches!(a, MenuAction::EditScalar(other) if other.label() == s.label())
                 }),
-                Some(Menu::CompactionSummary) => self
-                    .menu_rows
-                    .iter()
-                    .position(|(_, a)| matches!(a, MenuAction::OpenCompactionSummary)),
                 Some(Menu::UndoShadow) => self
                     .menu_rows
                     .iter()
@@ -1364,33 +1346,6 @@ impl App {
                 }
             }
             MenuAction::OpenControls => self.open_menu(Menu::Controls),
-            MenuAction::CycleCompactionSummary => {
-                let all = crate::config::CompactionSummary::ALL;
-                let cur = all
-                    .iter()
-                    .position(|s| s.as_str() == self.cfg.compaction.summary.as_str())
-                    .unwrap_or(0);
-                self.cfg.compaction.summary = all[(cur + 1) % all.len()];
-                self.cfg.save().ok();
-                self.status(
-                    &format!(
-                        "compaction summary = {}",
-                        self.cfg.compaction.summary.as_str()
-                    ),
-                    StatusKind::Ok,
-                );
-                self.build_menu_rows();
-            }
-            MenuAction::OpenCompactionSummary => self.open_menu(Menu::CompactionSummary),
-            MenuAction::SetCompactionSummary(summary) => {
-                self.cfg.compaction.summary = summary;
-                self.cfg.save().ok();
-                self.status(
-                    &format!("compaction summary = {}", summary.as_str()),
-                    StatusKind::Ok,
-                );
-                self.menu_back();
-            }
             MenuAction::CycleUndoShadow => {
                 let all = crate::config::ShadowStore::ALL;
                 let cur = all
@@ -1907,7 +1862,6 @@ impl App {
     pub(super) fn menu_title(&self) -> String {
         match &self.cur_menu() {
             Some(Menu::Settings) => " Config ".into(),
-            Some(Menu::CompactionSummary) => " Config · compaction summary ".into(),
             Some(Menu::UndoShadow) => " Config · undo shadow ".into(),
             Some(Menu::UndoList) => " Undo / Redo checkpoints ".into(),
             Some(Menu::Providers) => " Providers ".into(),
@@ -2052,11 +2006,6 @@ impl App {
                         MenuAction::EditScalar(ScalarSetting::CompactionAnchorRatio),
                     ),
                     (
-                        "compaction summary",
-                        self.cfg.compaction.summary.as_str().to_string(),
-                        MenuAction::OpenCompactionSummary,
-                    ),
-                    (
                         "undo keep per session",
                         ScalarSetting::UndoKeepPerSession.current(&self.cfg),
                         MenuAction::EditScalar(ScalarSetting::UndoKeepPerSession),
@@ -2097,20 +2046,6 @@ impl App {
                     ));
                 }
                 self.menu_sel = sel_before;
-            }
-            Menu::CompactionSummary => {
-                let current = self.cfg.compaction.summary.as_str();
-                for s in crate::config::CompactionSummary::ALL {
-                    let style = if s.as_str() == current {
-                        Theme::brand_ink()
-                    } else {
-                        Style::new().fg(Theme::FG())
-                    };
-                    self.menu_rows.push(row(
-                        Line::from(vec![Span::styled(s.as_str(), style)]),
-                        MenuAction::SetCompactionSummary(s),
-                    ));
-                }
             }
             Menu::UndoShadow => {
                 let current = self.cfg.undo.shadow;

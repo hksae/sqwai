@@ -140,6 +140,16 @@ pub struct CompactionPrefix<'a> {
     pub tools: &'a [crate::providers::ToolSpec],
 }
 
+/// A `/compact <focus>` tail, folded into the plan hint so the summarizer
+/// gives those details priority without changing any function signature.
+pub(crate) fn plan_hint_with_focus(base: &str, focus: &str) -> String {
+    let focus = focus.trim();
+    if focus.is_empty() {
+        return base.to_string();
+    }
+    format!("{base}\n<user-compaction-focus>\n{focus}\n</user-compaction-focus>")
+}
+
 /// Saved thinking blocks replay only while thinking is on for the request.
 /// The summary request thinks nothing (effort off, tiny budget), so a
 /// history that carries thinking blocks cannot travel as structured
@@ -158,13 +168,18 @@ fn history_has_thinking(messages: &[Message]) -> bool {
 
 /// Build the summary request. Cache-aware when the parent prefix is handed
 /// over and the history carries no thinking: parent system, schemas and the
-/// full history go on the wire unchanged, the summarization prompt is
+/// wire history go on the wire unchanged, the summarization prompt is
 /// appended as the last user message. Otherwise the compact standalone
 /// request: tiny system, transcript rendered as text, no schemas.
+///
+/// `keep_len` is how many trailing messages stay verbatim after compaction:
+/// the prompt names them so the model summarizes the earlier part and does
+/// not restate the kept tail.
 pub(crate) fn compaction_request(
     prefix: Option<&CompactionPrefix<'_>>,
     older: &[Message],
     history: &[Message],
+    keep_len: usize,
     previous: Option<&str>,
     plan_hint: &str,
     model_id: &str,
@@ -201,7 +216,7 @@ pub(crate) fn compaction_request(
     let mut messages = history.to_vec();
     messages.push(Message::new(
         Role::User,
-        context::summary_short_prompt(previous, plan_hint, retry),
+        context::summary_short_prompt_with_keep(previous, plan_hint, retry, keep_len),
     ));
     (
         ChatRequest {
@@ -233,6 +248,11 @@ pub(crate) async fn compact_history(
     prefix: Option<&CompactionPrefix<'_>>,
 ) -> Option<(u64, u64, bool)> {
     let measured = |m: &[Message]| context::estimated_tokens(m);
+    // Pressure is judged on the WIRE size, not the raw store: aged-out tool
+    // results are already stubs on the request, so counting stored bytes keeps
+    // firing compaction long after the request stopped growing.
+    let wire_measured =
+        |m: &[Message]| context::wire_estimated_tokens(m, policy.context_limit);
     let before = measured(messages);
 
     // No per-turn pruning by design (Codex shape): what the model read
@@ -242,36 +262,42 @@ pub(crate) async fn compact_history(
     // on pressure, via summary or hard trim.
     if std::env::var("SQWAI_BENCH_DEBUG").is_ok() {
         let measured_now = measured(messages);
+        let wire_now = wire_measured(messages);
         eprintln!(
-            "bench-debug: pressure check: measured={} budget={} limit={} msgs={}",
+            "bench-debug: pressure check: measured={} wire={} budget={} limit={} msgs={}",
             measured_now,
+            wire_now,
             policy.budget(),
             policy.context_limit,
             messages.len(),
         );
         eprintln!(
-            "[compact] check: measured={} budget={} triggered={}",
-            measured_now,
+            "[compact] check: wire={} budget={} triggered={}",
+            wire_now,
             policy.budget(),
-            measured_now >= policy.budget()
+            wire_now >= policy.budget()
         );
     }
-    if !force && policy.pressure(measured(messages)) == context::Pressure::Ok {
+    if !force && policy.pressure(wire_measured(messages)) == context::Pressure::Ok {
         // Pressure is fine: history is untouched, report nothing.
         return None;
     }
 
     // stage 2: summarize. The cut is safe by construction, so an assistant
-    // tool call can never be separated from its results.
-    let (older, keep) = context::split_for_summary_with_keep(messages, policy.keep_turns());
+    // tool call can never be separated from its results. `force` (manual
+    // `/compact`) also shrinks the kept tail when the configured keep_turns
+    // would leave nothing to summarize.
+    let (older, keep) = context::split_for_summary_adaptive(messages, policy.keep_turns(), force);
     let older: Vec<Message> = older.to_vec();
     let keep: Vec<Message> = keep.to_vec();
+    let keep_len = keep.len();
     let mut summarized = false;
     let debug = std::env::var("SQWAI_BENCH_DEBUG").is_ok();
     if debug {
         eprintln!(
-            "bench-debug: stages: older={} summary_enabled={}",
+            "bench-debug: stages: older={} keep={} summary_enabled={}",
             older.len(),
+            keep_len,
             policy.summary_enabled,
         );
     }
@@ -285,6 +311,7 @@ pub(crate) async fn compact_history(
             prefix,
             &older,
             &wire_history,
+            keep_len,
             summary.as_deref(),
             plan_hint,
             model_id,
@@ -310,6 +337,7 @@ pub(crate) async fn compact_history(
                 prefix,
                 &older,
                 &wire_history,
+                keep_len,
                 summary.as_deref(),
                 plan_hint,
                 model_id,
@@ -339,7 +367,7 @@ pub(crate) async fn compact_history(
     }
 
     // stage 4: still too big — drop the oldest turns outright
-    if policy.pressure(measured(messages)) != context::Pressure::Ok {
+    if policy.pressure(wire_measured(messages)) != context::Pressure::Ok {
         let budget = policy.budget();
         let before_len = messages.len();
         *messages = context::hard_trim(messages, budget);

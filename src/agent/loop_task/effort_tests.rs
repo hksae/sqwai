@@ -1,6 +1,7 @@
 use super::loop_compact::{
     CompactionPrefix, MIN_ZERO_TURNS_BEFORE_REPORTING, compact_history, compaction_request,
-    effort_ignored_reason, record_compaction, rejects_effort_parameter, turn_shows_no_reasoning,
+    effort_ignored_reason, plan_hint_with_focus, record_compaction, rejects_effort_parameter,
+    turn_shows_no_reasoning,
 };
 use super::loop_subagent::{SUBAGENT_TIMEOUT_SECS, adopt_in_progress_step};
 use super::loop_turn::{TurnOutcome, run_turn};
@@ -415,7 +416,7 @@ async fn test_provider_fallback_chain_switch_on_failure() {
         summary: None,
         mcp: Default::default(),
         lsp: Default::default(),
-        compact_only: false,
+        compact_only: false, compact_focus: String::new(),
         memory: Default::default(),
         compaction: Default::default(),
         plan_limits: Default::default(),
@@ -503,7 +504,7 @@ async fn partial_stream_failure_does_not_fall_back() {
         summary: None,
         mcp: Default::default(),
         lsp: Default::default(),
-        compact_only: false,
+        compact_only: false, compact_focus: String::new(),
         memory: Default::default(),
         compaction: Default::default(),
         plan_limits: Default::default(),
@@ -777,7 +778,7 @@ fn compaction_request_reuses_the_parent_prefix() {
     ];
     let prefix = parent_prefix(&system, &tools);
     let (req, cache_aware) =
-        compaction_request(Some(&prefix), &history[..1], &history, None, "", "m", false);
+        compaction_request(Some(&prefix), &history[..1], &history, 1, None, "", "m", false);
     assert!(cache_aware);
     assert_eq!(req.system, system, "prefix must be byte-identical");
     let req_tools: Vec<&str> = req.tools.iter().map(|t| t.name.as_str()).collect();
@@ -798,12 +799,42 @@ fn compaction_request_reuses_the_parent_prefix() {
     assert_eq!(req.effort, None, "the summarizer thinks nothing");
 }
 
+/// The cache-aware prompt names the kept tail so the model summarizes the
+/// earlier part instead of restating the messages that survive compaction.
+#[test]
+fn compaction_request_instructs_the_model_about_the_kept_tail() {
+    let system = vec![crate::providers::SystemPart::cached("rules")];
+    let tools = vec![];
+    let prefix = parent_prefix(&system, &tools);
+    let history = vec![
+        Message::new(Role::User, "do it"),
+        Message::new(Role::Assistant, "done"),
+    ];
+    let (req, cache_aware) =
+        compaction_request(Some(&prefix), &history[..1], &history, 1, None, "", "m", false);
+    assert!(cache_aware);
+    let prompt = req.messages.last().unwrap().content.clone();
+    assert!(prompt.contains("1 message(s) stay verbatim"), "{prompt}");
+    assert!(prompt.contains("do not repeat the kept tail"), "{prompt}");
+}
+
+/// `/compact <focus>` folds into the plan hint without changing any caller.
+#[test]
+fn plan_hint_with_focus_is_folded_into_the_prompt() {
+    let base = "Goal: fix the bug\nConstraints:\n- keep API stable";
+    assert_eq!(plan_hint_with_focus(base, "  "), base);
+    let focused = plan_hint_with_focus(base, "keep the parser details");
+    assert!(focused.contains("<user-compaction-focus>"), "{focused}");
+    assert!(focused.contains("keep the parser details"), "{focused}");
+    assert!(focused.contains("keep API stable"), "{focused}");
+}
+
 /// No prefix handed over (tests, side calls): the compact standalone
 /// request — tiny system, transcript as text, no schemas.
 #[test]
 fn compaction_request_falls_back_to_standalone_without_a_prefix() {
     let older = vec![Message::new(Role::User, "do it")];
-    let (req, cache_aware) = compaction_request(None, &older, &older, None, "", "m", false);
+    let (req, cache_aware) = compaction_request(None, &older, &older, 0, None, "", "m", false);
     assert!(!cache_aware);
     assert!(req.tools.is_empty());
     assert_eq!(req.messages.len(), 1);
@@ -834,7 +865,7 @@ fn compaction_request_dodges_thinking_histories() {
     let tools = vec![];
     let prefix = parent_prefix(&system, &tools);
     let (req, cache_aware) =
-        compaction_request(Some(&prefix), &history, &history, None, "", "m", false);
+        compaction_request(Some(&prefix), &history, &history, 0, None, "", "m", false);
     assert!(!cache_aware, "thinking histories take the text path");
     assert!(req.tools.is_empty());
     assert_eq!(req.messages.len(), 1);
@@ -955,6 +986,7 @@ async fn live_compaction_request_reuses_prefix() {
         Some(&prefix),
         older,
         &history,
+        history.len() - older.len(),
         None,
         "",
         &bench.model_id,
@@ -966,7 +998,7 @@ async fn live_compaction_request_reuses_prefix() {
 
     // standalone: tiny system + rendered transcript
     let (alone, is_aware) =
-        compaction_request(None, older, &history, None, "", &bench.model_id, false);
+        compaction_request(None, older, &history, 0, None, "", &bench.model_id, false);
     assert!(!is_aware);
     let u = send(&bench, alone).await;
     report("alone", &u);
@@ -1474,7 +1506,7 @@ async fn esc_between_tool_calls_stops_the_batch() {
         summary: None,
         mcp: Default::default(),
         lsp: Default::default(),
-        compact_only: false,
+        compact_only: false, compact_focus: String::new(),
         memory: Default::default(),
         compaction: Default::default(),
         plan_limits: Default::default(),
@@ -1920,7 +1952,7 @@ async fn same_turn_subagent_calls_overlap() {
         summary: None,
         mcp: Default::default(),
         lsp: Default::default(),
-        compact_only: false,
+        compact_only: false, compact_focus: String::new(),
         memory: Default::default(),
         compaction: Default::default(),
         plan_limits: Default::default(),
@@ -2028,7 +2060,7 @@ async fn parallel_read_only_batch_merges_read_state_before_following_mutation() 
         summary: None,
         mcp: Default::default(),
         lsp: Default::default(),
-        compact_only: false,
+        compact_only: false, compact_focus: String::new(),
         memory: Default::default(),
         compaction: Default::default(),
         plan_limits: Default::default(),

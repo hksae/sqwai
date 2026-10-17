@@ -340,7 +340,7 @@ impl Policy {
             context_limit,
             anchor_ratio: None,
             keep_turns: None,
-            summary_enabled: false,
+            summary_enabled: true,
             threshold: None,
         }
     }
@@ -451,6 +451,38 @@ pub fn estimated_tokens(messages: &[Message]) -> u64 {
         .sum()
 }
 
+/// Estimated tokens the history occupies on the WIRE. Aged-out tool results
+/// are already stubs there, so counting raw stored bytes would keep firing
+/// compaction long after the request stopped growing. The stub length is
+/// approximated (the exact bytes depend on the tool name, which the caller
+/// would have to build anyway); only the magnitude matters for the pressure
+/// decision, and it is bounded by the real stub.
+pub fn wire_estimated_tokens(messages: &[Message], context_limit: u64) -> u64 {
+    let cleared: std::collections::HashSet<usize> =
+        crate::agent::tool_output::cleared_indices_with_limit(messages, context_limit)
+            .into_iter()
+            .collect();
+    messages
+        .iter()
+        .enumerate()
+        .map(|(i, m)| {
+            let content = if cleared.contains(&i) {
+                crate::agent::tool_output::STUB_MARK.len()
+                    + m.tool_call_id.as_deref().map_or(0, str::len)
+                    + 64
+            } else {
+                m.content.len()
+            };
+            (content as u64
+                + m.tool_calls
+                    .iter()
+                    .map(|c| c.name.len() as u64 + c.args.to_string().len() as u64)
+                    .sum::<u64>())
+                .div_ceil(4)
+        })
+        .sum()
+}
+
 /// Stage 2: split the history into (to_summarize, keep_verbatim).
 ///
 /// `keep_turns` counts user turns, not messages: the last `keep_turns` user
@@ -512,6 +544,37 @@ pub fn split_for_summary_with_keep(
         return (&[], messages);
     }
     (&messages[..cut], &messages[cut..])
+}
+
+/// Split `messages` into `(older, keep)` for summarization. When `force` is
+/// true (manual `/compact` or overflow recovery) and the configured `keep_turns`
+/// leaves `older` empty because the conversation has few turns, adaptively
+/// steps `keep_turns` down to `1` (or summarizes a single completed exchange)
+/// so an explicit `/compact` never no-ops on a multi-message transcript.
+pub fn split_for_summary_adaptive(
+    messages: &[Message],
+    keep_turns: usize,
+    force: bool,
+) -> (&[Message], &[Message]) {
+    let (older, keep) = split_for_summary_with_keep(messages, keep_turns);
+    if !older.is_empty() || !force {
+        return (older, keep);
+    }
+    for k in (1..keep_turns.max(1)).rev() {
+        let (o, kp) = split_for_summary_with_keep(messages, k);
+        if !o.is_empty() {
+            return (o, kp);
+        }
+    }
+    if messages.len() >= 2
+        && !messages
+            .last()
+            .is_some_and(|m| m.role == Role::Assistant && !m.tool_calls.is_empty())
+        && !messages.iter().all(is_summary_message)
+    {
+        return (messages, &[]);
+    }
+    (&[], messages)
 }
 
 fn is_safe_cut(messages: &[Message], cut: usize) -> bool {
@@ -582,16 +645,16 @@ pub fn transcript(messages: &[Message]) -> String {
     out
 }
 
-/// Cap for the restricted short summary: the only summary mode
-/// (`compaction.summary: off|short`). Anything the plan already owns must
-/// not be re-listed — the budget exists for what the plan does not hold.
-pub const SUMMARY_SHORT_MAX_TOKENS: u32 = 300;
+/// Token ceiling for the summarization API call. Must be generous enough for
+/// reasoning models (which spend part of `max_tokens` on internal thinking
+/// before emitting text); the actual stored summary length is bounded by
+/// [`SUMMARY_SHORT_MAX_CHARS`].
+pub const SUMMARY_SHORT_MAX_TOKENS: u32 = 2_048;
 
-/// Host-enforced character cap for stored/applied summaries. Endpoints
-/// ignore `max_output_tokens` (measured 33K–140K chars against a 300-token
-/// cap), so without this the chained summary grows every cycle and late
-/// compactions free ~nothing at full call price.
-pub const SUMMARY_SHORT_MAX_CHARS: usize = 1_200;
+/// Host-enforced character cap for stored/applied summaries (~800 tokens).
+/// Endpoints ignore `max_output_tokens`, so without this the chained summary
+/// grows every cycle and late compactions free ~nothing at full call price.
+pub const SUMMARY_SHORT_MAX_CHARS: usize = 3_200;
 
 /// Enforce the cap: truncate to whole characters, mark the cut so a
 /// reader knows the tail is missing (truncation drops the END — goal and
@@ -609,12 +672,6 @@ pub fn truncate_summary(text: &str) -> String {
     format!("{head}{MARKER}")
 }
 
-/// The user turn of the restricted summarization request: ONLY
-/// what the user explicitly asked, forbade, or stated as fact in the
-/// dropped messages that is NOT already covered by the durable plan.
-/// `plan_hint` is preformatted "Goal: …\nConstraints: …" (possibly empty:
-/// with no plan, every user request counts as uncovered). `retry` appends
-/// the hard-limit line for the second attempt after a blown budget.
 /// Shared head: what to summarize and the plan to exclude. `setting` names
 /// where the conversation lives — rendered inline below (standalone
 /// request) or travelling as the request's own messages above (cache-aware
@@ -622,18 +679,38 @@ pub fn truncate_summary(text: &str) -> String {
 fn summary_head(previous: Option<&str>, plan_hint: &str, setting: &str) -> String {
     let mut out = format!(
         "Summarize ONLY what the user explicitly asked, forbade, or stated \
-         as fact {setting} — and ONLY what is not \
+         as fact, plus key technical findings, root causes discovered, and \
+         completed or rejected work {setting} — and ONLY what is not \
          already covered by the durable plan. The plan owns goals, \
          constraints, and decisions; re-listing them wastes the budget this \
-         summary exists to save.\n\n<durable-plan>\n",
+         summary exists to save.\n\n\
+         Structure the summary concisely around:\n\
+         - User intent, constraints & preferences (uncovered by `<durable-plan>`)\n\
+         - Key findings, root causes & code locations discovered\n\
+         - Work completed, verified, or rejected\n\
+         - Current state & next step at the cut\n\n<durable-plan>\n",
     );
-    if plan_hint.trim().is_empty() {
+    let (plan_part, focus_part) = match plan_hint.split_once("\n<user-compaction-focus>\n") {
+        Some((p, f)) => (
+            p.trim(),
+            f.strip_suffix("</user-compaction-focus>")
+                .unwrap_or(f)
+                .trim(),
+        ),
+        None => (plan_hint.trim(), ""),
+    };
+    if plan_part.is_empty() {
         out.push_str("(no durable plan: include all user requests)\n");
     } else {
-        out.push_str(plan_hint.trim());
+        out.push_str(plan_part);
         out.push('\n');
     }
     out.push_str("</durable-plan>\n");
+    if !focus_part.is_empty() {
+        out.push_str("\n<user-compaction-focus>\n");
+        out.push_str(focus_part);
+        out.push_str("\n</user-compaction-focus>\n");
+    }
     if let Some(prev) = previous.filter(|s| !s.trim().is_empty()) {
         out.push_str("\n<previous-summary>\n");
         out.push_str(prev.trim());
@@ -649,7 +726,7 @@ fn summary_tail(retry: bool) -> String {
     let mut out = String::from(
         "Rules: no preamble, no questions, no instructions \
          to the reader, no invented facts, no tool calls — respond with text \
-         only. If something is unknown, say it \
+         only. Keep it under 2,800 characters. If something is unknown, say it \
          is unknown.",
     );
     if retry {
@@ -678,12 +755,31 @@ pub fn summary_short_input(
 /// The summarization prompt without the transcript: for the cache-aware
 /// request, where the conversation travels as the request's own messages
 /// and the prompt is appended last. Same head, same rules, nothing repeated.
+#[allow(dead_code)]
 pub fn summary_short_prompt(previous: Option<&str>, plan_hint: &str, retry: bool) -> String {
+    summary_short_prompt_with_keep(previous, plan_hint, retry, 0)
+}
+
+pub fn summary_short_prompt_with_keep(
+    previous: Option<&str>,
+    plan_hint: &str,
+    retry: bool,
+    kept_tail_messages: usize,
+) -> String {
     let mut out = summary_head(previous, plan_hint, "in the conversation above");
-    out.push_str(
-        "\nThat conversation is the messages of this request, above this \
-         prompt. Do not repeat any of it; summarize only.\n\n",
-    );
+    if kept_tail_messages > 0 {
+        out.push_str(&format!(
+            "\nThat conversation is the messages of this request, above this \
+             prompt. The final {kept_tail_messages} message(s) stay verbatim after \
+             compaction — focus the summary on the earlier messages before them \
+             and do not repeat the kept tail.\n\n"
+        ));
+    } else {
+        out.push_str(
+            "\nThat conversation is the messages of this request, above this \
+             prompt. Do not repeat any of it; summarize only.\n\n",
+        );
+    }
     out.push_str(&summary_tail(retry));
     out
 }

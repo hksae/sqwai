@@ -2112,7 +2112,7 @@ impl App {
                 self.session.response_id_for(&self.session.model_key)
             },
             summary: self.session.summary.clone(),
-            compact_only: false,
+            compact_only: false, compact_focus: String::new(),
             memory: self.cfg.memory.clone(),
             compaction: self.cfg.compaction.clone(),
             plan_limits: self.cfg.plan,
@@ -2229,10 +2229,12 @@ impl App {
         );
     }
 
-    /// `/compact`: run the compaction policy over the stored transcript.
+    /// `/compact [focus]`: run the compaction policy over the stored transcript.
     /// Reuses the agent plumbing so the summary request streams like any other
-    /// turn and can be aborted with esc.
-    fn start_compaction(&mut self) {
+    /// turn and can be aborted with esc. The real system block and tool
+    /// schemas travel with the request so a warm prefix cache is reused, and
+    /// an optional focus tail steers the summarizer.
+    fn start_compaction_with_focus(&mut self, focus: &str) {
         if self.streaming {
             self.show_busy_status();
             return;
@@ -2244,6 +2246,17 @@ impl App {
         // pick up any provider/key change made since the last turn
         self.rebuild_provider();
         self.session.strip_system_messages();
+        // AGENTS.md, MEMORY.md and skills are re-read every turn, exactly like
+        // a real request: the summary request then shares the session's warm
+        // prefix cache instead of paying full price for the whole transcript.
+        self.stable_parts = self.stable_parts();
+        // `system_block` consumes the one-shot resume / stopped-turn notices;
+        // a compaction is not a turn, so those must survive for the next one.
+        let armed = self.resume_notice_armed;
+        let aborted = self.session.prev_turn_aborted;
+        let system = self.system_block();
+        self.resume_notice_armed = armed;
+        self.session.prev_turn_aborted = aborted;
         let input = crate::agent::loop_task::AgentInput {
             provider: self.provider.clone(),
             model_id: self.model_cfg.id.clone(),
@@ -2251,8 +2264,7 @@ impl App {
             effort: None,
             effort_support: self.effort_support(),
             max_tokens: None,
-            // compaction needs no system block and no tools
-            system: Vec::new(),
+            system,
             messages: self.session.messages.clone(),
             root: self.project_root.clone(),
             session_id: self.session.id.to_string(),
@@ -2260,7 +2272,7 @@ impl App {
             web_allow_hosts: Vec::new(),
             plan_mode: false,
             context_limit: self.session.context_limit,
-            enable_tools: false,
+            enable_tools: true,
             background_baselines: false,
             read_only: self.read_only,
             mcp: Default::default(),
@@ -2268,6 +2280,7 @@ impl App {
             previous_response_id: None,
             summary: self.session.summary.clone(),
             compact_only: true,
+            compact_focus: focus.to_string(),
             memory: self.cfg.memory.clone(),
             compaction: self.cfg.compaction.clone(),
             plan_limits: self.cfg.plan,

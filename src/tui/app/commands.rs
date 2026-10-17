@@ -175,7 +175,10 @@ impl App {
                 self.run_undo_maintenance();
                 self.quit = true;
             }
-            "/compact" => self.start_compaction(),
+            "/compact" => {
+                let focus: Vec<&str> = rest.split_whitespace().skip(1).collect();
+                self.start_compaction_with_focus(&focus.join(" "));
+            }
             "/context" => self.open_menu(Menu::Context),
             "/context-view" => self.open_menu(Menu::ContextView),
             "/effort" => self.open_menu(Menu::Effort { model: None }),
