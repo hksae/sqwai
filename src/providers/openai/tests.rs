@@ -722,19 +722,16 @@ mod live_cache {
         model_id: String,
     }
 
-    /// Same credential path as the G0 bench: the provider comes from the
-    /// user's config file (`last_model`, or `SQWAI_BENCH_MODEL`), never
-    /// from env. The env key has no Go rights, which is why a hardcoded
-    /// probe 402/403s while the TUI and the bench work.
     fn live_provider() -> Live {
-        // the Go gateway routes on x-opencode-session; without it every
-        // request 400s with MissingSessionID
         crate::providers::set_conversation_id("cache-probe");
-        let bench = crate::agent::bench_harness::bench_model()
-            .expect("bench_model must resolve: check config + SQWAI_BENCH_MODEL");
+        let cfg = crate::config::Config::load().expect("user config must load");
+        let key = &cfg.last_model;
+        let mc = cfg.models.get(key).expect("last_model must exist in config");
+        let resolved = cfg.resolve_provider(mc).expect("provider must resolve");
+        let provider = crate::providers::create(&resolved).expect("provider must create");
         Live {
-            provider: bench.provider,
-            model_id: bench.model_id,
+            provider,
+            model_id: mc.id.clone(),
         }
     }
 

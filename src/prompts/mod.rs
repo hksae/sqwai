@@ -87,12 +87,10 @@ pub type PrefixLayer = (crate::providers::PrefixSection, String);
 /// nor conversation, and lumping them into "system" made the biggest block on
 /// the scale a lie. Joined with blank lines, they are the bytes one string
 /// used to carry.
+#[allow(dead_code)]
 pub fn stable_prefix_layers() -> Vec<PrefixLayer> {
-    // the product always runs the full machinery; only the bench harness
-    // passes its own baseline flag, explicitly
     prefix_layers_with_limit(
         &std::env::current_dir().unwrap_or_default(),
-        false,
         MEMORY_MAX_CHARS,
     )
 }
@@ -103,28 +101,10 @@ pub fn stable_prefix_layers_at(
     context_limit: u64,
 ) -> Vec<PrefixLayer> {
     let max_chars = memory_char_budget(memory_cfg, context_limit);
-    prefix_layers_with_limit(root, false, max_chars)
+    prefix_layers_with_limit(root, max_chars)
 }
 
-/// Bench assembly: identical layers, rooted at the fixture copy.
-/// The model must never see the cargo-inherited cwd here.
-/// Used by the bench harness (test-only) — not dead, just cfg-gated.
-/// The harness is the only caller by design: production never assembles
-/// prompts against a fixture root.
-#[allow(dead_code)]
-pub fn bench_prefix(root: &std::path::Path, baseline: bool) -> String {
-    join_layers(prefix_layers(root, baseline))
-}
-
-fn prefix_layers(root: &std::path::Path, baseline: bool) -> Vec<PrefixLayer> {
-    prefix_layers_with_limit(root, baseline, MEMORY_MAX_CHARS)
-}
-
-fn prefix_layers_with_limit(
-    root: &std::path::Path,
-    baseline: bool,
-    memory_max_chars: usize,
-) -> Vec<PrefixLayer> {
+fn prefix_layers_with_limit(root: &std::path::Path, memory_max_chars: usize) -> Vec<PrefixLayer> {
     use crate::providers::PrefixSection;
     let mut layers = vec![
         (
@@ -137,10 +117,7 @@ fn prefix_layers_with_limit(
         ),
         (PrefixSection::System, env::process_block_at(root)),
     ];
-    // The baseline arm of the bench runs without durable memory in the
-    // prefix; the product path always includes it (the flag is the harness's
-    // own argument, never an environment switch).
-    if !baseline && let Some(memory) = memory_block_with_limit(root, memory_max_chars) {
+    if let Some(memory) = memory_block_with_limit(root, memory_max_chars) {
         layers.push((PrefixSection::Memory, memory));
     }
     layers
@@ -312,7 +289,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("AGENTS.md"), "shared rule").unwrap();
         std::fs::write(dir.join("SQWAI.md"), "own rule").unwrap();
-        let p = super::bench_prefix(&dir, true);
+        let p = super::join_layers(super::prefix_layers_with_limit(&dir, 0));
         assert!(p.contains("own rule"), "sqwai rules must load");
         assert!(p.contains("shared rule"), "agents rules must load");
         let agents_at = p.find("AGENTS.md").unwrap();
@@ -320,7 +297,7 @@ mod tests {
         assert!(agents_at < sqwai_at, "sqwai section comes last");
         // empty SQWAI.md behaves as absent
         std::fs::write(dir.join("SQWAI.md"), "  \n").unwrap();
-        let p = super::bench_prefix(&dir, true);
+        let p = super::join_layers(super::prefix_layers_with_limit(&dir, 0));
         assert!(!p.contains("SQWAI.md"), "empty file must not load");
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -453,25 +430,22 @@ mod tests {
     }
 
     #[test]
-    fn bench_prefix_roots_at_fixture_not_cwd() {
-        let dir = std::env::temp_dir().join(format!("sqwai-bench-prefix-{}", std::process::id()));
+    fn prefix_layers_root_at_explicit_directory_not_cwd() {
+        let dir = std::env::temp_dir().join(format!("sqwai-prefix-root-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("AGENTS.md"), "FIXTURE AGENTS MARKER").unwrap();
-        let p = bench_prefix(&dir, false);
-        // working directory points at the fixture copy...
+        std::fs::write(dir.join("AGENTS.md"), "EXPLICIT ROOT AGENTS MARKER").unwrap();
+        let p = super::join_layers(super::prefix_layers_with_limit(&dir, MEMORY_MAX_CHARS));
         assert!(
             p.contains(&dir.display().to_string()),
-            "cwd must be the fixture: {p:.200}"
+            "cwd must be the explicit root: {p:.200}"
         );
-        // ...and so does the project instructions layer
-        assert!(p.contains("FIXTURE AGENTS MARKER"), "{p:.200}");
-        // the cargo-inherited cwd must not leak in as a working directory
+        assert!(p.contains("EXPLICIT ROOT AGENTS MARKER"), "{p:.200}");
         let cwd = std::env::current_dir().unwrap_or_default();
         if cwd != dir {
             assert!(
                 !p.contains(&format!("Working directory: {}", cwd.display())),
-                "repo cwd leaked into bench prompt: {p:.200}"
+                "repo cwd leaked into prompt: {p:.200}"
             );
         }
         let _ = std::fs::remove_dir_all(&dir);

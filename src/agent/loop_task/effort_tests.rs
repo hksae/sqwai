@@ -882,18 +882,26 @@ fn compaction_request_dodges_thinking_histories() {
 async fn live_compaction_request_reuses_prefix() {
     use futures::StreamExt;
     crate::providers::set_conversation_id("cache-probe-compact");
-    let bench = crate::agent::bench_harness::bench_model()
-        .expect("bench_model must resolve: check config + SQWAI_BENCH_MODEL");
+    let cfg = crate::config::Config::load().expect("user config must load");
+    let mc = cfg
+        .models
+        .get(&cfg.last_model)
+        .expect("last_model must exist in config");
+    let resolved = cfg
+        .resolve_provider(mc)
+        .expect("provider must resolve");
+    let live_provider = crate::providers::create(&resolved).expect("provider must create");
+    let live_model_id = mc.id.clone();
 
     async fn send(
-        bench: &crate::agent::bench_harness::BenchModel,
+        provider: &crate::providers::SharedProvider,
         req: ChatRequest,
     ) -> crate::providers::Usage {
         let mut wait_secs = 5u64;
         for _ in 0..6 {
             let mut usage = crate::providers::Usage::default();
             let mut rate_limited = false;
-            let mut stream = bench.provider.stream_chat(req.clone());
+            let mut stream = provider.stream_chat(req.clone());
             while let Some(ev) = stream.next().await {
                 match ev {
                     Ok(StreamEvent::Text(_)) => {}
@@ -963,7 +971,7 @@ async fn live_compaction_request_reuses_prefix() {
     let mut prime_msgs = history.clone();
     prime_msgs.push(Message::new(Role::User, "go on"));
     let prime = ChatRequest {
-        model_id: bench.model_id.clone(),
+        model_id: live_model_id.clone(),
         system: system.clone(),
         messages: prime_msgs,
         effort: None,
@@ -973,8 +981,7 @@ async fn live_compaction_request_reuses_prefix() {
         previous_response_id: None,
         context_transport: crate::providers::ContextTransport::Stateless,
     };
-    // keep the prime small enough to leave room: reuse three_turns as-is
-    let u = send(&bench, prime).await;
+    let u = send(&live_provider, prime).await;
     report("prime", &u);
 
     // cache-aware: same prefix + history, prompt appended
@@ -989,18 +996,18 @@ async fn live_compaction_request_reuses_prefix() {
         history.len() - older.len(),
         None,
         "",
-        &bench.model_id,
+        &live_model_id,
         false,
     );
     assert!(is_aware);
-    let u = send(&bench, aware).await;
+    let u = send(&live_provider, aware).await;
     report("aware", &u);
 
     // standalone: tiny system + rendered transcript
     let (alone, is_aware) =
-        compaction_request(None, older, &history, 0, None, "", &bench.model_id, false);
+        compaction_request(None, older, &history, 0, None, "", &live_model_id, false);
     assert!(!is_aware);
-    let u = send(&bench, alone).await;
+    let u = send(&live_provider, alone).await;
     report("alone", &u);
 }
 

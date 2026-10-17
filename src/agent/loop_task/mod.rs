@@ -989,9 +989,6 @@ async fn run_agent(
         // is observed here, but the gate must use
         // what compaction can actually remove — otherwise a big fixed
         // prefix fires futile compactions every turn.
-        if std::env::var("SQWAI_BENCH_DEBUG").is_ok() {
-            eprintln!("[compact] calling compact_history, msgs={}", messages.len());
-        }
         let msgs_before = messages.len();
         let plan_hint = plan_hint_for_summary(&root, &session_id);
         let prefix = CompactionPrefix {

@@ -260,24 +260,6 @@ pub(crate) async fn compact_history(
     // output taught the model to re-read the same files in circles —
     // the prune note even instructed it to. History shrinks only below,
     // on pressure, via summary or hard trim.
-    if std::env::var("SQWAI_BENCH_DEBUG").is_ok() {
-        let measured_now = measured(messages);
-        let wire_now = wire_measured(messages);
-        eprintln!(
-            "bench-debug: pressure check: measured={} wire={} budget={} limit={} msgs={}",
-            measured_now,
-            wire_now,
-            policy.budget(),
-            policy.context_limit,
-            messages.len(),
-        );
-        eprintln!(
-            "[compact] check: wire={} budget={} triggered={}",
-            wire_now,
-            policy.budget(),
-            wire_now >= policy.budget()
-        );
-    }
     if !force && policy.pressure(wire_measured(messages)) == context::Pressure::Ok {
         // Pressure is fine: history is untouched, report nothing.
         return None;
@@ -292,15 +274,6 @@ pub(crate) async fn compact_history(
     let keep: Vec<Message> = keep.to_vec();
     let keep_len = keep.len();
     let mut summarized = false;
-    let debug = std::env::var("SQWAI_BENCH_DEBUG").is_ok();
-    if debug {
-        eprintln!(
-            "bench-debug: stages: older={} keep={} summary_enabled={}",
-            older.len(),
-            keep_len,
-            policy.summary_enabled,
-        );
-    }
     if !older.is_empty() && policy.summary_enabled {
         let mut wire_history = messages.clone();
         crate::agent::tool_output::trim_for_wire_with_limit(
@@ -353,13 +326,6 @@ pub(crate) async fn compact_history(
         // host-enforced cap (the wire cap is advisory at best): without it
         // chained summaries balloon every cycle (measured 33K-140K chars)
         // and late compactions free nothing at full call price.
-        if std::env::var("SQWAI_BENCH_DEBUG").is_ok() {
-            eprintln!(
-                "bench-debug: summary {} chars after cap ({} before)",
-                context::truncate_summary(&text).chars().count(),
-                text.chars().count()
-            );
-        }
         let text = context::truncate_summary(&text);
         *messages = context::apply_summary(&text, &keep);
         *summary = Some(text);
@@ -369,23 +335,9 @@ pub(crate) async fn compact_history(
     // stage 4: still too big — drop the oldest turns outright
     if policy.pressure(wire_measured(messages)) != context::Pressure::Ok {
         let budget = policy.budget();
-        let before_len = messages.len();
         *messages = context::hard_trim(messages, budget);
-        if debug {
-            eprintln!(
-                "bench-debug: stage4: {} -> {} msgs (budget {})",
-                before_len,
-                messages.len(),
-                budget,
-            );
-        }
-    } else if debug {
-        eprintln!("bench-debug: stage4 skipped (fits)");
     }
     let after = measured(messages);
-    if std::env::var("SQWAI_BENCH_DEBUG").is_ok() {
-        eprintln!("[compact] done, new msgs={}", messages.len());
-    }
     if after == before && !summarized {
         return None;
     }

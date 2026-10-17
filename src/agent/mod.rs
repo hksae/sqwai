@@ -1,5 +1,3 @@
-#[cfg(test)]
-pub mod bench_harness;
 pub mod blobs;
 pub mod checkpoints;
 pub mod context;
@@ -17,5 +15,3 @@ pub mod tool_output;
 pub mod tools;
 pub mod trust;
 pub mod undo_guard;
-#[cfg(test)]
-pub mod why;
