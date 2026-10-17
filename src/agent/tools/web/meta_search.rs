@@ -1018,6 +1018,53 @@ async fn search_github_issues(client: &Client, query: &str, limit: usize) -> Vec
     hits
 }
 
+/// Strip registry/meta noise words (`crate`, `crates.io`, `latest`, `version`, `rust`, `npm`, etc.)
+/// before querying package registry APIs (`crates.io`, `registry.npmjs.org`) so queries like
+/// `"tokio-util crate latest version crates.io"` resolve to `"tokio-util"`.
+pub fn sanitize_package_query(query: &str) -> String {
+    const META_NOISE: &[&str] = &[
+        "crate",
+        "crates",
+        "crates.io",
+        "cargo",
+        "rust",
+        "npm",
+        "npmjs",
+        "npmjs.com",
+        "pypi",
+        "pypi.org",
+        "pip",
+        "package",
+        "packages",
+        "pkg",
+        "latest",
+        "current",
+        "newest",
+        "version",
+        "versions",
+        "release",
+        "releases",
+        "docs",
+        "doc",
+        "docs.rs",
+        "documentation",
+        "feature",
+        "features",
+        "flag",
+        "flags",
+    ];
+    let kept: Vec<&str> = query
+        .split_whitespace()
+        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric() && c != '-' && c != '_' && c != '@' && c != '/' && c != '.'))
+        .filter(|w| !w.is_empty() && !META_NOISE.contains(&w.to_ascii_lowercase().as_str()))
+        .collect();
+    if kept.is_empty() {
+        query.trim().to_string()
+    } else {
+        kept.join(" ")
+    }
+}
+
 async fn search_packages(client: &Client, query: &str, limit: usize) -> Vec<RawSearchHit> {
     let (crates, npm) = tokio::join!(
         search_crates_io(client, query, limit),
@@ -1029,10 +1076,11 @@ async fn search_packages(client: &Client, query: &str, limit: usize) -> Vec<RawS
 }
 
 async fn search_crates_io(client: &Client, query: &str, limit: usize) -> Vec<RawSearchHit> {
+    let clean_q = sanitize_package_query(query);
     let per_page = limit.clamp(1, 10).to_string();
     let Ok(resp) = client
         .get("https://crates.io/api/v1/crates")
-        .query(&[("q", query), ("per_page", per_page.as_str())])
+        .query(&[("q", clean_q.as_str()), ("per_page", per_page.as_str())])
         .send()
         .await
     else {
@@ -1079,10 +1127,11 @@ async fn search_crates_io(client: &Client, query: &str, limit: usize) -> Vec<Raw
 }
 
 async fn search_npm(client: &Client, query: &str, limit: usize) -> Vec<RawSearchHit> {
+    let clean_q = sanitize_package_query(query);
     let size = limit.clamp(1, 10).to_string();
     let Ok(resp) = client
         .get("https://registry.npmjs.org/-/v1/search")
-        .query(&[("text", query), ("size", size.as_str())])
+        .query(&[("text", clean_q.as_str()), ("size", size.as_str())])
         .send()
         .await
     else {

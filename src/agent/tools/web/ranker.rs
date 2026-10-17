@@ -14,6 +14,10 @@ const CACHE_TTL: Duration = Duration::from_secs(15 * 60);
 pub const FULL_PAGE_CHARS: usize = 22_000;
 /// Maximum characters returned from `project_page`.
 pub const MAX_PROJECTED_CHARS: usize = 28_000;
+/// Focused character budget when `query` is passed to `webfetch`.
+const QUERY_PROJECTED_CHARS: usize = 14_000;
+/// Maximum number of ranked sections returned for a targeted `query`.
+const MAX_QUERY_SECTIONS: usize = 6;
 /// Maximum size of a single chunk before paragraph subdivision.
 const MAX_SECTION_CHARS: usize = 5_000;
 
@@ -353,9 +357,17 @@ fn split_large_section(body: &str, max_chars: usize) -> Vec<String> {
 /// Build a compact Table of Contents for a parsed page.
 pub fn build_outline(sections: &[PageSection]) -> String {
     let mut lines = Vec::new();
+    let many_deep = sections.iter().filter(|s| s.level >= 4).count() > 20;
+    let mut deep_shown = 0usize;
     for sec in sections {
         if sec.heading.ends_with(')') && sec.heading.contains("(part ") {
             continue;
+        }
+        if many_deep && sec.level >= 4 {
+            deep_shown += 1;
+            if deep_shown > 12 {
+                continue;
+            }
         }
         let indent = "  ".repeat(sec.level.saturating_sub(1) as usize);
         let code_tag = if sec.has_code_block { " [code]" } else { "" };
@@ -363,7 +375,7 @@ pub fn build_outline(sections: &[PageSection]) -> String {
             "{indent}- {} ({} chars{code_tag})",
             sec.heading, sec.char_len
         ));
-        if lines.len() >= 45 {
+        if lines.len() >= 35 {
             lines.push("  - ...".to_string());
             break;
         }
@@ -379,28 +391,11 @@ pub fn project_page(page: &CachedPage, query: Option<&str>, section: Option<&str
 
     // 1. Explicit section lookup (`section="..."`).
     if let Some(sec_q) = section_filter {
-        let lower_q = sec_q.to_ascii_lowercase();
-        let mut matched_indices: Vec<usize> = Vec::new();
-        let mut include_below_level: Option<u8> = None;
+        let mut matched_indices = match_sections_by_heading(&page.sections, sec_q);
 
-        for sec in &page.sections {
-            if let Some(parent_lvl) = include_below_level {
-                let base_part = sec.heading.contains("(part ");
-                if base_part || (sec.level > parent_lvl && sec.level > 0) {
-                    matched_indices.push(sec.index);
-                    continue;
-                } else {
-                    include_below_level = None;
-                }
-            }
-            if sec.heading.to_ascii_lowercase().contains(&lower_q)
-                || sec.breadcrumb.to_ascii_lowercase().contains(&lower_q)
-            {
-                matched_indices.push(sec.index);
-                if sec.level > 0 && !sec.heading.contains("(part ") {
-                    include_below_level = Some(sec.level);
-                }
-            }
+        // Fuzzy stemmed-token fallback on headings (e.g. `section="Feature flags"` -> `## Cargo Features`).
+        if matched_indices.is_empty() {
+            matched_indices = match_sections_by_heading_tokens(&page.sections, sec_q);
         }
 
         if !matched_indices.is_empty() {
@@ -418,7 +413,7 @@ pub fn project_page(page: &CachedPage, query: Option<&str>, section: Option<&str
         return assemble_selected_sections(
             page,
             &top_indices,
-            MAX_PROJECTED_CHARS,
+             QUERY_PROJECTED_CHARS,
             Some(&format!(
                 "No exact heading matched '{sec_q}'; showing outline and closest sections"
             )),
@@ -432,6 +427,9 @@ pub fn project_page(page: &CachedPage, query: Option<&str>, section: Option<&str
         if ranked.is_empty() && total_chars <= FULL_PAGE_CHARS {
             return page.markdown.clone();
         }
+        let best_score = ranked.first().map(|(_, s)| *s).unwrap_or(0.0);
+        let score_threshold = best_score * 0.35;
+
         let mut selected: Vec<usize> = Vec::new();
         if let Some(first) = page.sections.first()
             && first.char_len <= 2_500
@@ -439,17 +437,23 @@ pub fn project_page(page: &CachedPage, query: Option<&str>, section: Option<&str
             selected.push(0);
         }
         let mut used_chars: usize = selected.iter().map(|&i| page.sections[i].char_len).sum();
-        for (idx, _score) in ranked {
+        let mut matched_count = 0usize;
+        for (idx, score) in ranked {
+            if score < score_threshold && matched_count >= 1 {
+                break;
+            }
             if selected.contains(&idx) {
+                matched_count += 1;
                 continue;
             }
             let len = page.sections[idx].char_len;
-            if used_chars + len > MAX_PROJECTED_CHARS && selected.len() >= 2 {
+            if used_chars + len > QUERY_PROJECTED_CHARS && matched_count >= 1 {
                 continue;
             }
             selected.push(idx);
             used_chars += len;
-            if used_chars >= MAX_PROJECTED_CHARS {
+            matched_count += 1;
+            if matched_count >= MAX_QUERY_SECTIONS || used_chars >= QUERY_PROJECTED_CHARS {
                 break;
             }
         }
@@ -457,7 +461,7 @@ pub fn project_page(page: &CachedPage, query: Option<&str>, section: Option<&str
         return assemble_selected_sections(
             page,
             &selected,
-            MAX_PROJECTED_CHARS,
+            QUERY_PROJECTED_CHARS,
             Some(&format!("Focused on query: '{q}'")),
             page.sections.len() >= 3,
         );
@@ -489,6 +493,80 @@ pub fn project_page(page: &CachedPage, query: Option<&str>, section: Option<&str
         )),
         true,
     )
+}
+
+fn match_sections_by_heading(sections: &[PageSection], sec_q: &str) -> Vec<usize> {
+    let lower_q = sec_q.to_ascii_lowercase();
+    let mut matched_indices: Vec<usize> = Vec::new();
+    let mut include_below_level: Option<u8> = None;
+
+    for sec in sections {
+        if let Some(parent_lvl) = include_below_level {
+            let base_part = sec.heading.contains("(part ");
+            if base_part || (sec.level > parent_lvl && sec.level > 0) {
+                matched_indices.push(sec.index);
+                continue;
+            } else {
+                include_below_level = None;
+            }
+        }
+        if sec.heading.to_ascii_lowercase().contains(&lower_q)
+            || sec.breadcrumb.to_ascii_lowercase().contains(&lower_q)
+        {
+            matched_indices.push(sec.index);
+            if sec.level > 0 && !sec.heading.contains("(part ") {
+                include_below_level = Some(sec.level);
+            }
+        }
+    }
+    matched_indices
+}
+
+/// Match sections when the user/agent passed a synonymous heading phrase
+/// (e.g. `section="Feature flags"` for a heading titled `## Cargo Features`)
+/// by comparing stemmed tokens of `sec_q` against each section's `heading`.
+fn match_sections_by_heading_tokens(sections: &[PageSection], sec_q: &str) -> Vec<usize> {
+    let q_tokens: HashSet<String> = tokenize_for_bm25(sec_q)
+        .into_iter()
+        .filter(|t| t.len() >= 3)
+        .collect();
+    if q_tokens.is_empty() {
+        return Vec::new();
+    }
+
+    let mut best_overlap = 0usize;
+    let mut roots: Vec<(usize, u8)> = Vec::new();
+    for sec in sections {
+        let h_tokens: HashSet<String> = tokenize_for_bm25(&sec.heading)
+            .into_iter()
+            .filter(|t| t.len() >= 3)
+            .collect();
+        let overlap = q_tokens.intersection(&h_tokens).count();
+        if overlap > 0 {
+            if overlap > best_overlap {
+                best_overlap = overlap;
+                roots.clear();
+                roots.push((sec.index, sec.level));
+            } else if overlap == best_overlap && roots.len() < 3 {
+                roots.push((sec.index, sec.level));
+            }
+        }
+    }
+
+    let mut matched = Vec::new();
+    for (root_idx, root_lvl) in roots {
+        matched.push(root_idx);
+        if root_lvl > 0 {
+            for sec in sections.iter().skip(root_idx + 1) {
+                if sec.heading.contains("(part ") || (sec.level > root_lvl && sec.level > 0) {
+                    matched.push(sec.index);
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+    matched
 }
 
 fn assemble_selected_sections(
@@ -946,9 +1024,11 @@ fn stem_token(token: &str) -> String {
     {
         return format!("{base}y");
     }
+    // Only strip `-es` after sibilants (`boxes` -> `box`, `matches` -> `match`, `hashes` -> `hash`);
+    // words like `features`, `examples`, `crates`, `routes`, `types` are `<root>e` + `s`!
     if let Some(base) = token.strip_suffix("es")
         && base.len() >= 3
-        && !base.ends_with(['s', 'x', 'z'])
+        && (base.ends_with(['s', 'x', 'z']) || base.ends_with("ch") || base.ends_with("sh"))
     {
         return base.to_string();
     }

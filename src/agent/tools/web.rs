@@ -10,10 +10,28 @@ pub mod router;
 use super::Outcome;
 use reqwest::{Client, Url};
 use serde_json::Value;
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
 /// Output cap in chars: head+tail mid-trim, same budget as exec/git.
 const MAX_OUTPUT_CHARS: usize = 30_000;
+
+/// Per-canonical-URL async lock so concurrent `webfetch` calls to the same page
+/// in one parallel tool batch coalesce into a single network fetch + cache hit.
+static IN_FLIGHT_URLS: LazyLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn url_inflight_lock(url: &str) -> Arc<tokio::sync::Mutex<()>> {
+    let key = ranker::canonicalize_url(url);
+    let mut map = IN_FLIGHT_URLS.lock().unwrap_or_else(|e| e.into_inner());
+    if map.len() > 128 {
+        map.retain(|_, v| Arc::strong_count(v) > 1);
+    }
+    map.entry(key)
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+}
 
 fn url_arg(args: &Value, allow_hosts: &[String]) -> Result<Url, String> {
     let raw = args
@@ -99,6 +117,25 @@ pub async fn fetch(args: &Value, allow_hosts: &[String]) -> Outcome {
     // Fast path: if no raw CSS selector is requested and the page is already in
     // our session LRU cache (from an earlier webfetch or deep websearch), serve
     // the requested section/query projection immediately in 0ms.
+    if selector.is_none()
+        && !force_refresh
+        && let Some(cached) = ranker::get_cached_page(url.as_str())
+    {
+        return Outcome::ok(ranker::project_page(&cached, query, section));
+    }
+
+    // Coalesce concurrent requests to the same canonical URL in a parallel batch:
+    // the second caller waits for the first caller's network fetch and then reads
+    // directly from `PAGE_CACHE` in 0ms.
+    let inflight = if selector.is_none() && !force_refresh {
+        Some(url_inflight_lock(url.as_str()))
+    } else {
+        None
+    };
+    let _inflight_guard = match inflight.as_ref() {
+        Some(lock) => Some(lock.lock().await),
+        None => None,
+    };
     if selector.is_none()
         && !force_refresh
         && let Some(cached) = ranker::get_cached_page(url.as_str())
@@ -765,6 +802,34 @@ let y = 2;</pre></td>
             global.contains("ImmixAllocator::alloc_frame(size);"),
             "global BM25 pool must pick Page 3's exact code match:\n{global}"
         );
+
+        // 5. Package query sanitization strips registry meta-words (`tokio-util crate latest version crates.io` -> `tokio-util`).
+        assert_eq!(
+            meta_search::sanitize_package_query("tokio-util crate latest version crates.io"),
+            "tokio-util"
+        );
+        assert_eq!(
+            meta_search::sanitize_package_query("@tanstack/react-query npm package latest"),
+            "@tanstack/react-query"
+        );
+
+        // 6. Fuzzy stemmed-token section matching (`section="Feature flags"` -> `## Cargo Features`).
+        let crate_page = ranker::put_cached_page(
+            "https://crates.io/crates/tokio-util",
+            Some("tokio-util".into()),
+            "# Crate tokio-util\n\nOverview.\n\n## Cargo Features\n\n- `rt`\n- `codec`\n\n## README\n\nSome readme.".into(),
+        );
+        let feat_proj = ranker::project_page(&crate_page, None, Some("Feature flags"));
+        assert!(
+            feat_proj.contains("> [Section match: 'Feature flags']"),
+            "Feature flags should fuzzy-match Cargo Features:\n{feat_proj}"
+        );
+        assert!(feat_proj.contains("- `rt`"));
+
+        // 7. In-flight URL lock coalesces canonical equivalents.
+        let l1 = url_inflight_lock("https://www.example.com/docs/hashmap/?utm_source=x#top");
+        let l2 = url_inflight_lock("https://example.com/docs/hashmap");
+        assert!(Arc::ptr_eq(&l1, &l2));
     }
 
     #[tokio::test]
