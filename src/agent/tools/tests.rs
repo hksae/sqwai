@@ -3280,3 +3280,53 @@ fn an_edit_to_a_plain_file_does_not_add_a_bom() {
     assert_eq!(&bytes, b"fn b() {}\n");
     fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn journal_resolves_recap_session_prefix_and_renders_tool_result_summaries_and_undo_files() {
+    let (mut ctx, dir) = proj();
+    write_journal(
+        &dir,
+        "01JXYZ99ABCDEF0000",
+        &[
+            rec(
+                1,
+                "2026-03-01T10:00:00+00:00",
+                "tool_result",
+                r#","tool":"bash","ok":false,"summary":"error[E0308]: mismatched types""#,
+            ),
+            rec(
+                2,
+                "2026-03-01T10:01:00+00:00",
+                "undo",
+                r#","to_checkpoint":"deadbeef123456","files":["src/foo.rs"]"#,
+            ),
+        ],
+    );
+
+    // 1. 8-char prefix from `op=recap` resolves to the full session file
+    let o = execute(
+        &mut ctx,
+        "journal",
+        &json!({"session": "01JXYZ99", "query": "E0308"}),
+    );
+    assert!(o.ok, "{}", o.output);
+    assert!(
+        o.output.contains("error[E0308]: mismatched types"),
+        "tool_result summary must be rendered and searchable: {}",
+        o.output
+    );
+
+    // 2. `undo` record renders checkpoint and reverted files
+    let o_undo = execute(
+        &mut ctx,
+        "journal",
+        &json!({"session": "01JXYZ99", "kind": "undo"}),
+    );
+    assert!(o_undo.ok, "{}", o_undo.output);
+    assert!(
+        o_undo.output.contains("files=[src/foo.rs]"),
+        "undo record must list reverted files: {}",
+        o_undo.output
+    );
+    fs::remove_dir_all(&dir).ok();
+}

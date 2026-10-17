@@ -403,7 +403,9 @@ fn journal_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
         return Outcome::err("journal op must be 'read', 'recap' or 'assumptions'");
     }
 
-    let (records, label) = match args["session"].as_str().unwrap_or("current") {
+    let session_arg = args["session"].as_str().unwrap_or("current");
+    let show_session = session_arg == "all";
+    let (records, label) = match session_arg {
         "current" | "" => (
             crate::agent::journal::Journal::records_for(&ctx.root, &ctx.session_id),
             ctx.session_id.clone(),
@@ -413,13 +415,15 @@ fn journal_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
             "all sessions".to_string(),
         ),
         other => {
-            // a session id is a bare file stem, never a path
+            // a session id is a bare file stem (or 4+ char prefix from recap), never a path
             if other.contains('/') || other.contains('\\') || other.contains("..") {
                 return Outcome::err(format!("bad session id '{other}'"));
             }
+            let resolved = crate::agent::journal::Journal::resolve_session_id(&ctx.root, other)
+                .unwrap_or_else(|| other.to_string());
             (
-                crate::agent::journal::Journal::records_for(&ctx.root, other),
-                other.to_string(),
+                crate::agent::journal::Journal::records_for(&ctx.root, &resolved),
+                resolved,
             )
         }
     };
@@ -464,7 +468,7 @@ fn journal_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                 Err(_) => false,
             },
         })
-        .map(journal_line)
+        .map(|r| journal_line_with_session(r, show_session))
         .filter(|line| {
             query
                 .as_ref()
@@ -625,20 +629,24 @@ fn recap_text(items: &[crate::agent::journal::Recap], days: i64) -> String {
     out
 }
 
-/// One rendered journal line: `j#<seq> <time> <kind> [step=N] ([agent]) | body`.
+/// One rendered journal line: `j#<seq> <time> <kind> [session=S] [step=N] ([agent]) | body`.
 /// Everything after `|` is a kind-specific summary with a generic k=v fallback.
-fn journal_line(r: &crate::agent::journal::Record) -> String {
+fn journal_line_with_session(r: &crate::agent::journal::Record, show_session: bool) -> String {
     let when = chrono::DateTime::parse_from_rfc3339(&r.ts)
         .map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
         .unwrap_or_else(|_| r.ts.clone());
     let mut line = format!("j#{} {when} {}", r.seq, r.kind);
+    if show_session && !r.session.is_empty() {
+        let short_session: String = r.session.chars().take(8).collect();
+        line.push_str(&format!(" session={short_session}"));
+    }
     if let Some(step) = &r.step {
         line.push_str(&format!(" step={step}"));
     }
     if r.agent != "main" {
         line.push_str(&format!(" [{}]", r.agent));
     }
-    let body = specs::clip(&journal_body(r), 140);
+    let body = specs::clip(&journal_body(r), 160);
     if !body.is_empty() {
         line.push_str(" | ");
         line.push_str(&body);
@@ -668,7 +676,14 @@ fn journal_body(r: &crate::agent::journal::Record) -> String {
             if let Some(code) = s("code") {
                 parts.push(format!("code={code}"));
             }
-            parts.join(" ")
+            let head = parts.join(" ");
+            match s("summary").map(str::trim).filter(|sum| !sum.is_empty()) {
+                Some(sum) => {
+                    let clean = sum.split_whitespace().collect::<Vec<_>>().join(" ");
+                    format!("{head} — {clean}")
+                }
+                None => head,
+            }
         }
         "file_diff" => {
             let mut parts: Vec<String> = Vec::new();
@@ -715,6 +730,35 @@ fn journal_body(r: &crate::agent::journal::Record) -> String {
                 }
             }
             parts.join(" ")
+        }
+        "undo" | "redo" => {
+            let mut parts: Vec<String> = Vec::new();
+            if let Some(step) = s("step") {
+                parts.push(format!("step={step}"));
+            }
+            if let Some(cp) = s("to_checkpoint")
+                && !cp.is_empty()
+            {
+                parts.push(format!("to={}", specs::clip(cp, 12)));
+            }
+            if let Some(files) = f.get("files").and_then(Value::as_array) {
+                let list: Vec<&str> = files.iter().filter_map(Value::as_str).take(4).collect();
+                if !list.is_empty() {
+                    parts.push(format!("files=[{}]", list.join(", ")));
+                }
+            }
+            parts.join(" ")
+        }
+        "memory" => {
+            let scope = s("scope").unwrap_or("project");
+            let section = s("section").unwrap_or("Project");
+            let op = s("op").unwrap_or("written");
+            let text = s("text").unwrap_or("");
+            if text.is_empty() {
+                format!("{scope}/{section} ({op})")
+            } else {
+                format!("{scope}/{section} ({op}): {text}")
+            }
         }
         "checkpoint" => s("label").unwrap_or_default().to_string(),
         "provider_error" => {

@@ -378,8 +378,8 @@ One batch at the close of a step is enough.",
                 "properties": {
                     "op": {"type": "string", "enum": ["read", "recap", "assumptions"], "description": "read journal records (default); recap = what happened in this project over the last days, per session; assumptions = list open ones"},
                     "days": {"type": "integer", "description": "recap only: how many days back, today included (default 3, max 7)"},
-                    "session": {"type": "string", "enum": ["current", "all"], "description": "whose journal to read: this session (default) or every session in the project"},
-                    "kind": {"type": "string", "description": "exact record kind: user_msg|tool_call|tool_result|file_diff|diagnostics|note|plan|checkpoint|provider_error|compaction"},
+                    "session": {"type": "string", "description": "whose journal to read: 'current' (default), 'all' (every session in the project), or a session id / prefix from op=recap"},
+                    "kind": {"type": "string", "description": "exact record kind: user_msg|tool_call|tool_result|file_diff|diagnostics|note|plan|checkpoint|undo|redo|memory|provider_error|compaction"},
                     "step": {"type": "string", "description": "only records attached to this plan step id"},
                     "from": {"type": "string", "description": "inclusive lower time bound, UTC: RFC3339 or YYYY-MM-DD"},
                     "to": {"type": "string", "description": "inclusive upper time bound, UTC: RFC3339 or YYYY-MM-DD (a bare date means through the end of that day)"},
@@ -408,10 +408,11 @@ project, USER.md for the user) — it is injected into your context at the start
 every future session, so this is how knowledge outlives the conversation. Write it \
 as soon as you learn something that will still matter later: a stated user preference \
 or an agreement, a project convention, a decision or fact that is not derivable from \
-code or git, an environment gotcha. Use `replaces` with the old text to correct a fact \
-instead of duplicating it. Store durable truths only — not transient task state, \
+code or git, an environment gotcha. Use `replaces` with the old text to update a fact \
+in place instead of duplicating it, or pass `replaces` with `text: \"\"` to delete an \
+outdated entry. Store durable truths only — not transient task state, \
 guesses, or anything you would not want shown to you every session.",
-            parameters: json!({"type":"object","properties":{"section":{"type":"string","enum":["Project","Conventions","User","Agreements"]},"scope":{"type":"string","enum":["project","user"]},"text":{"type":"string"},"replaces":{"type":"string"}},"required":["section","text"]}),
+            parameters: json!({"type":"object","properties":{"section":{"type":"string","enum":["Project","Conventions","User","Agreements"]},"scope":{"type":"string","enum":["project","user"]},"text":{"type":"string","description":"new fact to record, or empty string when using `replaces` to delete an outdated entry"},"replaces":{"type":"string","description":"existing fact text to update in place (or delete when `text` is empty)"}},"required":["section","text"]}),
         },
         ToolDef {
             name: "plan",

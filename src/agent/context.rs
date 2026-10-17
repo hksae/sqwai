@@ -36,6 +36,7 @@ pub fn anchor(root: &std::path::Path, session_id: &str) -> String {
     // unchanged), so a turn-start snapshot would only resurrect the
     // two-plan problem. The anchor keeps what the journal proves got done.
     let mut changed = Vec::new();
+    let mut recent_reads: Vec<String> = Vec::new();
     let mut last_verification = None;
     if let Ok(records) = crate::agent::journal::Journal::records_for(root, session_id) {
         for record in records {
@@ -57,6 +58,43 @@ pub fn anchor(root: &std::path::Path, session_id: &str) -> String {
                     changed.retain(|path: &String| *path != name);
                 }
             }
+            // A `/redo` puts the reverted files back into the worktree.
+            if record.kind == "redo"
+                && let Some(files) = record.fields.get("files").and_then(|v| v.as_array())
+            {
+                for file in files.iter().filter_map(|v| v.as_str()) {
+                    changed.push(bounded(file, 160));
+                }
+            }
+            if record.kind == "tool_call"
+                && record
+                    .fields
+                    .get("tool")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|t| matches!(t, "read" | "outline"))
+            {
+                let path_opt = record
+                    .fields
+                    .get("args")
+                    .and_then(|a| {
+                        a.get("file_path")
+                            .or_else(|| a.get("path"))
+                            .and_then(|v| v.as_str())
+                    })
+                    .or_else(|| record.fields.get("args_digest").and_then(|v| v.as_str()));
+                if let Some(raw_path) = path_opt {
+                    let clean = raw_path
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or(raw_path)
+                        .trim();
+                    if !clean.is_empty() {
+                        let name = bounded(clean, 160);
+                        recent_reads.retain(|p| *p != name);
+                        recent_reads.push(name);
+                    }
+                }
+            }
             if record.kind == "tool_result"
                 && record
                     .fields
@@ -76,7 +114,15 @@ pub fn anchor(root: &std::path::Path, session_id: &str) -> String {
     } else {
         out.push_str(&format!(
             "files changed this session: {}\n",
-            changed.into_iter().take(24).collect::<Vec<_>>().join(" · ")
+            changed.iter().take(24).cloned().collect::<Vec<_>>().join(" · ")
+        ));
+    }
+    recent_reads.retain(|p| !changed.contains(p));
+    if !recent_reads.is_empty() {
+        let start = recent_reads.len().saturating_sub(5);
+        out.push_str(&format!(
+            "recent files read: {}\n",
+            recent_reads[start..].join(" · ")
         ));
     }
     out.push_str(&format!(
@@ -716,6 +762,15 @@ fn hard_trim_inner(messages: &[Message], budget: u64) -> Vec<Message> {
 /// Host note replacing the trimmed head when the safe cut lands mid tool
 /// loop. Host-authored, not model text: nothing here claims anything.
 const TRIM_MARKER: &str = "[earlier turns were trimmed to fit the context window]";
+
+/// True when `messages` or `summary` shows that earlier turns were compacted or
+/// hard-trimmed, so the host-generated `ANCHOR` should ride on requests.
+pub fn has_compacted_history(summary: Option<&str>, messages: &[Message]) -> bool {
+    summary.is_some()
+        || messages.first().is_some_and(|m| {
+            m.content.starts_with(TRIM_MARKER) || m.content.contains("<conversation-summary>")
+        })
+}
 
 #[allow(dead_code)]
 /// Boundary for the local compaction path: keep the most recent

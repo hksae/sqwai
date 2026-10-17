@@ -31,23 +31,31 @@ const MEMORY_MAX_CHARS: usize = 12_000;
 /// fact never produced a line of prose. Recent history is pulled now, with
 /// `journal op=recap`.
 pub fn memory_block(root: &std::path::Path) -> Option<String> {
+    memory_block_with_limit(root, MEMORY_MAX_CHARS)
+}
+
+pub fn memory_block_with_limit(root: &std::path::Path, max_chars: usize) -> Option<String> {
+    if max_chars == 0 {
+        return None;
+    }
     let mut sections = Vec::new();
     if let Ok(path) = crate::config::config_dir().map(|dir| dir.join("USER.md"))
-        && let Some(text) = read_bounded(&path)
+        && let Some(text) = read_bounded(&path, max_chars)
     {
         sections.push(format!("<user_memory>\n{text}\n</user_memory>"));
     }
     let project_memory = root.join(".sqwai").join("memory").join("MEMORY.md");
-    if let Some(text) = read_bounded(&project_memory) {
+    if let Some(text) = read_bounded(&project_memory, max_chars) {
         sections.push(format!("<project_memory>\n{text}\n</project_memory>"));
     }
     (!sections.is_empty()).then(|| sections.join("\n\n"))
 }
 
-fn read_bounded(path: &std::path::Path) -> Option<String> {
+fn read_bounded(path: &std::path::Path, max_chars: usize) -> Option<String> {
     let text = std::fs::read_to_string(path).ok()?;
-    let screened = crate::agent::secrets::screen(&text).text;
-    Some(truncate_chars(&screened, MEMORY_MAX_CHARS))
+    let cleaned = crate::agent::memory::clean_for_prompt(&text)?;
+    let screened = crate::agent::secrets::screen(&cleaned).text;
+    Some(truncate_chars(&screened, max_chars))
 }
 
 fn truncate_chars(text: &str, max: usize) -> String {
@@ -56,6 +64,19 @@ fn truncate_chars(text: &str, max: usize) -> String {
     }
     let clipped: String = text.chars().take(max).collect();
     format!("{clipped}\n[truncated]")
+}
+
+/// Effective character budget for each memory file (`USER.md` / `MEMORY.md`),
+/// honoring both `[memory].max_tokens` and `[memory].load_budget_ratio`.
+pub fn memory_char_budget(memory_cfg: &crate::config::MemoryConfig, context_limit: u64) -> usize {
+    let by_tokens = (memory_cfg.max_tokens as usize).saturating_mul(4);
+    if context_limit > 0 && memory_cfg.load_budget_ratio > 0.0 {
+        let ratio = memory_cfg.load_budget_ratio.clamp(0.0, 1.0);
+        let by_ratio = ((context_limit as f64 * ratio).round() as usize).saturating_mul(4);
+        by_tokens.min(by_ratio)
+    } else {
+        by_tokens
+    }
 }
 
 /// One layer of the stable prefix: which section it belongs to, and its text.
@@ -69,7 +90,20 @@ pub type PrefixLayer = (crate::providers::PrefixSection, String);
 pub fn stable_prefix_layers() -> Vec<PrefixLayer> {
     // the product always runs the full machinery; only the bench harness
     // passes its own baseline flag, explicitly
-    prefix_layers(&std::env::current_dir().unwrap_or_default(), false)
+    prefix_layers_with_limit(
+        &std::env::current_dir().unwrap_or_default(),
+        false,
+        MEMORY_MAX_CHARS,
+    )
+}
+
+pub fn stable_prefix_layers_at(
+    root: &std::path::Path,
+    memory_cfg: &crate::config::MemoryConfig,
+    context_limit: u64,
+) -> Vec<PrefixLayer> {
+    let max_chars = memory_char_budget(memory_cfg, context_limit);
+    prefix_layers_with_limit(root, false, max_chars)
 }
 
 /// Bench assembly: identical layers, rooted at the fixture copy.
@@ -83,6 +117,14 @@ pub fn bench_prefix(root: &std::path::Path, baseline: bool) -> String {
 }
 
 fn prefix_layers(root: &std::path::Path, baseline: bool) -> Vec<PrefixLayer> {
+    prefix_layers_with_limit(root, baseline, MEMORY_MAX_CHARS)
+}
+
+fn prefix_layers_with_limit(
+    root: &std::path::Path,
+    baseline: bool,
+    memory_max_chars: usize,
+) -> Vec<PrefixLayer> {
     use crate::providers::PrefixSection;
     let mut layers = vec![
         (
@@ -98,7 +140,7 @@ fn prefix_layers(root: &std::path::Path, baseline: bool) -> Vec<PrefixLayer> {
     // The baseline arm of the bench runs without durable memory in the
     // prefix; the product path always includes it (the flag is the harness's
     // own argument, never an environment switch).
-    if !baseline && let Some(memory) = memory_block(root) {
+    if !baseline && let Some(memory) = memory_block_with_limit(root, memory_max_chars) {
         layers.push((PrefixSection::Memory, memory));
     }
     layers

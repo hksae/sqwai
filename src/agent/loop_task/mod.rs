@@ -936,6 +936,19 @@ async fn run_agent(
     // consecutive turns that asked for effort and came back with no reasoning
     let mut zero_reasoning_turns: u32 = 0;
 
+    let refresh_anchor_in_system =
+        |sys: &mut Vec<SystemPart>, root: &std::path::Path, session_id: &str| {
+            let fresh = SystemPart::volatile(context::anchor(root, session_id));
+            if let Some(slot) = sys
+                .iter_mut()
+                .find(|p| !p.cacheable && p.text.starts_with("ANCHOR "))
+            {
+                *slot = fresh;
+            } else {
+                sys.push(fresh);
+            }
+        };
+
     let build_turn_system = |base: &[SystemPart], root: &std::path::Path, session_id: &str| {
         let mut ts = base.to_vec();
         if let Ok(Some(nudge)) =
@@ -1007,6 +1020,7 @@ async fn run_agent(
             // owns has changed, so the provider's copy of it is no longer the
             // context this turn is about.
             previous_response_id = None;
+            refresh_anchor_in_system(&mut system, &root, &session_id);
             turn_system = build_turn_system(&system, &root, &session_id);
             let _ = tx
                 .send(AgentEvent::Compaction {
@@ -1198,6 +1212,8 @@ async fn run_agent(
                         // provider holds any more, so the reference cannot be
                         // reused for the retry either.
                         previous_response_id = None;
+                        refresh_anchor_in_system(&mut system, &root, &session_id);
+                        turn_system = build_turn_system(&system, &root, &session_id);
                         let _ = tx
                             .send(AgentEvent::Compaction {
                                 summarized,
@@ -1585,23 +1601,41 @@ async fn run_agent(
                                 tools::Outcome::err("memory write limit reached for this turn")
                             } else {
                                 let text = call.args["text"].as_str().unwrap_or_default().trim();
+                                let replaces = call.args["replaces"].as_str();
                                 match crate::agent::memory::Scope::parse(
                                     call.args["scope"].as_str().unwrap_or("project"),
                                 )
                                 .and_then(|scope| {
-                                    crate::agent::memory::apply_proposal(
+                                    crate::agent::memory::apply_proposal_with_stats(
                                         &root,
                                         scope,
                                         call.args["section"].as_str().unwrap_or("Project"),
                                         text,
-                                        call.args["replaces"].as_str(),
+                                        replaces,
                                         &session_id,
                                         memory.max_tokens,
                                     )
-                                    .map(|path| format!("memory written: {}", path.display()))
+                                    .map(|res| (scope, res))
                                     .map_err(|error| error.to_string())
                                 }) {
-                                    Ok(output) => tools::Outcome::ok(output),
+                                    Ok((scope, res)) => {
+                                        if let Some(writer) = journal.as_mut() {
+                                            let _ = writer.append(
+                                                "memory",
+                                                serde_json::json!({
+                                                    "scope": scope.label(),
+                                                    "section": res.section,
+                                                    "op": res.op,
+                                                    "text": if text.is_empty() {
+                                                        replaces.unwrap_or_default()
+                                                    } else {
+                                                        text
+                                                    },
+                                                }),
+                                            );
+                                        }
+                                        tools::Outcome::ok(res.summary())
+                                    }
                                     Err(error) => tools::Outcome::err(error),
                                 }
                             }

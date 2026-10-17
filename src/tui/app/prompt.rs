@@ -11,8 +11,12 @@ impl App {
     /// memory, then the loaded skills — one cacheable part per layer.
     pub(super) fn stable_parts(&self) -> Vec<crate::providers::SystemPart> {
         use crate::providers::PrefixSection;
-        let mut layers = crate::prompts::stable_prefix_layers();
         let root = self.project_root.clone();
+        let mut layers = crate::prompts::stable_prefix_layers_at(
+            &root,
+            &self.cfg.memory,
+            self.session.context_limit,
+        );
         let mut loaded = crate::prompts::skills::load(&self.cfg.skills, &root);
         for selected in &self.active_skills {
             if !loaded.iter().any(|skill| skill.name == selected.name) {
@@ -126,7 +130,10 @@ impl App {
         // distrust the conversation in front of the model, and the engine of a
         // live session that re-answered its own previous turn and ran five
         // identical `git_diff` calls.
-        if self.session.summary.is_some() {
+        if crate::agent::context::has_compacted_history(
+            self.session.summary.as_deref(),
+            &self.session.messages,
+        ) {
             parts.push(SystemPart::volatile(crate::agent::context::anchor(
                 &root,
                 &self.session.id.to_string(),

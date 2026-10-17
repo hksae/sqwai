@@ -708,3 +708,51 @@ fn split_summarizes_a_tool_loop_with_one_user_turn() {
         keep[0].role
     );
 }
+
+#[test]
+fn anchor_restores_files_on_redo_and_lists_recent_reads_and_blockers() {
+    let root = temp_root("anchor-redo-reads");
+    std::fs::remove_dir_all(&root).ok();
+    std::fs::create_dir_all(&root).unwrap();
+    let mut journal = crate::agent::journal::Journal::open(&root, "s").unwrap();
+    journal
+        .append("file_diff", serde_json::json!({"path": "src/a.rs"}))
+        .unwrap();
+    journal
+        .append_undo("cp1", &["src/a.rs".to_string()], &[])
+        .unwrap();
+    journal
+        .append_redo(&["cp1".to_string()], &["src/a.rs".to_string()], &[])
+        .unwrap();
+    journal
+        .append(
+            "tool_call",
+            serde_json::json!({
+                "tool": "read",
+                "args": {"file_path": "src/lib.rs"},
+                "args_digest": "src/lib.rs"
+            }),
+        )
+        .unwrap();
+    journal
+        .append(
+            "note",
+            serde_json::json!({"note": "blocker", "text": "waiting on schema migration"}),
+        )
+        .unwrap();
+
+    let rendered = anchor(&root, "s");
+    assert!(
+        rendered.contains("files changed this session: src/a.rs"),
+        "redo must restore reverted file to anchor: {rendered}"
+    );
+    assert!(
+        rendered.contains("recent files read: src/lib.rs"),
+        "recent unedited reads must appear in anchor: {rendered}"
+    );
+    assert!(
+        rendered.contains("waiting on schema migration"),
+        "blocker notes must survive in anchor decisions: {rendered}"
+    );
+    std::fs::remove_dir_all(root).ok();
+}

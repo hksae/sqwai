@@ -432,12 +432,48 @@ impl Journal {
         Ok(records)
     }
 
-    /// Read records from one session journal only.
+    /// Resolve a session identifier or unique prefix (such as the 8-char prefix
+    /// shown by `journal op=recap`) to the full session stem on disk.
+    pub fn resolve_session_id(root: &Path, query: &str) -> Option<String> {
+        let dir = root.join(".sqwai").join("journal");
+        if dir.join(format!("{query}.jsonl")).exists() {
+            return Some(query.to_string());
+        }
+        if query.len() < 4 {
+            return None;
+        }
+        let entries = fs::read_dir(&dir).ok()?;
+        let q_lower = query.to_ascii_lowercase();
+        let mut matches: Vec<(std::time::SystemTime, String)> = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if stem.to_ascii_lowercase().starts_with(&q_lower) {
+                let mtime = entry
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                matches.push((mtime, stem.to_string()));
+            }
+        }
+        matches.sort_by(|a, b| b.0.cmp(&a.0));
+        matches.into_iter().next().map(|(_, stem)| stem)
+    }
+
+    /// Read records from one session journal only (supports exact session ID or
+    /// 4+ char prefix from `op=recap`).
     pub fn records_for(root: &Path, session_id: &str) -> Result<Vec<Record>> {
+        let resolved =
+            Self::resolve_session_id(root, session_id).unwrap_or_else(|| session_id.to_string());
         let path = root
             .join(".sqwai")
             .join("journal")
-            .join(format!("{session_id}.jsonl"));
+            .join(format!("{resolved}.jsonl"));
         let Ok(file) = File::open(path) else {
             return Ok(Vec::new());
         };
@@ -452,7 +488,7 @@ impl Journal {
                     serde_json::from_str::<Record>(&line)
                         .ok()
                         .map(|mut record| {
-                            record.session = session_id.to_string();
+                            record.session = resolved.clone();
                             Ok(record)
                         })
                 }
@@ -971,7 +1007,8 @@ impl Journal {
     }
 
     /// Decision-like notes for the anchor: `decision` (why this way),
-    /// `lesson` (learned the hard way), `rejected` (considered and dropped).
+    /// `lesson` (learned the hard way), `rejected` (considered and dropped),
+    /// and `blocker` (what is currently standing in the way).
     /// Newest last — the anchor takes the tail. Same record shape as
     /// assumptions: kind `note`, the note kind in `fields.note`, content in
     /// `fields.text`.
@@ -984,7 +1021,9 @@ impl Journal {
                         .fields
                         .get("note")
                         .and_then(Value::as_str)
-                        .is_some_and(|kind| matches!(kind, "decision" | "lesson" | "rejected"))
+                        .is_some_and(|kind| {
+                            matches!(kind, "decision" | "lesson" | "rejected" | "blocker")
+                        })
             })
             .filter_map(|record| record.fields.get("text").and_then(Value::as_str))
             .map(str::to_string)
