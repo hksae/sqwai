@@ -460,6 +460,7 @@ impl LiveRender {
     }
 
     /// Render `text` at `width`, reusing the cached prefix lines for `id`.
+    #[cfg(test)]
     pub fn lines(
         &mut self,
         id: u64,

@@ -8,6 +8,7 @@
 //! terminal, newer frames overwrite the mailbox slot instead of queueing —
 //! stale frames drop structurally, input never blocks on terminal I/O.
 
+#[cfg(test)]
 use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 use std::io::{self, Write};
@@ -73,6 +74,7 @@ fn cell_clearable(cell: &Cell, bg: RColor) -> bool {
 /// real content; wide glyphs cannot straddle the EL start because the
 /// ratatui buffer never stores overlapping glyphs. Runs shorter than
 /// [`MIN_EL_RUN`] stay plain spaces (the EL preamble would cost more).
+#[cfg(test)]
 pub(crate) fn coalesce_trailing_blanks(
     cells: &[(u16, u16, Cell)],
     width: u16,

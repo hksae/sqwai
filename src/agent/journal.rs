@@ -1265,6 +1265,7 @@ impl Journal {
         Ok(seq)
     }
 
+    #[cfg(test)]
     pub fn append_undo(
         &mut self,
         checkpoint: &str,

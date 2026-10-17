@@ -30,6 +30,7 @@ const MEMORY_MAX_CHARS: usize = 12_000;
 /// cost up to 24KB of prefix for a copy of the journal — whose writer had in
 /// fact never produced a line of prose. Recent history is pulled now, with
 /// `journal op=recap`.
+#[cfg(test)]
 pub fn memory_block(root: &std::path::Path) -> Option<String> {
     memory_block_with_limit(root, MEMORY_MAX_CHARS)
 }
@@ -125,6 +126,7 @@ fn prefix_layers_with_limit(root: &std::path::Path, memory_max_chars: usize) -> 
 
 /// The exact bytes the joined prefix used to carry: layers are already trimmed
 /// by their own readers, so this only inserts the separators between them.
+#[cfg(test)]
 fn join_layers(layers: Vec<PrefixLayer>) -> String {
     layers
         .into_iter()

@@ -184,6 +184,7 @@ fn normalize_fact(s: &str) -> String {
 ///
 /// `replaces`, when present, must match an existing text fragment (or bullet).
 /// Passing `replaces` with an empty `text` deletes the matched bullet entry.
+#[cfg(test)]
 pub fn apply_proposal(
     root: &Path,
     scope: Scope,
