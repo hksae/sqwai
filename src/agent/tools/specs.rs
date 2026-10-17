@@ -131,7 +131,7 @@ mismatch); replace_all needs one. Never edit on a stale read — the host refuse
         ToolDef {
             name: "multi_edit",
             kind: Kind::Mutating,
-            description: "Apply several exact replacements to one file as one operation: a rename that touches five places, or a change plus its doc line.",
+            description: "Apply multiple exact replacements to one file atomically in a single call. Prefer this over sequential `edit` calls when changing several places in the same file. Exact single matches check freshness automatically; any entry with `replace_all: true` requires a prior `read` of the file.",
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -212,7 +212,7 @@ Pass context:N for N surrounding lines per match (like grep -C) so a follow-up r
                 "properties": {
                     "command": {"type": "string", "description": "the shell command line to run"},
                     "timeout": {"type": "integer", "description": "seconds; kills the process on expiry"},
-                    "background": {"type": "boolean", "description": "detach and return immediately with a job id when the command may outlast the tool timeout; wait with bash_output, stop with bash_kill; await its result before dependent changes or reporting success"}
+                    "background": {"type": "boolean", "description": "detach and return a job id immediately; monitor with bash_output(id, wait_secs)"}
                 },
                 "required": ["command"]
             }),
@@ -288,7 +288,7 @@ Pass context:N for N surrounding lines per match (like grep -C) so a follow-up r
         ToolDef {
             name: "git_commit",
             kind: Kind::Mutating,
-            description: "Create a commit from staged changes, or from all tracked changes when all is true. Only when the user asked for a commit.",
+            description: "Create a commit from staged changes, or from all tracked changes when `all` is true. Use only when requested by the user or required by project instructions (AGENTS.md / SQWAI.md).",
             parameters: json!({"type":"object","properties":{"message":{"type":"string"},"all":{"type":"boolean"}},"required":["message"]}),
         },
         ToolDef {
@@ -417,11 +417,11 @@ guesses, or anything you would not want shown to you every session.",
             name: "plan",
             kind: Kind::Mutating,
             description: "Work the structured plan, one operation per call. Ops: create, start, \
-finish, block, unblock, cancel, add, split, add_criteria, complete, block_plan, abandon. To retire \
+finish, block, unblock, cancel, add, split, add_criteria, step_diff, complete, block_plan, abandon. To retire \
 a wrong plan, use op abandon with a reason (it is for wrong plans, not hard steps — a stuck step is \
 block or ask_user), never cancel-and-recreate around it. Plans are for \
-work that changes things: read-only inspection needs no plan — just look. \
-For a write, create with goal + steps + at least one criteria note. criteria are your own \
+multi-step work that changes things: read-only inspection or a trivial one-line edit needs no plan. \
+For a multi-step change, create with goal + steps + at least one criteria note. criteria are your own \
 plain-text done-notes: what must be true when the work is done. They survive compaction and \
 keep you honest with yourself — the host runs nothing and certifies nothing, so write each one \
 as something you can check yourself (run the command with bash, read its observed result). \
@@ -450,7 +450,7 @@ either side — quote the conflict in reason.",
                     "criteria": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "create: at least one done-note. add_criteria: notes to append. Plain text — what must be true when the work is done; the host runs nothing, so phrase each as something you can check yourself"
+                        "description": "create / add_criteria: plain-text done-notes of what must be true when finished"
                     },
                     "steps": {
                         "type": "array",

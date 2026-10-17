@@ -34,8 +34,8 @@ pub fn capture_nudge(user_text: &str, constraints: &[String]) -> Option<String> 
     }
     Some(
         "\n[host note: this message states a restriction that is not among the \
-         active plan's constraints — record it with plan constraints add, or \
-         note why it needs no protection.]"
+         active plan's constraints — record it with `plan` (`op: \"add_criteria\"`) \
+         or `note` (`kind: \"decision\"`), or note why it needs no protection.]"
             .to_string(),
     )
 }
