@@ -7,8 +7,6 @@
 .sqwai/
 .zig-cache/
 
-.workbuddy-ai/
-
 *.log
 __pycache__/
 *.pyc
