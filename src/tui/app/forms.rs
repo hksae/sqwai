@@ -111,7 +111,11 @@ impl FormField {
     }
 
     pub(super) fn trimmed(&self) -> String {
-        self.current_value().trim().to_string()
+        self.current_value()
+            .trim_matches(|c: char| {
+                c.is_whitespace() || matches!(c, '\u{200b}' | '\u{200c}' | '\u{200d}' | '\u{feff}' | '\0')
+            })
+            .to_string()
     }
 }
 

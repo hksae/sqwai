@@ -1126,6 +1126,58 @@ fn ctrl_v_does_not_submit_following_enter() {
 }
 
 #[test]
+fn win_v_paste_in_edit_model_field_saves_on_enter() {
+    use crossterm::event::{Event, KeyCode, KeyModifiers};
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.open_menu(Menu::EditModel {
+        provider: "p".into(),
+        key: Some("m".into()),
+    });
+    // Open `key` field editor (`Model · p · key`)
+    app.menu_sel = 0;
+    app.menu_activate();
+    assert!(matches!(
+        app.cur_menu(),
+        Some(Menu::EditModelField {
+            field: super::super::menus::ModelField::Key,
+            ..
+        })
+    ));
+
+    // Select all (`Ctrl+A`), then simulate `Win+V` (which sends `Ctrl+V` + `Event::Paste`), then `Enter`.
+    let _ = crate::tui::app::clip_set("deepseek-v4-flash");
+    let (tx, rx) = std::sync::mpsc::channel();
+    tx.send(Event::Key(crossterm::event::KeyEvent::new(
+        KeyCode::Char('a'),
+        KeyModifiers::CONTROL,
+    )))
+    .unwrap();
+    tx.send(Event::Key(crossterm::event::KeyEvent::new(
+        KeyCode::Char('v'),
+        KeyModifiers::CONTROL,
+    )))
+    .unwrap();
+    tx.send(Event::Paste("deepseek-v4-flash".into())).unwrap();
+    tx.send(Event::Key(crossterm::event::KeyEvent::new(
+        KeyCode::Enter,
+        KeyModifiers::empty(),
+    )))
+    .unwrap();
+    app.poll_input(&rx).unwrap();
+
+    // Enter must save the field and pop back to EditModel with the renamed key!
+    assert!(
+        matches!(
+            app.cur_menu(),
+            Some(Menu::EditModel { key: Some(k), .. }) if k == "deepseek-v4-flash"
+        ),
+        "expected EditModel with new key, title={}",
+        app.menu_title()
+    );
+    assert!(app.cfg.models.contains_key("deepseek-v4-flash"));
+}
+
+#[test]
 fn appearance_toggles_ui_settings() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.open_menu(Menu::Settings);

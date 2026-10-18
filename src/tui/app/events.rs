@@ -148,19 +148,26 @@ impl App {
                     if k.kind != KeyEventKind::Press {
                         continue;
                     }
-                    if consume_replayed_paste_key(&mut self.paste_replay, k, Instant::now()) {
-                        continue;
-                    }
-                    if matches!(k.code, KeyCode::Enter | KeyCode::Char('\r')) {
-                        match self.paste_enter_until {
-                            // Synthetic Enter following our own Ctrl+V insert:
-                            // swallow once, then disarm so a genuine Enter is
-                            // never eaten by a stale guard.
-                            Some(until) if Instant::now() <= until => {
-                                self.paste_enter_until = None;
-                                continue;
+                    if !self.menu_stack.is_empty()
+                        && matches!(k.code, KeyCode::Enter | KeyCode::Char('\r'))
+                    {
+                        self.paste_replay = None;
+                        self.paste_enter_until = None;
+                    } else {
+                        if consume_replayed_paste_key(&mut self.paste_replay, k, Instant::now()) {
+                            continue;
+                        }
+                        if matches!(k.code, KeyCode::Enter | KeyCode::Char('\r')) {
+                            match self.paste_enter_until {
+                                // Synthetic Enter following our own Ctrl+V insert:
+                                // swallow once, then disarm so a genuine Enter is
+                                // never eaten by a stale guard.
+                                Some(until) if Instant::now() <= until => {
+                                    self.paste_enter_until = None;
+                                    continue;
+                                }
+                                _ => self.paste_enter_until = None,
                             }
-                            _ => self.paste_enter_until = None,
                         }
                     }
                     self.dirty = true;
@@ -279,8 +286,8 @@ impl App {
                         };
                         let txt = normalize_paste(&txt);
                         self.paste_replay = Some(PasteReplay::new(txt.clone(), now));
-                        self.paste_enter_until = Some(now + PASTE_REPLAY_TTL);
                         if !self.menu_stack.is_empty() {
+                            self.paste_enter_until = None;
                             let p = txt.replace(['\r', '\n'], " ");
                             if let Some(FormField::Text { ta, .. }) =
                                 self.form_fields.get_mut(self.form_focus)
@@ -290,6 +297,7 @@ impl App {
                             self.dirty = true;
                             continue;
                         }
+                        self.paste_enter_until = Some(now + PASTE_ENTER_GUARD);
                         self.paste_text(&txt);
                         continue;
                     }
@@ -1137,7 +1145,11 @@ impl App {
                     // while advancing the replay marker by their exact
                     // prefix. This also handles a payload split at a newline.
                     if consume_replayed_paste_text(&mut self.paste_replay, &p, now) {
-                        self.paste_enter_until = Some(now + PASTE_REPLAY_TTL);
+                        if self.menu_stack.is_empty() && p.contains('\n') {
+                            self.paste_enter_until = Some(now + PASTE_ENTER_GUARD);
+                        } else {
+                            self.paste_enter_until = None;
+                        }
                         continue;
                     }
                     self.paste_enter_until = None;
@@ -1329,7 +1341,10 @@ pub(super) struct PasteReplay {
 
 /// Replay markers live only long enough for terminal echo, never across
 /// turns: echo bursts arrive within milliseconds of the paste.
-const PASTE_REPLAY_TTL: Duration = Duration::from_secs(2);
+const PASTE_REPLAY_TTL: Duration = Duration::from_millis(250);
+/// Tight guard window for a synthetic Enter immediately trailing Ctrl+V in the
+/// same terminal event burst (never long enough to eat a human Enter press).
+const PASTE_ENTER_GUARD: Duration = Duration::from_millis(60);
 
 impl PasteReplay {
     fn new(text: String, now: Instant) -> Self {
@@ -1402,12 +1417,17 @@ fn consume_replayed_paste_key(
             true
         } else {
             // On Windows, some terminals replay a clipboard newline as Enter
-            // after the preceding characters, while the next characters may be
-            // delivered in a later batch. Consume that boundary without
-            // advancing the marker; otherwise it submits the first line and the
-            // rest of the paste is left in the editor. Bounded by the replay
-            // deadline above, so a stale marker cannot eat genuine Enters.
-            true
+            // immediately after the preceding characters (within the same
+            // <60ms burst), while the next characters arrive in the next read.
+            // Only swallow if we are still inside that tight initial burst;
+            // a human pressing Enter after Win+V / Ctrl+V must never be eaten.
+            let elapsed = (now + PASTE_REPLAY_TTL).saturating_duration_since(r.until);
+            if elapsed <= PASTE_ENTER_GUARD {
+                true
+            } else {
+                *slot = None;
+                false
+            }
         }
     } else if let KeyCode::Char(ch) = key.code {
         if r.remainder().starts_with(ch) {
