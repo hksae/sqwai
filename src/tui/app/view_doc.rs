@@ -50,6 +50,19 @@ fn expand_tool_row_controls(raw: &str, start_col: usize) -> String {
     out
 }
 
+#[derive(Clone, Copy)]
+enum ResizeScrollAnchor {
+    InsideSeg {
+        seg_idx: usize,
+        within: usize,
+        old_len: usize,
+    },
+    BeforeSeg {
+        seg_idx: usize,
+        lead_blank: usize,
+    },
+}
+
 impl App {
     /// cache key for a segment's rendered content; changing it forces a repaint.
     /// Byte lengths (O(1)) rather than char counts: counting chars over the
@@ -680,6 +693,15 @@ impl App {
 
     pub(super) fn rebuild_cache(&mut self, width: u16) {
         let t0 = std::time::Instant::now();
+        let resize_anchor = if self.cache_w != 0
+            && self.cache_w != width
+            && !self.follow
+            && self.pending_anchor.is_none()
+        {
+            self.capture_resize_scroll_anchor()
+        } else {
+            None
+        };
         let w = width.saturating_sub(2).max(10);
         let mut chunks: Vec<RowChunk> = Vec::new();
         let mut fresh: Vec<bool> = Vec::new();
@@ -766,7 +788,79 @@ impl App {
         self.prune_seg_cache();
         self.merge_chunks(chunks, fresh);
         self.cache_w = width;
+        if let Some(anchor) = resize_anchor {
+            self.restore_resize_scroll_anchor(anchor);
+        }
         self.last_rebuild_us = t0.elapsed().as_micros();
+    }
+
+    /// Capture which segment (and proportional offset within it) sits at the
+    /// top of the viewport before a width change re-wraps `cache_lines`.
+    fn capture_resize_scroll_anchor(&self) -> Option<ResizeScrollAnchor> {
+        if self.view_top == 0 || self.cache_rowseg.is_empty() {
+            return None;
+        }
+        let old_top = self.view_top.min(self.cache_rowseg.len().saturating_sub(1));
+        if let Some(Some(seg_idx)) = self.cache_rowseg.get(old_top).copied() {
+            let (start, end) = self.seg_row_range(seg_idx)?;
+            let within = old_top.saturating_sub(start);
+            let old_len = (end.saturating_sub(start)).max(1);
+            return Some(ResizeScrollAnchor::InsideSeg {
+                seg_idx,
+                within,
+                old_len,
+            });
+        }
+        // `old_top` sits on a structural blank line between segments: anchor
+        // relative to the immediately following segment (or preceding if at tail).
+        for (r, slot) in self.cache_rowseg.iter().enumerate().skip(old_top + 1) {
+            if let Some(seg_idx) = *slot {
+                return Some(ResizeScrollAnchor::BeforeSeg {
+                    seg_idx,
+                    lead_blank: r - old_top,
+                });
+            }
+        }
+        for r in (0..old_top).rev() {
+            if let Some(Some(seg_idx)) = self.cache_rowseg.get(r).copied() {
+                let (start, end) = self.seg_row_range(seg_idx)?;
+                let old_len = (end.saturating_sub(start)).max(1);
+                return Some(ResizeScrollAnchor::InsideSeg {
+                    seg_idx,
+                    within: old_len.saturating_sub(1),
+                    old_len,
+                });
+            }
+        }
+        None
+    }
+
+    fn restore_resize_scroll_anchor(&mut self, anchor: ResizeScrollAnchor) {
+        match anchor {
+            ResizeScrollAnchor::InsideSeg {
+                seg_idx,
+                within,
+                old_len,
+            } => {
+                if let Some((new_start, new_end)) = self.seg_row_range(seg_idx) {
+                    let new_len = (new_end.saturating_sub(new_start)).max(1);
+                    let new_within = if within == 0 {
+                        0
+                    } else {
+                        (within * new_len + old_len / 2) / old_len
+                    };
+                    self.view_top = new_start + new_within.min(new_len.saturating_sub(1));
+                }
+            }
+            ResizeScrollAnchor::BeforeSeg {
+                seg_idx,
+                lead_blank,
+            } => {
+                if let Some((new_start, _)) = self.seg_row_range(seg_idx) {
+                    self.view_top = new_start.saturating_sub(lead_blank);
+                }
+            }
+        }
     }
 
     pub(super) fn prune_seg_cache(&mut self) {

@@ -741,7 +741,7 @@ impl App {
     /// `asm_lens`) in O(chunks) instead of scanning all wrapped lines in
     /// `cache_rowseg`, falling back to `cache_rowseg` when a test populates
     /// `cache_rowseg` directly without `asm_tags`.
-    fn seg_row_range(&self, seg_idx: usize) -> Option<(usize, usize)> {
+    pub(super) fn seg_row_range(&self, seg_idx: usize) -> Option<(usize, usize)> {
         let (_, meta) = self.view_transcript();
         if self.asm_tags.len() == self.asm_lens.len() && !self.asm_tags.is_empty() {
             if let Some(m) = meta.get(seg_idx) {

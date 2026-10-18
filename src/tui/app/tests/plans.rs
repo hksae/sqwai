@@ -1087,7 +1087,44 @@ fn spinner_tick_updates_live_chrome_without_rebuilding_transcript() {
             .unwrap()
             .content
             .starts_with(mark1),
-        "working_line marker must advance in place"
     );
+}
+
+#[test]
+fn resize_preserves_mid_history_scroll_anchor() {
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.startup = false;
+    for i in 0..20 {
+        app.push_segment(Segment::User(format!("user question {i}")));
+        app.push_segment(Segment::Assistant {
+            text: format!(
+                "assistant answer {i}: {}",
+                "long prose sentence that wraps differently across widths. ".repeat(6)
+            ),
+            live: false,
+        });
+    }
+    app.rebuild_cache(120);
+
+    // Scroll to segment 20 (mid-history: `user question 10`).
+    let target_seg = 20usize;
+    let (start_120, _) = app.seg_row_range(target_seg).unwrap();
+    app.follow = false;
+    app.view_top = start_120;
+    assert_eq!(app.cache_rowseg[app.view_top], Some(target_seg));
+
+    // Narrow terminal to width 50 -> earlier segments double in line count,
+    // but `view_top` must re-anchor onto `target_seg`.
+    app.rebuild_cache(50);
+    assert_eq!(
+        app.cache_rowseg[app.view_top],
+        Some(target_seg),
+        "narrowing terminal must keep viewport pinned to segment {target_seg}"
+    );
+
+    // Widen terminal back to width 120 -> `view_top` returns to `start_120` on `target_seg`.
+    app.rebuild_cache(120);
+    assert_eq!(app.view_top, start_120);
+    assert_eq!(app.cache_rowseg[app.view_top], Some(target_seg));
 }
 
