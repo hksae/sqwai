@@ -585,6 +585,7 @@ impl App {
     }
 
     pub(super) fn handle_subagent_start(&mut self, id: u64, task: String) {
+        let task = task.split_whitespace().collect::<Vec<_>>().join(" ");
         crate::tui::event_log::log(
             "SUBAGENT",
             format!("start id={id} task_len={}", task.chars().count()),

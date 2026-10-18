@@ -498,10 +498,11 @@ impl App {
                 let summary_width = available
                     .saturating_sub(counts_width)
                     .min(usize::from(w) / 2);
-                let summary = if ask.is_some() || args.is_empty() || summary_width == 0 {
+                let clean_args = args.split_whitespace().collect::<Vec<_>>().join(" ");
+                let summary = if ask.is_some() || clean_args.is_empty() || summary_width == 0 {
                     String::new()
                 } else {
-                    format!(" ({})", truncate_display_width(args, summary_width))
+                    format!(" ({})", truncate_display_width(&clean_args, summary_width))
                 };
                 let wave = match (ok, flash) {
                     (Some(done), Some(t0)) => {

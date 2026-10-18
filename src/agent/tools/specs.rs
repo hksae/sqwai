@@ -665,6 +665,15 @@ pub fn call_args_for_journal(args: &Value) -> Value {
 
 /// one-line description of a call's arguments for the live TUI row
 pub fn call_summary(name: &str, args: &Value) -> String {
+    let raw = call_summary_raw(name, args);
+    if raw.contains(['\n', '\r', '\t']) {
+        raw.split_whitespace().collect::<Vec<_>>().join(" ")
+    } else {
+        raw
+    }
+}
+
+fn call_summary_raw(name: &str, args: &Value) -> String {
     let s = |k: &str| args[k].as_str().unwrap_or_default().to_string();
     match name {
         "ls" => s("path"),
