@@ -497,6 +497,48 @@ fn transcript_row_toggles_subagent_inline_like_standard_tool() {
     assert!(unfolded.contains("[Subagent receipt: ok"), "receipt visible inline:\n{unfolded}");
 }
 
+#[test]
+fn subagent_multiline_task_and_blank_deltas_render_without_empty_gaps() {
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.startup = false;
+    app.handle_subagent_start(
+        3,
+        "Исследуй файл src/tui/presenter.rs. Найди и опиши:\n1. Как работает дифф\n2. Как работает coalesce"
+            .into(),
+    );
+    // Expand while running before any tools arrive -> shows "thinking…" without blank gaps.
+    if let Some(Segment::Subagent { expanded, .. }) = app.segments.first_mut() {
+        *expanded = true;
+    }
+    app.touch_segment(0);
+    let initial = render_to_string(&mut app, 100, 20);
+    assert!(
+        initial.contains("thinking…"),
+        "running subagent with no output yet shows thinking indicator:\n{initial}"
+    );
+    assert!(
+        !initial.contains("\n1. Как"),
+        "multiline task must be flattened onto the header row:\n{initial}"
+    );
+
+    // Provider emits leading/interleaved "\n\n" text deltas around tool calls.
+    if let Some(Segment::Subagent { output, .. }) = app.segments.first_mut() {
+        output.push_str("\n\n• read (src/tui/presenter.rs)\n\n\n• grep (coalesce)\n\n");
+    }
+    app.touch_segment(0);
+    let mid = render_to_string(&mut app, 100, 20);
+    let lines: Vec<&str> = mid.lines().map(str::trim_end).collect();
+    let head_idx = lines.iter().position(|l| l.contains("subagent-3")).unwrap();
+    assert!(
+        lines[head_idx + 1].contains("• read (src/tui/presenter.rs)"),
+        "first tool row must sit immediately under subagent header with no blank gap:\n{mid}"
+    );
+    assert!(
+        lines[head_idx + 2].contains("• grep (coalesce)"),
+        "second tool row must sit immediately under first tool row with no blank gap:\n{mid}"
+    );
+}
+
 fn open_sub_chat(app: &mut App, id: u64, status: &str) {
     use crate::tui::app::view::SegMeta;
     app.subagent_chats.insert(

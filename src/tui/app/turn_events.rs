@@ -132,8 +132,12 @@ impl App {
                     .rposition(|s| matches!(s, Segment::Subagent { id: sid, .. } if *sid == id))
                     && let Some(Segment::Subagent { output, .. }) = self.segments.get_mut(pos)
                 {
-                    output.push_str(&text);
-                    self.touch_segment(pos);
+                    // Ignore pure whitespace deltas when output is empty or ends with a newline
+                    // so empty lines never accumulate before or between tool calls.
+                    if !(text.trim().is_empty() && (output.is_empty() || output.ends_with('\n'))) {
+                        output.push_str(&text);
+                        self.touch_segment(pos);
+                    }
                 }
                 self.sub_touch_all(id);
                 self.dirty = true;
@@ -145,10 +149,16 @@ impl App {
                     .rposition(|s| matches!(s, Segment::Subagent { id: sid, .. } if *sid == id))
                     && let Some(Segment::Subagent { output, .. }) = self.segments.get_mut(pos)
                 {
-                    let step_line = if summary.trim().is_empty() {
+                    let trimmed_len = output.trim_end().len();
+                    output.truncate(trimmed_len);
+                    if !output.is_empty() {
+                        output.push('\n');
+                    }
+                    let clean_sum = summary.split_whitespace().collect::<Vec<_>>().join(" ");
+                    let step_line = if clean_sum.is_empty() {
                         format!("• {name}\n")
                     } else {
-                        format!("• {name} ({})\n", summary.trim())
+                        format!("• {name} ({clean_sum})\n")
                     };
                     output.push_str(&step_line);
                     self.touch_segment(pos);
@@ -273,7 +283,18 @@ impl App {
                     } else {
                         "failed".into()
                     };
-                    *current = output;
+                    let tool_steps: Vec<String> = current
+                        .lines()
+                        .filter(|l| l.trim_start().starts_with("• "))
+                        .map(str::to_string)
+                        .collect();
+                    if tool_steps.is_empty() {
+                        *current = output;
+                    } else if output.trim().is_empty() {
+                        *current = tool_steps.join("\n");
+                    } else {
+                        *current = format!("{}\n{}", tool_steps.join("\n"), output.trim());
+                    }
                     self.touch_segment(pos);
                 }
                 if let Some(chat) = self.subagent_chats.get_mut(&id) {

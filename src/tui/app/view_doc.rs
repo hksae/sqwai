@@ -391,10 +391,11 @@ impl App {
                 let summary_width = usize::from(w)
                     .saturating_sub(2 + name.len() + 2)
                     .min(usize::from(w) / 2);
-                let summary = if task.is_empty() || summary_width == 0 {
+                let clean_task = task.split_whitespace().collect::<Vec<_>>().join(" ");
+                let summary = if clean_task.is_empty() || summary_width == 0 {
                     String::new()
                 } else {
-                    format!(" ({})", truncate_display_width(task, summary_width))
+                    format!(" ({})", truncate_display_width(&clean_task, summary_width))
                 };
                 out.push((
                     Line::from(vec![
@@ -404,36 +405,54 @@ impl App {
                     ]),
                     Some(idx),
                 ));
-                if *expanded && !output.is_empty() {
-                    let (shown, total) = tool_preview(None, output);
+                if *expanded {
+                    let non_empty: Vec<&str> = output
+                        .lines()
+                        .map(str::trim_end)
+                        .filter(|l| !l.trim().is_empty())
+                        .collect();
                     let width = usize::from(w).saturating_sub(2).max(1);
-                    for l in &shown {
-                        let st = if l.starts_with('+') && !l.starts_with("+++") {
-                            Theme::ok()
-                        } else if l.starts_with('-') && !l.starts_with("---") {
-                            Theme::err()
-                        } else if l.starts_with("@@") || l.starts_with("[Subagent receipt:") {
-                            Theme::accent()
-                        } else {
-                            Theme::dim()
-                        };
-                        out.push((
-                            Line::from(vec![
-                                Span::styled("  ".to_string(), Theme::base()),
-                                Span::styled(truncate_display_width(l, width), st),
-                            ]),
-                            Some(idx),
-                        ));
-                    }
-                    if total > shown.len() {
-                        let more = format!("… {} more lines", total - shown.len());
-                        out.push((
-                            Line::from(vec![
-                                Span::styled("  ".to_string(), Theme::base()),
-                                Span::styled(truncate_display_width(&more, width), Theme::dim()),
-                            ]),
-                            Some(idx),
-                        ));
+                    if non_empty.is_empty() {
+                        if status == "running" {
+                            out.push((
+                                Line::from(vec![
+                                    Span::styled("  ".to_string(), Theme::base()),
+                                    Span::styled("thinking…".to_string(), Theme::dim()),
+                                ]),
+                                Some(idx),
+                            ));
+                        }
+                    } else {
+                        let total = non_empty.len();
+                        let shown = &non_empty[..total.min(40)];
+                        for l in shown {
+                            let st = if l.starts_with('+') && !l.starts_with("+++") {
+                                Theme::ok()
+                            } else if l.starts_with('-') && !l.starts_with("---") {
+                                Theme::err()
+                            } else if l.starts_with("@@") || l.starts_with("[Subagent receipt:") {
+                                Theme::accent()
+                            } else {
+                                Theme::dim()
+                            };
+                            out.push((
+                                Line::from(vec![
+                                    Span::styled("  ".to_string(), Theme::base()),
+                                    Span::styled(truncate_display_width(l, width), st),
+                                ]),
+                                Some(idx),
+                            ));
+                        }
+                        if total > shown.len() {
+                            let more = format!("… {} more lines", total - shown.len());
+                            out.push((
+                                Line::from(vec![
+                                    Span::styled("  ".to_string(), Theme::base()),
+                                    Span::styled(truncate_display_width(&more, width), Theme::dim()),
+                                ]),
+                                Some(idx),
+                            ));
+                        }
                     }
                 }
             }
