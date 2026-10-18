@@ -88,6 +88,13 @@ pub(crate) fn request_messages_with_limit(
     out
 }
 
+pub(crate) type PrefetchedToolHandle = tokio::task::JoinHandle<(
+    usize,
+    u128,
+    crate::agent::tools::Outcome,
+    Option<crate::agent::tools::ToolCtx>,
+)>;
+
 pub(crate) struct TurnOutcome {
     pub(crate) text: String,
     pub(crate) calls: Vec<ToolCallReq>,
@@ -112,9 +119,36 @@ pub(crate) struct TurnOutcome {
     pub(crate) effort_rejected: bool,
     /// provider-owned opaque state attached to this turn (reasoning items, phase)
     pub(crate) provider_state: Option<serde_json::Value>,
+    /// read-only tool calls already spawned in the background mid-stream while
+    /// the LLM was still generating subsequent tool calls
+    pub(crate) prefetched: std::collections::HashMap<usize, PrefetchedToolHandle>,
 }
 
+#[cfg(test)]
 pub(crate) async fn run_turn(
+    provider: &SharedProvider,
+    req: &ChatRequest,
+    tx: &mpsc::Sender<AgentEvent>,
+    ctl: &mut mpsc::Receiver<ControlMsg>,
+    response_id: &mut Option<String>,
+    prompt_size: &mut u64,
+    has_fallback: bool,
+) -> Result<TurnOutcome, TurnFailure> {
+    run_turn_with_prefetch(
+        provider,
+        req,
+        tx,
+        ctl,
+        response_id,
+        prompt_size,
+        has_fallback,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_turn_with_prefetch(
     provider: &SharedProvider,
     req: &ChatRequest,
     tx: &mpsc::Sender<AgentEvent>,
@@ -122,6 +156,7 @@ pub(crate) async fn run_turn(
     response_id: &mut Option<String>,
     prompt_size: &mut u64,
     has_fallback: bool,
+    prefetch_env: Option<(&crate::agent::tools::ToolCtx, &[String])>,
 ) -> Result<TurnOutcome, TurnFailure> {
     use futures::StreamExt;
 
@@ -153,6 +188,9 @@ pub(crate) async fn run_turn(
         let mut reasoning_ms = 0u64;
         let mut calls: Vec<ToolCallReq> = Vec::new();
         let mut provider_state: Option<serde_json::Value> = None;
+        let mut prefetched: std::collections::HashMap<usize, PrefetchedToolHandle> =
+            std::collections::HashMap::new();
+        let mut prefetch_open = prefetch_env.is_some();
 
         let mut stream = provider.stream_chat(req.clone());
         while let Some(ev) = stream.next().await {
@@ -183,23 +221,12 @@ pub(crate) async fn run_turn(
                     }
                 }
                 Ok(StreamEvent::Usage(u)) => {
-                    // prompt size of *this* request: replaces, never accumulates.
-                    // Some providers send a second output-only event with zero
-                    // input — that must not reset the meter.
                     if u.prompt_tokens > 0 {
                         *prompt_size = u.prompt_tokens;
                     }
-                    // Same hazard as the line above, and the one that bit us:
-                    // a gateway can send a second usage event whose
-                    // `completion_tokens_details` is a stub of zeros. Taking
-                    // the last value let a real count decay to 0, and the host
-                    // then reported the level as ignored. These counters only
-                    // grow, so keep the largest one seen.
                     if let Some(n) = u.reasoning_tokens {
                         reasoning_tokens = Some(reasoning_tokens.unwrap_or(0).max(n));
                     }
-                    // no-op unless the http log is on; this is the line that
-                    // makes an inconsistent gateway diagnosable at all
                     crate::providers::log_http(&format!(
                         "usage event: prompt={} completion={} cached={:?} written={:?} reasoning={:?}",
                         u.prompt_tokens,
@@ -213,16 +240,36 @@ pub(crate) async fn run_turn(
                     }
                 }
                 Ok(StreamEvent::ResponseId(id)) => {
-                    // A continuation chain moves forward: the next iteration
-                    // must reference this response, not the one before it.
                     *response_id = Some(id.clone());
                     let _ = tx.send(AgentEvent::ResponseId(id)).await;
                 }
                 Ok(StreamEvent::ToolCall(tc)) => {
-                    // only tool-capable requests may schedule tools; a call
-                    // emitted for a tools-less request is ignored
                     if req.tool_capable() {
+                        let idx = calls.len();
                         calls.push(tc);
+                        if prefetch_open
+                            && let Some((base_ctx, allow_hosts)) = prefetch_env
+                        {
+                            if !base_ctx
+                                .cancel
+                                .load(std::sync::atomic::Ordering::Relaxed)
+                                && super::parallel_read_only_batch_end(&calls, 0) == calls.len()
+                            {
+                                let c = calls[idx].clone();
+                                let mut child_ctx = base_ctx.clone();
+                                child_ctx.current_call_id = Some(c.id.clone());
+                                let hosts = allow_hosts.to_vec();
+                                let handle = tokio::spawn(super::execute_parallel_read_only_call(
+                                    idx,
+                                    c,
+                                    child_ctx,
+                                    hosts,
+                                ));
+                                prefetched.insert(idx, handle);
+                            } else {
+                                prefetch_open = false;
+                            }
+                        }
                     }
                 }
                 Ok(StreamEvent::ProviderState(s)) => {
@@ -240,17 +287,12 @@ pub(crate) async fn run_turn(
         }
 
         let Some(error) = failed else {
-            // The one line that makes the effort machinery inspectable: what
-            // was asked for, what went on the wire, and what the provider
-            // counted. Without it, "the level was honoured" and "the provider
-            // says nothing about reasoning" look identical from outside.
             if let Some(level) = requested_effort {
                 let sent = match req.effort {
                     Some(still) => format!(
                         "{:?}",
                         crate::providers::effort::plan(still, req.effort_support).wire
                     ),
-                    // stripped by the rejection retry above
                     None => "nothing (parameter refused by the provider)".to_string(),
                 };
                 crate::providers::log_http(&format!(
@@ -273,8 +315,12 @@ pub(crate) async fn run_turn(
                 effort_rejected,
                 retries: attempt,
                 provider_state,
+                prefetched,
             });
         };
+        for (_, h) in prefetched {
+            h.abort();
+        }
         let class = crate::providers::class_of(&error);
         let err = format!("{error:#}");
 

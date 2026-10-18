@@ -165,6 +165,7 @@ fn turn(reasoning_tokens: Option<u64>, effort_rejected: bool) -> TurnOutcome {
         reasoning_ms: 0,
         effort_rejected,
         provider_state: None,
+        prefetched: Default::default(),
     }
 }
 

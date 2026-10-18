@@ -187,6 +187,75 @@ pub(crate) fn diff_counts(diff: &str) -> (usize, usize) {
 }
 
 pub(super) fn read(ctx: &mut ToolCtx, raw: &str, args: &serde_json::Value) -> Outcome {
+    // Fused multi-file read (`paths: ["src/a.rs", "src/b.rs", ...]`).
+    if let Some(arr) = args.get("paths").and_then(|v| v.as_array()) {
+        let mut path_list: Vec<String> = Vec::new();
+        if !raw.trim().is_empty() {
+            path_list.push(raw.trim().to_string());
+        }
+        for v in arr.iter().filter_map(|x| x.as_str()) {
+            let trimmed = v.trim();
+            if !trimmed.is_empty() && !path_list.iter().any(|p| p == trimmed) {
+                path_list.push(trimmed.to_string());
+            }
+        }
+        if path_list.len() > 16 {
+            return Outcome::err("read accepts at most 16 paths in one call");
+        }
+        if path_list.len() == 1 {
+            return read_single(ctx, &path_list[0], args);
+        }
+        if !path_list.is_empty() {
+            let mut combined = Vec::with_capacity(path_list.len());
+            let mut any_ok = false;
+            for p_str in &path_list {
+                let res = read_single(ctx, p_str, args);
+                if res.ok {
+                    any_ok = true;
+                    combined.push(format!("=== {p_str} ===\n{}", res.output.trim_end()));
+                } else {
+                    combined.push(format!("=== {p_str} [ERROR] ===\n{}", res.output.trim_end()));
+                }
+            }
+            let body = combined.join("\n\n");
+            return if any_ok {
+                Outcome::ok(body)
+            } else {
+                Outcome::err(body)
+            };
+        }
+    }
+
+    read_single(ctx, raw, args)
+}
+
+fn extract_requested_symbols(args: &serde_json::Value) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(s) = args.get("symbol").and_then(|v| v.as_str()) {
+        let t = s.trim();
+        if !t.is_empty() {
+            out.push(t.to_string());
+        }
+    }
+    if let Some(arr) = args.get("symbols").and_then(|v| v.as_array()) {
+        for v in arr.iter().filter_map(|x| x.as_str()) {
+            let t = v.trim();
+            if !t.is_empty() && !out.iter().any(|x| x == t) {
+                out.push(t.to_string());
+            }
+        }
+    } else if let Some(s) = args.get("symbols").and_then(|v| v.as_str()) {
+        for part in s.split(',') {
+            let t = part.trim();
+            if !t.is_empty() && !out.iter().any(|x| x == t) {
+                out.push(t.to_string());
+            }
+        }
+    }
+    out
+}
+
+fn read_single(ctx: &mut ToolCtx, raw: &str, args: &serde_json::Value) -> Outcome {
     let p = match existing(ctx, raw) {
         Ok(p) => p,
         Err(e) => return Outcome::err(e),
@@ -203,6 +272,48 @@ pub(super) fn read(ctx: &mut ToolCtx, raw: &str, args: &serde_json::Value) -> Ou
     // stays over the raw bytes, so the guard still sees the file as it is.
     let decoded = String::from_utf8_lossy(&bytes);
     let (text, _had_bom) = split_bom(&decoded);
+    let window_hash = content_hash(&bytes);
+    let total_lines = text.lines().count();
+
+    // Symbol-targeted read (`symbol` / `symbols: ["fn_a", "StructB"]`) via tree-sitter AST:
+    // extracts the exact line spans of matching functions/types/methods in one step
+    // without requiring a prior `outline` round-trip.
+    let symbols = extract_requested_symbols(args);
+    if !symbols.is_empty() {
+        let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let ranges = super::outline::find_symbol_ranges(text, ext, &symbols);
+        if !ranges.is_empty() {
+            let lines_vec: Vec<&str> = text.lines().collect();
+            let mut out = String::new();
+            for (sig, start, end) in &ranges {
+                let capped_end = (*end).min(start + READ_MAX_LINES - 1).min(lines_vec.len());
+                if !out.is_empty() {
+                    out.push('\n');
+                }
+                out.push_str(&format!(
+                    "// Symbol: {sig} (lines {start}–{capped_end} of {total_lines})\n"
+                ));
+                for (i, line) in lines_vec
+                    .iter()
+                    .enumerate()
+                    .take(capped_end)
+                    .skip(start.saturating_sub(1))
+                {
+                    out.push_str(&format!("{:>6}\t{line}\n", i + 1));
+                }
+                ctx.note_read_window(&p, *start, capped_end, window_hash.clone());
+            }
+            ctx.mark_read(&p);
+            return Outcome::ok(out);
+        }
+        // Fallback if no AST declaration matched: return structure_hint so the model sees valid symbols.
+        let hint = structure_hint(ctx, raw).unwrap_or_default();
+        return Outcome::err(format!(
+            "symbol(s) [{}] not found in {raw}{hint}",
+            symbols.join(", ")
+        ));
+    }
+
     let offset = args["offset"].as_u64().unwrap_or(1).max(1) as usize;
     let limit =
         (args["limit"].as_u64().unwrap_or(READ_MAX_LINES as u64) as usize).min(READ_MAX_LINES);
@@ -212,8 +323,6 @@ pub(super) fn read(ctx: &mut ToolCtx, raw: &str, args: &serde_json::Value) -> Ou
     // file actually moved. Coverage counts, not equality — a live session
     // asked for 846+80, then 846+15, then 855+60 of the same file, and an
     // exact-match guard let all three through.
-    let window_hash = content_hash(&bytes);
-    let total_lines = text.lines().count();
     let wanted_from = offset.min(total_lines.max(1));
     let wanted_to = offset
         .saturating_add(limit)
@@ -1632,5 +1741,43 @@ mod tests {
         );
         assert!(gr.ok);
         assert!(gr.output.contains("CI_MARKER"), "{}", gr.output);
+    }
+
+    #[test]
+    fn read_supports_fused_paths_and_treesitter_symbols() {
+        let dir = tempfile::tempdir().unwrap();
+        let src_a = "//! header\n\npub fn alpha() -> i32 {\n    10\n}\n\n/// Doc for beta\npub fn beta(x: i32) -> i32 {\n    x + 20\n}\n";
+        let src_b = "pub struct Config {\n    pub port: u16,\n}\n";
+        std::fs::write(dir.path().join("a.rs"), src_a).unwrap();
+        std::fs::write(dir.path().join("b.rs"), src_b).unwrap();
+
+        let mut ctx = ToolCtx::new(dir.path());
+
+        // 1. Symbol-targeted read via tree-sitter extracts only `beta` (+ its doc comment).
+        let sym_out = read(
+            &mut ctx,
+            "a.rs",
+            &json!({"file_path": "a.rs", "symbols": ["beta"]}),
+        );
+        assert!(sym_out.ok, "{}", sym_out.output);
+        assert!(sym_out.output.contains("// Symbol: pub fn beta(x: i32) -> i32"));
+        assert!(sym_out.output.contains("Doc for beta"));
+        assert!(sym_out.output.contains("x + 20"));
+        assert!(!sym_out.output.contains("pub fn alpha"));
+
+        // 2. Fused multi-file read (`paths: ["a.rs", "b.rs"]`) reads both files and marks them read.
+        let mut ctx2 = ToolCtx::new(dir.path());
+        let multi_out = read(
+            &mut ctx2,
+            "",
+            &json!({"paths": ["a.rs", "b.rs"]}),
+        );
+        assert!(multi_out.ok, "{}", multi_out.output);
+        assert!(multi_out.output.contains("=== a.rs ==="));
+        assert!(multi_out.output.contains("=== b.rs ==="));
+        assert!(multi_out.output.contains("pub struct Config"));
+        // Overwriting `b.rs` succeeds because fused `read` registered `b.rs` in `ctx2.reads`.
+        let w = write_file(&mut ctx2, "b.rs", "pub struct Config {}\n");
+        assert!(w.ok, "fused read must mark all paths as read: {}", w.output);
     }
 }

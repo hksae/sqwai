@@ -16,6 +16,7 @@ const MAX_SIG_LEN: usize = 120;
 #[derive(Debug, Clone)]
 pub(crate) struct OutlineItem {
     pub(crate) line: usize,
+    pub(crate) end_line: usize,
     pub(crate) depth: usize,
     pub(crate) signature: String,
 }
@@ -155,8 +156,10 @@ fn walk_node(
         let (line, sig) = extract_signature(node, src, body_opt, lang);
 
         if !sig.is_empty() {
+            let end_line = (node.end_position().row + 1).max(line);
             out.push(OutlineItem {
                 line,
+                end_line,
                 depth,
                 signature: sig,
             });
@@ -442,6 +445,7 @@ fn extract_fallback(src: &str, max_depth: usize) -> Vec<OutlineItem> {
                 if hashes <= max_depth {
                     items.push(OutlineItem {
                         line: line_no,
+                        end_line: line_no,
                         depth: hashes,
                         signature: clean_signature(trimmed),
                     });
@@ -481,12 +485,24 @@ fn extract_fallback(src: &str, max_depth: usize) -> Vec<OutlineItem> {
                 if !sig.is_empty() {
                     items.push(OutlineItem {
                         line: line_no,
+                        end_line: line_no,
                         depth,
                         signature: sig,
                     });
                 }
             }
         }
+    }
+
+    let total_lines = src.lines().count().max(1);
+    for i in 0..items.len() {
+        let cur_depth = items[i].depth;
+        let next_start = items[i + 1..]
+            .iter()
+            .find(|next| next.depth <= cur_depth)
+            .map(|next| next.line.saturating_sub(1))
+            .unwrap_or(total_lines);
+        items[i].end_line = next_start.max(items[i].line);
     }
 
     items
@@ -653,4 +669,105 @@ fn clean_signature(raw: &str) -> String {
     } else {
         res.to_string()
     }
+}
+
+/// Locate exact 1-based `(signature, start_line, end_line)` spans for the
+/// requested symbol names in `src` using tree-sitter AST declarations (with
+/// fallback to keyword/indentation scan). Expands `start_line` upward to
+/// include immediately preceding doc comments or attributes.
+pub(crate) fn find_symbol_ranges(
+    src: &str,
+    ext: &str,
+    symbols: &[String],
+) -> Vec<(String, usize, usize)> {
+    let items = match Lang::from_extension(ext) {
+        Some(lang) => {
+            let ts_items = extract_ts(src, lang, 3);
+            if ts_items.is_empty() && !src.trim().is_empty() {
+                extract_fallback(src, 3)
+            } else {
+                ts_items
+            }
+        }
+        None => extract_fallback(src, 3),
+    };
+    if items.is_empty() {
+        return Vec::new();
+    }
+
+    let lines: Vec<&str> = src.lines().collect();
+    let total_lines = lines.len().max(1);
+    let mut results: Vec<(String, usize, usize)> = Vec::new();
+
+    for raw_sym in symbols {
+        let cleaned = raw_sym
+            .trim()
+            .trim_start_matches("fn ")
+            .trim_start_matches("pub fn ")
+            .trim_start_matches("struct ")
+            .trim_start_matches("enum ")
+            .trim_start_matches("trait ")
+            .trim_start_matches("class ")
+            .trim_start_matches("def ")
+            .trim_end_matches("()");
+        let leaf = cleaned
+            .rsplit("::")
+            .next()
+            .unwrap_or(cleaned)
+            .rsplit('.')
+            .next()
+            .unwrap_or(cleaned)
+            .trim();
+        if leaf.is_empty() {
+            continue;
+        }
+
+        for item in &items {
+            if contains_ident(&item.signature, leaf) || item.signature.contains(cleaned) {
+                let mut start = item.line.clamp(1, total_lines);
+                let end = item.end_line.clamp(start, total_lines);
+                // Expand upward up to 6 lines for doc comments (`///`, `#`) and attributes (`#[...]`, `@`).
+                let min_start = start.saturating_sub(6).max(1);
+                while start > min_start {
+                    let prev = lines[start - 2].trim();
+                    if prev.starts_with("///")
+                        || prev.starts_with("#[")
+                        || prev.starts_with('@')
+                        || prev.starts_with("//!")
+                        || prev.starts_with("*/")
+                        || prev.starts_with('*')
+                        || prev.starts_with("/**")
+                    {
+                        start -= 1;
+                    } else {
+                        break;
+                    }
+                }
+                if !results.iter().any(|(_, s, e)| *s == start && *e == end) {
+                    results.push((item.signature.clone(), start, end));
+                }
+            }
+        }
+    }
+    results
+}
+
+fn contains_ident(haystack: &str, ident: &str) -> bool {
+    if ident.is_empty() {
+        return false;
+    }
+    let is_id_char = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let h_bytes = haystack.as_bytes();
+    let mut from = 0usize;
+    while let Some(rel) = haystack[from..].find(ident) {
+        let start = from + rel;
+        let end = start + ident.len();
+        let prev_ok = start == 0 || !is_id_char(h_bytes[start - 1]);
+        let next_ok = end >= h_bytes.len() || !is_id_char(h_bytes[end]);
+        if prev_ok && next_ok {
+            return true;
+        }
+        from = start + 1;
+    }
+    false
 }

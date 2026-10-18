@@ -30,7 +30,7 @@ use loop_subagent::{
     SUBAGENT_TIMEOUT_SECS, adopt_in_progress_step, run_subagent, run_subagent_batch,
 };
 pub(crate) use loop_turn::TurnOutcome;
-use loop_turn::{request_messages_with_limit, run_turn, turn_transport};
+use loop_turn::{request_messages_with_limit, run_turn_with_prefetch, turn_transport};
 
 mod loop_ask;
 mod loop_compact;
@@ -569,8 +569,8 @@ fn is_parallel_read_only_call(call: &ToolCallReq) -> bool {
 /// a duplicate `call_key` (so `repeat_verdict` can catch identical re-runs
 /// sequentially), or before a second `read` on the same `file_path` (so window
 /// coverage from the first `read` is visible to the second).
-fn parallel_read_only_batch_end(calls: &[ToolCallReq], start_idx: usize) -> usize {
-    const MAX_PARALLEL_TOOLS: usize = 8;
+pub(crate) fn parallel_read_only_batch_end(calls: &[ToolCallReq], start_idx: usize) -> usize {
+    const MAX_PARALLEL_TOOLS: usize = 24;
     let mut keys: Vec<String> = Vec::new();
     let mut read_paths: Vec<String> = Vec::new();
     let mut end = start_idx;
@@ -584,14 +584,21 @@ fn parallel_read_only_batch_end(calls: &[ToolCallReq], start_idx: usize) -> usiz
             break;
         }
         if call.name == "read" {
-            let p = call.args["file_path"]
-                .as_str()
-                .unwrap_or_default()
-                .replace('\\', "/");
-            if read_paths.contains(&p) {
+            let mut targets: Vec<String> = Vec::new();
+            if let Some(p) = call.args["file_path"].as_str().filter(|s| !s.is_empty()) {
+                targets.push(p.replace('\\', "/"));
+            }
+            if let Some(arr) = call.args["paths"].as_array() {
+                for v in arr.iter().filter_map(|x| x.as_str()) {
+                    if !v.is_empty() {
+                        targets.push(v.replace('\\', "/"));
+                    }
+                }
+            }
+            if targets.iter().any(|t| read_paths.contains(t)) {
                 break;
             }
-            read_paths.push(p);
+            read_paths.extend(targets);
         }
         if !k.is_empty() {
             keys.push(k);
@@ -599,6 +606,33 @@ fn parallel_read_only_batch_end(calls: &[ToolCallReq], start_idx: usize) -> usiz
         end += 1;
     }
     end
+}
+
+pub(crate) async fn execute_parallel_read_only_call(
+    idx: usize,
+    c: ToolCallReq,
+    mut child_ctx: ToolCtx,
+    allow_hosts: Vec<String>,
+) -> (usize, u128, tools::Outcome, Option<ToolCtx>) {
+    let started = Instant::now();
+    match c.name.as_str() {
+        "webfetch" | "websearch" => {
+            let mut out = if c.name == "webfetch" {
+                tools::web::fetch(&c.args, &allow_hosts).await
+            } else {
+                tools::web::search(&c.args).await
+            };
+            if out.ok {
+                out.output = crate::agent::trust::banner_wrap(&out.output);
+            }
+            (idx, started.elapsed().as_millis(), out, None)
+        }
+        _ => {
+            let out = run_tool_blocking(&mut child_ctx, &c.name, &c.args).await;
+            child_ctx.current_call_id = None;
+            (idx, started.elapsed().as_millis(), out, Some(child_ctx))
+        }
+    }
 }
 
 /// Sessions this process already opened an agent run for. `run_agent` is
@@ -1064,8 +1098,22 @@ async fn run_agent(
         let breakdown = RequestBreakdown::from_request(&chat_req);
         let _ = tx.send(AgentEvent::RequestBreakdown(breakdown)).await;
 
-        // one complete streaming turn
-        let turn = match run_turn(
+        // Refresh visible read windows before the turn streams so any eager
+        // mid-stream `read` prefetch sees accurate window coverage.
+        {
+            let cleared =
+                crate::agent::tool_output::cleared_indices_with_limit(&messages, context_limit);
+            let visible_ids: std::collections::HashSet<String> = messages
+                .iter()
+                .enumerate()
+                .filter(|(idx, m)| m.role == Role::Tool && !cleared.contains(idx))
+                .filter_map(|(_, m)| m.tool_call_id.clone())
+                .collect();
+            ctx.retain_visible_read_windows(&visible_ids);
+        }
+
+        // one complete streaming turn (with eager mid-stream read-only prefetch)
+        let mut turn = match run_turn_with_prefetch(
             &provider,
             &chat_req,
             &tx,
@@ -1073,6 +1121,7 @@ async fn run_agent(
             &mut previous_response_id,
             &mut prompt_size,
             !fallback_chain.is_empty(),
+            Some((&ctx, &web_allow_hosts)),
         )
         .await
         {
@@ -1364,6 +1413,20 @@ async fn run_agent(
                 usize,
                 (u128, tools::Outcome, Option<ToolCtx>),
             > = std::collections::HashMap::new();
+            // Collect any eager mid-stream prefetched read-only calls first.
+            if !ctx.cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                for (idx, handle) in std::mem::take(&mut turn.prefetched) {
+                    if let Ok((i, dur_ms, out, child_ctx)) = handle.await {
+                        parallel_outcomes.insert(i, (dur_ms, out, child_ctx));
+                    } else {
+                        let _ = idx;
+                    }
+                }
+            } else {
+                for (_, handle) in std::mem::take(&mut turn.prefetched) {
+                    handle.abort();
+                }
+            }
             for (call_index, call) in turn.calls.iter().enumerate() {
                 if !parallel_outcomes.contains_key(&call_index)
                     && !ctx.cancel.load(std::sync::atomic::Ordering::Relaxed)
@@ -1389,6 +1452,7 @@ async fn run_agent(
                         use futures::{StreamExt, stream};
                         let tasks: Vec<(usize, ToolCallReq, ToolCtx, Vec<String>)> = (call_index
                             ..batch_end)
+                            .filter(|idx| !parallel_outcomes.contains_key(idx))
                             .map(|idx| {
                                 let c = turn.calls[idx].clone();
                                 let mut child_ctx = ctx.clone();
@@ -1398,39 +1462,10 @@ async fn run_agent(
                             .collect();
                         let results: Vec<(usize, u128, tools::Outcome, Option<ToolCtx>)> =
                             stream::iter(tasks)
-                                .map(|(idx, c, mut child_ctx, allow_hosts)| async move {
-                                    let started = Instant::now();
-                                    match c.name.as_str() {
-                                        "webfetch" | "websearch" => {
-                                            let mut out = if c.name == "webfetch" {
-                                                tools::web::fetch(&c.args, &allow_hosts).await
-                                            } else {
-                                                tools::web::search(&c.args).await
-                                            };
-                                            if out.ok {
-                                                out.output =
-                                                    crate::agent::trust::banner_wrap(&out.output);
-                                            }
-                                            (idx, started.elapsed().as_millis(), out, None)
-                                        }
-                                        _ => {
-                                            let out = run_tool_blocking(
-                                                &mut child_ctx,
-                                                &c.name,
-                                                &c.args,
-                                            )
-                                            .await;
-                                            child_ctx.current_call_id = None;
-                                            (
-                                                idx,
-                                                started.elapsed().as_millis(),
-                                                out,
-                                                Some(child_ctx),
-                                            )
-                                        }
-                                    }
+                                .map(|(idx, c, child_ctx, allow_hosts)| {
+                                    execute_parallel_read_only_call(idx, c, child_ctx, allow_hosts)
                                 })
-                                .buffer_unordered(8)
+                                .buffer_unordered(24)
                                 .collect()
                                 .await;
                         for (idx, dur_ms, out, child_ctx) in results {

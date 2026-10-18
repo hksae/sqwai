@@ -447,6 +447,25 @@ impl Provider for OpenAiProvider {
                         if let Some(calls) = delta.get("tool_calls").and_then(|c| c.as_array()) {
                             for tc in calls {
                                 let idx = tc.get("index").and_then(|i| i.as_i64()).unwrap_or(0);
+                                // Once a higher tool_call index `idx` starts streaming, any earlier
+                                // index `< idx` with complete valid JSON arguments is finished and
+                                // can be emitted immediately mid-stream for eager execution.
+                                let ready_earlier: Vec<i64> = partials
+                                    .range(..idx)
+                                    .filter(|(_, p)| {
+                                        !p.name.is_empty()
+                                            && !p.args.trim().is_empty()
+                                            && serde_json::from_str::<Value>(&p.args).is_ok()
+                                    })
+                                    .map(|(&k, _)| k)
+                                    .collect();
+                                for k in ready_earlier {
+                                    if let Some(p) = partials.remove(&k)
+                                        && let Some(req) = p.finish()
+                                    {
+                                        yield Ok(StreamEvent::ToolCall(req));
+                                    }
+                                }
                                 let slot = partials.entry(idx).or_default();
                                 if let Some(id) = tc.get("id").and_then(|i| i.as_str()) {
                                     slot.id.push_str(id);

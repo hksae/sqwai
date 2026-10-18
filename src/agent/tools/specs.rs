@@ -76,24 +76,29 @@ fn defs() -> Vec<ToolDef> {
         ToolDef {
             name: "read",
             kind: Kind::ReadOnly,
-            description: "Read a file from the project. Returns numbered lines \
-with totals (use offset/limit windows of 200–500 lines rather than tiny 30–50 \
-line slices across multiple calls; truncated output spills \
-to a file — grep it instead of re-reading). Must be called once before \
-replace_all edits and overwrites of existing files — one read per session \
-is enough: the host tracks freshness and refuses the edit with a stale \
-warning if the file moved underneath, so never re-read defensively. \
-A first read of a large file carries its structural outline, so read windows \
-of it deliberately rather than scanning line by line; a window already shown \
-to you is answered with a pointer, not the bytes again.",
+            description: "Read one or more files from the project. Supports three fast modes: \
+(1) `file_path` with `offset`/`limit` (use 200–500 line windows; first read of a large file carries its structural outline); \
+(2) `file_path` with `symbols: [\"fn_name\", \"StructName\"]` (or `symbol`) to extract the exact AST bodies of specific functions, methods, or types via tree-sitter in one step without calling `outline` first; \
+(3) `paths: [\"a.rs\", \"b.rs\", ...]` (up to 16 files) to read multiple files in a single fused call. \
+Must be called once before `replace_all` edits and overwrites of existing files; the host tracks freshness and answers repeat reads of unchanged windows with a pointer.",
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "file_path": {"type": "string", "description": "path relative to the project root"},
+                    "paths": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "optional list of up to 16 file paths to read in a single fused call"
+                    },
+                    "symbol": {"type": "string", "description": "optional function/struct/method name to extract via tree-sitter AST"},
+                    "symbols": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "optional list of function/struct/method names to extract from the file via tree-sitter AST in one step"
+                    },
                     "offset": {"type": "integer", "description": "1-based first line to read"},
                     "limit": {"type": "integer", "description": "max lines to read"}
-                },
-                "required": ["file_path"]
+                }
             }),
         },
         ToolDef {
@@ -677,7 +682,22 @@ fn call_summary_raw(name: &str, args: &Value) -> String {
     let s = |k: &str| args[k].as_str().unwrap_or_default().to_string();
     match name {
         "ls" => s("path"),
-        "read" | "write" | "edit" | "multi_edit" => s("file_path"),
+        "read" => {
+            let base = s("file_path");
+            if !base.is_empty() {
+                base
+            } else if let Some(arr) = args["paths"].as_array() {
+                let names: Vec<&str> = arr.iter().filter_map(|v| v.as_str()).take(3).collect();
+                if arr.len() > 3 {
+                    format!("{} (+{} more)", names.join(", "), arr.len() - 3)
+                } else {
+                    names.join(", ")
+                }
+            } else {
+                String::new()
+            }
+        }
+        "write" | "edit" | "multi_edit" => s("file_path"),
         "bash" => s("command"),
         "bash_output" => {
             // wait_secs/from_start visible right in the row: no need to
