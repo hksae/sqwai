@@ -43,6 +43,7 @@ fn ask_user_seg_key_changes_with_picked_options() {
             picked,
             custom: vec![String::new()],
             focus: 0,
+            cursor: vec![0],
         })
     };
     let tool = |ask| Segment::Tool {

@@ -1379,6 +1379,7 @@ impl App {
                 .collect(),
             custom: vec![String::new(); questions.len()],
             focus: 0,
+            cursor: vec![0; questions.len()],
             questions,
         });
         let found = self.segments.iter().position(|s| {
@@ -1514,6 +1515,9 @@ impl App {
             for (i, v) in opts.iter_mut().enumerate() {
                 *v = i == opt;
             }
+            if let Some(c) = ask.cursor.get_mut(q) {
+                *c = opt;
+            }
             ask.focus = q;
             // one radio: choosing an option retires the free text, so a
             // single-choice question never shows two filled markers
@@ -1541,6 +1545,9 @@ impl App {
                 return;
             };
             *v = !*v;
+            if let Some(c) = ask.cursor.get_mut(q) {
+                *c = opt;
+            }
             ask.focus = q;
         }
         self.touch_segment(seg);
@@ -1579,16 +1586,67 @@ impl App {
         self.inline_ask_focus(q);
         if let Some(seg) = self.active_ask_seg()
             && let Some(Segment::Tool { ask: Some(ask), .. }) = self.segments.get_mut(seg)
-            && !ask.questions.get(q).is_some_and(|qq| qq.multiple)
-            && let Some(opts) = ask.picked.get_mut(q)
         {
-            for v in opts.iter_mut() {
-                *v = false;
+            if let Some(qq) = ask.questions.get(q) {
+                let n = qq.options.len();
+                let multiple = qq.multiple;
+                if let Some(c) = ask.cursor.get_mut(q) {
+                    *c = n;
+                }
+                if !multiple
+                    && let Some(opts) = ask.picked.get_mut(q)
+                {
+                    for v in opts.iter_mut() {
+                        *v = false;
+                    }
+                }
             }
             self.touch_segment(seg);
         }
         self.ask_custom_focus = Some(q);
         self.dirty = true;
+    }
+
+    /// Move the option cursor (`Up` / `Down`) strictly inside the currently
+    /// focused question (`ask.focus`).
+    pub(super) fn inline_ask_move(&mut self, delta: isize) {
+        let Some(seg) = self.active_ask_seg() else {
+            return;
+        };
+        let (q, next_cursor, n_opts, multiple, allow_free) = match self.segments.get(seg) {
+            Some(Segment::Tool { ask: Some(ask), .. }) => {
+                let q = ask.focus;
+                let Some(qq) = ask.questions.get(q) else {
+                    return;
+                };
+                let n_opts = qq.options.len();
+                let total = n_opts + usize::from(qq.allow_free);
+                if total == 0 {
+                    return;
+                }
+                let cur = ask.cursor.get(q).copied().unwrap_or(0).min(total - 1);
+                let next = (cur as isize + delta).rem_euclid(total as isize) as usize;
+                (q, next, n_opts, qq.multiple, qq.allow_free)
+            }
+            _ => return,
+        };
+        self.ask_hover = None;
+        if next_cursor < n_opts {
+            if multiple {
+                if let Some(Segment::Tool { ask: Some(ask), .. }) = self.segments.get_mut(seg)
+                    && let Some(c) = ask.cursor.get_mut(q)
+                {
+                    *c = next_cursor;
+                }
+                self.ask_custom_focus = None;
+                self.touch_segment(seg);
+                self.dirty = true;
+            } else {
+                self.inline_ask_select(q, next_cursor);
+            }
+        } else if allow_free {
+            self.inline_ask_open_custom(q);
+        }
     }
 
     /// confirm the current question: if it is answered and more questions

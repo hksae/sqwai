@@ -472,6 +472,23 @@ impl App {
                         }
                         KeyCode::Up if !self.menu_stack.is_empty() => self.menu_nav(-1),
                         KeyCode::Down if !self.menu_stack.is_empty() => self.menu_nav(1),
+                        // Inline ask: Up/Down moves the option cursor inside the active question.
+                        KeyCode::Up
+                            if self.menu_stack.is_empty()
+                                && !ctrl
+                                && !alt
+                                && self.active_ask_seg().is_some() =>
+                        {
+                            self.inline_ask_move(-1);
+                        }
+                        KeyCode::Down
+                            if self.menu_stack.is_empty()
+                                && !ctrl
+                                && !alt
+                                && self.active_ask_seg().is_some() =>
+                        {
+                            self.inline_ask_move(1);
+                        }
                         // The command list takes the arrows while it is open and
                         // the draft is one line; a multi-line draft keeps the
                         // arrows as caret keys.
@@ -782,9 +799,13 @@ impl App {
                                     KeyCode::Char(c) if !ctrl && !alt => slot.push(c),
                                     KeyCode::Backspace => {
                                         slot.pop();
+                                        if slot.is_empty() {
+                                            self.ask_custom_focus = None;
+                                        }
                                     }
                                     KeyCode::Delete => {
                                         slot.clear();
+                                        self.ask_custom_focus = None;
                                     }
                                     _ => {}
                                 }

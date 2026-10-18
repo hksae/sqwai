@@ -329,6 +329,8 @@ pub(super) struct AskState {
     pub custom: Vec<String>,
     /// which question the keyboard is on
     pub focus: usize,
+    /// per-question highlighted row index (`0..options.len()`, or `options.len()` for `allow_free`)
+    pub cursor: Vec<usize>,
 }
 
 impl AskState {

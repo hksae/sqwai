@@ -142,6 +142,9 @@ impl App {
                     for c in &ask.custom {
                         k += c.len();
                     }
+                    for (q, &cur) in ask.cursor.iter().enumerate() {
+                        k = k.wrapping_add((cur + 1).wrapping_mul((q + 1) * 700_001));
+                    }
                     if let Some(hover) = self.ask_hover {
                         k = k.wrapping_add(match hover {
                             AskRow::Option { q, opt } => (q + 1) * 1_000_007 + (opt + 1) * 1_009,
@@ -217,29 +220,23 @@ impl App {
     ) -> Vec<(Line<'static>, Option<usize>)> {
         let width = usize::from(w).max(1);
         let mut out: Vec<(Line<'static>, Option<usize>)> = Vec::new();
-        let mut row = |spans: Vec<Span<'static>>, hovered: bool| {
-            let line = Self::form_hover_band(Line::from(spans), live && hovered, width);
-            out.push((line, Some(idx)));
+        let mut row = |spans: Vec<Span<'static>>| {
+            out.push((Line::from(spans), Some(idx)));
         };
         for (q_idx, q) in ask.questions.iter().enumerate() {
             let focused = live && q_idx == ask.focus;
             let locked = live && (q_idx > ask.focus || !ask.can_reach(q_idx));
+            let cur_cursor = ask.cursor.get(q_idx).copied().unwrap_or(0);
             if !q.header.is_empty() {
-                row(
-                    vec![Span::styled(
-                        truncate_display_width(&format!("  {}", q.header), width),
-                        if focused { Theme::base() } else { Theme::dim() },
-                    )],
-                    false,
-                );
+                row(vec![Span::styled(
+                    truncate_display_width(&format!("  {}", q.header), width),
+                    if focused { Theme::base() } else { Theme::dim() },
+                )]);
             }
-            row(
-                vec![Span::styled(
-                    truncate_display_width(&format!("  {}", q.question), width),
-                    if locked { Theme::dim() } else { Theme::base() },
-                )],
-                false,
-            );
+            row(vec![Span::styled(
+                truncate_display_width(&format!("  {}", q.question), width),
+                if locked { Theme::dim() } else { Theme::base() },
+            )]);
             for (o_idx, opt) in q.options.iter().enumerate() {
                 let picked = ask
                     .picked
@@ -247,12 +244,21 @@ impl App {
                     .and_then(|v| v.get(o_idx))
                     .copied()
                     .unwrap_or(false);
+                let is_selected_row = live
+                    && !locked
+                    && (self.ask_hover
+                        == Some(AskRow::Option {
+                            q: q_idx,
+                            opt: o_idx,
+                        })
+                        || (focused && self.ask_hover.is_none() && cur_cursor == o_idx));
+                let prefix = if is_selected_row { "› " } else { "  " };
                 let marker = if q.multiple {
-                    if picked { "  [x] " } else { "  [ ] " }
+                    if picked { "[x] " } else { "[ ] " }
                 } else if picked {
-                    "  ● "
+                    "● "
                 } else {
-                    "  ○ "
+                    "○ "
                 };
                 let mut text = format!("{}. {}", o_idx + 1, opt.label);
                 if opt.recommended {
@@ -261,40 +267,49 @@ impl App {
                 if let Some(d) = &opt.description {
                     text.push_str(&format!(" — {d}"));
                 }
-                let text = truncate_display_width(&text, width.saturating_sub(marker.width()));
-                row(
-                    vec![
-                        Span::styled(
-                            marker.to_string(),
-                            if picked {
-                                Theme::brand_ink()
-                            } else {
-                                Theme::dim()
-                            },
-                        ),
-                        Span::styled(
-                            text,
-                            if locked { Theme::dim() } else { Theme::base() },
-                        ),
-                    ],
-                    live && !locked
-                        && self.ask_hover
-                            == Some(AskRow::Option {
-                                q: q_idx,
-                                opt: o_idx,
-                            }),
+                let text = truncate_display_width(
+                    &text,
+                    width.saturating_sub(prefix.width() + marker.width()),
                 );
+                row(vec![
+                    Span::styled(
+                        prefix.to_string(),
+                        if is_selected_row {
+                            Theme::brand_ink()
+                        } else {
+                            Theme::base()
+                        },
+                    ),
+                    Span::styled(
+                        marker.to_string(),
+                        if picked {
+                            Theme::brand_ink()
+                        } else {
+                            Theme::dim()
+                        },
+                    ),
+                    Span::styled(
+                        text,
+                        if locked { Theme::dim() } else { Theme::base() },
+                    ),
+                ]);
             }
             if q.allow_free {
                 let c = ask.custom.get(q_idx).map(|s| s.as_str()).unwrap_or("");
                 let editing = live && self.ask_custom_focus == Some(q_idx);
                 let filled = !c.is_empty();
+                let is_selected_row = live
+                    && !locked
+                    && (self.ask_hover == Some(AskRow::Custom { q: q_idx })
+                        || editing
+                        || (focused && self.ask_hover.is_none() && cur_cursor == q.options.len()));
+                let prefix = if is_selected_row { "› " } else { "  " };
                 let marker = if q.multiple {
-                    if filled { "  [x] " } else { "  [ ] " }
+                    if filled { "[x] " } else { "[ ] " }
                 } else if filled {
-                    "  ● "
+                    "● "
                 } else {
-                    "  ○ "
+                    "○ "
                 };
                 let text = if filled {
                     format!(
@@ -305,51 +320,66 @@ impl App {
                 } else {
                     format!("{}. your answer…", q.options.len() + 1)
                 };
-                let text = truncate_display_width(&text, width.saturating_sub(marker.width()));
-                row(
-                    vec![
-                        Span::styled(
-                            marker.to_string(),
-                            if filled {
-                                Theme::brand_ink()
-                            } else {
-                                Theme::dim()
-                            },
-                        ),
-                        Span::styled(
-                            text,
-                            if (filled || editing) && !locked {
-                                Theme::base()
-                            } else {
-                                Theme::dim()
-                            },
-                        ),
-                    ],
-                    live && !locked && self.ask_hover == Some(AskRow::Custom { q: q_idx }),
+                let text = truncate_display_width(
+                    &text,
+                    width.saturating_sub(prefix.width() + marker.width()),
                 );
+                row(vec![
+                    Span::styled(
+                        prefix.to_string(),
+                        if is_selected_row {
+                            Theme::brand_ink()
+                        } else {
+                            Theme::base()
+                        },
+                    ),
+                    Span::styled(
+                        marker.to_string(),
+                        if filled {
+                            Theme::brand_ink()
+                        } else {
+                            Theme::dim()
+                        },
+                    ),
+                    Span::styled(
+                        text,
+                        if (filled || editing) && !locked {
+                            Theme::base()
+                        } else {
+                            Theme::dim()
+                        },
+                    ),
+                ]);
             }
             if q_idx + 1 < ask.questions.len() {
-                row(
-                    vec![Span::styled(
-                        truncate_display_width("  ──", width),
-                        Theme::dim(),
-                    )],
-                    false,
-                );
+                row(vec![Span::styled(
+                    truncate_display_width("  ──", width),
+                    Theme::dim(),
+                )]);
             }
         }
+        let confirm_hovered =
+            live && ask.is_answered(ask.focus) && self.ask_hover == Some(AskRow::Confirm);
+        let confirm_prefix = if confirm_hovered { "›  " } else { "   " };
         let confirm_label = if ask.focus + 1 < ask.questions.len() {
-            "   enter to next question"
+            "enter to next question"
         } else {
-            "   enter to confirm"
+            "enter to confirm"
         };
-        row(
-            vec![Span::styled(
-                truncate_display_width(confirm_label, width),
+        row(vec![
+            Span::styled(
+                confirm_prefix.to_string(),
+                if confirm_hovered {
+                    Theme::brand_ink()
+                } else {
+                    Theme::dim()
+                },
+            ),
+            Span::styled(
+                truncate_display_width(confirm_label, width.saturating_sub(confirm_prefix.width())),
                 Theme::dim(),
-            )],
-            live && ask.is_answered(ask.focus) && self.ask_hover == Some(AskRow::Confirm),
-        );
+            ),
+        ]);
         out
     }
 

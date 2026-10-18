@@ -749,6 +749,58 @@ fn the_free_answer_is_the_next_number() {
     assert_eq!(app.ask_custom_focus, Some(0), "its digit opens the editor");
 }
 
+#[test]
+fn inline_ask_arrows_chevron_marker_and_custom_erase_resets_focus() {
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.startup = false;
+    push_inline_ask(&mut app, ask_fixture()); // Q1 has options "alpha", "beta" + allow_free (3. your answer…)
+    let seg = app.active_ask_seg().unwrap();
+
+    // Initial render shows `› ` on option 1 in Q1 (and not on Q2).
+    let s0 = render_to_string(&mut app, 70, 30);
+    assert!(s0.contains("› ○ 1. alpha"), "chevron on first option:\n{s0}");
+
+    // Press Down arrow -> moves cursor to option 2 ("beta") inside Q1 and selects it.
+    let (tx, rx) = std::sync::mpsc::channel();
+    tx.send(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::empty())))
+        .unwrap();
+    app.poll_input(&rx).unwrap();
+    let s1 = render_to_string(&mut app, 70, 30);
+    assert!(s1.contains("› ● 2. beta"), "Down arrow selects option 2 with ›:\n{s1}");
+    assert_eq!(app.inline_ask_text(seg), "Q1: beta | Q2: (no answer)");
+
+    // Press Down arrow again -> moves to 3. your answer… and opens custom focus.
+    tx.send(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::empty())))
+        .unwrap();
+    app.poll_input(&rx).unwrap();
+    assert_eq!(app.ask_custom_focus, Some(0));
+
+    // Type "hi", then erase both chars with Backspace -> custom focus resets to None!
+    for ch in ['h', 'i'] {
+        tx.send(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::empty())))
+            .unwrap();
+    }
+    tx.send(Event::Key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::empty())))
+        .unwrap();
+    app.poll_input(&rx).unwrap();
+    assert_eq!(app.ask_custom_focus, Some(0), "still focused while 1 char remains");
+
+    tx.send(Event::Key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::empty())))
+        .unwrap();
+    app.poll_input(&rx).unwrap();
+    assert_eq!(
+        app.ask_custom_focus, None,
+        "erasing the last char must reset custom focus"
+    );
+
+    // Pressing digit '1' now selects option 1 ("alpha") instead of typing '1' into custom text!
+    tx.send(Event::Key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::empty())))
+        .unwrap();
+    app.poll_input(&rx).unwrap();
+    assert_eq!(app.inline_ask_text(seg), "Q1: alpha | Q2: (no answer)");
+}
+
 /// Choosing an option repaints one glyph in place — the block keeps its height
 /// — so the view must stay where the user left it. Forcing follow made a
 /// multi-question ask snap to its bottom on every click.
