@@ -42,42 +42,59 @@ fn subagent_task_text(item: &serde_json::Value) -> Option<String> {
 /// One parsed child task. Children are read-only by default; `write` with
 /// `paths` declares a writer scoped to those roots. Paths are normalized
 /// here so spawn-time overlap checks and execute-time enforcement agree.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct SubagentTask {
     pub(crate) label: String,
     pub(crate) write: bool,
     pub(crate) paths: Vec<String>,
+    pub(crate) context: Option<String>,
+    pub(crate) files: Vec<String>,
+}
+
+fn normalize_rel_path_list(arr: &[serde_json::Value]) -> Vec<String> {
+    arr.iter()
+        .filter_map(|v| v.as_str())
+        .map(|p| {
+            p.replace('\\', "/")
+                .trim_start_matches("./")
+                .trim_end_matches('/')
+                .to_string()
+        })
+        .filter(|p| !p.is_empty())
+        .collect()
 }
 
 fn subagent_task_spec(item: &serde_json::Value) -> Option<SubagentTask> {
     let label = subagent_task_text(item)?;
-    let (write, paths) = match item {
+    let (write, paths, context, files) = match item {
         serde_json::Value::Object(map) => {
             let write = map.get("write").and_then(|v| v.as_bool()).unwrap_or(false);
             let paths = map
                 .get("paths")
                 .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str())
-                        .map(|p| {
-                            p.replace('\\', "/")
-                                .trim_start_matches("./")
-                                .trim_end_matches('/')
-                                .to_string()
-                        })
-                        .filter(|p| !p.is_empty())
-                        .collect()
-                })
+                .map(|a| normalize_rel_path_list(a))
                 .unwrap_or_default();
-            (write, paths)
+            let context = map
+                .get("context")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+            let files = map
+                .get("files")
+                .and_then(|v| v.as_array())
+                .map(|a| normalize_rel_path_list(a))
+                .unwrap_or_default();
+            (write, paths, context, files)
         }
-        _ => (false, Vec::new()),
+        _ => (false, Vec::new(), None, Vec::new()),
     };
     Some(SubagentTask {
         label,
         write,
         paths,
+        context,
+        files,
     })
 }
 
@@ -405,6 +422,7 @@ pub(crate) async fn run_subagent(
         use futures::{StreamExt, stream};
         let outcomes = stream::iter(tasks.into_iter().enumerate())
             .map(|(index, task)| {
+                let task_label = task.label.clone();
                 let mut one = call.clone();
                 // re-parseable single: the recursive call re-derives the
                 // same write scope from these flags
@@ -413,6 +431,8 @@ pub(crate) async fn run_subagent(
                         "task": task.label,
                         "write": task.write,
                         "paths": task.paths,
+                        "context": task.context,
+                        "files": task.files,
                     }],
                 });
                 let system = system.clone();
@@ -449,11 +469,7 @@ pub(crate) async fn run_subagent(
                         timeout,
                     )
                     .await;
-                    (
-                        index,
-                        one.args["task"].as_str().unwrap_or_default().to_string(),
-                        outcome,
-                    )
+                    (index, task_label, outcome)
                 }
             })
             .buffer_unordered(MAX_PARALLEL_SUBAGENTS)
@@ -522,8 +538,9 @@ pub(crate) async fn run_subagent(
     // Keep all cacheable system parts byte-identical to the parent so every
     // child hits the parent's warm KV cache for `tools + stable system`, and
     // retain only `Mode:` + `<turn_environment>` in the volatile tail (dropping
-    // parent-only one-shot notices like ANCHOR, stopped-turn, or undo notes).
-    let child_system: Vec<SystemPart> = system
+    // parent-only one-shot notices like ANCHOR, stopped-turn, or undo notes),
+    // then append the child's `<subagent_contract>` and `<parent_context>`.
+    let mut child_system: Vec<SystemPart> = system
         .into_iter()
         .filter(|p| {
             p.cacheable
@@ -531,6 +548,13 @@ pub(crate) async fn run_subagent(
                 || p.text.starts_with("<turn_environment>")
         })
         .collect();
+    child_system.push(SystemPart::volatile(build_subagent_tail(
+        root,
+        parent_session,
+        &task,
+        child_read_only,
+    )));
+    let user_prompt = build_subagent_user_prompt(&task);
     let child = spawn_agent(AgentInput {
         provider: provider.clone(),
         model_id: model_id.to_string(),
@@ -539,7 +563,7 @@ pub(crate) async fn run_subagent(
         effort_support,
         max_tokens,
         system: child_system,
-        messages: vec![Message::new(Role::User, task.label.clone())],
+        messages: vec![Message::new(Role::User, user_prompt)],
         root: root.to_path_buf(),
         // #190: NOT `sub-{id}` — the numeric counter resets on restart
         // and would append to a previous run's journal file
@@ -572,22 +596,25 @@ pub(crate) async fn run_subagent(
     // leaves the map on every exit path below, including early returns.
     let _child_slot = crate::agent::undo_guard::track_child(id, child.child_control());
     let mut output = String::new();
+    let mut trail = SubagentTrail::default();
     let deadline = tokio::time::Instant::now() + timeout;
     // Esc polling: the parent cancel flag is the only stop signal visible
     // inside this wait — without it a stop request sits unobserved until
     // the timeout, and the TUI shows "cancelling…" forever.
     let mut cancel_poll = tokio::time::interval(std::time::Duration::from_millis(100));
     loop {
-        // Checked at the top of every iteration, not only on the interval
-        // tick. The select below is `biased`, so while the child keeps
-        // producing events its `recv` branch is always the ready one and the
-        // interval branch is never polled — a fast child streaming a long
-        // answer would starve the check and Esc would look ignored. The
-        // loop always consumes one event per iteration, so this check can
-        // never starve; the interval branch still covers a silent child
-        // parked in `recv`.
         if parent_cancel.load(std::sync::atomic::Ordering::Relaxed) {
-            return stop_child(&mut child, parent_tx, id, "cancelled by user").await;
+            return stop_child(
+                &mut child,
+                parent_tx,
+                id,
+                "cancelled by user",
+                root,
+                &child_session,
+                &mut trail,
+                &output,
+            )
+            .await;
         }
         let event = tokio::select! {
             biased;
@@ -605,7 +632,17 @@ pub(crate) async fn run_subagent(
                 return result;
             }
             Err(_) => {
-                return stop_child(&mut child, parent_tx, id, &format!("timed out after {}s", timeout.as_secs())).await;
+                return stop_child(
+                    &mut child,
+                    parent_tx,
+                    id,
+                    &format!("timed out after {}s", timeout.as_secs()),
+                    root,
+                    &child_session,
+                    &mut trail,
+                    &output,
+                )
+                .await;
             }
             },
             _ = cancel_poll.tick() => {
@@ -623,6 +660,7 @@ pub(crate) async fn run_subagent(
                     .await;
             }
             AgentEvent::ToolStart { name, summary, .. } => {
+                trail.record_start(&name, &summary);
                 let _ = parent_tx
                     .send(AgentEvent::SubagentToolStart { id, name, summary })
                     .await;
@@ -634,6 +672,7 @@ pub(crate) async fn run_subagent(
                 diff,
                 ..
             } => {
+                trail.record_done(&name, ok);
                 let _ = parent_tx
                     .send(AgentEvent::SubagentToolDone {
                         id,
@@ -648,6 +687,7 @@ pub(crate) async fn run_subagent(
                 let _ = parent_tx.send(AgentEvent::Checkpoint { sha, label }).await;
             }
             AgentEvent::Completed(result) => {
+                trail.collect_journal_writes(root, &child_session);
                 let result = match result {
                     Ok(outcome) => {
                         if output.is_empty() {
@@ -659,9 +699,13 @@ pub(crate) async fn run_subagent(
                                 .map(|m| m.content.clone())
                                 .unwrap_or_default();
                         }
-                        tools::Outcome::ok(output.clone())
+                        let final_text = trail.attach_receipt(&output, true);
+                        tools::Outcome::ok(final_text)
                     }
-                    Err(error) => tools::Outcome::err(error),
+                    Err(error) => {
+                        let final_err = trail.salvage_on_error(&error, &output);
+                        tools::Outcome::err(final_err)
+                    }
                 };
                 let _ = parent_tx
                     .send(AgentEvent::SubagentDone {
@@ -697,26 +741,31 @@ pub(crate) async fn run_subagent(
 /// `bash` child kills its own process tree on this), wait out a short
 /// grace, then tear down hard. Always ends with `SubagentDone(ok:false)`
 /// and the error outcome — the parent turn must never hang on a child.
-/// `reason` names the trigger ("timed out after Ns" / "cancelled by
-/// user"); a child that finishes inside the grace is still discarded: its
-/// result belongs to a turn that already moved on.
+/// Salvages any tool trail, modified files, and partial output accumulated
+/// before the stop so the parent does not lose the child's investigation.
+#[allow(clippy::too_many_arguments)]
 async fn stop_child(
     child: &mut AgentHandle,
     parent_tx: &mpsc::Sender<AgentEvent>,
     id: u64,
     reason: &str,
+    root: &Path,
+    child_session: &str,
+    trail: &mut SubagentTrail,
+    partial_output: &str,
 ) -> tools::Outcome {
     child.request_tool_cancel();
     let grace = std::time::Duration::from_secs(SUBAGENT_CANCEL_GRACE_SECS);
     let finished = tokio::time::timeout(grace, child.rx.recv()).await;
     child.abort();
-    let result = if matches!(finished, Ok(Some(AgentEvent::Completed(_)))) {
-        tools::Outcome::err(format!(
-            "subagent {reason} (finished during cancel, result discarded)"
-        ))
+    trail.collect_journal_writes(root, child_session);
+    let base_msg = if matches!(finished, Ok(Some(AgentEvent::Completed(_)))) {
+        format!("subagent {reason} (finished during cancel, result discarded)")
     } else {
-        tools::Outcome::err(format!("subagent {reason}"))
+        format!("subagent {reason}")
     };
+    let salvaged = trail.salvage_on_error(&base_msg, partial_output);
+    let result = tools::Outcome::err(salvaged);
     let _ = parent_tx
         .send(AgentEvent::SubagentDone {
             id,
@@ -725,6 +774,269 @@ async fn stop_child(
         })
         .await;
     result
+}
+
+#[derive(Default, Debug)]
+pub(crate) struct SubagentTrail {
+    pub(crate) calls: Vec<String>,
+    pub(crate) failed_calls: usize,
+    pub(crate) modified_files: Vec<String>,
+}
+
+impl SubagentTrail {
+    pub(crate) fn record_start(&mut self, name: &str, summary: &str) {
+        let s = summary.trim();
+        let entry = if s.is_empty() {
+            name.to_string()
+        } else {
+            let clipped: String = s.chars().take(48).collect();
+            let suffix = if s.chars().count() > 48 { "…" } else { "" };
+            format!("{name}({clipped}{suffix})")
+        };
+        if self.calls.len() < 32 {
+            self.calls.push(entry);
+        }
+    }
+
+    pub(crate) fn record_done(&mut self, _name: &str, ok: bool) {
+        if !ok {
+            self.failed_calls += 1;
+        }
+    }
+
+    pub(crate) fn collect_journal_writes(&mut self, root: &Path, child_session: &str) {
+        let Ok(records) = crate::agent::journal::Journal::records_for(root, child_session) else {
+            return;
+        };
+        for rec in records {
+            if rec.kind == "file_diff"
+                && let Some(path) = rec.fields.get("path").and_then(|v| v.as_str())
+                && !path.is_empty()
+                && !self.modified_files.iter().any(|p| p == path)
+            {
+                self.modified_files.push(path.to_string());
+            }
+        }
+    }
+
+    pub(crate) fn receipt_line(&self, ok: bool) -> Option<String> {
+        if self.calls.is_empty() && self.modified_files.is_empty() {
+            return None;
+        }
+        let status = if ok { "ok" } else { "stopped" };
+        let calls_part = if self.calls.is_empty() {
+            "0 tool calls".to_string()
+        } else {
+            let shown: Vec<&str> = self.calls.iter().take(12).map(String::as_str).collect();
+            let extra = if self.calls.len() > 12 {
+                format!(" +{} more", self.calls.len() - 12)
+            } else {
+                String::new()
+            };
+            let fail_note = if self.failed_calls > 0 {
+                format!(" ({} failed)", self.failed_calls)
+            } else {
+                String::new()
+            };
+            format!(
+                "{} tool call(s){fail_note}: {}{extra}",
+                self.calls.len(),
+                shown.join(", ")
+            )
+        };
+        let mod_part = if self.modified_files.is_empty() {
+            String::new()
+        } else {
+            format!(" | modified: {}", self.modified_files.join(", "))
+        };
+        Some(format!("[Subagent receipt: {status} | {calls_part}{mod_part}]"))
+    }
+
+    pub(crate) fn attach_receipt(&self, output: &str, ok: bool) -> String {
+        let trimmed = output.trim();
+        match self.receipt_line(ok) {
+            Some(receipt) if trimmed.is_empty() => receipt,
+            Some(receipt) => format!("{trimmed}\n\n{receipt}"),
+            None => trimmed.to_string(),
+        }
+    }
+
+    pub(crate) fn salvage_on_error(&self, err_msg: &str, partial_output: &str) -> String {
+        let mut parts = vec![err_msg.to_string()];
+        if let Some(receipt) = self.receipt_line(false) {
+            parts.push(receipt);
+        }
+        let partial = partial_output.trim();
+        if !partial.is_empty() {
+            let capped: String = partial.chars().take(4_000).collect();
+            parts.push(format!("Partial findings before stop:\n{capped}"));
+        }
+        parts.join("\n\n")
+    }
+}
+
+pub(crate) fn build_subagent_user_prompt(task: &SubagentTask) -> String {
+    let mut prompt = task.label.clone();
+    let mut focus_files = task.files.clone();
+    if !task.write {
+        for p in &task.paths {
+            if !focus_files.contains(p) {
+                focus_files.push(p.clone());
+            }
+        }
+    }
+    if !focus_files.is_empty() {
+        prompt.push_str(&format!("\n\nTarget files/paths: {}", focus_files.join(", ")));
+    }
+    if let Some(ref ctx) = task.context {
+        prompt.push_str(&format!("\n\nAdditional context from parent:\n{ctx}"));
+    }
+    prompt
+}
+
+pub(crate) fn build_subagent_tail(
+    root: &Path,
+    parent_session: &str,
+    task: &SubagentTask,
+    child_read_only: bool,
+) -> String {
+    let mut block = String::new();
+    if child_read_only {
+        block.push_str(
+            "<subagent_contract>\n\
+             Role: READ-ONLY EXPLORER SUBAGENT\n\
+             - You are running in an isolated child context to investigate and report back to the parent agent.\n\
+             - Do NOT call mutating tools (`write`, `edit`, `multi_edit`, `patch`, `git_commit`, `git_stage`), `plan`, `memory_write`, `subagent`, or `ask_user`.\n\
+             - Emit independent `grep`, `glob`, `outline`, and `read(offset, limit)` calls in parallel batches.\n\
+             - Structure your final report concisely for the parent agent:\n\
+               1. **Findings:** Verified facts with exact `path:line` references and symbol names.\n\
+               2. **Key Signatures / Snippets:** Exact type/function signatures or critical lines so the parent does not need to re-read the same files.\n\
+               3. **Risks / Edge Cases:** Callers, invariants, or edge cases discovered.\n\
+             </subagent_contract>",
+        );
+    } else {
+        let scope_list = if task.paths.is_empty() {
+            "(none)".to_string()
+        } else {
+            task.paths.join(", ")
+        };
+        block.push_str(&format!(
+            "<subagent_contract>\n\
+             Role: SCOPED WRITER SUBAGENT\n\
+             Allowed write scope: [{scope_list}]\n\
+             - You are running in an isolated child context to implement changes strictly inside the allowed write scope above. Writes outside those paths are rejected by the host.\n\
+             - Do NOT call `plan`, `memory_write`, `git_commit`, `subagent`, or `ask_user` — the parent agent owns plan state, git commits, memory, and user interaction.\n\
+             - Read target files before overwriting or editing, and verify your changes (e.g. `cargo check` or targeted tests) before finishing when feasible.\n\
+             - Structure your final report concisely for the parent agent:\n\
+               1. **Changes Made:** Exact files and symbols modified (`path:line`) and what changed.\n\
+               2. **Verification:** Checks run and their outcome (or why verification was skipped).\n\
+               3. **Interface / Follow-up Impact:** Any cross-file impacts outside your write scope that the parent must handle.\n\
+             </subagent_contract>"
+        ));
+    }
+
+    if let Some(parent_ctx) = build_parent_context_brief(root, parent_session) {
+        block.push_str("\n\n");
+        block.push_str(&parent_ctx);
+    }
+    block
+}
+
+pub(crate) fn build_parent_context_brief(root: &Path, parent_session: &str) -> Option<String> {
+    if parent_session.trim().is_empty() {
+        return None;
+    }
+    let mut lines: Vec<String> = Vec::new();
+
+    if let Ok(Some(active_plan)) = plan::open_active_for_session(root, Some(parent_session)) {
+        lines.push(format!("Plan goal: {}", active_plan.goal.text));
+        if let Some(in_prog) = active_plan
+            .steps
+            .iter()
+            .find(|s| s.status == plan::StepStatus::InProgress)
+        {
+            lines.push(format!("Active step [{}]: {}", in_prog.id, in_prog.title));
+        }
+        if !active_plan.constraints.is_empty() {
+            lines.push(format!(
+                "Plan constraints: {}",
+                active_plan.constraints.join("; ")
+            ));
+        }
+    }
+
+    if let Ok(records) = crate::agent::journal::Journal::records_for(root, parent_session) {
+        let mut modified: Vec<String> = Vec::new();
+        let mut inspected: Vec<String> = Vec::new();
+        let mut notes: Vec<String> = Vec::new();
+
+        for rec in records.iter().rev() {
+            match rec.kind.as_str() {
+                "file_diff" => {
+                    if modified.len() < 8
+                        && let Some(p) = rec.fields.get("path").and_then(|v| v.as_str())
+                        && !p.is_empty()
+                        && !modified.iter().any(|x| x == p)
+                    {
+                        modified.push(p.to_string());
+                    }
+                }
+                "tool_call" => {
+                    let tool = rec.fields.get("tool").and_then(|v| v.as_str()).unwrap_or("");
+                    if matches!(tool, "read" | "outline")
+                        && inspected.len() < 10
+                        && let Some(p) = rec.fields.get("path").and_then(|v| v.as_str())
+                        && !p.is_empty()
+                        && !inspected.iter().any(|x| x == p)
+                    {
+                        inspected.push(p.to_string());
+                    }
+                }
+                "note" => {
+                    if notes.len() < 5 {
+                        let (kind, text) = match (
+                            rec.fields.get("note").and_then(|v| v.as_str()),
+                            rec.fields.get("text").and_then(|v| v.as_str()),
+                        ) {
+                            (Some(k), Some(t)) if !t.is_empty() => (k, t),
+                            (Some(t), None) if !t.is_empty() => ("note", t),
+                            _ => continue,
+                        };
+                        let entry = format!("[{kind}] {text}");
+                        if !notes.contains(&entry) {
+                            notes.push(entry);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if !modified.is_empty() {
+            lines.push(format!(
+                "Parent modified files: {}",
+                modified.join(", ")
+            ));
+        }
+        if !inspected.is_empty() {
+            lines.push(format!(
+                "Parent recently read files: {}",
+                inspected.join(", ")
+            ));
+        }
+        if !notes.is_empty() {
+            lines.push(format!("Parent session notes: {}", notes.join(" | ")));
+        }
+    }
+
+    if lines.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "<parent_context>\n{}\n</parent_context>",
+            lines.join("\n")
+        ))
+    }
 }
 
 fn next_subagent_id() -> u64 {

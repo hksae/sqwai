@@ -404,18 +404,34 @@ impl App {
                     ]),
                     Some(idx),
                 ));
-                if *expanded {
-                    for line in wrap_tagged(
-                        output
-                            .lines()
-                            .map(|l| (Line::from(l.to_string()), None))
-                            .collect(),
-                        w.saturating_sub(4),
-                    )
-                    .0
-                    {
+                if *expanded && !output.is_empty() {
+                    let (shown, total) = tool_preview(None, output);
+                    let width = usize::from(w).saturating_sub(2).max(1);
+                    for l in &shown {
+                        let st = if l.starts_with('+') && !l.starts_with("+++") {
+                            Theme::ok()
+                        } else if l.starts_with('-') && !l.starts_with("---") {
+                            Theme::err()
+                        } else if l.starts_with("@@") || l.starts_with("[Subagent receipt:") {
+                            Theme::accent()
+                        } else {
+                            Theme::dim()
+                        };
                         out.push((
-                            Line::from(vec![Span::styled(format!("    {line}"), Theme::dim())]),
+                            Line::from(vec![
+                                Span::styled("  ".to_string(), Theme::base()),
+                                Span::styled(truncate_display_width(l, width), st),
+                            ]),
+                            Some(idx),
+                        ));
+                    }
+                    if total > shown.len() {
+                        let more = format!("… {} more lines", total - shown.len());
+                        out.push((
+                            Line::from(vec![
+                                Span::styled("  ".to_string(), Theme::base()),
+                                Span::styled(truncate_display_width(&more, width), Theme::dim()),
+                            ]),
                             Some(idx),
                         ));
                     }

@@ -98,9 +98,6 @@ pub(super) enum ClickTarget {
         seg: u64,
         screen: u16,
     },
-    OpenSubagent {
-        seg: u64,
-    },
     /// Fenced-block index resolved at press: the fire step only indexes the
     /// segment's source blocks, so a layout shift in between cannot retarget
     /// the copy to a row that moved under the old screen line.
@@ -589,10 +586,12 @@ impl App {
             return Some(ClickTarget::Link { url });
         }
         match segs.get(tag) {
-            Some(Segment::Subagent { .. }) => Some(ClickTarget::OpenSubagent { seg: id }),
-            Some(Segment::Thinking { .. } | Segment::Tool { .. } | Segment::Status { .. }) => {
-                Some(ClickTarget::Toggle { seg: id, screen })
-            }
+            Some(
+                Segment::Thinking { .. }
+                | Segment::Subagent { .. }
+                | Segment::Tool { .. }
+                | Segment::Status { .. },
+            ) => Some(ClickTarget::Toggle { seg: id, screen }),
             _ => None,
         }
     }
@@ -933,6 +932,7 @@ impl App {
                         ..
                     }) => Some(!*expanded),
                     Some(Segment::Thinking { expanded, .. }) => Some(!*expanded),
+                    Some(Segment::Subagent { expanded, .. }) => Some(!*expanded),
                     Some(Segment::Tool {
                         ok: Some(_),
                         expanded,
@@ -976,15 +976,6 @@ impl App {
                     }
                     self.touch_segment(idx);
                     self.dirty = true;
-                }
-            }
-            ClickTarget::OpenSubagent { seg } => {
-                let Some(idx) = self.index_of_seg(seg) else {
-                    return;
-                };
-                if let Some(Segment::Subagent { id, .. }) = self.segments.get(idx) {
-                    let id = *id;
-                    self.open_subagent_view(id);
                 }
             }
             ClickTarget::Code { seg, block } => {
@@ -1720,6 +1711,7 @@ impl App {
         self.last_fp = store.fp;
     }
 
+    #[cfg(test)]
     pub(super) fn open_subagent_view(&mut self, id: u64) {
         if let Some(cur) = self.active_subagent {
             if cur == id {

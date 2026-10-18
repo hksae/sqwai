@@ -126,10 +126,33 @@ impl App {
                 {
                     current.push_str(&text);
                 }
+                if let Some(pos) = self
+                    .segments
+                    .iter()
+                    .rposition(|s| matches!(s, Segment::Subagent { id: sid, .. } if *sid == id))
+                    && let Some(Segment::Subagent { output, .. }) = self.segments.get_mut(pos)
+                {
+                    output.push_str(&text);
+                    self.touch_segment(pos);
+                }
                 self.sub_touch_all(id);
                 self.dirty = true;
             }
             AgentEvent::SubagentToolStart { id, name, summary } => {
+                if let Some(pos) = self
+                    .segments
+                    .iter()
+                    .rposition(|s| matches!(s, Segment::Subagent { id: sid, .. } if *sid == id))
+                    && let Some(Segment::Subagent { output, .. }) = self.segments.get_mut(pos)
+                {
+                    let step_line = if summary.trim().is_empty() {
+                        format!("• {name}\n")
+                    } else {
+                        format!("• {name} ({})\n", summary.trim())
+                    };
+                    output.push_str(&step_line);
+                    self.touch_segment(pos);
+                }
                 let preamble: Option<(usize, String)> = if let Some(chat) =
                     self.subagent_chats.get_mut(&id)
                 {

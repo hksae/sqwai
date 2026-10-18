@@ -378,8 +378,37 @@ Pass context:N for N surrounding lines per match (like grep -C) so a follow-up r
         ToolDef {
             name: "subagent",
             kind: Kind::ReadOnly,
-            description: "Delegate one or more focused tasks to child agents. Children inherit the current Plan/Act mode; up to 8 tasks are accepted, at most 4 run concurrently, and child agents cannot create further subagents. A child silent for 600s is cancelled and reported as timed out. Children are read-only by default; a task object with write:true and paths:[...] declares a writer scoped to those roots (non-empty, non-overlapping with sibling writers) — writes outside the scope are refused.",
-            parameters: json!({"type":"object","properties":{"tasks":{"type":"array","items":{"anyOf":[{"type":"string"},{"type":"object","properties":{"task":{"type":"string"},"prompt":{"type":"string"},"description":{"type":"string"},"write":{"type":"boolean","description":"allow file writes, scoped to paths"},"paths":{"type":"array","items":{"type":"string"},"description":"write scope roots, required with write:true"}},"additionalProperties":true}]},"minItems":1,"maxItems":8,"description":"focused child tasks to run concurrently: strings, or objects with task|prompt"}},"required":["tasks"]}),
+            description: "Delegate 1–8 focused tasks to isolated child agents (up to 4 run concurrently). Children inherit the cached project/system prefix and receive a host-generated `<parent_context>` brief (active plan goal/step, parent's recent files and notes) plus a `<subagent_contract>` tailored to their mode: Read-Only Explorer (`write: false`, default) for broad multi-file research without polluting parent context, or Scoped Writer (`write: true, paths: [...]`, non-overlapping across siblings) for isolated implementation. Pass optional `files` or `context` in task objects to point children at known starting points. Returns each child's report with a host-verified `[Subagent receipt: ...]` of executed tools and modified files.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "tasks": {
+                        "type": "array",
+                        "items": {
+                            "anyOf": [
+                                {"type": "string"},
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "task": {"type": "string"},
+                                        "prompt": {"type": "string"},
+                                        "description": {"type": "string"},
+                                        "context": {"type": "string", "description": "optional background/decisions from parent to guide the child"},
+                                        "files": {"type": "array", "items": {"type": "string"}, "description": "optional starting file/dir paths to inspect"},
+                                        "write": {"type": "boolean", "description": "allow file writes, scoped to paths"},
+                                        "paths": {"type": "array", "items": {"type": "string"}, "description": "write scope roots (required with write:true; or focus paths when write:false)"}
+                                    },
+                                    "additionalProperties": true
+                                }
+                            ]
+                        },
+                        "minItems": 1,
+                        "maxItems": 8,
+                        "description": "focused child tasks to run concurrently: strings, or objects with task|prompt"
+                    }
+                },
+                "required": ["tasks"]
+            }),
         },
         ToolDef {
             name: "note",

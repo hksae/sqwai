@@ -1,5 +1,6 @@
 use super::loop_subagent::{
-    MAX_PARALLEL_SUBAGENTS, SubagentTask, next_subagent_session, subagent_tasks_from_args,
+    MAX_PARALLEL_SUBAGENTS, SubagentTask, SubagentTrail, build_subagent_tail,
+    build_subagent_user_prompt, next_subagent_session, subagent_tasks_from_args,
 };
 
 /// #190: every child session id is distinct, even back-to-back —
@@ -104,4 +105,99 @@ fn rejects_more_than_eight_subagents() {
     let error = subagent_tasks_from_args(&serde_json::json!({"tasks":tasks})).unwrap_err();
     assert!(error.contains("maximum is 8"));
     assert_eq!(MAX_PARALLEL_SUBAGENTS, 4);
+}
+
+#[test]
+fn subagent_contract_parent_context_and_receipt_salvage() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+
+    // Create an active plan and parent journal entries so `<parent_context>` is populated.
+    let mut plan = crate::plan::create(
+        "Refactor parser module".into(),
+        vec!["Preserve public AST API".into()],
+        vec!["cargo test passes".into()],
+        vec![crate::plan::NewStep {
+            title: "Extract lexer tokens".into(),
+        }],
+        &crate::plan::Limits::default(),
+    )
+    .unwrap();
+    plan.sessions = vec!["parent-s1".into()];
+    crate::plan::apply(
+        &mut plan,
+        crate::plan::Op::Start {
+            id: "1".into(),
+            confirm: None,
+        },
+        &crate::plan::Limits::default(),
+        None,
+    )
+    .unwrap();
+    crate::plan::store(root, &plan).unwrap();
+
+    let mut j = crate::agent::journal::Journal::open(root, "parent-s1").unwrap();
+    j.append(
+        "tool_call",
+        serde_json::json!({"tool": "read", "path": "src/parser.rs"}),
+    )
+    .unwrap();
+    j.append(
+        "file_diff",
+        serde_json::json!({"path": "src/lexer.rs", "diff": "+token"}),
+    )
+    .unwrap();
+    j.append(
+        "note",
+        serde_json::json!({"note": "decision", "text": "Keep Token enum Copy"}),
+    )
+    .unwrap();
+
+    let tasks = subagent_tasks_from_args(&serde_json::json!({
+        "tasks": [
+            {
+                "task": "Find all callers of parse_expr",
+                "files": ["./src/parser.rs"],
+                "context": "Checking impact before signature change"
+            },
+            {
+                "task": "Implement Token::is_keyword",
+                "write": true,
+                "paths": ["src/lexer.rs"]
+            }
+        ]
+    }))
+    .unwrap();
+
+    let explorer_prompt = build_subagent_user_prompt(&tasks[0]);
+    assert!(explorer_prompt.contains("Target files/paths: src/parser.rs"));
+    assert!(explorer_prompt.contains("Checking impact before signature change"));
+
+    let explorer_tail = build_subagent_tail(root, "parent-s1", &tasks[0], true);
+    assert!(explorer_tail.contains("Role: READ-ONLY EXPLORER SUBAGENT"));
+    assert!(explorer_tail.contains("Plan goal: Refactor parser module"));
+    assert!(explorer_tail.contains("Active step [1]: Extract lexer tokens"));
+    assert!(explorer_tail.contains("Parent modified files: src/lexer.rs"));
+    assert!(explorer_tail.contains("Parent recently read files: src/parser.rs"));
+    assert!(explorer_tail.contains("[decision] Keep Token enum Copy"));
+
+    let writer_tail = build_subagent_tail(root, "parent-s1", &tasks[1], false);
+    assert!(writer_tail.contains("Role: SCOPED WRITER SUBAGENT"));
+    assert!(writer_tail.contains("Allowed write scope: [src/lexer.rs]"));
+
+    // Verify SubagentTrail receipt and partial-work salvage on timeout/error.
+    let mut trail = SubagentTrail::default();
+    trail.record_start("grep", "parse_expr");
+    trail.record_done("grep", true);
+    trail.record_start("read", "src/parser.rs");
+    trail.record_done("read", true);
+    trail.modified_files.push("src/lexer.rs".into());
+
+    let attached = trail.attach_receipt("All callers updated.", true);
+    assert!(attached.contains("[Subagent receipt: ok | 2 tool call(s): grep(parse_expr), read(src/parser.rs) | modified: src/lexer.rs]"));
+
+    let salvaged = trail.salvage_on_error("subagent timed out after 600s", "Found 3 callers in src/ast.rs:42");
+    assert!(salvaged.contains("subagent timed out after 600s"));
+    assert!(salvaged.contains("[Subagent receipt: stopped | 2 tool call(s)"));
+    assert!(salvaged.contains("Partial findings before stop:\nFound 3 callers in src/ast.rs:42"));
 }

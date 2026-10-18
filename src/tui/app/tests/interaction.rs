@@ -472,37 +472,29 @@ fn finish_turn_ok_rebases_notes_after_compaction() {
 }
 
 #[test]
-fn transcript_row_opens_read_only_child_chat() {
-    use crate::tui::app::view::SegMeta;
+fn transcript_row_toggles_subagent_inline_like_standard_tool() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.startup = false;
-    app.subagents.push((
-        7,
-        "inspect rendering".into(),
-        "running".into(),
-        "read view.rs".into(),
-        false,
-    ));
     app.push_segment(Segment::Subagent {
         id: 7,
         task: "inspect rendering".into(),
-        status: "running".into(),
-        output: String::new(),
+        status: "completed".into(),
+        output: "found 3 callers in src/view.rs\n[Subagent receipt: ok | 2 tool call(s): grep(render)]".into(),
         expanded: false,
     });
-    app.subagent_chats
-        .insert(7, vec![Segment::User("do research".into())]);
-    app.subagent_meta
-        .insert(7, vec![SegMeta { id: 70, rev: 0 }]);
-    render_to_string(&mut app, 100, 30);
-    // the child's own row (no list menu anymore) opens its transcript
+    let collapsed = render_to_string(&mut app, 100, 30);
+    assert!(!collapsed.contains("found 3 callers"), "collapsed by default:\n{collapsed}");
+
     let row = app
         .cache_rowseg
         .iter()
         .position(|t| *t == Some(0))
         .expect("child row");
     app.click(row);
-    assert_eq!(app.active_subagent, Some(7));
+    assert_eq!(app.active_subagent, None, "stays in main chat instead of switching screens");
+    let unfolded = render_to_string(&mut app, 100, 30);
+    assert!(unfolded.contains("found 3 callers in src/view.rs"), "unfolds inline:\n{unfolded}");
+    assert!(unfolded.contains("[Subagent receipt: ok"), "receipt visible inline:\n{unfolded}");
 }
 
 fn open_sub_chat(app: &mut App, id: u64, status: &str) {
