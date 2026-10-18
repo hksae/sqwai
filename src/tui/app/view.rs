@@ -2015,8 +2015,15 @@ pub(super) fn cols(s: &str) -> usize {
 }
 
 pub(super) fn truncate_display_width(s: &str, width: usize) -> String {
-    let clean: std::borrow::Cow<'_, str> = if s.contains(['\n', '\r']) {
-        std::borrow::Cow::Owned(s.lines().map(str::trim).filter(|l| !l.is_empty()).collect::<Vec<_>>().join(" "))
+    let clean: std::borrow::Cow<'_, str> = if s.contains(['\n', '\r', '\t']) {
+        std::borrow::Cow::Owned(
+            s.replace('\t', " ")
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .collect::<Vec<_>>()
+                .join(" "),
+        )
     } else {
         std::borrow::Cow::Borrowed(s)
     };

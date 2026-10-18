@@ -907,6 +907,36 @@ fn toggled_tool_with_tabbed_output_leaves_no_control_cells() {
         !rows.iter().any(|r| r.contains("50%")),
         "overwritten progress survived: {rows:?}"
     );
+
+    // Long tabbed `read` row in a narrow terminal must truncate on 1 row, never wrap onto a 2nd row.
+    app.segments[tool_idx] = Segment::Tool {
+        call_id: None,
+        name: "read".into(),
+        args: "Cargo.toml".into(),
+        ok: Some(true),
+        output: "     5\tdescription = \"TUI coding agent\"\n     6\tlicense = \"Apache-2.0\"".into(),
+        diff: None,
+        preview: Vec::new(),
+        preview_total: 0,
+        expanded: true,
+        flash: None,
+        ask: None,
+    };
+    app.touch_segment(tool_idx);
+    app.rebuild_cache(40);
+    let tool_rows: Vec<String> = app
+        .cache_lines
+        .iter()
+        .zip(app.cache_rowseg.iter())
+        .filter(|(_, tag)| **tag == Some(tool_idx))
+        .map(|(l, _)| l.spans.iter().map(|s| s.content.as_ref()).collect())
+        .collect();
+    // 1 header row + 2 output rows = 3 rows total (line 5 must NOT wrap into a 4th row).
+    assert_eq!(
+        tool_rows.len(),
+        3,
+        "each expanded read line must stay on a single row without wrapping: {tool_rows:?}"
+    );
     // collapse again: the dialog keeps no tool fragments either
     let header = app
         .cache_rowseg

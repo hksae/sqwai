@@ -11,6 +11,45 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::tui::markdown::{render, wrap_tagged};
 use crate::tui::theme::Theme;
 
+/// Expand tabs (`\t` -> 8-column tab stops relative to `start_col`) and apply
+/// carriage-return (`\r`) line overwrites BEFORE `truncate_display_width`
+/// measures the row. Without this, `truncate_display_width` counts `\t` as 0
+/// columns, leaves it in the string, and `wrap_tagged` later expands `\t` to 8
+/// spaces — pushing the truncated row 8 columns past `width` and wrapping its
+/// tail onto a second line.
+fn expand_tool_row_controls(raw: &str, start_col: usize) -> String {
+    let overwrite = raw
+        .rfind('\r')
+        .filter(|&i| raw.as_bytes().get(i + 1) != Some(&b'\n'));
+    let text = match overwrite {
+        Some(i) => &raw[i + 1..],
+        None => raw,
+    };
+    if !text.bytes().any(|b| b < 0x20 || b == 0x7f) {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len() + 8);
+    let mut col = start_col;
+    for ch in text.chars() {
+        if ch == '\t' {
+            let spaces = 8 - (col % 8);
+            for _ in 0..spaces {
+                out.push(' ');
+            }
+            col += spaces;
+        } else if ch == '\n' || ch == '\r' {
+            out.push(' ');
+            col += 1;
+        } else if ch.is_control() {
+            // drop zero-width control chars
+        } else {
+            col += UnicodeWidthChar::width(ch).unwrap_or(0);
+            out.push(ch);
+        }
+    }
+    out
+}
+
 impl App {
     /// cache key for a segment's rendered content; changing it forces a repaint.
     /// Byte lengths (O(1)) rather than char counts: counting chars over the
@@ -426,11 +465,14 @@ impl App {
                         let total = non_empty.len();
                         let shown = &non_empty[..total.min(40)];
                         for l in shown {
-                            let st = if l.starts_with('+') && !l.starts_with("+++") {
+                            let expanded_l = expand_tool_row_controls(l, 2);
+                            let st = if expanded_l.starts_with('+') && !expanded_l.starts_with("+++") {
                                 Theme::ok()
-                            } else if l.starts_with('-') && !l.starts_with("---") {
+                            } else if expanded_l.starts_with('-') && !expanded_l.starts_with("---") {
                                 Theme::err()
-                            } else if l.starts_with("@@") || l.starts_with("[Subagent receipt:") {
+                            } else if expanded_l.starts_with("@@")
+                                || expanded_l.starts_with("[Subagent receipt:")
+                            {
                                 Theme::accent()
                             } else {
                                 Theme::dim()
@@ -438,7 +480,7 @@ impl App {
                             out.push((
                                 Line::from(vec![
                                     Span::styled("  ".to_string(), Theme::base()),
-                                    Span::styled(truncate_display_width(l, width), st),
+                                    Span::styled(truncate_display_width(&expanded_l, width), st),
                                 ]),
                                 Some(idx),
                             ));
@@ -566,11 +608,12 @@ impl App {
                     let total = preview_total;
                     let width = usize::from(w).saturating_sub(2).max(1);
                     for l in &shown {
-                        let st = if l.starts_with('+') && !l.starts_with("+++") {
+                        let expanded_l = expand_tool_row_controls(l, 2);
+                        let st = if expanded_l.starts_with('+') && !expanded_l.starts_with("+++") {
                             Theme::ok()
-                        } else if l.starts_with('-') && !l.starts_with("---") {
+                        } else if expanded_l.starts_with('-') && !expanded_l.starts_with("---") {
                             Theme::err()
-                        } else if l.starts_with("@@") {
+                        } else if expanded_l.starts_with("@@") {
                             Theme::accent()
                         } else {
                             Theme::dim()
@@ -578,7 +621,7 @@ impl App {
                         out.push((
                             Line::from(vec![
                                 Span::styled("  ".to_string(), Theme::base()),
-                                Span::styled(truncate_display_width(l, width), st),
+                                Span::styled(truncate_display_width(&expanded_l, width), st),
                             ]),
                             Some(idx),
                         ));
