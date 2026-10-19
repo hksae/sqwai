@@ -453,4 +453,25 @@ fn a_grant_follows_the_shape_of_the_risk() {
         !rm.covers("rm -rf build", "recursive delete"),
         "the classic widening stays behind a dialog"
     );
+
+    // Target-scoped destructive commands: `rm -rf target/debug` covers the
+    // same target, but NEVER covers `rm -rf src` or a chained `&& sudo reboot`
+    let rm_target = Grant::from_command("rm -rf target/debug", "recursive delete");
+    assert!(rm_target.covers("rm -rf target/debug", "recursive delete"));
+    assert!(
+        !rm_target.covers("rm -rf src", "recursive delete"),
+        "destructive grant must stay pinned to the approved target path"
+    );
+    assert!(
+        !rm_target.covers("rm -rf target/debug && rm -rf src", "recursive delete"),
+        "compound command with an unapproved second target must not ride on the first"
+    );
+
+    // Exec wrappers (`sudo`, `xargs`, `find`) are exact-only, never wildcarded
+    let sudo_grant = Grant::from_command("sudo rm /tmp/a", "privilege/system control");
+    assert!(sudo_grant.covers("sudo rm /tmp/a", "privilege/system control"));
+    assert!(
+        !sudo_grant.covers("sudo rm /etc/passwd", "privilege/system control"),
+        "sudo grant must never wildcard inner arguments"
+    );
 }

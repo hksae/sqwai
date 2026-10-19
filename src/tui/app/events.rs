@@ -622,6 +622,11 @@ impl App {
                         // shortcuts: the options are reached with arrows, click
                         // or a, and a digit in the terminal is cheap to mistype
                         // on the one dialog that runs a shell command.
+                        KeyCode::Char('r') | KeyCode::Char('y')
+                            if matches!(self.cur_menu(), Some(Menu::Approval { .. })) =>
+                        {
+                            self.approval_select(ApprovalDecision::RunOnce)
+                        }
                         KeyCode::Char('a')
                             if matches!(self.cur_menu(), Some(Menu::Approval { .. })) =>
                         {

@@ -466,31 +466,20 @@ fn heuristic_classify(shell: ShellKind, cmd: &str) -> Verdict {
         return Verdict::NeedsApproval("powershell code execution pattern");
     }
 
-    // --- forceful git operations -----------------------------------------
-    for g in [
-        "push --force",
-        "push -f",
-        "reset --hard",
-        "clean -fdx",
-        "clean -dfx",
-        "checkout -- .",
-        "restore .",
-        "branch -d ",
-        "branch -D ",
-    ] {
-        if lower.contains(g) {
-            return Verdict::NeedsApproval("forceful git operation");
-        }
+    // --- forceful git operations (token-level, position-independent) -------
+    if let Some(reason) = check_git_destructive(&lower) {
+        return Verdict::NeedsApproval(reason);
     }
-    // force push via refspec: `git push origin +master` moves the force flag
-    // into the refspec, so the substring checks above never see it
-    if lower.contains("git push") {
-        let tokens: Vec<&str> = lower.split_whitespace().collect();
-        if let Some(pos) = tokens.iter().position(|t| *t == "push")
-            && tokens[pos + 1..].iter().any(|t| t.starts_with('+'))
-        {
-            return Verdict::NeedsApproval("forceful git operation");
-        }
+
+    // --- cross-platform find -delete / -exec & tee to critical path --------
+    if check_find_destructive(&lower) {
+        return Verdict::NeedsApproval("find -delete/-exec (bulk file destruction)");
+    }
+    if check_tee_critical(&lower) {
+        return Verdict::NeedsApproval("redirect overwrites a critical path");
+    }
+    if check_unc_network_path(cmd) {
+        return Verdict::NeedsApproval("network UNC path access");
     }
 
     // --- package publishing ------------------------------------------------
@@ -508,6 +497,179 @@ fn heuristic_classify(shell: ShellKind, cmd: &str) -> Verdict {
     }
 
     Verdict::Safe
+}
+
+/// Token-level detector for destructive/forceful git subcommands across all
+/// shells. Handles global git options (`git -C dir push origin main --force`)
+/// and flags in any position (`--force`, `-f`, `--force-with-lease`, `+ref`,
+/// `clean -fd`, `reset --hard`, `branch -D`, `stash clear/drop`).
+fn check_git_destructive(lower: &str) -> Option<&'static str> {
+    const GIT_VALUE_FLAGS: &[&str] = &[
+        "-c",
+        "--git-dir",
+        "--work-tree",
+        "--namespace",
+        "--super-prefix",
+    ];
+    for seg in lower.split([';', '|', '&', '\n']) {
+        let words: Vec<&str> = seg.split_whitespace().collect();
+        if words.is_empty() {
+            continue;
+        }
+        let idx = effective_command_index(&words);
+        let head = words[idx].trim_end_matches(".exe");
+        if head != "git" && !head.ends_with("/git") && !head.ends_with("\\git") {
+            continue;
+        }
+        let mut i = idx + 1;
+        let mut subcmd: Option<&str> = None;
+        while i < words.len() {
+            let w = words[i];
+            if w.starts_with('-') {
+                if GIT_VALUE_FLAGS.contains(&w) {
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+                continue;
+            }
+            subcmd = Some(w);
+            i += 1;
+            break;
+        }
+        let Some(sub) = subcmd else {
+            continue;
+        };
+        let args = &words[i..];
+        match sub {
+            "push" => {
+                let forceful = args.iter().any(|a| {
+                    *a == "-f"
+                        || *a == "--force"
+                        || a.starts_with("--force-with-lease")
+                        || a.starts_with("--force-if-includes")
+                        || *a == "--delete"
+                        || *a == "-d"
+                        || (a.starts_with('+') && a.len() > 1)
+                        || (a.starts_with(':') && a.len() > 1)
+                });
+                if forceful {
+                    return Some("forceful git operation");
+                }
+            }
+            "reset" => {
+                if args.iter().any(|a| *a == "--hard" || *a == "--merge") {
+                    return Some("forceful git operation");
+                }
+            }
+            "clean" => {
+                if args.iter().any(|a| {
+                    *a == "--force"
+                        || (a.starts_with('-') && !a.starts_with("--") && a.contains('f'))
+                }) {
+                    return Some("forceful git operation");
+                }
+            }
+            "checkout" | "switch" => {
+                if args
+                    .iter()
+                    .any(|a| *a == "-f" || *a == "--force" || *a == ".")
+                {
+                    return Some("forceful git operation");
+                }
+            }
+            "restore" => {
+                if args.contains(&".") && !args.contains(&"--staged") && !args.contains(&"-s") {
+                    return Some("forceful git operation");
+                }
+            }
+            "branch" => {
+                if args
+                    .iter()
+                    .any(|a| *a == "-d" || *a == "-D" || *a == "--delete")
+                {
+                    return Some("forceful git operation");
+                }
+            }
+            "stash" => {
+                if args.first().is_some_and(|a| *a == "clear" || *a == "drop") {
+                    return Some("forceful git operation");
+                }
+            }
+            "filter-branch" | "filter-repo" => {
+                return Some("forceful git operation");
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn check_find_destructive(lower: &str) -> bool {
+    for seg in lower.split([';', '|', '&', '\n']) {
+        let words: Vec<&str> = seg.split_whitespace().collect();
+        if words.is_empty() {
+            continue;
+        }
+        let idx = effective_command_index(&words);
+        let head = words[idx].trim_end_matches(".exe");
+        if (head == "find" || head.ends_with("/find"))
+            && words[idx + 1..].iter().any(|w| {
+                matches!(
+                    *w,
+                    "-delete" | "-exec" | "-execdir" | "-ok" | "-okdir" | "-fprint" | "-fls"
+                )
+            })
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn check_tee_critical(lower: &str) -> bool {
+    for seg in lower.split([';', '|', '&', '\n']) {
+        let words: Vec<&str> = seg.split_whitespace().collect();
+        if words.is_empty() {
+            continue;
+        }
+        let idx = effective_command_index(&words);
+        let head = words[idx].trim_end_matches(".exe");
+        if (head == "tee" || head.ends_with("/tee"))
+            && words[idx + 1..]
+                .iter()
+                .filter(|w| !w.starts_with('-'))
+                .any(|w| {
+                    let clean = w.trim_matches(['"', '\'']);
+                    is_critical_path(clean)
+                        || clean.contains("c:\\windows")
+                        || clean.contains("c:/windows")
+                        || clean.contains("\\system32")
+                })
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn check_unc_network_path(cmd: &str) -> bool {
+    for raw in cmd.split_whitespace() {
+        let token = raw.trim_matches(['"', '\'']);
+        if let Some(rest) = token.strip_prefix("\\\\")
+            && let Some((host, share)) = rest.split_once('\\')
+            && !host.is_empty()
+            && !share.is_empty()
+            && host != "."
+            && host != "?"
+            && host
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn contains_any(hay: &str, needles: &[&str]) -> bool {
@@ -614,10 +776,29 @@ fn has_dynamic_code(lower: &str) -> bool {
         if head == "eval" || head == "source" || head == "." {
             return true;
         }
-        if matches!(head, "sh" | "bash" | "dash" | "zsh" | "ksh" | "fish") && rest.contains(&"-c") {
+        let head_clean = head.strip_suffix(".exe").unwrap_or(head);
+        if matches!(
+            head_clean,
+            "sh" | "bash"
+                | "dash"
+                | "zsh"
+                | "ksh"
+                | "fish"
+                | "pwsh"
+                | "powershell"
+                | "python"
+                | "python3"
+                | "python2"
+        ) && (rest.contains(&"-c") || rest.contains(&"-command"))
+        {
             return true;
         }
-        if head == "cmd" && rest.iter().any(|w| w.eq_ignore_ascii_case("/c")) {
+        if matches!(head_clean, "node" | "bun" | "deno" | "perl" | "ruby" | "lua")
+            && (rest.contains(&"-e") || rest.contains(&"--eval"))
+        {
+            return true;
+        }
+        if head_clean == "cmd" && rest.iter().any(|w| w.eq_ignore_ascii_case("/c")) {
             return true;
         }
     }
@@ -646,25 +827,21 @@ fn decodes_and_forwards(lower: &str) -> bool {
 /// Token-aware, not substring: `| head` stays Safe while `| sh`,
 /// `| pwsh -c`, `| powershell.exe` flag. Mirrors INTERPRETERS below.
 fn pipe_into_shell(lower: &str) -> bool {
-    const SHELLS: &[&str] = &[
-        "sh",
-        "bash",
-        "dash",
-        "zsh",
-        "fish",
-        "ksh",
-        "powershell",
-        "pwsh",
-        "cmd",
-    ];
     // `lower` is already lowercased by the caller
     for segment in lower.split('|').skip(1) {
         let seg = segment.trim_start().trim_start_matches('&').trim_start();
-        let mut token = seg.split_whitespace().next().unwrap_or("");
-        token = token.trim_end_matches([';', '&']);
-        // `powershell.exe`, `pwsh.exe`
-        let token = token.strip_suffix(".exe").unwrap_or(token);
-        if SHELLS.contains(&token) {
+        let words: Vec<&str> = seg
+            .split_whitespace()
+            .map(|w| w.trim_end_matches([';', '&']))
+            .filter(|w| !w.is_empty())
+            .collect();
+        if words.is_empty() {
+            continue;
+        }
+        let idx = effective_command_index(&words);
+        let token = words[idx].strip_suffix(".exe").unwrap_or(words[idx]);
+        let token = token.rsplit(['/', '\\']).next().unwrap_or(token);
+        if INTERPRETERS.contains(&token) {
             return true;
         }
     }
@@ -702,6 +879,16 @@ const INTERPRETERS: &[&str] = &[
     "pwsh",
     "powershell",
     "cmd",
+    "python",
+    "python3",
+    "python2",
+    "node",
+    "bun",
+    "deno",
+    "perl",
+    "ruby",
+    "php",
+    "lua",
 ];
 
 /// command heads that are dangerous by name regardless of context
@@ -1041,6 +1228,543 @@ fn command_parts(node: &Node, src: &str) -> Option<(String, Vec<String>, bool)> 
         head = words[effective_command_index(&refs)].clone();
     }
     Some((head, words, elevated))
+}
+
+/// Split a shell command into independent subcommands across `&&`, `||`, `;`,
+/// `|`, `|&`, `&`, and `\n` (respecting quotes and escapes), while also
+/// extracting inner commands from `$(...)` and `` `...` `` substitutions.
+/// Returns `Err` if quotes/substitutions are unterminated or if a list
+/// operator (`&&`, `||`, `|`) is left dangling at the end (Claude Code /
+/// OpenCode `opaque` rule).
+pub fn split_compound_commands(cmd: &str) -> Result<Vec<String>, &'static str> {
+    let mut out: Vec<String> = Vec::new();
+    let mut nested: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut chars = cmd.chars().peekable();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut dangling_op = false;
+
+    while let Some(c) = chars.next() {
+        if in_single {
+            cur.push(c);
+            if c == '\'' {
+                in_single = false;
+            }
+            continue;
+        }
+        if c == '\\' {
+            cur.push(c);
+            if let Some(next) = chars.next() {
+                cur.push(next);
+            } else {
+                return Err("unterminated escape");
+            }
+            dangling_op = false;
+            continue;
+        }
+        if in_double {
+            if c == '"' {
+                in_double = false;
+                cur.push(c);
+                continue;
+            }
+            if c == '$' && chars.peek() == Some(&'(') {
+                chars.next();
+                let inner = consume_balanced_parens(&mut chars)?;
+                if let Ok(subs) = split_compound_commands(&inner) {
+                    nested.extend(subs);
+                }
+                cur.push_str("$(");
+                cur.push_str(&inner);
+                cur.push(')');
+                continue;
+            }
+            cur.push(c);
+            continue;
+        }
+
+        match c {
+            '\'' => {
+                in_single = true;
+                cur.push(c);
+                dangling_op = false;
+            }
+            '"' => {
+                in_double = true;
+                cur.push(c);
+                dangling_op = false;
+            }
+            '`' => {
+                let mut inner = String::new();
+                let mut closed = false;
+                while let Some(bc) = chars.next() {
+                    if bc == '\\' {
+                        if let Some(esc) = chars.next() {
+                            inner.push(esc);
+                        }
+                        continue;
+                    }
+                    if bc == '`' {
+                        closed = true;
+                        break;
+                    }
+                    inner.push(bc);
+                }
+                if !closed {
+                    return Err("unterminated backtick substitution");
+                }
+                if let Ok(subs) = split_compound_commands(&inner) {
+                    nested.extend(subs);
+                }
+                cur.push('`');
+                cur.push_str(&inner);
+                cur.push('`');
+                dangling_op = false;
+            }
+            '$' if chars.peek() == Some(&'(') => {
+                chars.next();
+                let inner = consume_balanced_parens(&mut chars)?;
+                if let Ok(subs) = split_compound_commands(&inner) {
+                    nested.extend(subs);
+                }
+                cur.push_str("$(");
+                cur.push_str(&inner);
+                cur.push(')');
+                dangling_op = false;
+            }
+            ';' | '\n' => {
+                let seg = cur.trim();
+                if !seg.is_empty() {
+                    out.push(seg.to_string());
+                } else if dangling_op && c == ';' {
+                    return Err("invalid empty command after operator");
+                }
+                cur.clear();
+                dangling_op = false;
+            }
+            '|' => {
+                if chars.peek() == Some(&'|') || chars.peek() == Some(&'&') {
+                    chars.next();
+                }
+                let seg = cur.trim();
+                if seg.is_empty() {
+                    return Err("empty left-hand side before pipe/or operator");
+                }
+                out.push(seg.to_string());
+                cur.clear();
+                dangling_op = true;
+            }
+            '&' => {
+                if chars.peek() == Some(&'&') {
+                    chars.next();
+                    let seg = cur.trim();
+                    if seg.is_empty() {
+                        return Err("empty left-hand side before &&");
+                    }
+                    out.push(seg.to_string());
+                    cur.clear();
+                    dangling_op = true;
+                } else if chars.peek() == Some(&'>')
+                    || cur.ends_with('>')
+                    || cur.ends_with('<')
+                {
+                    // Redirection descriptor (`&>`, `2>&1`, `<&0`), not a command separator
+                    cur.push(c);
+                } else {
+                    let seg = cur.trim();
+                    if !seg.is_empty() {
+                        out.push(seg.to_string());
+                    }
+                    cur.clear();
+                    dangling_op = false;
+                }
+            }
+            _ => {
+                if !c.is_whitespace() {
+                    dangling_op = false;
+                }
+                cur.push(c);
+            }
+        }
+    }
+
+    if in_single || in_double {
+        return Err("unterminated quote");
+    }
+    if dangling_op && cur.trim().is_empty() {
+        return Err("dangling operator at end of command");
+    }
+    let tail = cur.trim();
+    if !tail.is_empty() {
+        out.push(tail.to_string());
+    }
+    out.extend(nested);
+    Ok(out)
+}
+
+fn consume_balanced_parens(
+    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+) -> Result<String, &'static str> {
+    let mut depth = 1usize;
+    let mut out = String::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    while let Some(c) = chars.next() {
+        if in_single {
+            if c == '\'' {
+                in_single = false;
+            }
+            out.push(c);
+            continue;
+        }
+        if c == '\\' {
+            out.push(c);
+            if let Some(next) = chars.next() {
+                out.push(next);
+            }
+            continue;
+        }
+        if in_double {
+            if c == '"' {
+                in_double = false;
+            }
+            out.push(c);
+            continue;
+        }
+        match c {
+            '\'' => in_single = true,
+            '"' => in_double = true,
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Ok(out);
+                }
+            }
+            _ => {}
+        }
+        out.push(c);
+    }
+    Err("unterminated command substitution")
+}
+
+/// Transparent wrappers that can be stripped before computing a permission rule
+/// (Claude Code process-wrappers convention: `timeout`, `time`, `nice`, `nohup`,
+/// `stdbuf`, `env`). Privilege/exec wrappers (`sudo`, `doas`, `xargs`, `watch`,
+/// `find`) are NOT stripped here — they require exact-command matching.
+const SAFE_STRIP_WRAPPERS: &[&str] = &["timeout", "time", "nice", "nohup", "stdbuf", "env"];
+
+/// Exec wrappers and dynamic runners whose inner command or action is too broad
+/// for a wildcard prefix grant (Claude Code "Exec wrappers and find actions").
+const EXACT_ONLY_BINARIES: &[&str] = &[
+    "sudo",
+    "doas",
+    "su",
+    "watch",
+    "xargs",
+    "find",
+    "eval",
+    "source",
+    "sh",
+    "bash",
+    "dash",
+    "zsh",
+    "ksh",
+    "fish",
+    "pwsh",
+    "powershell",
+    "cmd",
+    "iex",
+    "invoke-expression",
+];
+
+/// Destructive filesystem binaries where a session grant must also pin the
+/// target path arguments (`rm -rf target` must never grant `rm -rf src`).
+const TARGET_SCOPED_BINARIES: &[&str] = &[
+    "rm",
+    "rmdir",
+    "del",
+    "erase",
+    "rd",
+    "remove-item",
+    "ri",
+    "mv",
+    "cp",
+    "chmod",
+    "chown",
+    "dd",
+    "shred",
+    "format",
+    "diskpart",
+    "mkfs",
+];
+
+/// Parsed structure of a single subcommand for session permission grants.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubcommandGrant {
+    pub head: String,
+    pub flags: std::collections::BTreeSet<String>,
+    pub targets: Option<std::collections::BTreeSet<String>>,
+    pub exact_command: Option<String>,
+}
+
+impl SubcommandGrant {
+    pub fn from_subcommand(sub: &str) -> Self {
+        let norm_sub = sub.split_whitespace().collect::<Vec<_>>().join(" ");
+        let raw_words: Vec<&str> = sub.split_whitespace().collect();
+        if raw_words.is_empty() {
+            return Self {
+                head: String::new(),
+                flags: std::collections::BTreeSet::new(),
+                targets: None,
+                exact_command: Some(norm_sub),
+            };
+        }
+
+        // Strip leading safe env assignments (`NODE_ENV=test`) and transparent
+        // wrappers (`timeout 30`, `nice -n 10`).
+        let mut i = 0usize;
+        let mut wrapper: Option<&str> = None;
+        while i < raw_words.len() {
+            let w = raw_words[i];
+            let w_low = w.to_ascii_lowercase();
+            if SAFE_STRIP_WRAPPERS.contains(&w_low.as_str()) {
+                wrapper = Some(raw_words[i]);
+                i += 1;
+                continue;
+            }
+            if !w.starts_with('-') && w.contains('=') {
+                i += 1;
+                continue;
+            }
+            if let Some(wrap) = wrapper {
+                let wrap_low = wrap.to_ascii_lowercase();
+                if w.starts_with('-') {
+                    i += 1;
+                    if flag_takes_value(Some(wrap_low.as_str()), w) && i < raw_words.len() {
+                        i += 1;
+                    }
+                    continue;
+                }
+                if !w.is_empty() && w.chars().all(|c| c.is_ascii_digit()) {
+                    i += 1;
+                    continue;
+                }
+            }
+            break;
+        }
+        let words = &raw_words[i.min(raw_words.len().saturating_sub(1))..];
+        let bin_raw = words[0].trim_matches(['"', '\'']);
+        let bin_base = bin_raw
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or(bin_raw)
+            .trim_end_matches(".exe")
+            .to_ascii_lowercase();
+
+        // Exec wrappers, interpreters, or commands with redirects to critical paths require exact match
+        if EXACT_ONLY_BINARIES.contains(&bin_base.as_str()) || sub.contains('>') {
+            return Self {
+                head: bin_base,
+                flags: std::collections::BTreeSet::new(),
+                targets: None,
+                exact_command: Some(norm_sub),
+            };
+        }
+
+        let head = resolve_arity_head(&bin_base, &words[1..]);
+        let arity_words = head.split_whitespace().count();
+        let flags: std::collections::BTreeSet<String> = words[1..]
+            .iter()
+            .filter(|t| t.len() > 1 && (t.starts_with('-') || (bin_base == "cmd" && t.starts_with('/'))))
+            .map(|t| (*t).to_string())
+            .collect();
+
+        let targets = if TARGET_SCOPED_BINARIES.contains(&bin_base.as_str()) {
+            let positional: std::collections::BTreeSet<String> = words
+                .iter()
+                .skip(arity_words)
+                .filter(|t| !t.starts_with('-') && !(bin_base == "del" && t.starts_with('/')) && !(bin_base == "rd" && t.starts_with('/')) && !(bin_base == "rmdir" && t.starts_with('/')))
+                .map(|t| t.trim_matches(['"', '\'']).to_string())
+                .filter(|t| !t.is_empty())
+                .collect();
+            Some(positional)
+        } else {
+            None
+        };
+
+        Self {
+            head,
+            flags,
+            targets,
+            exact_command: None,
+        }
+    }
+
+    pub fn covers(&self, candidate_sub: &str) -> bool {
+        let cand = Self::from_subcommand(candidate_sub);
+        if let Some(exact) = &self.exact_command {
+            let cand_norm = candidate_sub.split_whitespace().collect::<Vec<_>>().join(" ");
+            return *exact == cand_norm;
+        }
+        if cand.exact_command.is_some() {
+            return false;
+        }
+        if self.head != cand.head || !cand.flags.is_subset(&self.flags) {
+            return false;
+        }
+        if let Some(allowed_targets) = &self.targets {
+            let Some(cand_targets) = &cand.targets else {
+                return false;
+            };
+            if cand_targets.is_empty() || !cand_targets.is_subset(allowed_targets) {
+                return false;
+            }
+        }
+        true
+    }
+
+    pub fn pattern_label(&self) -> String {
+        if let Some(exact) = &self.exact_command {
+            return exact.clone();
+        }
+        let mut parts = vec![self.head.clone()];
+        for f in &self.flags {
+            parts.push(f.clone());
+        }
+        if let Some(targets) = &self.targets
+            && !targets.is_empty()
+        {
+            for t in targets {
+                parts.push(t.clone());
+            }
+            return parts.join(" ");
+        }
+        parts.push("*".to_string());
+        parts.join(" ")
+    }
+}
+
+/// Arity-aware command prefix (OpenCode `parse.ts` ARITY convention):
+/// - `git <subcmd>` (skipping global flags like `-C <dir>`) -> `"git <subcmd>"`
+/// - `docker compose <subcmd>` -> `"docker compose <subcmd>"`
+/// - `cargo/npm/pnpm/yarn/bun/gh/kubectl <subcmd>` -> 2–3 words
+/// - single-verb binaries (`rm`, `chmod`, `curl`, `ssh`) -> 1 word
+fn resolve_arity_head(bin_base: &str, rest: &[&str]) -> String {
+    if bin_base == "git" {
+        const GIT_VAL_FLAGS: &[&str] = &[
+            "-c",
+            "-C",
+            "--git-dir",
+            "--work-tree",
+            "--namespace",
+            "--super-prefix",
+        ];
+        let mut i = 0usize;
+        while i < rest.len() {
+            let w = rest[i];
+            if w.starts_with('-') {
+                if GIT_VAL_FLAGS.contains(&w) {
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+                continue;
+            }
+            return format!("git {}", w.to_ascii_lowercase());
+        }
+        return "git".to_string();
+    }
+
+    let non_flag: Vec<String> = rest
+        .iter()
+        .take_while(|w| !w.starts_with('-'))
+        .take(2)
+        .map(|w| w.to_ascii_lowercase())
+        .collect();
+
+    if let Some(first) = non_flag.first() {
+        let two = format!("{bin_base} {first}");
+        if matches!(
+            two.as_str(),
+            "docker compose"
+                | "docker container"
+                | "docker image"
+                | "docker volume"
+                | "docker network"
+                | "docker builder"
+                | "cargo run"
+                | "cargo add"
+                | "npm run"
+                | "npm exec"
+                | "pnpm run"
+                | "pnpm exec"
+                | "yarn run"
+                | "bun run"
+                | "deno task"
+                | "gh pr"
+                | "gh issue"
+                | "gh repo"
+                | "kubectl rollout"
+        ) && let Some(second) = non_flag.get(1)
+        {
+            return format!("{two} {second}");
+        }
+        if matches!(
+            bin_base,
+            "cargo"
+                | "npm"
+                | "pnpm"
+                | "yarn"
+                | "bun"
+                | "deno"
+                | "docker"
+                | "podman"
+                | "kubectl"
+                | "helm"
+                | "terraform"
+                | "gh"
+                | "brew"
+                | "pip"
+                | "poetry"
+                | "twine"
+                | "go"
+                | "rustup"
+                | "systemctl"
+                | "ufw"
+                | "net"
+                | "schtasks"
+        ) {
+            return two;
+        }
+    }
+    bin_base.to_string()
+}
+
+/// Human-readable preview of what "always allow this session" will grant for `command`.
+pub fn session_grant_preview(command: &str) -> String {
+    let Ok(subs) = split_compound_commands(command) else {
+        return command.trim().to_string();
+    };
+    let shell = ShellKind::detect();
+    let mut labels: Vec<String> = Vec::new();
+    for sub in &subs {
+        let is_risky = !matches!(classify_for(shell, sub), Verdict::Safe)
+            || egress_kind(sub).is_some();
+        if is_risky {
+            let lbl = SubcommandGrant::from_subcommand(sub).pattern_label();
+            if !labels.contains(&lbl) {
+                labels.push(lbl);
+            }
+        }
+    }
+    if labels.is_empty()
+        && let Some(first) = subs.first()
+    {
+        labels.push(SubcommandGrant::from_subcommand(first).pattern_label());
+    }
+    labels.join(" ; ")
 }
 
 #[cfg(test)]

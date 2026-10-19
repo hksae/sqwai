@@ -1106,13 +1106,47 @@ impl App {
     }
 
     fn build_approval_rows(&mut self, command: String, reason: &str) {
-        self.menu_rows.push(row(
-            Line::from(vec![
-                Span::styled(command, Theme::WARN()),
-                Span::styled(format!(" ({reason})"), Theme::dim()),
-            ]),
-            MenuAction::None,
-        ));
+        let preview = crate::agent::safety::session_grant_preview(&command);
+        let single_line = !command.contains('\n') && command.chars().count() <= 68;
+        if single_line {
+            self.menu_rows.push(row(
+                Line::from(vec![
+                    Span::styled(command, Theme::WARN()),
+                    Span::styled(format!(" ({reason})"), Theme::dim()),
+                ]),
+                MenuAction::None,
+            ));
+        } else {
+            let mut wrapped: Vec<String> = Vec::new();
+            for raw_line in command.lines() {
+                if raw_line.is_empty() {
+                    continue;
+                }
+                let chars: Vec<char> = raw_line.chars().collect();
+                for chunk in chars.chunks(68) {
+                    if wrapped.len() >= 4 {
+                        break;
+                    }
+                    wrapped.push(chunk.iter().collect());
+                }
+                if wrapped.len() >= 4 {
+                    break;
+                }
+            }
+            for wline in wrapped {
+                self.menu_rows.push(row(
+                    Line::from(vec![Span::styled(wline, Theme::WARN())]),
+                    MenuAction::None,
+                ));
+            }
+            self.menu_rows.push(row(
+                Line::from(vec![Span::styled(
+                    format!("reason: {reason}"),
+                    Theme::dim(),
+                )]),
+                MenuAction::None,
+            ));
+        }
         self.menu_rows.push(row(Line::default(), MenuAction::None));
         self.menu_rows.push(row(
             Line::from(vec![Span::styled("deny".to_string(), Theme::ERR())]),
@@ -1122,11 +1156,15 @@ impl App {
             Line::from(vec![Span::styled("run once".to_string(), Theme::base())]),
             MenuAction::DecideApproval(ApprovalDecision::RunOnce),
         ));
+        let mut always_spans = vec![Span::styled(
+            "always allow this session".to_string(),
+            Theme::base(),
+        )];
+        if !preview.is_empty() {
+            always_spans.push(Span::styled(format!(" ({preview})"), Theme::dim()));
+        }
         self.menu_rows.push(row(
-            Line::from(vec![Span::styled(
-                "always allow this session".to_string(),
-                Theme::base(),
-            )]),
+            Line::from(always_spans),
             MenuAction::DecideApproval(ApprovalDecision::AlwaysSession),
         ));
         self.menu_footer_text = Some("enter: confirm · esc: deny".into());

@@ -747,7 +747,7 @@ impl App {
             Some(Menu::EditModel { .. }) => (0, 4, ""),
             Some(Menu::Sessions) => (1, dyn_win, "sessions"),
             Some(Menu::ConfirmDelete { .. }) => (2, 2, ""),
-            Some(Menu::Approval { .. }) => (2, 3, ""),
+            Some(Menu::Approval { .. }) => (self.menu_rows.len().saturating_sub(3), 3, ""),
             Some(
                 Menu::EditModelField { .. }
                 | Menu::EditProviderField { .. }
@@ -1071,6 +1071,7 @@ impl App {
             } else {
                 let avail = area.width.saturating_sub(2 + rail) as usize;
                 let mut spans: Vec<Span> = if i == 0
+                    && head == 2
                     && let Some(Menu::Approval {
                         command, reason, ..
                     }) = slf.cur_menu()
@@ -1079,6 +1080,12 @@ impl App {
                         crate::tui::shimmer::shimmer_warn_spans(command, slf.spinner_tick);
                     s.push(Span::styled(format!(" ({reason})"), Theme::dim()));
                     s
+                } else if i < head.saturating_sub(2)
+                    && matches!(slf.cur_menu(), Some(Menu::Approval { .. }))
+                {
+                    let row_text: String =
+                        line.spans.iter().map(|sp| sp.content.as_ref()).collect();
+                    crate::tui::shimmer::shimmer_warn_spans(&row_text, slf.spinner_tick)
                 } else if i == 0
                     && let Some(Menu::ConfirmDelete { label, .. }) = slf.cur_menu()
                 {

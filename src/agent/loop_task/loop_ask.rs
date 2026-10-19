@@ -201,56 +201,117 @@ fn ask_rejection(questions: &[AskQuestion]) -> Option<String> {
     })
 }
 
-/// What one "always allow" answer grants for the rest of the session. The old
-/// rule compared whole command strings, so approving `git commit -m "a"` never
-/// covered `git commit -m "b"`, although the user clearly approved that shape
-/// (#191). Matching the prefix alone would be too generous: it would let
-/// `git commit --no-verify -m "b"` ride on a grant given to a command that had
-/// no such flag.
+/// What one "always allow" answer grants for the rest of the session.
 ///
-/// A grant therefore covers a later call with the same two-word head, the same
-/// classifier reason, and no flag the user has not already seen. Argument
-/// values are free to differ; the shape of the risk is not.
+/// Splits compound commands (`&&`, `||`, `;`, `|`, `$(...)`) into individual
+/// subcommands, strips transparent wrappers (`timeout`, `nice`, `env`), uses
+/// arity-aware command heads (`git commit`, `docker compose up`), pins target
+/// paths for destructive file commands (`rm -rf target`), and requires exact
+/// matches for exec wrappers (`sudo`, `xargs`, `find -delete`).
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Grant {
-    head: String,
     reason: String,
-    flags: std::collections::BTreeSet<String>,
+    subcommands: Vec<safety::SubcommandGrant>,
+    opaque_exact: Option<String>,
 }
 
 impl Grant {
     pub(crate) fn from_command(command: &str, reason: &str) -> Self {
-        Self {
-            head: command_head(command),
-            reason: reason.to_string(),
-            flags: command_flags(command),
+        match safety::split_compound_commands(command) {
+            Ok(subs) if !subs.is_empty() => {
+                let shell = crate::agent::shell::ShellKind::detect();
+                let mut risky: Vec<safety::SubcommandGrant> = subs
+                    .iter()
+                    .filter(|s| {
+                        !matches!(safety::classify_for(shell, s), safety::Verdict::Safe)
+                            || safety::egress_kind(s).is_some()
+                    })
+                    .map(|s| safety::SubcommandGrant::from_subcommand(s))
+                    .collect();
+                if risky.is_empty() {
+                    risky = subs
+                        .iter()
+                        .map(|s| safety::SubcommandGrant::from_subcommand(s))
+                        .collect();
+                }
+                Self {
+                    reason: reason.to_string(),
+                    subcommands: risky,
+                    opaque_exact: None,
+                }
+            }
+            _ => Self {
+                reason: reason.to_string(),
+                subcommands: Vec::new(),
+                opaque_exact: Some(command.trim().to_string()),
+            },
         }
     }
 
     /// True when running `command` for `reason` is inside what was approved.
-    /// The call's flags must be a subset of the granted ones: dropping an
-    /// approved flag cannot add risk, adding one the user never saw always does.
     pub(crate) fn covers(&self, command: &str, reason: &str) -> bool {
-        self.head == command_head(command)
-            && self.reason == reason
-            && command_flags(command).is_subset(&self.flags)
+        if self.reason != reason {
+            return false;
+        }
+        if let Some(exact) = &self.opaque_exact {
+            return exact == command.trim();
+        }
+        let Ok(subs) = safety::split_compound_commands(command) else {
+            return false;
+        };
+        if subs.is_empty() {
+            return false;
+        }
+        let shell = crate::agent::shell::ShellKind::detect();
+        let risky_subs: Vec<&String> = subs
+            .iter()
+            .filter(|s| {
+                !matches!(safety::classify_for(shell, s), safety::Verdict::Safe)
+                    || safety::egress_kind(s).is_some()
+            })
+            .collect();
+        let to_check: Vec<&String> = if risky_subs.is_empty() {
+            subs.iter().collect()
+        } else {
+            risky_subs
+        };
+        to_check
+            .into_iter()
+            .all(|sub| self.subcommands.iter().any(|g| g.covers(sub)))
     }
 }
 
-fn command_head(command: &str) -> String {
-    command
-        .split_whitespace()
-        .take(2)
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn command_flags(command: &str) -> std::collections::BTreeSet<String> {
-    command
-        .split_whitespace()
-        .filter(|token| token.len() > 1 && token.starts_with('-'))
-        .map(|token| token.to_string())
-        .collect()
+fn grants_cover_command(grants: &[Grant], command: &str, reason: &str) -> bool {
+    if grants.iter().any(|g| g.covers(command, reason)) {
+        return true;
+    }
+    let Ok(subs) = safety::split_compound_commands(command) else {
+        return false;
+    };
+    if subs.len() <= 1 {
+        return false;
+    }
+    let shell = crate::agent::shell::ShellKind::detect();
+    let risky_subs: Vec<&String> = subs
+        .iter()
+        .filter(|s| {
+            !matches!(safety::classify_for(shell, s), safety::Verdict::Safe)
+                || safety::egress_kind(s).is_some()
+        })
+        .collect();
+    if risky_subs.is_empty() {
+        return false;
+    }
+    risky_subs.into_iter().all(|sub| {
+        let sub_reason = match safety::classify_for(shell, sub) {
+            safety::Verdict::NeedsApproval(r) => r,
+            _ => reason,
+        };
+        grants.iter().any(|g| {
+            (g.reason == reason || g.reason == sub_reason)
+                && g.subcommands.iter().any(|sg| sg.covers(sub))
+        })
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -338,10 +399,7 @@ pub(crate) async fn bash_call(
     }
 
     if let Some(reason) = &needs_approval {
-        if !always_allow
-            .iter()
-            .any(|grant| grant.covers(&command, reason))
-        {
+        if !grants_cover_command(always_allow, &command, reason) {
             if subagent_depth > 0 {
                 return tools::Outcome::err(format!(
                     "dangerous command requires user approval, but subagents cannot prompt for approval ({reason})"
