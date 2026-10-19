@@ -163,8 +163,8 @@ pub fn plan_block(root: &std::path::Path, session_id: Option<&str>) -> Option<St
 /// Reference tone on purpose. This block used to end in "call ops
 /// directly with the step ids above … do not `create` — continue it", and a live
 /// session obeyed it into a five-iteration loop: with every step already done
-/// there was nothing to continue, so "continue it" came out as "проверяю,
-/// коммичу и закрываю". Commands belong in system.md, where they are stated
+/// there was nothing to continue, so "continue it" came out as "verifying,
+/// committing, and closing". Commands belong in system.md, where they are stated
 /// once as rules; a block that rides every request describes state.
 /// (Kept out of `render_status`, which also paints the user-facing `/plan` panel.)
 pub fn plan_status_block(root: &std::path::Path, session_id: Option<&str>) -> Option<String> {

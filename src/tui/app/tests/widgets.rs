@@ -424,7 +424,7 @@ fn undo_refuses_an_argument_that_is_not_a_count() {
     app.command("undo yesterday");
     let status = last_status(&app);
     assert!(
-        status.contains("invalid command /undo <аргумент не число>"),
+        status.contains("invalid command /undo <expected a number>"),
         "must explain instead of undoing the wrong thing: {status:?}"
     );
 

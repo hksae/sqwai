@@ -47,7 +47,10 @@ impl App {
             "/config" | "/settings" => self.open_menu(Menu::Settings),
             "/test" => {
                 if !self.experimental_test() {
-                    self.status("invalid command /test <флаг не включен>", StatusKind::Warn);
+                    self.status(
+                        "invalid command /test <experimental flag disabled>",
+                        StatusKind::Warn,
+                    );
                 } else if rest.split_whitespace().nth(1) == Some("art") {
                     self.open_menu(Menu::TestArt);
                 } else if rest.split_whitespace().nth(1) == Some("anim") {
@@ -71,7 +74,7 @@ impl App {
                     self.start_test_churn();
                 } else {
                     self.status(
-                        "invalid command /test <имя не распознано>",
+                        "invalid command /test <unknown test name>",
                         StatusKind::Warn,
                     );
                 }
@@ -192,7 +195,7 @@ impl App {
                         Some("turn") => {
                             if parts.next().is_some() {
                                 self.status(
-                                    "invalid command /undo turn <аргумент не нужен>",
+                                    "invalid command /undo turn <takes no arguments>",
                                     StatusKind::Warn,
                                 );
                             } else {
@@ -202,7 +205,7 @@ impl App {
                         Some("list") => {
                             if parts.next().is_some() {
                                 self.status(
-                                    "invalid command /undo list <аргумент не нужен>",
+                                    "invalid command /undo list <takes no arguments>",
                                     StatusKind::Warn,
                                 );
                             } else if self.session.checkpoints.is_empty()
@@ -216,7 +219,7 @@ impl App {
                         Some("step") => match parts.next() {
                             Some(step) if parts.next().is_none() => self.undo_step(step),
                             _ => self.status(
-                                "invalid command /undo step <укажите номер шага>",
+                                "invalid command /undo step <missing step id>",
                                 StatusKind::Warn,
                             ),
                         },
@@ -225,7 +228,7 @@ impl App {
                             // Never guess: this used to parse as `/undo 1` and
                             // revert the last checkpoint, reported as success.
                             _ => self.status(
-                                "invalid command /undo <аргумент не число>",
+                                "invalid command /undo <expected a number>",
                                 StatusKind::Warn,
                             ),
                         },
@@ -242,7 +245,7 @@ impl App {
                         Some(arg) => match arg.parse::<usize>() {
                             Ok(n) if parts.next().is_none() => self.redo(n),
                             _ => self.status(
-                                "invalid command /redo <аргумент не число>",
+                                "invalid command /redo <expected a number>",
                                 StatusKind::Warn,
                             ),
                         },
@@ -251,7 +254,10 @@ impl App {
             }
             "/export" => {
                 if rest.split_whitespace().nth(1).is_some() {
-                    self.status("invalid command /export <аргумент не нужен>", StatusKind::Warn);
+                    self.status(
+                        "invalid command /export <takes no arguments>",
+                        StatusKind::Warn,
+                    );
                 } else {
                     self.export_session();
                 }
@@ -322,9 +328,9 @@ impl App {
                 None => "no active plan".to_string(),
             },
             Some("waive") | Some("confirm") => {
-                format!("invalid command /plan <subcommand больше не используется>")
+                "invalid command /plan <subcommand is retired>".to_string()
             }
-            Some(other) => format!("invalid command /plan {other} <имя не распознано>"),
+            Some(other) => format!("invalid command /plan {other} <unknown subcommand>"),
         };
         self.status(&result, StatusKind::Info);
     }
