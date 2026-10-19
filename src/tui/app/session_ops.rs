@@ -617,6 +617,7 @@ impl App {
         if manual {
             self.status("checking for built-in provider updates…", StatusKind::Info);
         }
+        self.last_builtin_check = Instant::now();
         let (tx, rx) = std::sync::mpsc::channel();
         self.builtin_update_rx = Some((manual, rx));
         std::thread::spawn(move || {
@@ -635,6 +636,11 @@ impl App {
 
     pub(super) fn poll_builtin_update(&mut self) {
         let Some((manual, rx)) = self.builtin_update_rx.take() else {
+            if self.last_builtin_check.elapsed()
+                >= std::time::Duration::from_secs(crate::config::CATALOG_CHECK_INTERVAL_SECS)
+            {
+                self.start_builtin_update(false);
+            }
             return;
         };
         match rx.try_recv() {

@@ -332,7 +332,10 @@ impl ModelConfig {
 pub const BUILTIN_PROVIDERS_FALLBACK: &str = include_str!("../../builtin_providers.toml");
 
 pub const BUILTIN_PROVIDERS_URL: &str =
-    "https://raw.githubusercontent.com/hksae/sqwai/master/builtin_providers.toml";
+    "https://raw.githubusercontent.com/hksae/sqwai-providers/master/builtin_providers.toml";
+
+/// Minimum interval (3 hours) between automatic background catalog checks.
+pub const CATALOG_CHECK_INTERVAL_SECS: u64 = 3 * 3600;
 
 /// SSRF gate shared by webfetch and the catalog check: literal non-public
 /// IPs and local metadata names never become request targets. The model
@@ -481,13 +484,19 @@ pub struct BuiltinCatalog {
     pub providers: BTreeMap<String, ProviderConfig>,
     #[serde(default)]
     pub models: BTreeMap<String, ModelConfig>,
+    /// File-declaration order of `[providers.<name>]` sections.
+    #[serde(skip)]
+    pub provider_order: Vec<String>,
+    /// File-declaration order of `[models."<key>"]` sections (newest release_date first).
+    #[serde(skip)]
+    pub model_order: Vec<String>,
 }
 
-/// Pinned origins for the six built-in providers: (name, host, key env).
+/// Pinned origins for built-in providers: (name, host, key env).
 /// A remote catalog may refresh metadata, but it can never move a key to
 /// a new host (that is key exfiltration, not an update) and it can never
-/// introduce a new provider (those ship with releases). Unknown names in
-/// a fetched file are skipped, never applied.
+/// introduce an unpinned provider over the wire (those ship with releases).
+/// Unknown names in a fetched file are skipped, never applied.
 pub const BUILTIN_ORIGINS: &[(&str, &str, &str)] = &[
     (
         "gemini",
@@ -499,6 +508,22 @@ pub const BUILTIN_ORIGINS: &[(&str, &str, &str)] = &[
     ("deepseek", "api.deepseek.com", "DEEPSEEK_API_KEY"),
     ("grok", "api.x.ai", "XAI_API_KEY"),
     ("kimi", "api.moonshot.ai", "MOONSHOT_API_KEY"),
+    (
+        "alibaba",
+        "dashscope-intl.aliyuncs.com",
+        "DASHSCOPE_API_KEY",
+    ),
+    ("zai", "api.z.ai", "ZHIPU_API_KEY"),
+    ("minimax", "api.minimax.io", "MINIMAX_API_KEY"),
+    ("mistral", "api.mistral.ai", "MISTRAL_API_KEY"),
+    ("cohere", "api.cohere.ai", "COHERE_API_KEY"),
+    ("groq", "api.groq.com", "GROQ_API_KEY"),
+    ("cerebras", "api.cerebras.ai", "CEREBRAS_API_KEY"),
+    ("togetherai", "api.together.xyz", "TOGETHER_API_KEY"),
+    ("fireworks", "api.fireworks.ai", "FIREWORKS_API_KEY"),
+    ("deepinfra", "api.deepinfra.com", "DEEPINFRA_API_KEY"),
+    ("nvidia", "integrate.api.nvidia.com", "NVIDIA_API_KEY"),
+    ("openrouter", "openrouter.ai", "OPENROUTER_API_KEY"),
 ];
 
 fn pinned_origin(name: &str) -> Option<(&'static str, &'static str)> {
@@ -544,14 +569,45 @@ pub fn catalog_status_line() -> String {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct BuiltinMeta {
     pub last_checked: String,
+    /// Unix timestamp (seconds) of the last check, for the 3-hour poll interval.
+    #[serde(default)]
+    pub last_checked_ts: u64,
     /// ETag of the cached catalog body, for conditional refresh.
     #[serde(default)]
     pub etag: Option<String>,
 }
 
 static BUILTIN_CACHE: std::sync::RwLock<Option<BuiltinCatalog>> = std::sync::RwLock::new(None);
+static PREVIOUS_BUILTIN_CACHE: std::sync::RwLock<Option<BuiltinCatalog>> =
+    std::sync::RwLock::new(None);
 
 impl BuiltinCatalog {
+    pub fn from_toml_str(text: &str) -> Result<Self> {
+        let mut catalog: BuiltinCatalog =
+            toml::from_str(text).context("parsing builtin providers TOML")?;
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if let Some(rest) = trimmed
+                .strip_prefix("[providers.")
+                .and_then(|s| s.strip_suffix(']'))
+            {
+                let name = rest.trim_matches('"');
+                if catalog.providers.contains_key(name) {
+                    catalog.provider_order.push(name.to_string());
+                }
+            } else if let Some(rest) = trimmed
+                .strip_prefix("[models.")
+                .and_then(|s| s.strip_suffix(']'))
+            {
+                let key = rest.trim_matches('"');
+                if catalog.models.contains_key(key) {
+                    catalog.model_order.push(key.to_string());
+                }
+            }
+        }
+        Ok(catalog)
+    }
+
     pub fn current() -> Self {
         if let Ok(guard) = BUILTIN_CACHE.read()
             && let Some(catalog) = guard.as_ref()
@@ -566,18 +622,20 @@ impl BuiltinCatalog {
     }
 
     pub fn invalidate_cache() {
-        if let Ok(mut guard) = BUILTIN_CACHE.write() {
-            *guard = None;
+        if let Ok(mut guard) = BUILTIN_CACHE.write()
+            && let Some(prev) = guard.take()
+            && let Ok(mut prev_guard) = PREVIOUS_BUILTIN_CACHE.write()
+        {
+            *prev_guard = Some(prev);
         }
     }
 
     pub fn load_local() -> Self {
         #[cfg(test)]
-        return toml::from_str(BUILTIN_PROVIDERS_FALLBACK).unwrap_or_default();
+        return Self::from_toml_str(BUILTIN_PROVIDERS_FALLBACK).unwrap_or_default();
         #[allow(unreachable_code)]
         {
-            let fallback: BuiltinCatalog =
-                toml::from_str(BUILTIN_PROVIDERS_FALLBACK).unwrap_or_default();
+            let fallback = Self::from_toml_str(BUILTIN_PROVIDERS_FALLBACK).unwrap_or_default();
             if let Ok(path) = builtin_cache_path()
                 && let Ok(raw) = std::fs::read_to_string(&path)
                 && let Ok(catalog) = validated_disk_catalog(&raw, &fallback)
@@ -619,7 +677,7 @@ fn validated_disk_catalog(raw: &str, fallback: &BuiltinCatalog) -> Result<Builti
 /// Signature verification is the real fix and needs repo-side signing;
 /// until then this is the enforced half.
 pub fn validate_fetched_catalog(text: &str, cached_serial: u64) -> Result<BuiltinCatalog> {
-    let catalog: BuiltinCatalog = toml::from_str(text).context("parsing builtin providers TOML")?;
+    let catalog = BuiltinCatalog::from_toml_str(text)?;
     if catalog.serial < cached_serial {
         anyhow::bail!(
             "fetched catalog is older than the cached one (serial {} < {cached_serial})",
@@ -674,13 +732,18 @@ pub async fn check_and_update_builtins(force: bool) -> Result<Option<BuiltinCata
         .filter(|u| !u.trim().is_empty())
         .unwrap_or_else(|| BUILTIN_PROVIDERS_URL.to_string());
     let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    let now_ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     let meta_now = builtin_meta_path()
         .and_then(|path| std::fs::read_to_string(&path).map_err(|e| e.into()))
         .ok()
         .and_then(|raw| serde_json::from_str::<BuiltinMeta>(&raw).ok());
     if !force
         && let Some(meta) = meta_now.as_ref()
-        && meta.last_checked == today
+        && meta.last_checked_ts > 0
+        && now_ts.saturating_sub(meta.last_checked_ts) < CATALOG_CHECK_INTERVAL_SECS
     {
         return Ok(None);
     }
@@ -695,7 +758,7 @@ pub async fn check_and_update_builtins(force: bool) -> Result<Option<BuiltinCata
     if res.status() == reqwest::StatusCode::NOT_MODIFIED {
         // Edge: 304 with no usable cache on disk falls through to the
         // embedded fallback below via Ok(None) — same as "up to date".
-        write_meta(&today, meta_now.as_ref().and_then(|m| m.etag.clone()));
+        write_meta(&today, now_ts, meta_now.as_ref().and_then(|m| m.etag.clone()));
         return Ok(None);
     }
     if !res.status().is_success() {
@@ -708,7 +771,7 @@ pub async fn check_and_update_builtins(force: bool) -> Result<Option<BuiltinCata
         .map(str::to_string);
     let text = res.text().await?;
     // the cached serial is the rollback floor; a refusal leaves the meta
-    // stamp alone so tomorrow retries (and recovers on its own)
+    // stamp alone so the next interval retries (and recovers on its own)
     let cached_serial = builtin_cache_path()
         .and_then(|path| std::fs::read_to_string(&path).map_err(|e| e.into()))
         .ok()
@@ -718,14 +781,15 @@ pub async fn check_and_update_builtins(force: bool) -> Result<Option<BuiltinCata
     let catalog = validate_fetched_catalog(&text, cached_serial)?;
 
     // No-op when the content is identical: the meta stamp still advances
-    // (so tomorrow's launch skips the fetch), but the caller gets Ok(None)
-    // — no rewrite, no apply_builtins pass, no "updated" noise.
+    // (so the next launch within 3h skips the fetch), but the caller gets
+    // Ok(None) — no rewrite, no apply_builtins pass, no "updated" noise.
     if let Ok(cache_path) = builtin_cache_path()
         && let Ok(cached) = std::fs::read_to_string(&cache_path)
         && cached == text
     {
         write_meta(
             &today,
+            now_ts,
             etag.or(meta_now.as_ref().and_then(|m| m.etag.clone())),
         );
         return Ok(None);
@@ -734,15 +798,16 @@ pub async fn check_and_update_builtins(force: bool) -> Result<Option<BuiltinCata
     if let Ok(cache_path) = builtin_cache_path() {
         let _ = atomic_write(&cache_path, &text);
     }
-    write_meta(&today, etag);
+    write_meta(&today, now_ts, etag);
     BuiltinCatalog::invalidate_cache();
     Ok(Some(catalog))
 }
 
-fn write_meta(today: &str, etag: Option<String>) {
+fn write_meta(today: &str, now_ts: u64, etag: Option<String>) {
     if let Ok(meta_path) = builtin_meta_path()
         && let Ok(meta_json) = serde_json::to_string(&BuiltinMeta {
             last_checked: today.to_string(),
+            last_checked_ts: now_ts,
             etag,
         })
     {
@@ -1202,11 +1267,12 @@ pub struct Config {
 }
 
 fn first_builtin_model() -> String {
-    BuiltinCatalog::current()
-        .models
-        .keys()
-        .next()
+    let catalog = BuiltinCatalog::current();
+    catalog
+        .model_order
+        .first()
         .cloned()
+        .or_else(|| catalog.models.keys().next().cloned())
         .unwrap_or_default()
 }
 
@@ -1273,6 +1339,28 @@ impl Config {
         BuiltinCatalog::current().models.contains_key(key)
     }
 
+    /// Transition pristine built-in models from `old` catalog to `new`:
+    /// untouched built-in models update their specs in-place, and built-in
+    /// models removed upstream are dropped unless the user customized them
+    /// or currently has them selected as `last_model`.
+    pub fn apply_catalog_transition(&mut self, old: &BuiltinCatalog, new: &BuiltinCatalog) {
+        for (k, old_m) in &old.models {
+            if self.models.get(k) != Some(old_m) {
+                continue;
+            }
+            match new.models.get(k) {
+                Some(new_m) => {
+                    self.models.insert(k.clone(), new_m.clone());
+                }
+                None => {
+                    if self.last_model != *k {
+                        self.models.remove(k);
+                    }
+                }
+            }
+        }
+    }
+
     /// Merge built-in providers/models into config. Provider endpoints stay
     /// fresh (base_url/format sync); user key overrides are preserved.
     /// Models are user-owned by key: catalog entries fill in absent keys
@@ -1280,6 +1368,11 @@ impl Config {
     /// `save` persists it (see below).
     pub fn apply_builtins(&mut self) {
         let catalog = BuiltinCatalog::current();
+        if let Ok(mut prev_guard) = PREVIOUS_BUILTIN_CACHE.write()
+            && let Some(prev) = prev_guard.take()
+        {
+            self.apply_catalog_transition(&prev, &catalog);
+        }
         for (name, p) in catalog.providers {
             // New providers never arrive over the wire: they ship with
             // releases (which extend the pinned origins above), so anything

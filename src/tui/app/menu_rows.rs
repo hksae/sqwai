@@ -514,7 +514,21 @@ impl App {
         ));
         let applied = self.model_cfg.provider.clone();
         let q = self.prov_search.lines().join("").to_lowercase();
-        for (name, _pc) in &self.cfg.providers {
+        let cat = crate::config::BuiltinCatalog::current();
+        let order_map: std::collections::HashMap<&str, usize> = cat
+            .provider_order
+            .iter()
+            .enumerate()
+            .map(|(idx, k)| (k.as_str(), idx))
+            .collect();
+        let mut names: Vec<&String> = self.cfg.providers.keys().collect();
+        names.sort_by_key(|name| {
+            (
+                order_map.get(name.as_str()).copied().unwrap_or(usize::MAX),
+                name.as_str(),
+            )
+        });
+        for name in names {
             if !q.is_empty() && !name.to_lowercase().contains(&q) {
                 continue;
             }
@@ -613,11 +627,32 @@ impl App {
         ));
         let current = self.session.model_key.clone();
         let q = self.model_search.lines().join("").to_lowercase();
-        for (k, m) in &self.cfg.models {
-            if m.provider != provider || !m.status.visible_in_picker() {
-                continue;
-            }
-            if !q.is_empty() && !k.to_lowercase().contains(&q) {
+        let cat = crate::config::BuiltinCatalog::current();
+        let order_map: std::collections::HashMap<&str, usize> = cat
+            .model_order
+            .iter()
+            .enumerate()
+            .map(|(idx, k)| (k.as_str(), idx))
+            .collect();
+        let mut entries: Vec<(&String, &crate::config::ModelConfig)> = self
+            .cfg
+            .models
+            .iter()
+            .filter(|(_, m)| m.provider == provider && m.status.visible_in_picker())
+            .collect();
+        entries.sort_by_key(|(k, _)| {
+            (
+                order_map.get(k.as_str()).copied().unwrap_or(usize::MAX),
+                k.as_str(),
+            )
+        });
+        let prefix = format!("{provider}/");
+        for (k, m) in entries {
+            let display = k.strip_prefix(&prefix).unwrap_or(k.as_str());
+            if !q.is_empty()
+                && !k.to_lowercase().contains(&q)
+                && !display.to_lowercase().contains(&q)
+            {
                 continue;
             }
             let label = crate::providers::effort::plan(
@@ -644,7 +679,7 @@ impl App {
             };
             self.menu_rows.push(row(
                 Line::from(vec![
-                    Span::styled(k.clone(), style),
+                    Span::styled(display.to_string(), style),
                     Span::styled(tail, Theme::dim()),
                 ]),
                 MenuAction::UseModel(k.clone()),

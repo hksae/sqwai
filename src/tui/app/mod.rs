@@ -556,6 +556,9 @@ pub struct App {
     provider_check_rx: Option<(String, std::sync::mpsc::Receiver<Result<String, String>>)>,
     /// Background check/download of builtin providers: (manual, rx)
     builtin_update_rx: Option<BuiltinUpdateRx>,
+    /// Last time a background catalog check was started, so a long-running TUI
+    /// session re-checks every 3 hours automatically.
+    last_builtin_check: Instant,
     /// Background undo maintenance (blobs + shadow GC) — the scan+gc can
     /// take seconds with many sessions, so `/new` must not block on it.
     maintain_rx:
@@ -801,6 +804,7 @@ impl App {
             provider_checks: std::collections::HashMap::new(),
             provider_check_rx: None,
             builtin_update_rx: None,
+            last_builtin_check: Instant::now(),
             maintain_rx: None,
             effort_observed_ignored: None,
             mode_blend: None,

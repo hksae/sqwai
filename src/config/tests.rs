@@ -354,18 +354,37 @@ fn api_key_resolves_from_env() {
 #[test]
 fn builtins_merge_without_overwriting_user_edits() {
     let mut cfg = Config::default();
-    for p in ["gemini", "anthropic", "openai", "deepseek", "grok", "kimi"] {
+    let expected_providers = [
+        "gemini",
+        "anthropic",
+        "openai",
+        "deepseek",
+        "grok",
+        "kimi",
+        "alibaba",
+        "zai",
+        "minimax",
+        "mistral",
+        "cohere",
+        "groq",
+        "cerebras",
+        "togetherai",
+        "fireworks",
+        "deepinfra",
+        "nvidia",
+        "openrouter",
+    ];
+    for p in expected_providers {
         assert!(cfg.providers.contains_key(p), "missing provider {p}");
         assert!(cfg.is_builtin_provider(p), "not marked builtin {p}");
     }
-    // Exact model ids float with the catalog (deepseek-chat became
-    // v4-pro/v4-flash in the 2026-10-03 discovery sync), so assert
-    // structurally: every builtin provider contributes builtin models.
-    for p in ["gemini", "anthropic", "openai", "deepseek", "grok", "kimi"] {
+    // Exact model ids float with the catalog, so assert structurally:
+    // every builtin provider contributes builtin models.
+    for p in expected_providers {
         assert!(
             cfg.models
-                .values()
-                .any(|m| m.provider == p && cfg.is_builtin_model(&m.id)),
+                .iter()
+                .any(|(k, m)| m.provider == p && cfg.is_builtin_model(k)),
             "provider {p} has no builtin models"
         );
     }
@@ -589,6 +608,48 @@ fn customized_builtin_model_survives_save_strip_and_reapply() {
         Some(&customized),
         "re-apply must not clobber the user override"
     );
+}
+
+#[test]
+fn catalog_transition_updates_pristine_specs_and_drops_removed_builtins() {
+    let old_cat = BuiltinCatalog::from_toml_str(
+        "serial = 1\n\
+         [providers.openai]\nformat = \"openai\"\nbase_url = \"https://api.openai.com/v1\"\napi_key_env = \"OPENAI_API_KEY\"\n\
+         [models.\"m-keep\"]\nprovider = \"openai\"\nid = \"m-keep\"\ncontext = 128000\neffort = \"medium\"\n\
+         [models.\"m-custom\"]\nprovider = \"openai\"\nid = \"m-custom\"\ncontext = 128000\neffort = \"medium\"\n\
+         [models.\"m-retired\"]\nprovider = \"openai\"\nid = \"m-retired\"\ncontext = 16385\neffort = \"off\"\n",
+    )
+    .unwrap();
+    let new_cat = BuiltinCatalog::from_toml_str(
+        "serial = 2\n\
+         [providers.openai]\nformat = \"openai\"\nbase_url = \"https://api.openai.com/v1\"\napi_key_env = \"OPENAI_API_KEY\"\n\
+         [models.\"m-keep\"]\nprovider = \"openai\"\nid = \"m-keep\"\ncontext = 400000\neffort = \"high\"\n\
+         [models.\"m-custom\"]\nprovider = \"openai\"\nid = \"m-custom\"\ncontext = 400000\neffort = \"high\"\n",
+    )
+    .unwrap();
+
+    let mut cfg = Config {
+        last_model: "m-keep".into(),
+        legacy_default_model: String::new(),
+        providers: old_cat.providers.clone(),
+        models: old_cat.models.clone(),
+        ..Config::default()
+    };
+    // User customized `m-custom` effort to Low
+    cfg.models.get_mut("m-custom").unwrap().effort = EffortLevel::Low;
+
+    cfg.apply_catalog_transition(&old_cat, &new_cat);
+
+    // Pristine `m-keep` updated its context and effort to `new_cat`
+    assert_eq!(cfg.models["m-keep"].context, 400000);
+    assert_eq!(cfg.models["m-keep"].effort, EffortLevel::High);
+
+    // User-customized `m-custom` kept its user override
+    assert_eq!(cfg.models["m-custom"].context, 128000);
+    assert_eq!(cfg.models["m-custom"].effort, EffortLevel::Low);
+
+    // Pristine `m-retired` was removed and does not linger
+    assert!(!cfg.models.contains_key("m-retired"));
 }
 
 #[test]
