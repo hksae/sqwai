@@ -375,7 +375,13 @@ impl Session {
         self.estimated_tokens = self
             .messages
             .iter()
-            .map(|m| (m.content.len() as u64).div_ceil(4))
+            .map(|m| {
+                let mut bytes = m.content.len() as u64;
+                for call in &m.tool_calls {
+                    bytes += (call.name.len() + call.args.to_string().len()) as u64;
+                }
+                bytes.div_ceil(4)
+            })
             .sum();
     }
 
@@ -412,7 +418,7 @@ impl Session {
     /// the destination on Windows too; the round-trip test saves twice to
     /// pin that. `save()` is the same write to the real sessions dir.
     pub fn save_to(&self, path: &std::path::Path) -> Result<()> {
-        let tmp = path.with_extension("json.tmp");
+        let tmp = path.with_extension(format!("{}.json.tmp", std::process::id()));
         {
             let file = std::fs::File::create(&tmp)?;
             let mut writer = std::io::BufWriter::with_capacity(64 * 1024, file);

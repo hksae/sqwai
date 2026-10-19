@@ -663,8 +663,7 @@ fn background_jobs_are_isolated_by_session() {
     );
 
     // ...while A works with it normally
-    std::thread::sleep(std::time::Duration::from_millis(600));
-    let polled = bash_output(&a, &serde_json::json!({"id": id}));
+    let polled = bash_output(&a, &serde_json::json!({"id": id, "wait_secs": 5}));
     assert!(polled.ok, "{}", polled.output);
     assert!(polled.output.contains("hello-a"), "{}", polled.output);
 }

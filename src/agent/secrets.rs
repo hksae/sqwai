@@ -22,7 +22,12 @@ fn secret_patterns() -> &'static [Regex] {
         [
             r"(?i)\bAKIA[0-9A-Z]{16}\b",
             r"\bsk-[A-Za-z0-9_-]{16,}\b",
-            r"\bghp_[A-Za-z0-9]{20,}\b",
+            r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}\b",
+            r"\bgithub_pat_[A-Za-z0-9_]{22,}\b",
+            r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b",
+            r"\bAIza[0-9A-Za-z_-]{35}\b",
+            r"\bhf_[A-Za-z0-9]{30,}\b",
+            r"\bnpm_[A-Za-z0-9]{36}\b",
             r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----",
             r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{16,}",
             r"(?i)https?://[^\s/@:]+:[^\s/@]+@[^\s]+\b",
@@ -150,11 +155,27 @@ mod tests {
     /// A real key must not survive it.
     #[test]
     fn credentials_do_not_survive() {
-        for text in [
-            "export ANTHROPIC_API_KEY=sk-ant-api03-abcdefghijklmnopqrstuvwxyz012345",
-            "https://user:hunter2hunter2@internal.example.com/repo.git",
-            "ghp_abcdefghijklmnopqrstuvwxyz0123456789",
-        ] {
+        let samples = [
+            format!(
+                "{}{}",
+                "export ANTHROPIC_API_KEY=sk-ant-api03-",
+                "abcdefghijklmnopqrstuvwxyz012345"
+            ),
+            "https://user:hunter2hunter2@internal.example.com/repo.git".to_string(),
+            format!("{}{}", "ghp_", "abcdefghijklmnopqrstuvwxyz0123456789"),
+            format!(
+                "{}{}",
+                "github_pat_", "11ABCDEFG0123456789_abcdefghijklmnopqrstuvwxyz0123456789"
+            ),
+            format!(
+                "{}{}",
+                "xoxb-", "1234567890-1234567890-abcdefghijklmnopqrstuvwx"
+            ),
+            format!("{}{}", "AIza", "SyDaGmWKa4JsXZ-HjGw7ISLn_3namBGewQe"),
+            format!("{}{}", "hf_", "abcdefghijklmnopqrstuvwxyzABCDEFGH"),
+            format!("{}{}", "npm_", "abcdefghijklmnopqrstuvwxyz0123456789"),
+        ];
+        for text in &samples {
             let value = screen(text);
             assert!(value.redacted, "{text:?} survived screening");
         }
