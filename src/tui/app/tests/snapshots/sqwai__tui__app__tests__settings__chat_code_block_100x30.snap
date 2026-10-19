@@ -1,10 +1,11 @@
 ---
 source: src/tui/app/tests/settings.rs
+assertion_line: 635
 expression: s
 ---
 
   sqwai v0.1.0
-  [CWD]
+   [CWD]
  › Explain this snippet.
 
  Here is the explanation:

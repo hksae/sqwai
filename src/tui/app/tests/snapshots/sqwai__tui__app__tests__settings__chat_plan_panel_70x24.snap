@@ -1,10 +1,11 @@
 ---
 source: src/tui/app/tests/settings.rs
+assertion_line: 866
 expression: s
 ---
 
   sqwai v0.1.0
-  [CWD]
+   [CWD]
  › What is the plan?
 
  See the plan panel.

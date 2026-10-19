@@ -24,6 +24,7 @@ use ratatui::backend::{Backend, CrosstermBackend};
 use ratatui::buffer::{Buffer, Cell};
 use ratatui::layout::Rect;
 use ratatui::style::{Color as RColor, Modifier};
+use rustc_hash::FxHasher;
 use unicode_width::UnicodeWidthStr;
 
 /// Minimum interval between presents (~120 FPS max). No EMA is needed:
@@ -283,7 +284,7 @@ fn rows_visually_eq(a: &[Cell], b: &[Cell]) -> bool {
 
 #[inline]
 fn hash_row(row: &[Cell]) -> u64 {
-    let mut h = std::collections::hash_map::DefaultHasher::new();
+    let mut h = FxHasher::default();
     for c in row {
         if is_plain_blank(c) {
             0u8.hash(&mut h);
@@ -898,6 +899,12 @@ impl<W: Write> Presenter<W> {
 
         let next_content = &next.content;
 
+        // DEC 2026 band split counter: some terminals (VTE < 0.74, older
+        // Windows Terminal) can drop large synchronized-update regions.
+        // Split every 50 dirty rows so no single update is too long.
+        let mut rows_in_band = 0usize;
+        const MAX_ROWS_PER_BAND: usize = 50;
+
         for (y, &clean) in row_clean.iter().enumerate() {
             if clean {
                 continue;
@@ -1007,6 +1014,16 @@ impl<W: Write> Presenter<W> {
                 }
                 self.scratch.extend_from_slice(b"\x1b[K");
             }
+
+            // Split DEC 2026 band every MAX_ROWS_PER_BAND so old terminals
+            // (VTE < 0.74, older Windows Terminal) do not drop the update.
+            rows_in_band += 1;
+            if rows_in_band >= MAX_ROWS_PER_BAND {
+                rstate.reset_sgr(&mut self.scratch);
+                self.scratch.extend_from_slice(b"\x1b[?2026l");
+                self.scratch.extend_from_slice(b"\x1b[?2026h");
+                rows_in_band = 0;
+            }
         }
 
         rstate.reset_sgr(&mut self.scratch);
@@ -1028,7 +1045,11 @@ impl<W: Write> Presenter<W> {
         }
         let t0 = Instant::now();
         if frame.area != self.area {
-            self.backend.clear()?;
+            // Erase-below (J) instead of 2J: on iTerm2, Alacritty, Kitty
+            // and others, 2J clears the scrollback history whose content we
+            // didn't write. Home first gives a clean slate for the new size
+            // without destroying scrollback.
+            self.backend.write_all(b"\x1b[H\x1b[J")?;
             self.prev = Arc::new(Buffer::empty(frame.area));
             self.area = frame.area;
         }
@@ -1194,8 +1215,8 @@ mod tests {
             .present(text_frame(2, 30, 3, &["hello", "world", "again"]))
             .expect("present");
         let out = cap.text();
-        // Full clear between sizes, then the new content in full.
-        assert!(out.contains("\x1b[2J"), "expected full clear: {out:?}");
+        // Erase-below between sizes, then the new content in full.
+        assert!(out.contains("\x1b[H\x1b[J"), "expected erase-below: {out:?}");
         assert!(out.contains("again"), "resized content missing: {out:?}");
     }
 

@@ -48,6 +48,7 @@ tree-sitter-cpp = "0.23.4"
 tree-sitter-c-sharp = "0.23.5"
 tree-sitter-java = "0.23.5"
 scraper = "0.27.0"
+rustc-hash = "2"
 # Unix process-group kill for shell trees (killpg); cf. exec::kill_tree
 [target.'cfg(unix)'.dependencies]
 libc = "=0.2.189"
