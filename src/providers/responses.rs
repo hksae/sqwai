@@ -376,7 +376,7 @@ impl Provider for ResponsesProvider {
                                         yield Ok(StreamEvent::ToolCall(call));
                                     }
                                 }
-                                if ev.event.as_str() == "response.completed" { break; }
+                                break;
                             }
                             "error" => {
                                 let msg = v.get("message").and_then(|x| x.as_str()).unwrap_or("unknown");

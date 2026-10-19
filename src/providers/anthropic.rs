@@ -332,7 +332,7 @@ impl Provider for AnthropicProvider {
         stream! {
             let mut req = req;
             this.sanitize(&mut req);
-            let body = build_body(&req, 8192, cache_breakpoints);
+            let body = build_body(&req, 16384, cache_breakpoints);
             let resp = match super::with_opencode_session(
                 this.http
                     .post(&this.url)

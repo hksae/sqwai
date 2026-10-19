@@ -1067,3 +1067,13 @@ fn openrouter_injects_cache_control_for_anthropic_gemini_and_qwen() {
     assert!(plain.get("cache_control").is_none());
     assert!(plain["messages"][0]["content"].is_string());
 }
+
+#[test]
+fn uses_max_completion_tokens_covers_gpt6_and_newer() {
+    assert!(uses_max_completion_tokens("gpt-6-astra", false));
+    assert!(uses_max_completion_tokens("openai/gpt-6.1-sol", false));
+    assert!(uses_max_completion_tokens("gpt-5.4", false));
+    assert!(!uses_max_completion_tokens("gpt-4o", false));
+    assert!(uses_max_completion_tokens("gpt-4o", true));
+}
+

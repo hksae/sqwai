@@ -251,7 +251,9 @@ pub fn uses_max_completion_tokens(model: &str, has_reasoning: bool) -> bool {
         || name.starts_with("o3")
         || name.starts_with("o4")
         || name.starts_with("o-")
-        || name.contains("gpt-5")
+        || (name.starts_with("gpt-")
+            && !name.starts_with("gpt-3")
+            && !name.starts_with("gpt-4"))
 }
 
 /// accumulated partial tool call keyed by the streaming index
@@ -377,6 +379,18 @@ impl Provider for OpenAiProvider {
                                 continue;
                             }
                         };
+                        if let Some(err) = v.get("error")
+                            && !err.is_null()
+                        {
+                            let msg = err
+                                .get("message")
+                                .and_then(|x| x.as_str())
+                                .or_else(|| err.as_str())
+                                .unwrap_or("stream error");
+                            super::log_http(&format!("POST {url} stream error: {msg}"));
+                            yield Err(super::event_error(msg));
+                            return;
+                        }
                         if let Some(id) = v.get("id").and_then(|x| x.as_str())
                             && !response_id_sent
                         {
