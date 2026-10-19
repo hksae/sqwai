@@ -1241,7 +1241,7 @@ impl App {
         let cwd = truncate_display_width(&self.cwd_label, w.saturating_sub(1));
         vec![
             Line::from(spans),
-            Line::from(Span::styled(format!(" {cwd}"), Theme::dim())),
+            Line::from(Span::styled(format!("  {cwd}"), Theme::dim())),
         ]
     }
 

@@ -556,7 +556,7 @@ fn empty_mark_lines_cover_mcp_plan_and_plain_states() {
     let lines = text(&app);
     assert_eq!(lines.len(), 2, "two-line transcript header: {lines:?}");
     assert!(lines[0].contains("sqwai v"), "{lines:?}");
-    assert_eq!(lines[1], " ~/sqwai");
+    assert_eq!(lines[1], "  ~/sqwai");
     assert!(
         app.empty_mark_lines()[0].spans.len() > 3,
         "empty session shimmers sqwai character-by-character"
