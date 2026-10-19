@@ -312,11 +312,14 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
         "patch" => git::patch(ctx, args),
         "outline" => outline::outline(ctx, args),
         "webfetch" | "websearch" => Outcome::err("web tools must run through the async dispatcher"),
-        "bash" => exec::bash(
+        "bash" => exec::bash_with_workdir(
             ctx,
             args["command"].as_str().unwrap_or_default(),
             args["timeout"].as_u64(),
             args["background"].as_bool().unwrap_or(false),
+            args["workdir"]
+                .as_str()
+                .or_else(|| args["cwd"].as_str()),
         ),
         "bash_output" => exec::bash_output(ctx, args),
         "bash_kill" => exec::bash_kill(ctx, args),

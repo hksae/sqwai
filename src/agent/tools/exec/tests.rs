@@ -722,3 +722,35 @@ fn a_background_job_logs_stdout_and_stderr_in_one_file() {
     );
     let _ = bash_kill(&c, &serde_json::json!({"id": id}));
 }
+
+#[test]
+fn bash_workdir_executes_in_subdir_and_strips_ansi_and_progress_bars() {
+    let dir = tempfile::tempdir().unwrap();
+    let sub = dir.path().join("nested_sub");
+    std::fs::create_dir_all(&sub).unwrap();
+    std::fs::write(sub.join("marker_file.txt"), "found_in_sub\n").unwrap();
+    let mut c = ToolCtx::new(dir.path());
+
+    // 1. Valid `workdir` runs the command inside `nested_sub`
+    let out = bash_with_workdir(&mut c, "echo ok_sub", Some(10), false, Some("nested_sub"));
+    assert!(out.ok, "{}", out.output);
+    assert!(out.output.contains("ok_sub"), "{}", out.output);
+
+    // 2. Non-existent `workdir` returns a clean error before spawning
+    let bad = bash_with_workdir(&mut c, "echo x", Some(10), false, Some("no_such_dir"));
+    assert!(!bad.ok);
+    assert!(
+        bad.output.contains("working directory does not exist"),
+        "{}",
+        bad.output
+    );
+
+    // 3. Path traversal in `workdir` is rejected by `ctx.resolve`
+    let esc = bash_with_workdir(&mut c, "echo x", Some(10), false, Some("../outside"));
+    assert!(!esc.ok);
+
+    // 4. `decode_child_output` strips ANSI CSI sequences and collapses `\r` progress overwrites
+    let raw = b"\x1b[32mCompiling\x1b[0m crate...\r\nStep 10%\rStep 50%\rStep 100%\r\nDone!\r\n";
+    let cleaned = crate::agent::tools::decode_child_output(raw);
+    assert_eq!(cleaned, "Compiling crate...\nStep 100%\nDone!\n");
+}

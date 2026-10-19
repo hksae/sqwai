@@ -216,6 +216,7 @@ Pass context:N for N surrounding lines per match (like grep -C) so a follow-up r
                 "type": "object",
                 "properties": {
                     "command": {"type": "string", "description": "the shell command line to run"},
+                    "workdir": {"type": "string", "description": "optional working directory relative to the project root"},
                     "timeout": {"type": "integer", "description": "seconds; kills the process on expiry"},
                     "background": {"type": "boolean", "description": "detach and return a job id immediately; monitor with bash_output(id, wait_secs)"}
                 },
@@ -887,14 +888,111 @@ pub fn trim_middle(text: &str, max_chars: usize) -> String {
     }
     let head_len = max_chars / 3;
     let tail_len = max_chars - head_len;
-    let head: String = text.chars().take(head_len).collect();
-    let tail: String = text.chars().skip(total - tail_len).collect();
+    let raw_head: String = text.chars().take(head_len).collect();
+    let raw_tail: String = text.chars().skip(total - tail_len).collect();
+
+    let head_snap_window = 120.min(head_len / 2);
+    let head = if head_snap_window > 0
+        && let Some((pos, _)) = raw_head
+            .char_indices()
+            .rev()
+            .take(head_snap_window)
+            .find(|(_, ch)| *ch == '\n')
+    {
+        &raw_head[..pos]
+    } else {
+        raw_head.as_str()
+    };
+
+    let tail_snap_window = 120.min(tail_len / 2);
+    let tail = if tail_snap_window > 0
+        && let Some((pos, _)) = raw_tail
+            .char_indices()
+            .take(tail_snap_window)
+            .find(|(_, ch)| *ch == '\n')
+    {
+        &raw_tail[pos + 1..]
+    } else {
+        raw_tail.as_str()
+    };
+
+    let head_chars = head.chars().count();
+    let tail_chars = tail.chars().count();
     format!(
         "{}\n…(output truncated: {} chars omitted)\n{}",
         head.trim_end(),
-        total - head_len - tail_len,
+        total.saturating_sub(head_chars + tail_chars),
         tail.trim_start()
     )
+}
+
+/// Strip ANSI CSI/OSC escape sequences and collapse bare `\r` progress-bar
+/// overwrites within each line while preserving `\n` / `\r\n` line breaks.
+pub fn clean_terminal_output(raw: &str) -> String {
+    let mut no_ansi = String::with_capacity(raw.len());
+    let mut chars = raw.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            match chars.peek().copied() {
+                Some('[') => {
+                    chars.next();
+                    for ch in chars.by_ref() {
+                        if ('@'..='~').contains(&ch) {
+                            break;
+                        }
+                    }
+                }
+                Some(']') => {
+                    chars.next();
+                    while let Some(ch) = chars.next() {
+                        if ch == '\x07' {
+                            break;
+                        }
+                        if ch == '\x1b' && chars.peek() == Some(&'\\') {
+                            chars.next();
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        } else {
+            no_ansi.push(c);
+        }
+    }
+
+    if !no_ansi.contains('\r') {
+        return no_ansi;
+    }
+
+    let lf_norm = no_ansi.replace("\r\n", "\n");
+    if !lf_norm.contains('\r') {
+        return lf_norm;
+    }
+    let trailing_nl = lf_norm.ends_with('\n');
+    let mut lines: Vec<&str> = lf_norm.split('\n').collect();
+    if trailing_nl {
+        lines.pop();
+    }
+    let mut out = String::with_capacity(lf_norm.len());
+    for (idx, line) in lines.iter().enumerate() {
+        if idx > 0 {
+            out.push('\n');
+        }
+        if line.contains('\r') {
+            let final_seg = line
+                .rsplit('\r')
+                .find(|seg| !seg.is_empty())
+                .unwrap_or_default();
+            out.push_str(final_seg);
+        } else {
+            out.push_str(line);
+        }
+    }
+    if trailing_nl {
+        out.push('\n');
+    }
+    out
 }
 
 /// Decode child-process output. UTF-8 when valid; otherwise the Windows
@@ -904,24 +1002,26 @@ pub fn trim_middle(text: &str, max_chars: usize) -> String {
 /// line each decodes correctly. File content never comes here (source files
 /// are UTF-8 by contract; lossy is right for them).
 pub fn decode_child_output(bytes: &[u8]) -> String {
-    if let Ok(text) = std::str::from_utf8(bytes) {
-        return text.to_string();
-    }
-    let mut out = String::new();
-    for line in bytes.split(|b| *b == b'\n') {
-        if !out.is_empty() {
-            out.push('\n');
-        }
-        match std::str::from_utf8(line) {
-            Ok(text) => out.push_str(text),
-            Err(_) => {
-                for b in line {
-                    out.push(cp866_char(*b));
+    let decoded = if let Ok(text) = std::str::from_utf8(bytes) {
+        text.to_string()
+    } else {
+        let mut out = String::new();
+        for line in bytes.split(|b| *b == b'\n') {
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            match std::str::from_utf8(line) {
+                Ok(text) => out.push_str(text),
+                Err(_) => {
+                    for b in line {
+                        out.push(cp866_char(*b));
+                    }
                 }
             }
         }
-    }
-    out
+        out
+    };
+    clean_terminal_output(&decoded)
 }
 
 /// One cp866 byte to char. Cyrillic ranges first (the observed mojibake),

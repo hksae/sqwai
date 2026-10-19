@@ -115,9 +115,12 @@ const BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x0000_4000;
 const DETACHED_PROCESS: u32 = 0x0800_0000;
 
 /// build a Command runnable in `cwd`
-fn spawn_command(ctx: &ToolCtx, command: &str, cwd: Option<&str>) -> Command {
+fn spawn_command(ctx: &ToolCtx, command: &str, cwd: Option<&str>) -> Result<Command, String> {
     let (kind, program, flag) = shell();
     let mut c = Command::new(program.as_ref());
+    c.env("GIT_TERMINAL_PROMPT", "0");
+    c.env("PAGER", "cat");
+    c.env("NO_COLOR", "1");
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -147,34 +150,50 @@ fn spawn_command(ctx: &ToolCtx, command: &str, cwd: Option<&str>) -> Command {
         let _ = kind;
         c.arg(flag).arg(command);
     }
-    match cwd {
+    match cwd.map(str::trim).filter(|s| !s.is_empty()) {
         Some(d) => {
-            if let Ok(p) = ctx.resolve(d) {
-                c.current_dir(p);
+            let p = ctx.resolve(d)?;
+            if !p.exists() {
+                return Err(format!("working directory does not exist: {d}"));
             }
+            if !p.is_dir() {
+                return Err(format!("working directory is not a directory: {d}"));
+            }
+            c.current_dir(p);
         }
         None => {
             c.current_dir(&ctx.root);
         }
     }
-    c
+    Ok(c)
 }
 
 /// run to completion under a timeout; kill on expiry
+#[allow(dead_code)]
 pub(super) fn bash(
     ctx: &mut ToolCtx,
     command: &str,
     timeout: Option<u64>,
     background: bool,
 ) -> Outcome {
+    bash_with_workdir(ctx, command, timeout, background, None)
+}
+
+pub(super) fn bash_with_workdir(
+    ctx: &mut ToolCtx,
+    command: &str,
+    timeout: Option<u64>,
+    background: bool,
+    workdir: Option<&str>,
+) -> Outcome {
     if command.trim().is_empty() {
         return Outcome::err("empty command");
     }
     if background {
-        return run_background(ctx, command);
+        return run_background(ctx, command, workdir);
     }
     let timeout_secs = timeout.unwrap_or(DEFAULT_TIMEOUT_SECS).max(1);
-    run_blocking(ctx, command, timeout_secs)
+    run_blocking(ctx, command, timeout_secs, workdir)
 }
 
 /// Kill a child and drain its wait, ignoring errors: by the time this runs the
@@ -317,11 +336,19 @@ impl HeadTail {
     }
 }
 
-fn run_blocking(ctx: &ToolCtx, command: &str, timeout_secs: u64) -> Outcome {
+fn run_blocking(
+    ctx: &ToolCtx,
+    command: &str,
+    timeout_secs: u64,
+    workdir: Option<&str>,
+) -> Outcome {
     use std::io::Read;
     use std::sync::{Arc, Mutex};
 
-    let mut cmd = spawn_command(ctx, command, None);
+    let mut cmd = match spawn_command(ctx, command, workdir) {
+        Ok(c) => c,
+        Err(e) => return Outcome::err(e),
+    };
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -447,7 +474,7 @@ fn run_blocking(ctx: &ToolCtx, command: &str, timeout_secs: u64) -> Outcome {
     }
 }
 
-fn run_background(ctx: &ToolCtx, command: &str) -> Outcome {
+fn run_background(ctx: &ToolCtx, command: &str, workdir: Option<&str>) -> Outcome {
     let dir = std::env::temp_dir().join("sqwai-bg");
     let _ = std::fs::create_dir_all(&dir);
     let stamp = std::time::SystemTime::now()
@@ -456,7 +483,10 @@ fn run_background(ctx: &ToolCtx, command: &str) -> Outcome {
         .unwrap_or(0);
     let log = dir.join(format!("bg-{stamp}.out"));
 
-    let mut cmd = spawn_command(ctx, command, None);
+    let mut cmd = match spawn_command(ctx, command, workdir) {
+        Ok(c) => c,
+        Err(e) => return Outcome::err(e),
+    };
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -672,7 +702,7 @@ pub(super) fn bash_output(ctx: &ToolCtx, args: &serde_json::Value) -> Outcome {
         {
             Ok(_) => {
                 let skipped = start.saturating_sub(job.read);
-                let mut text = String::from_utf8_lossy(&buf).into_owned();
+                let mut text = super::decode_child_output(&buf);
                 if skipped > 0 {
                     text = format!("…(showing the last {tail} of {skipped} new bytes)\n{text}");
                 }
@@ -854,7 +884,7 @@ fn tail_of_file(path: &PathBuf, max: usize) -> Option<String> {
         }
     }
     let truncated = start > 0;
-    let text = String::from_utf8_lossy(&data[cut..]).into_owned();
+    let text = super::decode_child_output(&data[cut..]);
     Some(if truncated {
         format!("…(only the last {max} bytes shown)\n{text}")
     } else {
