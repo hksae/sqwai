@@ -87,6 +87,27 @@ pub fn outline(ctx: &mut ToolCtx, args: &Value) -> Outcome {
     }
 
     let mut out = format!("{path_arg} ({} items):\n", items.len());
+    let skip_deps = args["skip_deps"].as_bool().unwrap_or(false);
+    if !skip_deps {
+        let imports = extract_file_imports(src, ext);
+        if !imports.is_empty() {
+            out.push_str(&format!("Imports: {}\n", imports.join(", ")));
+        }
+        let importers = find_importers(&ctx.root, &full_path);
+        if !importers.is_empty() {
+            let shown: Vec<&str> = importers.iter().take(12).map(String::as_str).collect();
+            let extra = if importers.len() > 12 {
+                format!(" (+{} more)", importers.len() - 12)
+            } else {
+                String::new()
+            };
+            out.push_str(&format!(
+                "Imported by ({}): {}{extra}\n",
+                importers.len(),
+                shown.join(", ")
+            ));
+        }
+    }
     for item in items {
         let indent = "  ".repeat(item.depth.saturating_sub(1));
         out.push_str(&format!("{:>4}: {indent}{}\n", item.line, item.signature));
@@ -907,4 +928,153 @@ fn contains_ident(haystack: &str, ident: &str) -> bool {
         from = start + 1;
     }
     false
+}
+
+/// Extract compact outgoing imports / module declarations from `src`.
+fn extract_file_imports(src: &str, ext: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let lower_ext = ext.to_ascii_lowercase();
+    for line in src.lines().take(250) {
+        let t = line.trim();
+        if t.is_empty() || t.starts_with("//") || t.starts_with('#') && !t.starts_with("#include") {
+            continue;
+        }
+        let target = match lower_ext.as_str() {
+            "rs" => t
+                .strip_prefix("pub use ")
+                .or_else(|| t.strip_prefix("pub(crate) use "))
+                .or_else(|| t.strip_prefix("pub(super) use "))
+                .or_else(|| t.strip_prefix("use "))
+                .or_else(|| t.strip_prefix("pub mod "))
+                .or_else(|| t.strip_prefix("pub(crate) mod "))
+                .or_else(|| t.strip_prefix("mod "))
+                .and_then(|rest| {
+                    let clean = rest.trim_end_matches(';').trim();
+                    (!clean.ends_with('{') && !clean.is_empty()).then_some(clean)
+                }),
+            "py" | "pyi" | "pyw" => {
+                if t.starts_with("import ") || t.starts_with("from ") {
+                    Some(t)
+                } else {
+                    None
+                }
+            }
+            "js" | "mjs" | "cjs" | "jsx" | "ts" | "mts" | "cts" | "tsx" => {
+                if (t.starts_with("import ") || t.starts_with("export "))
+                    && let Some(pos) = t.find(" from ")
+                {
+                    Some(t[pos + 6..].trim_end_matches(';').trim())
+                } else {
+                    None
+                }
+            }
+            "c" | "h" | "cpp" | "cc" | "cxx" | "hpp" | "hh" | "hxx" | "ipp" | "tpp" | "ino" => {
+                t.strip_prefix("#include").map(str::trim)
+            }
+            "go" | "java" | "cs" | "csx" => t
+                .strip_prefix("import ")
+                .or_else(|| t.strip_prefix("using "))
+                .map(|r| r.trim_end_matches(';').trim()),
+            _ => None,
+        };
+        if let Some(imp) = target {
+            let entry = imp.to_string();
+            if !entry.is_empty() && !out.contains(&entry) {
+                out.push(entry);
+                if out.len() >= 15 {
+                    break;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Fast on-demand scan for project files that import/reference `target_path` by
+/// its module/file stem (`use ...::stem`, `mod stem`, `import ... stem`, `#include "...stem..."`).
+fn find_importers(root: & std::path::Path, target_path: &std::path::Path) -> Vec<String> {
+    let raw_stem = target_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    let module_name = if matches!(raw_stem, "mod" | "index" | "__init__" | "lib") {
+        target_path
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+    } else {
+        raw_stem
+    };
+    if module_name.len() < 2 || matches!(module_name, "main" | "lib" | "src" | "tests" | "test") {
+        return Vec::new();
+    }
+
+    let mut importers = Vec::new();
+    let mut scanned_files = 0usize;
+    let host_owned = root.join(".sqwai");
+
+    for entry in ignore::WalkBuilder::new(root)
+        .hidden(false)
+        .max_filesize(Some(512 * 1024))
+        .build()
+        .flatten()
+    {
+        let p = entry.path();
+        if !p.is_file() || p == target_path || p.starts_with(&host_owned) {
+            continue;
+        }
+        let rel = p.strip_prefix(root).unwrap_or(p);
+        if rel.components().any(|c| {
+            matches!(
+                c.as_os_str().to_str(),
+                Some(".git" | ".sqwai" | "target" | "node_modules" | "dist" | "build")
+            )
+        }) {
+            continue;
+        }
+        let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("");
+        if Lang::from_extension(ext).is_none() {
+            continue;
+        }
+        scanned_files += 1;
+        if scanned_files > 500 {
+            break;
+        }
+        let Ok(bytes) = std::fs::read(p) else {
+            continue;
+        };
+        if bytes.iter().take(1024).any(|&b| b == 0) {
+            continue;
+        }
+        let text = String::from_utf8_lossy(&bytes);
+        if !text.contains(module_name) {
+            continue;
+        }
+        for (idx, line) in text.lines().enumerate() {
+            let t = line.trim();
+            let is_import_or_use = t.starts_with("use ")
+                || t.starts_with("pub use ")
+                || t.starts_with("pub(crate) use ")
+                || t.starts_with("pub(super) use ")
+                || t.starts_with("mod ")
+                || t.starts_with("pub mod ")
+                || t.starts_with("pub(crate) mod ")
+                || t.starts_with("import ")
+                || t.starts_with("from ")
+                || t.starts_with("export ")
+                || t.starts_with("#include")
+                || t.contains(&format!("{module_name}::"));
+            if is_import_or_use && contains_ident(t, module_name) {
+                let rel_str = rel.to_string_lossy().replace('\\', "/");
+                importers.push(format!("{rel_str}:{}", idx + 1));
+                break;
+            }
+        }
+        if importers.len() >= 20 {
+            break;
+        }
+    }
+    importers.sort();
+    importers
 }

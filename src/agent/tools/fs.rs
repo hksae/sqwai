@@ -395,7 +395,10 @@ const SLICING_NUDGE_AFTER: usize = 3;
 const STRUCTURE_HINT_MAX_BYTES: usize = 3_000;
 
 fn structure_hint(ctx: &mut ToolCtx, raw: &str) -> Option<String> {
-    let listed = super::outline::outline(ctx, &serde_json::json!({"path": raw, "max_depth": 1}));
+    let listed = super::outline::outline(
+        ctx,
+        &serde_json::json!({"path": raw, "max_depth": 1, "skip_deps": true}),
+    );
     if !listed.ok {
         return None;
     }
@@ -1797,8 +1800,13 @@ mod tests {
         );
 
         // 4. TypeScript arrow-function components & hooks (`export const Button = ...`, `const useAuth = ...`).
-        let tsx_src = "export const Button = (props: Props) => {\n    return <button>{props.label}</button>;\n};\n\nconst useAuth = () => {\n    return true;\n};\n";
+        let tsx_src = "import { Props } from './types';\nexport const Button = (props: Props) => {\n    return <button>{props.label}</button>;\n};\n\nconst useAuth = () => {\n    return true;\n};\n";
         std::fs::write(dir.path().join("comp.tsx"), tsx_src).unwrap();
+        std::fs::write(
+            dir.path().join("app.tsx"),
+            "import { Button } from './comp';\nexport const App = () => <Button />;\n",
+        )
+        .unwrap();
         let tsx_out = read(
             &mut ctx2,
             "comp.tsx",
@@ -1807,5 +1815,11 @@ mod tests {
         assert!(tsx_out.ok, "{}", tsx_out.output);
         assert!(tsx_out.output.contains("export const Button"));
         assert!(tsx_out.output.contains("const useAuth"));
+
+        // 5. `outline` reports both outgoing `Imports:` and incoming `Imported by:`.
+        let out_res = crate::agent::tools::outline::outline(&mut ctx2, &json!({"path": "comp.tsx"}));
+        assert!(out_res.ok, "{}", out_res.output);
+        assert!(out_res.output.contains("Imports: './types'"), "{}", out_res.output);
+        assert!(out_res.output.contains("Imported by (1): app.tsx:1"), "{}", out_res.output);
     }
 }
