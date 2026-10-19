@@ -335,11 +335,6 @@ pub struct App {
     last_reported_seq: u64,
     pending_frames: std::collections::VecDeque<PendingFrame>,
     last_presented_at: Option<Instant>,
-    /// EMA (µs) of measured inter-present intervals. Starts at the hard
-    /// minimum and rises when the terminal (ConPTY, SSH) backpressures.
-    /// Used in next_wake_deadline to gate frame builds to the real
-    /// throughput instead of silently dropping frames at 120 FPS.
-    pacing_ema: f64,
     renderer_dead_reported: bool,
     /// last time draw_menu rebuilt menu_rows (throttled background refresh)
     menu_built_at: Option<std::time::Instant>,
@@ -730,7 +725,6 @@ impl App {
             last_reported_seq: 0,
             pending_frames: std::collections::VecDeque::new(),
             last_presented_at: None,
-            pacing_ema: crate::tui::presenter::MIN_PRESENT_INTERVAL.as_micros() as f64,
             renderer_dead_reported: false,
             menu_built_at: None,
             quit: false,
@@ -927,17 +921,14 @@ impl App {
         };
 
         // 1. Frame build pending: either waiting out a 150ms resize drag settle
-        //    or held back by the pacing EMA (measured terminal throughput).
-        //    A slow terminal raises the EMA and the gate widens; on a fast
-        //    terminal it stays at the 120 FPS minimum.
+        //    or held back by the 8.33ms presenter pacing gate.
         if self.dirty {
             if self.defer_rebuild
                 && let Some(t_res) = self.last_resize
             {
                 consider(t_res + Duration::from_millis(150));
             } else {
-                let pacing = Duration::from_micros(self.pacing_ema as u64);
-                consider(last_build + pacing);
+                consider(last_build + crate::tui::presenter::MIN_PRESENT_INTERVAL);
             }
         }
 
@@ -1204,8 +1195,7 @@ impl App {
             if self.test_churn.is_some() {
                 self.tick_test_churn();
             }
-            if self.dirty
-                && last_build.elapsed().as_micros() as f64 >= self.pacing_ema {
+            if self.dirty && last_build.elapsed() >= crate::tui::presenter::MIN_PRESENT_INTERVAL {
                 let area =
                     ratatui::layout::Rect::new(0, 0, self.term_size.width, self.term_size.height);
                 // cleared every frame (as the old draw path did): only a
@@ -1294,10 +1284,6 @@ impl App {
                     None => 0,
                 };
                 self.last_presented_at = Some(rep.presented_at);
-                // EMA (α=0.125, ~8 samples): smooth the measured pace toward
-                // the real terminal throughput instead of crashing against the
-                // hard 120 FPS gate and silently dropping frames.
-                self.pacing_ema = self.pacing_ema * 0.875 + (pace_us as f64).max(8_334.0) * 0.125;
                 let stat = perf::FrameStat {
                     draw_us: rep.draw_us,
                     rebuild_us,

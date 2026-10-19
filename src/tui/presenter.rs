@@ -899,12 +899,6 @@ impl<W: Write> Presenter<W> {
 
         let next_content = &next.content;
 
-        // DEC 2026 band split counter: some terminals (VTE < 0.74, older
-        // Windows Terminal) can drop large synchronized-update regions.
-        // Split every 50 dirty rows so no single update is too long.
-        let mut rows_in_band = 0usize;
-        const MAX_ROWS_PER_BAND: usize = 50;
-
         for (y, &clean) in row_clean.iter().enumerate() {
             if clean {
                 continue;
@@ -1013,16 +1007,6 @@ impl<W: Write> Presenter<W> {
                     rstate.style_dirty = true;
                 }
                 self.scratch.extend_from_slice(b"\x1b[K");
-            }
-
-            // Split DEC 2026 band every MAX_ROWS_PER_BAND so old terminals
-            // (VTE < 0.74, older Windows Terminal) do not drop the update.
-            rows_in_band += 1;
-            if rows_in_band >= MAX_ROWS_PER_BAND {
-                rstate.reset_sgr(&mut self.scratch);
-                self.scratch.extend_from_slice(b"\x1b[?2026l");
-                self.scratch.extend_from_slice(b"\x1b[?2026h");
-                rows_in_band = 0;
             }
         }
 
