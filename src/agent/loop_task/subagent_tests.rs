@@ -175,6 +175,27 @@ fn subagent_contract_parent_context_and_receipt_salvage() {
     assert!(writer_tail.contains("Role: SCOPED WRITER SUBAGENT"));
     assert!(writer_tail.contains("Allowed write scope: [src/lexer.rs]"));
 
+    // Clean-context reviewer mode (`clean: true`) omits `<parent_context>`
+    let clean_tasks = subagent_tasks_from_args(&serde_json::json!({
+        "clean": true,
+        "tasks": ["Review the current git diff for logic bugs"]
+    }))
+    .unwrap();
+    assert!(clean_tasks[0].clean);
+    let clean_tail = build_subagent_tail(root, "parent-s1", &clean_tasks[0], true);
+    assert!(clean_tail.contains("Role: READ-ONLY EXPLORER SUBAGENT"));
+    assert!(
+        !clean_tail.contains("<parent_context>"),
+        "clean:true subagent must not receive parent history/notes: {clean_tail}"
+    );
+
+    // Failure-loop intervention fires every 3 consecutive edit -> bash failure cycles
+    assert!(super::failure_loop_nudge(1).is_none());
+    assert!(super::failure_loop_nudge(2).is_none());
+    assert!(super::failure_loop_nudge(3).is_some());
+    assert!(super::failure_loop_nudge(4).is_none());
+    assert!(super::failure_loop_nudge(6).is_some());
+
     // Verify SubagentTrail receipt and partial-work salvage on timeout/error.
     let mut trail = SubagentTrail::default();
     trail.record_start("grep", "parse_expr");

@@ -374,6 +374,20 @@ const REPEAT_NOTE_MARK: &str = "\n[host: you already called";
 /// Marker of the stub that replaces a repeated result entirely.
 const REPEAT_STUB_MARK: &str = "[host: not re-reported";
 
+/// Turn-local intervention when the agent gets stuck in an unproductive
+/// `edit -> bash (fail)` loop (`TokenEconomizer` / `DeskCheck`).
+pub(crate) fn failure_loop_nudge(consecutive_failures: usize) -> Option<&'static str> {
+    if consecutive_failures >= 3 && consecutive_failures.is_multiple_of(3) {
+        Some(
+            "\n[host note: 3 consecutive edit/check cycles have failed. Stop guessing edits — \
+             inspect the exact symbol/type definitions with `read` (or `grep`) and verify the \
+             root cause before making another edit.]",
+        )
+    } else {
+        None
+    }
+}
+
 /// What the host decides to do with a result the model has already seen
 /// byte-for-byte.
 #[derive(Debug)]
@@ -900,6 +914,8 @@ async fn run_agent(
     // keep it in lockstep with plan outcomes below. `ctx.current_step` is
     // the single live copy; the TUI persists it via `StepCurrent` events.
     ctx.current_step = adopt_in_progress_step(&root, &session_id);
+    let mut edited_since_green_bash = false;
+    let mut consecutive_edit_bash_failures = 0usize;
     if enable_tools && !read_only {
         // Heal a crash between a journal intent and its plan store before anything — including this session's writer — reads the
         // plan or the tail counter. No-op on a clean tree.
@@ -2022,6 +2038,25 @@ async fn run_agent(
                 }
                 if outcome.cancelled {
                     interrupted = true;
+                }
+                if outcome.ok
+                    && matches!(
+                        call.name.as_str(),
+                        "edit" | "multi_edit" | "write" | "patch"
+                    )
+                {
+                    edited_since_green_bash = true;
+                } else if call.name == "bash" {
+                    if outcome.ok {
+                        consecutive_edit_bash_failures = 0;
+                        edited_since_green_bash = false;
+                    } else if !outcome.cancelled && edited_since_green_bash {
+                        consecutive_edit_bash_failures += 1;
+                        edited_since_green_bash = false;
+                        if let Some(nudge) = failure_loop_nudge(consecutive_edit_bash_failures) {
+                            outcome.output.push_str(nudge);
+                        }
+                    }
                 }
                 // Repeat handling: the first identical re-run is
                 // reported with a note, the next one loses its bytes — the note

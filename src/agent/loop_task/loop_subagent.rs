@@ -49,6 +49,7 @@ pub(crate) struct SubagentTask {
     pub(crate) paths: Vec<String>,
     pub(crate) context: Option<String>,
     pub(crate) files: Vec<String>,
+    pub(crate) clean: bool,
 }
 
 fn normalize_rel_path_list(arr: &[serde_json::Value]) -> Vec<String> {
@@ -64,9 +65,9 @@ fn normalize_rel_path_list(arr: &[serde_json::Value]) -> Vec<String> {
         .collect()
 }
 
-fn subagent_task_spec(item: &serde_json::Value) -> Option<SubagentTask> {
+fn subagent_task_spec(item: &serde_json::Value, default_clean: bool) -> Option<SubagentTask> {
     let label = subagent_task_text(item)?;
-    let (write, paths, context, files) = match item {
+    let (write, paths, context, files, clean) = match item {
         serde_json::Value::Object(map) => {
             let write = map.get("write").and_then(|v| v.as_bool()).unwrap_or(false);
             let paths = map
@@ -85,9 +86,13 @@ fn subagent_task_spec(item: &serde_json::Value) -> Option<SubagentTask> {
                 .and_then(|v| v.as_array())
                 .map(|a| normalize_rel_path_list(a))
                 .unwrap_or_default();
-            (write, paths, context, files)
+            let clean = map
+                .get("clean")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(default_clean);
+            (write, paths, context, files, clean)
         }
-        _ => (false, Vec::new(), None, Vec::new()),
+        _ => (false, Vec::new(), None, Vec::new(), default_clean),
     };
     Some(SubagentTask {
         label,
@@ -95,6 +100,7 @@ fn subagent_task_spec(item: &serde_json::Value) -> Option<SubagentTask> {
         paths,
         context,
         files,
+        clean,
     })
 }
 
@@ -111,12 +117,16 @@ fn scopes_overlap(a: &[String], b: &[String]) -> bool {
 pub(crate) fn subagent_tasks_from_args(
     args: &serde_json::Value,
 ) -> Result<Vec<SubagentTask>, String> {
+    let default_clean = args.get("clean").and_then(|v| v.as_bool()).unwrap_or(false);
     let tasks: Vec<SubagentTask> = match args.get("tasks") {
-        Some(serde_json::Value::Array(items)) => {
-            items.iter().filter_map(subagent_task_spec).collect()
-        }
+        Some(serde_json::Value::Array(items)) => items
+            .iter()
+            .filter_map(|item| subagent_task_spec(item, default_clean))
+            .collect(),
         // a lone string is one task, not a malformed array
-        Some(single) => subagent_task_spec(single).into_iter().collect(),
+        Some(single) => subagent_task_spec(single, default_clean)
+            .into_iter()
+            .collect(),
         None => Vec::new(),
     };
     if tasks.is_empty() {
@@ -438,6 +448,7 @@ pub(crate) async fn run_subagent(
                         "paths": task.paths,
                         "context": task.context,
                         "files": task.files,
+                        "clean": task.clean,
                     }],
                 });
                 let system = system.clone();
@@ -940,7 +951,9 @@ pub(crate) fn build_subagent_tail(
         ));
     }
 
-    if let Some(parent_ctx) = build_parent_context_brief(root, parent_session) {
+    if !task.clean
+        && let Some(parent_ctx) = build_parent_context_brief(root, parent_session)
+    {
         block.push_str("\n\n");
         block.push_str(&parent_ctx);
     }

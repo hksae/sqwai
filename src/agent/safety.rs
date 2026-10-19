@@ -1477,6 +1477,18 @@ const EXACT_ONLY_BINARIES: &[&str] = &[
     "cmd",
     "iex",
     "invoke-expression",
+    "python",
+    "python3",
+    "py",
+    "node",
+    "perl",
+    "ruby",
+    "php",
+    "lua",
+    "npx",
+    "bunx",
+    "pnpx",
+    "uvx",
 ];
 
 /// Destructive filesystem binaries where a session grant must also pin the
@@ -1574,6 +1586,27 @@ impl SubcommandGrant {
         }
 
         let head = resolve_arity_head(&bin_base, &words[1..]);
+        if [
+            "npm exec",
+            "pnpm exec",
+            "yarn exec",
+            "bun x",
+            "deno run",
+            "deno eval",
+            "uv run",
+            "poetry run",
+            "pipenv run",
+        ]
+        .iter()
+        .any(|p| head == *p || head.starts_with(&format!("{p} ")))
+        {
+            return Self {
+                head: bin_base,
+                flags: std::collections::BTreeSet::new(),
+                targets: None,
+                exact_command: Some(norm_sub),
+            };
+        }
         let arity_words = head.split_whitespace().count();
         let flags: std::collections::BTreeSet<String> = words[1..]
             .iter()
@@ -1727,6 +1760,8 @@ fn resolve_arity_head(bin_base: &str, rest: &[&str]) -> String {
                 | "gh"
                 | "brew"
                 | "pip"
+                | "uv"
+                | "pipenv"
                 | "poetry"
                 | "twine"
                 | "go"

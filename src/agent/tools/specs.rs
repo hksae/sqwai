@@ -384,10 +384,14 @@ Pass context:N for N surrounding lines per match (like grep -C) so a follow-up r
         ToolDef {
             name: "subagent",
             kind: Kind::ReadOnly,
-            description: "Delegate 1–8 focused tasks to isolated child agents (up to 4 run concurrently). Children inherit the cached project/system prefix and receive a host-generated `<parent_context>` brief (active plan goal/step, parent's recent files and notes) plus a `<subagent_contract>` tailored to their mode: Read-Only Explorer (`write: false`, default) for broad multi-file research without polluting parent context, or Scoped Writer (`write: true, paths: [...]`, non-overlapping across siblings) for isolated implementation. Pass optional `files` or `context` in task objects to point children at known starting points. Returns each child's report with a host-verified `[Subagent receipt: ...]` of executed tools and modified files.",
+            description: "Delegate 1–8 focused tasks to isolated child agents (up to 4 run concurrently). Children inherit the cached project/system prefix and by default receive a host-generated `<parent_context>` brief (active plan goal/step, parent's recent files and notes) plus a `<subagent_contract>` tailored to their mode: Read-Only Explorer (`write: false`, default) for broad multi-file research without polluting parent context, or Scoped Writer (`write: true, paths: [...]`, non-overlapping across siblings) for isolated implementation. Pass `clean: true` when spawning an independent code-review or verification subagent so it inspects the diff/files with a clean slate and zero parent bias. Pass optional `files` or `context` in task objects to point children at known starting points. Returns each child's report with a host-verified `[Subagent receipt: ...]` of executed tools and modified files.",
             parameters: json!({
                 "type": "object",
                 "properties": {
+                    "clean": {
+                        "type": "boolean",
+                        "description": "when true, omit parent history/notes (<parent_context>) so the subagent reviews or audits with an unbiased clean slate (default: false)"
+                    },
                     "tasks": {
                         "type": "array",
                         "items": {
@@ -402,7 +406,8 @@ Pass context:N for N surrounding lines per match (like grep -C) so a follow-up r
                                         "context": {"type": "string", "description": "optional background/decisions from parent to guide the child"},
                                         "files": {"type": "array", "items": {"type": "string"}, "description": "optional starting file/dir paths to inspect"},
                                         "write": {"type": "boolean", "description": "allow file writes, scoped to paths"},
-                                        "paths": {"type": "array", "items": {"type": "string"}, "description": "write scope roots (required with write:true; or focus paths when write:false)"}
+                                        "paths": {"type": "array", "items": {"type": "string"}, "description": "write scope roots (required with write:true; or focus paths when write:false)"},
+                                        "clean": {"type": "boolean", "description": "when true, omit <parent_context> for this task so it runs with a clean slate"}
                                     },
                                     "additionalProperties": true
                                 }

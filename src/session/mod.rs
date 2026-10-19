@@ -307,13 +307,61 @@ impl Session {
         if role == Role::System {
             return;
         }
+        let now = Utc::now();
+        if role == Role::User {
+            self.prune_stale_thinking_at(now);
+        }
         let content = content.into();
         if self.messages.is_empty() && role == Role::User {
             self.title = title_from(&content);
         }
         self.estimated_tokens += (content.len() as u64).div_ceil(4);
-        self.last_message_at = Some(Utc::now());
+        self.last_message_at = Some(now);
         self.messages.push(Message::new(role, content));
+    }
+
+    /// One-shot pruning of older `thinking_blocks` / `reasoning_items` when a
+    /// session resumes after more than 1 hour of inactivity (once provider KV
+    /// caches have already expired). Keeps the most recent assistant turn's
+    /// reasoning intact and updates `last_message_at` immediately in [`push`]
+    /// so active turns never re-trigger pruning and never invalidate warm caches.
+    pub fn prune_stale_thinking_at(&mut self, now: DateTime<Utc>) -> usize {
+        const IDLE_THINKING_TTL_SECS: i64 = 3600;
+        let Some(last_ts) = self.last_message_at else {
+            return 0;
+        };
+        if now.signed_duration_since(last_ts).num_seconds() <= IDLE_THINKING_TTL_SECS {
+            return 0;
+        }
+        let Some(last_assistant) = self
+            .messages
+            .iter()
+            .rposition(|m| m.role == Role::Assistant)
+        else {
+            return 0;
+        };
+        let mut pruned = 0usize;
+        for msg in &mut self.messages[..last_assistant] {
+            if msg.role != Role::Assistant {
+                continue;
+            }
+            if let Some(state) = msg.provider_state.as_mut()
+                && let Some(obj) = state.as_object_mut()
+            {
+                let removed_t = obj.remove("thinking_blocks").is_some();
+                let removed_r = obj.remove("reasoning_items").is_some();
+                if removed_t || removed_r {
+                    pruned += 1;
+                }
+                if obj.is_empty() {
+                    msg.provider_state = None;
+                }
+            }
+        }
+        if pruned > 0 {
+            self.last_response_id = None;
+        }
+        pruned
     }
 
     /// Record usage reported for **one** request.
@@ -913,5 +961,57 @@ mod tests {
         assert_eq!(v[0].id, pinned_old.id, "pinned first");
         assert_eq!(v[1].id, mid.id, "then latest activity");
         assert_eq!(v[2].id, old.id);
+    }
+
+    #[test]
+    fn prune_stale_thinking_clears_older_blocks_once_after_idle_hour() {
+        let mut s = Session::new("m".into(), 100_000);
+        let t0 = Utc::now() - chrono::Duration::hours(2);
+        let mut a1 = Message::new(Role::Assistant, "first");
+        a1.provider_state = Some(serde_json::json!({
+            "thinking_blocks": [{"type": "thinking", "thinking": "old thought", "signature": "sig1"}]
+        }));
+        let mut a2 = Message::new(Role::Assistant, "second");
+        a2.provider_state = Some(serde_json::json!({
+            "thinking_blocks": [{"type": "thinking", "thinking": "recent thought", "signature": "sig2"}]
+        }));
+        s.messages.push(Message::new(Role::User, "q1"));
+        s.messages.push(a1);
+        s.messages.push(Message::new(Role::User, "q2"));
+        s.messages.push(a2);
+        s.last_message_at = Some(t0);
+        s.last_response_id = Some("resp_old".into());
+
+        // Active session (< 1 hour idle): nothing is pruned
+        assert_eq!(
+            s.prune_stale_thinking_at(t0 + chrono::Duration::minutes(30)),
+            0
+        );
+        assert!(s.messages[1].provider_state.is_some());
+
+        // Resuming after > 1 hour idle (via push): older assistant thinking is pruned,
+        // the most recent assistant thinking is preserved, and last_message_at updates
+        s.push(Role::User, "resumed after 2 hours");
+        assert!(
+            s.messages[1].provider_state.is_none(),
+            "older thinking blocks must be pruned on cold resume"
+        );
+        assert!(
+            s.messages[3].provider_state.is_some(),
+            "most recent assistant thinking must be kept"
+        );
+        assert!(s.last_response_id.is_none());
+
+        // Subsequent active turns do NOT prune the kept thinking block
+        let mut a3 = Message::new(Role::Assistant, "third");
+        a3.provider_state = Some(serde_json::json!({
+            "thinking_blocks": [{"type": "thinking", "thinking": "third thought", "signature": "sig3"}]
+        }));
+        s.messages.push(a3);
+        s.push(Role::User, "immediate follow-up");
+        assert!(
+            s.messages[3].provider_state.is_some(),
+            "active turns must not prune thinking blocks"
+        );
     }
 }

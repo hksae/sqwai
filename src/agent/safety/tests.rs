@@ -778,3 +778,26 @@ fn compound_splitter_handles_chains_substitutions_and_rejects_dangling_ops() {
     assert!(split_compound_commands("npm test &&").is_err());
     assert!(split_compound_commands("echo 'unterminated").is_err());
 }
+
+#[test]
+fn interpreter_and_exec_grants_are_exact_only_to_prevent_privilege_escalation() {
+    for (approved, different) in [
+        ("python3 scripts/check.py", "python3 scripts/exfil.py"),
+        ("node tools/lint.js", "node -e 'process.exit(1)'"),
+        ("npx prettier --check .", "npx evil-pkg"),
+        ("npm exec vitest", "npm exec evil"),
+        ("uv run pytest", "uv run python -c 'import os'"),
+    ] {
+        let grant = SubcommandGrant::from_subcommand(approved);
+        assert!(
+            grant.exact_command.is_some(),
+            "interpreter/exec grant must be exact-only: {approved}"
+        );
+        assert!(grant.covers(approved));
+        assert!(
+            !grant.covers(different),
+            "grant for '{approved}' must NOT cover '{different}'"
+        );
+    }
+}
+
