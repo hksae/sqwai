@@ -57,6 +57,8 @@ pub enum Op {
     Finish {
         #[serde(default)]
         id: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        ids: Vec<String>,
         summary: String,
     },
     Add {
@@ -323,7 +325,7 @@ pub fn apply(plan: &mut Plan, op: Op, limits: &Limits) -> Result<Applied, Reject
             format!("an active plan already exists: {}", plan.id),
             "work that plan instead: finish its steps, do not create another one. The current plan is in your context above",
         ),
-        Op::Finish { id, summary } => finish(plan, &id, summary),
+        Op::Finish { id, ids, summary } => finish(plan, &id, &ids, summary),
         Op::Cancel { id, reason } => cancel(plan, id.as_deref(), reason),
         Op::Abandon { reason } => {
             let quoted = validate_surrender_reason(&reason, "abandoning a plan")?;
@@ -373,61 +375,78 @@ fn unknown_step(plan: &mut Plan, id: &str) -> Result<Applied, Rejection> {
     )
 }
 
-fn finish(plan: &mut Plan, id: &str, summary: String) -> Result<Applied, Rejection> {
-    let target_id = if id.trim().is_empty() {
+fn finish(plan: &mut Plan, id: &str, ids: &[String], summary: String) -> Result<Applied, Rejection> {
+    if summary.trim().is_empty() {
+        let label = if !id.trim().is_empty() { id.trim() } else { "current" };
+        return reject(
+            plan,
+            "empty_summary",
+            format!("step {label} needs a summary of what was done"),
+            "one line: what changed and where",
+        );
+    }
+    let targets: Vec<String> = if !ids.is_empty() {
+        ids.iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    } else if id.contains(',') {
+        id.split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    } else if !id.trim().is_empty() {
+        vec![id.trim().to_string()]
+    } else {
         plan.steps
             .iter()
             .find(|s| s.status == StepStatus::InProgress)
             .or_else(|| plan.steps.iter().find(|s| s.status == StepStatus::Reopened))
-            .map(|s| s.id.clone())
+            .map(|s| vec![s.id.clone()])
             .unwrap_or_default()
-    } else {
-        id.trim().to_string()
     };
-    let Some(status) = step_status(plan, &target_id) else {
-        return unknown_step(plan, &target_id);
-    };
-    if matches!(status, StepStatus::Done | StepStatus::Cancelled) {
-        return reject(
-            plan,
-            "step_already_closed",
-            format!("step {target_id} is already {}", status.as_str()),
-            "only an in-progress or reopened step can be finished",
-        );
+    if targets.is_empty() {
+        return unknown_step(plan, id);
     }
-    if status == StepStatus::Pending {
-        if let Some(active) = plan
-            .steps
-            .iter()
-            .find(|s| s.id != target_id && s.status == StepStatus::InProgress)
-        {
+
+    for target_id in &targets {
+        let Some(status) = step_status(plan, target_id) else {
+            return unknown_step(plan, target_id);
+        };
+        if matches!(status, StepStatus::Done | StepStatus::Cancelled) {
             return reject(
                 plan,
-                "step_not_in_progress",
-                format!(
-                    "step {target_id} is pending while step {} is in progress",
-                    active.id
-                ),
-                format!("finish or cancel step {} first", active.id),
+                "step_already_closed",
+                format!("step {target_id} is already {}", status.as_str()),
+                "only an in-progress or reopened step can be finished",
             );
         }
+        if status == StepStatus::Pending {
+            if let Some(active) = plan
+                .steps
+                .iter()
+                .find(|s| s.id != *target_id && s.status == StepStatus::InProgress)
+            {
+                return reject(
+                    plan,
+                    "step_not_in_progress",
+                    format!(
+                        "step {target_id} is pending while step {} is in progress",
+                        active.id
+                    ),
+                    format!("finish or cancel step {} first (or pass ids: [\"{}\", \"{target_id}\"] if both are done)", active.id, active.id),
+                );
+            }
+        }
+        let step = plan.step_mut(target_id).expect("checked above");
+        step.status = StepStatus::Done;
+        step.finished = Some(now());
+        step.summary = Some(summary.trim().to_string());
+        step.reason = None;
+        auto_advance(plan);
     }
-    if summary.trim().is_empty() {
-        return reject(
-            plan,
-            "empty_summary",
-            format!("step {target_id} needs a summary of what was done"),
-            "one line: what changed and where",
-        );
-    }
-    let step = plan.step_mut(&target_id).expect("checked above");
-    step.status = StepStatus::Done;
-    step.finished = Some(now());
-    step.summary = Some(summary.trim().to_string());
-    step.reason = None;
 
-    auto_advance(plan);
-
+    let closed_label = targets.join(", ");
     let all_closed = plan
         .steps
         .iter()
@@ -437,7 +456,7 @@ fn finish(plan: &mut Plan, id: &str, summary: String) -> Result<Applied, Rejecti
         plan.revision += 1;
         return Ok(Applied::Completed {
             message: format!(
-                "step {target_id} done — all steps closed, plan {} completed",
+                "step {closed_label} done — all steps closed, plan {} completed",
                 plan.id
             ),
         });
@@ -458,7 +477,7 @@ fn finish(plan: &mut Plan, id: &str, summary: String) -> Result<Applied, Rejecti
     accept(
         plan,
         format!(
-            "step {target_id} done{next_hint} — a decision this step settled, an approach it rejected or a \
+            "step {closed_label} done{next_hint} — a decision this step settled, an approach it rejected or a \
              lesson it learned belongs in `note`; the transcript gets compacted, the journal does not"
         ),
     )

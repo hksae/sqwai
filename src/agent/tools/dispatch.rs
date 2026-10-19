@@ -743,11 +743,27 @@ fn resolve_step_id(args: &mut Value, root: &std::path::Path, session_id: &str) {
             obj.insert(key.into(), Value::String(n.to_string()));
         }
     }
+    if let Some(arr) = obj.get_mut("ids").and_then(Value::as_array_mut) {
+        for item in arr.iter_mut() {
+            if let Some(n) = item.as_u64() {
+                *item = Value::String(n.to_string());
+            } else if let Some(n) = item.as_i64() {
+                *item = Value::String(n.to_string());
+            }
+        }
+    }
     // Coerce single string `criteria` / `constraints` / `acceptance` into a 1-element array
     for key in ["criteria", "acceptance", "constraints"] {
         if let Some(s) = obj.get(key).and_then(Value::as_str).map(str::to_string) {
             obj.insert(key.into(), Value::Array(vec![Value::String(s)]));
         }
+    }
+    // Infer `op = "create"` when `op` was omitted and `goal` + `steps` were provided
+    if !obj.contains_key("op")
+        && obj.get("goal").and_then(Value::as_str).is_some()
+        && obj.contains_key("steps")
+    {
+        obj.insert("op".into(), Value::String("create".into()));
     }
     let Some(op) = obj.get("op").and_then(Value::as_str).map(str::to_string) else {
         return;
@@ -780,13 +796,29 @@ fn resolve_step_id(args: &mut Value, root: &std::path::Path, session_id: &str) {
     {
         obj.insert("id".into(), step_id.into());
     }
-    if op != "finish" {
-        return;
-    }
     let Ok(Some(active)) = plan::open_active_for_session(root, Some(session_id)) else {
         return;
     };
     let given = obj.get("id").and_then(Value::as_str).map(String::from);
+    // If the model called `cancel` with the plan's own ULID (or no step id) AND
+    // provided a valid 3+ word reason, treat it as `abandon` of the whole plan.
+    if op == "cancel" {
+        let targets_whole_plan = match &given {
+            None => true,
+            Some(id) => id.trim() == active.id,
+        };
+        if targets_whole_plan
+            && let Some(reason) = obj.get("reason").and_then(Value::as_str)
+            && plan::validate_surrender_reason(reason, "abandoning a plan").is_ok()
+        {
+            obj.insert("op".into(), Value::String("abandon".into()));
+            obj.remove("id");
+        }
+        return;
+    }
+    if op != "finish" {
+        return;
+    }
     let missing_or_plan_id = match &given {
         None => true,
         Some(id) => id.trim().is_empty() || *id == active.id,
@@ -801,21 +833,61 @@ fn resolve_step_id(args: &mut Value, root: &std::path::Path, session_id: &str) {
     let (Some(first), None) = (candidates.next(), candidates.next()) else {
         return;
     };
+    if given.as_deref() == Some(active.id.as_str()) {
+        obj.insert("_was_plan_id".into(), Value::Bool(true));
+    }
     obj.insert("id".into(), first.id.clone().into());
 }
 
 pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
     let mut args = args.clone();
     resolve_step_id(&mut args, &ctx.root, &ctx.session_id);
-    if args.get("op").and_then(|v| v.as_str()) == Some("verify") {
+    let was_plan_id = args
+        .as_object_mut()
+        .and_then(|o| o.remove("_was_plan_id"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let raw_op = args.get("op").and_then(|v| v.as_str()).unwrap_or("");
+    if raw_op == "verify" {
         return Outcome::err(
             "verify is retired: run the command yourself (bash) and work from its observed result",
         );
     }
-    if args.get("op").and_then(|v| v.as_str()) == Some("show") {
+    if raw_op == "show" {
         return Outcome::err(
             "no plan show tool: the current plan with its step ids is in your context above — use those ids, never re-read the plan",
         );
+    }
+    if raw_op == "start" {
+        if let Ok(Some(active)) = plan::open_active_for_session(&ctx.root, Some(&ctx.session_id))
+            && let Some(cur) = active
+                .steps
+                .iter()
+                .find(|s| s.status == plan::StepStatus::InProgress)
+        {
+            return Outcome::ok(format!(
+                "step {} (\"{}\") is already in progress — steps start automatically; perform the work and call plan(op=\"finish\", id=\"{}\", summary=\"...\") when done",
+                cur.id, cur.title, cur.id
+            ));
+        }
+        return Outcome::err("no active plan: create one with op=create first");
+    }
+    if raw_op == "complete" {
+        if let Ok(Some(active)) = plan::open_active_for_session(&ctx.root, Some(&ctx.session_id)) {
+            let open: Vec<String> = active
+                .steps
+                .iter()
+                .filter(|s| !matches!(s.status, plan::StepStatus::Done | plan::StepStatus::Cancelled))
+                .map(|s| s.id.clone())
+                .collect();
+            if !open.is_empty() {
+                return Outcome::err(format!(
+                    "steps still open ({}) — finish or cancel them; the plan completes automatically when the last step closes",
+                    open.join(", ")
+                ));
+            }
+        }
+        return Outcome::ok("all steps are closed and the plan is completed");
     }
     let op: plan::Op = match serde_json::from_value(args.clone()) {
         Ok(op) => op,
@@ -960,12 +1032,38 @@ pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                 .iter()
                 .find(|s| s.status == plan::StepStatus::InProgress)
                 .map(|s| s.id.clone());
+            // Guard against a model calling `finish(id=<plan_ulid>, summary="Starting ...")`
+            // right after `create` before any work was performed on step 1.
+            if was_plan_id
+                && let plan::Op::Finish {
+                    ref id,
+                    ref ids,
+                    ref summary,
+                } = other
+                && ids.is_empty()
+                && id == "1"
+                && active.steps.first().is_some_and(|s| s.evidence.is_empty())
+            {
+                let sum_low = summary.trim().to_lowercase();
+                if sum_low.starts_with("start") || sum_low.starts_with("begin") {
+                    let s1_title = active
+                        .steps
+                        .first()
+                        .map(|s| s.title.as_str())
+                        .unwrap_or("step 1");
+                    return Outcome::ok(format!(
+                        "step 1 (\"{s1_title}\") is already in progress — perform the work for step 1 first, then call plan(op=\"finish\", id=\"1\", summary=\"...\") when step 1 is complete"
+                    ));
+                }
+            }
             let finishing = match &other {
-                plan::Op::Finish { id, .. } => {
-                    if id.trim().is_empty() {
+                plan::Op::Finish { id, ids, .. } => {
+                    if let Some(last) = ids.last() {
+                        Some(last.trim().to_string())
+                    } else if id.trim().is_empty() {
                         prev_in_progress.clone()
                     } else {
-                        Some(id.trim().to_string())
+                        Some(id.rsplit(',').next().unwrap_or(id).trim().to_string())
                     }
                 }
                 _ => None,

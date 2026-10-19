@@ -31,6 +31,7 @@ pub(crate) fn shadow(root: &Path, store: ShadowStore) -> Option<Shadow> {
     Shadow::open(root, store).ok().flatten()
 }
 
+#[cfg(test)]
 pub fn shadow_repo(root: &Path, store: ShadowStore) -> Option<Shadow> {
     shadow(root, store)
 }

@@ -74,6 +74,7 @@ fn undo_reopens_done_step_and_clears_completion_metadata() {
         &mut plan,
         Op::Finish {
             id: "1".into(),
+            ids: Vec::new(),
             summary: "model added".into(),
         },
         &Limits::default(),
@@ -95,6 +96,7 @@ fn undo_reopens_done_step_and_clears_completion_metadata() {
             &mut plan,
             Op::Finish {
                 id: "1".into(),
+                ids: Vec::new(),
                 summary: "re-did model".into(),
             },
             &Limits::default(),
@@ -143,6 +145,7 @@ fn create_starts_first_step_and_finish_advances_then_completes() {
             &mut plan,
             Op::Finish {
                 id: "1".into(),
+                ids: Vec::new(),
                 summary: "model added".into()
             },
             &Limits::default(),
@@ -157,6 +160,7 @@ fn create_starts_first_step_and_finish_advances_then_completes() {
             &mut plan,
             Op::Finish {
                 id: "2".into(),
+                ids: Vec::new(),
                 summary: "validator added".into()
             },
             &Limits::default(),
@@ -174,6 +178,7 @@ fn finish_requires_in_progress() {
         &mut plan,
         Op::Finish {
             id: "2".into(),
+            ids: Vec::new(),
             summary: "x".into(),
         },
         &Limits::default(),
@@ -190,6 +195,7 @@ fn closed_plans_are_read_only() {
         &mut plan,
         Op::Finish {
             id: "1".into(),
+            ids: Vec::new(),
             summary: "x".into(),
         },
         &Limits::default(),
@@ -202,6 +208,7 @@ fn closed_plans_are_read_only() {
         &mut plan,
         Op::Finish {
             id: "1".into(),
+            ids: Vec::new(),
             summary: "x".into(),
         },
         &Limits::default(),
@@ -293,6 +300,7 @@ fn abandon_validates_reason_and_closes_plan() {
         &mut plan,
         Op::Finish {
             id: "1".into(),
+            ids: Vec::new(),
             summary: "x".into(),
         },
         &Limits::default(),
@@ -734,6 +742,7 @@ fn reopen_bumps_epoch_and_clears_evidence() {
         &mut plan,
         Op::Finish {
             id: "1".into(),
+            ids: Vec::new(),
             summary: "model added".into(),
         },
         &Limits::default(),
@@ -907,6 +916,7 @@ fn new_step_deserializes_strings_and_aliases_and_finish_names_next_step() {
         &mut plan,
         Op::Finish {
             id: "1".into(),
+            ids: Vec::new(),
             summary: "done 1".into(),
         },
         &Limits::default(),

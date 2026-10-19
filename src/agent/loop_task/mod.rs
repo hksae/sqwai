@@ -2046,6 +2046,21 @@ async fn run_agent(
                     )
                 {
                     edited_since_green_bash = true;
+                    if subagent_depth == 0
+                        && let Ok(Some(active)) =
+                            plan::open_active_for_session(&root, Some(&session_id))
+                        && let Some(step) = active
+                            .steps
+                            .iter()
+                            .find(|s| s.status == plan::StepStatus::InProgress)
+                    {
+                        let total = active.steps.len();
+                        let title_short: String = step.title.chars().take(48).collect();
+                        outcome.output.push_str(&format!(
+                            "\n[active plan step {}/{total}: \"{title_short}\" — call plan(op=\"finish\", id=\"{}\", summary=\"...\") as soon as this step's work is done]",
+                            step.id, step.id
+                        ));
+                    }
                 } else if call.name == "bash" {
                     if outcome.ok {
                         consecutive_edit_bash_failures = 0;

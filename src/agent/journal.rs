@@ -521,6 +521,7 @@ impl Journal {
     }
 
     /// Check that a sequence belongs to this plan and is useful evidence.
+    #[cfg(test)]
     pub fn evidence(
         root: &Path,
         plan: &str,
@@ -985,8 +986,8 @@ impl Journal {
         }
         if actions >= threshold {
             Ok(Some(format!(
-                "plan: step {} has {actions} actions since its last plan operation.",
-                step.id
+                "plan: step {} (\"{}\") has {actions} actions since its last plan operation — call plan(op=\"finish\", id=\"{}\", summary=\"...\") if its work is complete.",
+                step.id, step.title, step.id
             )))
         } else {
             Ok(None)

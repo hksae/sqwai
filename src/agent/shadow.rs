@@ -351,6 +351,7 @@ impl Shadow {
     }
 
     /// List commits on a session's chain in reverse chronological order: (sha, label).
+    #[cfg(test)]
     pub fn commit_log(&self, session_id: &str) -> Result<Vec<(String, String)>> {
         let out = match self.git(&["log", "--format=%H\t%s", &session_ref(session_id)]) {
             Ok(out) => out,

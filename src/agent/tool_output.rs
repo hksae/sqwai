@@ -218,6 +218,7 @@ pub fn recall(messages: &[Message], call_id: &str) -> crate::agent::tools::Outco
     recall_with_limit(messages, call_id, 0)
 }
 
+#[cfg(test)]
 pub fn recall_with_limit(
     messages: &[Message],
     call_id: &str,

@@ -552,10 +552,10 @@ fn read_output_reports_totals_and_spills_when_truncated() {
 #[test]
 fn plan_ops_resolve_the_shapes_the_model_writes() {
     let (mut ctx, dir) = proj();
+    // Omitting `op` when `goal` and `steps` are present infers `op = "create"`
     let created = plan_op(
         &mut ctx,
         &json!({
-            "op": "create",
             "goal": "tolerance",
             "acceptance": ["eyeball it"],
             "steps": [{"title": "one"}, {"title": "two"}, {"title": "three"}]
@@ -564,16 +564,24 @@ fn plan_ops_resolve_the_shapes_the_model_writes() {
     assert!(created.ok, "{}", created.output);
     let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
 
-    // step 1 is already in_progress: finishing it needs no id
-    let done1 = plan_op(&mut ctx, &json!({"op": "finish", "summary": "did one"}));
-    assert!(done1.ok, "{}", done1.output);
-
-    // step 2 is now in_progress: finishing via step_id alias works
-    let done2 = plan_op(
+    // Premature `finish` with plan ULID and "Starting..." summary right after
+    // create does not accidentally close untouched step 1
+    let premature = plan_op(
         &mut ctx,
-        &json!({"op": "finish", "step_id": "2", "message": "did two"}),
+        &json!({"op": "finish", "id": plan_id, "summary": "Starting implementation of 3 steps"}),
     );
-    assert!(done2.ok, "{}", done2.output);
+    assert!(premature.ok, "{}", premature.output);
+    assert_eq!(
+        plan::open_active(&dir).unwrap().unwrap().step("1").unwrap().status,
+        plan::StepStatus::InProgress
+    );
+
+    // Batch finish of steps 1 and 2 via `ids`
+    let batch = plan_op(
+        &mut ctx,
+        &json!({"op": "finish", "ids": [1, 2], "summary": "did one and two"}),
+    );
+    assert!(batch.ok, "{}", batch.output);
 
     // step 3 is now in_progress: passing the plan's own ULID in `id` resolves to step 3
     let done3 = plan_op(

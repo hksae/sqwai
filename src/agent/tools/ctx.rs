@@ -309,21 +309,34 @@ impl ToolCtx {
 
     /// True when every line of `from..=to` was already served from identical
     /// content — including the case where an earlier, wider window covers it.
+    /// If the previous read of this file already returned the stub once
+    /// (`stubbed == true`) and the model is asking again, returns `None` so
+    /// the model is not trapped in a refusal loop when it needs exact lines for `edit`.
     pub(crate) fn read_range_served(
-        &self,
+        &mut self,
         p: &Path,
         hash: &str,
         from: usize,
         to: usize,
     ) -> Option<(usize, usize)> {
-        match self.read_windows.get(&Self::read_key(p)) {
-            Some(served) if served.hash == hash => served
-                .ranges
-                .iter()
-                .find(|(a, b)| *a <= from && *b >= to)
-                .copied(),
-            _ => None,
+        let key = Self::read_key(p);
+        let served = self.read_windows.get_mut(&key)?;
+        if served.hash != hash {
+            return None;
         }
+        let hit = served
+            .ranges
+            .iter()
+            .find(|(a, b)| *a <= from && *b >= to)
+            .copied();
+        if hit.is_some() {
+            if served.stubbed {
+                served.stubbed = false;
+                return None;
+            }
+            served.stubbed = true;
+        }
+        hit
     }
 
     /// Record the range that was actually put in front of the model, merging
@@ -337,8 +350,10 @@ impl ToolCtx {
             served.ranges.clear();
             served.windows.clear();
             served.served = 0;
+            served.stubbed = false;
         }
         served.served += 1;
+        served.stubbed = false;
         served.windows.push((from, to, call_id));
         served.rebuild_ranges();
     }
@@ -403,6 +418,7 @@ pub struct Served {
     pub ranges: Vec<(usize, usize)>,
     pub windows: Vec<(usize, usize, Option<String>)>,
     pub served: usize,
+    pub stubbed: bool,
 }
 
 impl Served {
@@ -412,6 +428,7 @@ impl Served {
             ranges: Vec::new(),
             windows: Vec::new(),
             served: 0,
+            stubbed: false,
         }
     }
 

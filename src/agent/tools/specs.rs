@@ -512,7 +512,12 @@ always ride in your context above — use those ids and never try to re-read the
                     "op": {"type": "string", "enum": [
                         "create", "finish", "add", "cancel", "abandon"
                     ]},
-                    "id": {"type": "string", "description": "finish / cancel: step id (optional for finish when one step is in_progress)"},
+                    "id": {"type": "string", "description": "finish / cancel: step number ('1', '2', '3', ...), NEVER the plan ULID. Optional for finish (defaults to the current in_progress step)"},
+                    "ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "finish: optional list of step numbers (e.g. ['1', '2']) when multiple steps were completed together"
+                    },
                     "goal": {"type": "string", "description": "create: overall goal"},
                     "constraints": {"type": "array", "items": {"type": "string"}, "description": "create: optional constraints"},
                     "criteria": {

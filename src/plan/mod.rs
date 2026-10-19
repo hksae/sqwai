@@ -18,7 +18,9 @@ use uuid::Uuid;
 mod ops;
 mod render;
 pub(crate) mod store;
-pub use ops::{Applied, Limits, NewStep, Op, Rejection, apply, create};
+pub use ops::{
+    Applied, Limits, NewStep, Op, Rejection, apply, create, validate_surrender_reason,
+};
 pub(crate) use ops::auto_advance;
 pub use render::{render, render_goal, render_status};
 #[cfg(test)]
