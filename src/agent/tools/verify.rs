@@ -12,38 +12,6 @@ use super::ctx::ToolCtx;
 use crate::plan;
 use serde_json::json;
 
-/// Append the open-assumption warning to a successful `finish`.
-///
-/// Non-blocking on purpose: the step is already finished when this runs. The
-/// point is that an assumption cannot quietly outlive the step that made it —
-/// the model either resolves it with `note { resolves }` or carries it
-/// forward knowingly.
-pub(crate) fn with_assumption_warning(
-    ctx: &ToolCtx,
-    finished_step: Option<&str>,
-    message: String,
-) -> String {
-    let Some(step) = finished_step else {
-        return message;
-    };
-    let open =
-        crate::agent::journal::Journal::open_assumptions_in(&ctx.root, &ctx.session_id, Some(step))
-            .unwrap_or_default();
-    if open.is_empty() {
-        return message;
-    }
-    let list = open
-        .iter()
-        .map(|item| item.label(80))
-        .collect::<Vec<_>>()
-        .join("; ");
-    format!(
-        "{message}\nwarning: step {step} has {} open assumption(s) ({list}) — resolve with \
-         note {{ kind: \"assumption\", resolves: <seq> }} or convert before completing",
-        open.len()
-    )
-}
-
 /// One-line blast radius on `finish`: the files this step wrote, from the
 /// journal's `file_diff` chain (all sessions — subagent writes count).
 /// Silent when the step wrote nothing (research steps). Informational,

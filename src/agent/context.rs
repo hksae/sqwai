@@ -38,6 +38,7 @@ pub fn anchor(root: &std::path::Path, session_id: &str) -> String {
     let mut changed = Vec::new();
     let mut recent_reads: Vec<String> = Vec::new();
     let mut last_verification = None;
+    let mut decisions: Vec<String> = Vec::new();
     let records =
         crate::agent::journal::Journal::records_for(root, session_id).unwrap_or_default();
     for record in &records {
@@ -117,6 +118,21 @@ pub fn anchor(root: &std::path::Path, session_id: &str) -> String {
         {
             last_verification = Some(record.seq);
         }
+        if record.kind == "note"
+            && record
+                .fields
+                .get("note")
+                .and_then(|value| value.as_str())
+                .is_some_and(|kind| {
+                    matches!(
+                        kind,
+                        "decision" | "lesson" | "rejected" | "blocker" | "assumption"
+                    )
+                })
+            && let Some(text) = record.fields.get("text").and_then(|value| value.as_str())
+        {
+            decisions.push(text.to_string());
+        }
     }
     changed.sort();
     changed.dedup();
@@ -142,33 +158,10 @@ pub fn anchor(root: &std::path::Path, session_id: &str) -> String {
             .map(|seq| format!("successful exec j#{seq}"))
             .unwrap_or_else(|| "none".to_string())
     ));
-    // asks the anchor to surface open assumptions: compaction is
-    // exactly when an unresolved assumption would otherwise vanish from the
-    // conversation while still holding up the work. Scoped to this session:
-    // sequence numbers restart per journal file.
-    let open = crate::agent::journal::Journal::open_assumptions_in(root, session_id, None)
-        .unwrap_or_default();
-    if open.is_empty() {
-        out.push_str("open assumptions: none\n");
-    } else {
-        out.push_str(&format!(
-            "open assumptions: {}\n",
-            open.iter()
-                .take(6)
-                .map(|item| item.label(120))
-                .collect::<Vec<_>>()
-                .join(" · ")
-        ));
-    }
-    // decisions, lessons and rejected approaches survive for the same
-    // reason: post-compaction "why did we do it this way" is otherwise
-    // answered from model memory rather than from facts.
-    let decisions =
-        crate::agent::journal::Journal::decision_notes_in(root, session_id).unwrap_or_default();
     if decisions.is_empty() {
         out.push_str("decisions: none\n");
     } else {
-        let start = decisions.len().saturating_sub(4);
+        let start = decisions.len().saturating_sub(6);
         out.push_str(&format!(
             "decisions: {}\n",
             decisions[start..]

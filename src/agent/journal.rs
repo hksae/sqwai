@@ -95,25 +95,6 @@ pub struct PreImage {
     pub agent_hash: Option<String>,
 }
 
-/// An assumption the model recorded and nothing has resolved.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Assumption {
-    pub seq: u64,
-    pub step: Option<String>,
-    pub text: String,
-}
-
-impl Assumption {
-    /// One-line form for the finish warning, the anchor and the recap.
-    pub fn label(&self, limit: usize) -> String {
-        let mut text: String = self.text.chars().take(limit).collect();
-        if self.text.chars().count() > limit {
-            text.push('…');
-        }
-        format!("j#{}: {text}", self.seq)
-    }
-}
-
 /// One session inside a [`Journal::recap`].
 #[derive(Debug, Clone, Default)]
 pub struct Recap {
@@ -130,7 +111,6 @@ pub struct Recap {
     pub calls: usize,
     pub failures: usize,
     pub notes: usize,
-    pub open: Vec<String>,
 }
 
 /// A plan as the recap sees it: identity, verdict, and what is still open.
@@ -159,7 +139,6 @@ impl Recap {
         session: String,
         records: &[Record],
         plans: &[crate::plan::Plan],
-        root: &Path,
     ) -> Result<Self> {
         let (day, from) = clock(&records[0].ts);
         let (_, to) = clock(&records[records.len() - 1].ts);
@@ -248,17 +227,7 @@ impl Recap {
                 unfinished,
             });
         }
-        out.open = Self::open_labels(root, &out.session);
         Ok(out)
-    }
-
-    fn open_labels(root: &Path, session: &str) -> Vec<String> {
-        Journal::open_assumptions_in(root, session, None)
-            .unwrap_or_default()
-            .iter()
-            .take(4)
-            .map(|a| a.label(80))
-            .collect()
     }
 }
 
@@ -545,12 +514,7 @@ impl Journal {
                 continue;
             }
             records.sort_by_key(|record| record.seq);
-            out.push(Recap::from_records(
-                session.to_string(),
-                &records,
-                &plans,
-                root,
-            )?);
+            out.push(Recap::from_records(session.to_string(), &records, &plans)?);
         }
         out.sort_by(|a, b| a.day.cmp(&b.day).then(a.from.cmp(&b.from)));
         Ok(out)
@@ -946,87 +910,6 @@ impl Journal {
                     .flatten()
             })
             .collect()
-    }
-
-    /// Assumption notes that nothing has closed yet.
-    ///
-    /// A `note { note: "assumption" }` opens one; a later note carrying
-    /// `resolves: <seq>` closes the note with that sequence number. Without
-    /// this the `assumption` kind can be written but never settled — the model
-    /// states an assumption, the step finishes, and nobody ever learns whether
-    /// it held.
-    ///
-    /// `step` narrows the result to one plan step, which is what `finish`
-    /// needs; `None` returns the session's open assumptions, which is what the
-    /// anchor and the diary need.
-    ///
-    /// Scoped to one session journal: sequence numbers restart per file, and
-    /// step numbers restart per plan, so an unscoped scan would validate a
-    /// `resolves` against another session's note and warn about foreign
-    /// plans' assumptions.
-    pub fn open_assumptions_in(
-        root: &Path,
-        session_id: &str,
-        step: Option<&str>,
-    ) -> Result<Vec<Assumption>> {
-        Ok(Self::assumptions_in(
-            &Self::records_for(root, session_id)?,
-            step,
-        ))
-    }
-
-    fn assumptions_in(records: &[Record], step: Option<&str>) -> Vec<Assumption> {
-        let resolved: std::collections::HashSet<u64> = records
-            .iter()
-            .filter(|record| record.kind == "note")
-            .filter_map(|record| record.fields.get("resolves").and_then(Value::as_u64))
-            .collect();
-        records
-            .iter()
-            .filter(|record| {
-                record.kind == "note"
-                    && record.fields.get("note").and_then(Value::as_str) == Some("assumption")
-                    && !resolved.contains(&record.seq)
-                    // a note that resolves another is a closure, not a new
-                    // assumption, even when it carries the same kind
-                    && record.fields.get("resolves").is_none()
-                    && step.is_none_or(|wanted| record.step.as_deref() == Some(wanted))
-            })
-            .map(|record| Assumption {
-                seq: record.seq,
-                step: record.step.clone(),
-                text: record
-                    .fields
-                    .get("text")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string(),
-            })
-            .collect()
-    }
-
-    /// Decision-like notes for the anchor: `decision` (why this way),
-    /// `lesson` (learned the hard way), `rejected` (considered and dropped),
-    /// and `blocker` (what is currently standing in the way).
-    /// Newest last — the anchor takes the tail. Same record shape as
-    /// assumptions: kind `note`, the note kind in `fields.note`, content in
-    /// `fields.text`.
-    pub fn decision_notes_in(root: &Path, session_id: &str) -> Result<Vec<String>> {
-        Ok(Self::records_for(root, session_id)?
-            .iter()
-            .filter(|record| {
-                record.kind == "note"
-                    && record
-                        .fields
-                        .get("note")
-                        .and_then(Value::as_str)
-                        .is_some_and(|kind| {
-                            matches!(kind, "decision" | "lesson" | "rejected" | "blocker")
-                        })
-            })
-            .filter_map(|record| record.fields.get("text").and_then(Value::as_str))
-            .map(str::to_string)
-            .collect())
     }
 
     /// Which of `checkpoints` have at least one recorded write.

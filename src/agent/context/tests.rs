@@ -133,18 +133,7 @@ fn anchor_surfaces_decisions_and_recent_failures() {
     let rendered = anchor(&root, "s");
     assert!(rendered.contains("chose btree over lsm"), "{rendered}");
     assert!(rendered.contains("flush before read"), "{rendered}");
-    let decisions = rendered
-        .lines()
-        .find(|line| line.starts_with("decisions:"))
-        .unwrap_or("");
-    assert!(
-        !decisions.contains("disk is fast"),
-        "assumptions have their own line: {decisions}"
-    );
-    assert!(
-        rendered.contains("open assumptions: j#3: disk is fast"),
-        "{rendered}"
-    );
+    assert!(rendered.contains("disk is fast"), "{rendered}");
     assert!(rendered.contains("boom: segfault"), "{rendered}");
     assert!(
         !rendered.contains("cancelled"),

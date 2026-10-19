@@ -5,7 +5,7 @@ use super::git;
 use super::outline;
 use super::policy::{bash_scope_hit, in_write_scope, mutation_target_paths, step_epoch_current};
 use super::specs;
-use super::verify::{rejection, with_assumption_warning, with_authorship, with_blast_radius};
+use super::verify::{rejection, with_authorship, with_blast_radius};
 use crate::plan;
 use serde_json::Value;
 
@@ -323,8 +323,19 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
         "sleep" => exec::sleep(ctx, args),
         "plan" => plan_op(ctx, args),
         "note" => {
-            let note = args["note"].as_str().unwrap_or_default().trim();
-            let kind = args["kind"].as_str().unwrap_or_default().trim();
+            let note = args
+                .get("note")
+                .or_else(|| args.get("text"))
+                .or_else(|| args.get("message"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim();
+            let kind = args
+                .get("kind")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("decision");
             if note.is_empty() || note.len() > 2000 {
                 Outcome::err("note must be 1-2000 bytes")
             } else if !matches!(
@@ -332,25 +343,6 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
                 "decision" | "rejected" | "assumption" | "lesson" | "blocker"
             ) {
                 Outcome::err("note kind is invalid")
-            } else if let Some(resolves) = args.get("resolves").and_then(Value::as_u64) {
-                // Closing an assumption is only meaningful against one that is
-                // actually open: a `resolves` pointing anywhere else would look
-                // like closure while leaving the assumption standing.
-                // Scoped to this session: sequence numbers restart per file.
-                let open = crate::agent::journal::Journal::open_assumptions_in(
-                    &ctx.root,
-                    &ctx.session_id,
-                    None,
-                )
-                .unwrap_or_default();
-                if open.iter().any(|item| item.seq == resolves) {
-                    Outcome::ok(format!("note recorded: {kind}, resolves j#{resolves}"))
-                } else {
-                    Outcome::err(format!(
-                        "j#{resolves} is not an open assumption — note without \
-                         `resolves` to record this on its own"
-                    ))
-                }
             } else {
                 Outcome::ok(format!("note recorded: {kind}"))
             }
@@ -373,24 +365,6 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
 /// output is filtered and capped so a broad query cannot flood the context.
 fn journal_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
     let op = args["op"].as_str().unwrap_or("read");
-    if op == "assumptions" {
-        let open = match crate::agent::journal::Journal::open_assumptions_in(
-            &ctx.root,
-            &ctx.session_id,
-            None,
-        ) {
-            Ok(open) => open,
-            Err(e) => return Outcome::err(format!("journal read failed: {e:#}")),
-        };
-        if open.is_empty() {
-            return Outcome::ok("no open assumptions");
-        }
-        let lines: Vec<String> = open.iter().map(|a| a.label(160)).collect();
-        return Outcome::ok(format!(
-            "open assumptions (j# = journal seq):\n{}",
-            lines.join("\n")
-        ));
-    }
     if op == "recap" {
         let days = args["days"].as_u64().unwrap_or(3).clamp(1, 7) as i64;
         let items = match crate::agent::journal::Journal::recap(&ctx.root, days) {
@@ -400,7 +374,7 @@ fn journal_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
         return Outcome::ok(recap_text(&items, days));
     }
     if op != "read" {
-        return Outcome::err("journal op must be 'read', 'recap' or 'assumptions'");
+        return Outcome::err("journal op must be 'read' or 'recap'");
     }
 
     let session_arg = args["session"].as_str().unwrap_or("current");
@@ -434,40 +408,17 @@ fn journal_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
     let total = records.len();
     let mut records = records;
     // records() walks session files in filesystem order; chronological order
-    // is the only sane reading order once more than one session is involved.
-    records.sort_by(|a, b| a.ts.cmp(&b.ts).then(a.seq.cmp(&b.seq)));
+    // is needed when merging records across all sessions.
+    if show_session {
+        records.sort_by(|a, b| a.ts.cmp(&b.ts).then(a.seq.cmp(&b.seq)));
+    }
 
-    let from = match args["from"].as_str() {
-        Some(s) => match parse_time_bound(s, false) {
-            Some(t) => Some(t),
-            None => return Outcome::err("bad 'from': use RFC3339 or YYYY-MM-DD (UTC)"),
-        },
-        None => None,
-    };
-    let to = match args["to"].as_str() {
-        Some(s) => match parse_time_bound(s, true) {
-            Some(t) => Some(t),
-            None => return Outcome::err("bad 'to': use RFC3339 or YYYY-MM-DD (UTC)"),
-        },
-        None => None,
-    };
     let kind = args["kind"].as_str();
-    let step = args["step"].as_str();
-    let after = args["after"].as_u64();
     let query = args["query"].as_str().map(str::to_lowercase);
 
     let rendered: Vec<String> = records
         .iter()
         .filter(|r| kind.is_none_or(|k| r.kind == k))
-        .filter(|r| step.is_none_or(|s| r.step.as_deref() == Some(s)))
-        .filter(|r| after.is_none_or(|a| r.seq > a))
-        .filter(|r| match (from, to) {
-            (None, None) => true,
-            _ => match chrono::DateTime::parse_from_rfc3339(&r.ts) {
-                Ok(t) => from.is_none_or(|f| t >= f) && to.is_none_or(|t2| t <= t2),
-                Err(_) => false,
-            },
-        })
         .map(|r| journal_line_with_session(r, show_session))
         .filter(|line| {
             query
@@ -502,22 +453,12 @@ fn journal_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
         "journal {label}: {total} records total, {matched} match, showing {} (oldest first, UTC)",
         lines.len()
     );
-    // A bare `journal` call is what the model reaches for when it wants to know
-    // what happened recently, and newest-first records answer that badly. Point
-    // at the digest, but only when nothing was asked for — a narrowed query has
-    // already been thought about.
-    if kind.is_none()
-        && step.is_none()
-        && from.is_none()
-        && to.is_none()
-        && after.is_none()
-        && query.is_none()
-    {
+    if kind.is_none() && query.is_none() {
         out.push_str("\nhint: unfiltered list. For \"what happened recently\" use journal op=recap (days=3, session=all).");
     }
     if start > 0 {
         out.push_str(&format!(
-            "; {start} older matches — page with 'after' or raise 'last'"
+            "; {start} older matches — narrow with 'query'/'kind' or raise 'last'"
         ));
     }
     if dropped_oldest > 0 {
@@ -612,14 +553,6 @@ fn recap_text(items: &[crate::agent::journal::Recap], days: i64) -> String {
             r.failures,
             plural(r.notes, "note")
         ));
-        out.push_str(&format!(
-            "    open: {}\n",
-            if r.open.is_empty() {
-                "none".to_string()
-            } else {
-                r.open.join(" · ")
-            }
-        ));
     }
     if omitted > 0 {
         out.push_str(&format!(
@@ -709,16 +642,10 @@ fn journal_body(r: &crate::agent::journal::Record) -> String {
             .to_string(),
             None => String::new(),
         },
-        "note" => {
-            let mut out = match (s("note"), s("text")) {
-                (Some(kind), Some(text)) => format!("{kind}: {text}"),
-                _ => s("text").unwrap_or_default().to_string(),
-            };
-            if let Some(resolves) = n("resolves") {
-                out.push_str(&format!(" (resolves j#{resolves})"));
-            }
-            out
-        }
+        "note" => match (s("note"), s("text")) {
+            (Some(kind), Some(text)) => format!("{kind}: {text}"),
+            _ => s("text").unwrap_or_default().to_string(),
+        },
         "plan" => {
             let mut parts: Vec<String> = Vec::new();
             if let Some(v) = s("op") {
@@ -800,34 +727,6 @@ fn journal_body(r: &crate::agent::journal::Record) -> String {
             parts.join(" ")
         }
     }
-}
-
-/// Parse a journal time bound: RFC3339, `YYYY-MM-DDTHH:MM[:SS]`,
-/// `YYYY-MM-DD HH:MM[:SS]`, or a bare `YYYY-MM-DD`. Journal times are UTC; a
-/// bare date used as `to` extends through the end of that day, inclusive.
-fn parse_time_bound(s: &str, end_of_day: bool) -> Option<chrono::DateTime<chrono::FixedOffset>> {
-    if let Ok(t) = chrono::DateTime::parse_from_rfc3339(s) {
-        return Some(t);
-    }
-    for fmt in [
-        "%Y-%m-%dT%H:%M:%S",
-        "%Y-%m-%dT%H:%M",
-        "%Y-%m-%d %H:%M:%S",
-        "%Y-%m-%d %H:%M",
-    ] {
-        if let Ok(t) = chrono::NaiveDateTime::parse_from_str(s, fmt) {
-            return Some(t.and_utc().fixed_offset());
-        }
-    }
-    if let Ok(d) = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d") {
-        let t = if end_of_day {
-            d.and_hms_opt(23, 59, 59)?
-        } else {
-            d.and_hms_opt(0, 0, 0)?
-        };
-        return Some(t.and_utc().fixed_offset());
-    }
-    None
 }
 
 /// The `plan` tool: one operation per call, validated by the host.
@@ -1123,14 +1022,12 @@ pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                     ctx.current_step = new_in_progress;
                     match applied {
                         plan::Applied::Updated { message } => {
-                            let msg = with_assumption_warning(ctx, finishing.as_deref(), message);
-                            let msg = with_blast_radius(ctx, finishing.as_deref(), &active, msg);
+                            let msg = with_blast_radius(ctx, finishing.as_deref(), &active, message);
                             Outcome::ok(msg)
                         }
                         plan::Applied::Completed { message } => {
-                            let msg = with_assumption_warning(ctx, finishing.as_deref(), message);
                             let mut msg =
-                                with_blast_radius(ctx, finishing.as_deref(), &active, msg);
+                                with_blast_radius(ctx, finishing.as_deref(), &active, message);
                             let memory_empty =
                                 std::fs::read_to_string(crate::agent::memory::project_path(
                                     &ctx.root,

@@ -419,57 +419,56 @@ Pass context:N for N surrounding lines per match (like grep -C) so a follow-up r
         ToolDef {
             name: "note",
             kind: Kind::ReadOnly,
-            description: "Record a concise note in the host journal — the durable event log \
-that survives compaction and feeds the next session's anchor. Use it at the close of a \
-step to capture what context will lose: a `decision` you made and why, a `rejected` \
-approach (so it is not retried), an `assumption` you are relying on but have not verified \
-(pass `resolves` with that note's seq to close it later), a `lesson` learned, or a `blocker`. \
-Notes are how your reasoning outlives the transcript, and tomorrow-you reads them blind. \
-One batch at the close of a step is enough.",
-            parameters: json!({"type":"object","properties":{"note":{"type":"string"},"kind":{"type":"string","enum":["decision","rejected","assumption","lesson","blocker"]},"resolves":{"type":"integer","description":"journal seq of an assumption this note closes"}},"required":["note","kind"]}),
+            description: "Record a concise reasoning note in the host journal so it survives \
+compaction and feeds the post-compaction ANCHOR. Use it to capture what context trimming would \
+otherwise lose: a `decision` you made and why (default), a `rejected` approach so it is not \
+retried, a `lesson` learned, a `blocker`, or an `assumption` you are relying on.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "note": {"type": "string", "description": "concise reasoning note (1-2000 bytes)"},
+                    "kind": {"type": "string", "enum": ["decision", "rejected", "assumption", "lesson", "blocker"], "description": "note category (default: decision)"}
+                },
+                "required": ["note"]
+            }),
         },
         ToolDef {
             name: "journal",
             kind: Kind::ReadOnly,
-            description: "Read the host journal: the factual event log of this \
-             project (user messages, tool calls and results, file diffs, plan ops, notes, \
-             checkpoints). Every line carries j#<seq>, the stable reference used by plan \
-             evidence and note resolves. Times are UTC. Use it to find what evidence exists \
-             or what was already tried; for what happened recently in this project — including \
-             sessions other than this one — use op=recap, which summarizes each of the last days' \
-             sessions (plan and its status, files touched, call counts, open threads) from host \
-             records alone. Output is newest-first and always capped: \
-             narrow with kind/step/from/to/after/query instead of dumping everything. \
-             Ground truth for anything that already happened: your context memory is \
-             lossy (early history gets compacted away), the journal is not. Before saying \
-             what was changed, moved or deleted, query it (query=<filename> usually finds it \
-             in one call) and report what you found — including when it says you were wrong.",
+            description: "Read the host journal: the factual event log of this project \
+(user messages, tool calls and results, file diffs, plan ops, notes, checkpoints, undo/redo). \
+Use op=read (default) with `query` (e.g. a filename or symbol) or `kind` to inspect what was \
+changed, tried, or decided earlier — your context memory is lossy after compaction, the journal \
+is not. For a cross-session digest of recent work in this project, use op=recap.",
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "op": {"type": "string", "enum": ["read", "recap", "assumptions"], "description": "read journal records (default); recap = what happened in this project over the last days, per session; assumptions = list open ones"},
-                    "days": {"type": "integer", "description": "recap only: how many days back, today included (default 3, max 7)"},
-                    "session": {"type": "string", "description": "whose journal to read: 'current' (default), 'all' (every session in the project), or a session id / prefix from op=recap"},
-                    "kind": {"type": "string", "description": "exact record kind: user_msg|tool_call|tool_result|file_diff|diagnostics|note|plan|checkpoint|undo|redo|memory|provider_error|compaction"},
-                    "step": {"type": "string", "description": "only records attached to this plan step id"},
-                    "from": {"type": "string", "description": "inclusive lower time bound, UTC: RFC3339 or YYYY-MM-DD"},
-                    "to": {"type": "string", "description": "inclusive upper time bound, UTC: RFC3339 or YYYY-MM-DD (a bare date means through the end of that day)"},
-                    "after": {"type": "integer", "description": "only records with j# greater than this (paging)"},
-                    "last": {"type": "integer", "description": "max records to return, default 40, maximum 200"},
-                    "query": {"type": "string", "description": "case-insensitive substring matched against the rendered line"}
+                    "op": {"type": "string", "enum": ["read", "recap"], "description": "read journal records (default) or recap recent sessions"},
+                    "query": {"type": "string", "description": "case-insensitive substring matched against the rendered record"},
+                    "kind": {"type": "string", "description": "filter by record kind: file_diff|note|tool_call|tool_result|plan|user_msg|memory|undo|redo|checkpoint"},
+                    "session": {"type": "string", "description": "whose journal to read: 'current' (default), 'all', or a session id / prefix from op=recap"},
+                    "last": {"type": "integer", "description": "max records to return for op=read (default 40, max 200)"},
+                    "days": {"type": "integer", "description": "recap only: how many days back, today included (default 3, max 7)"}
                 }
             }),
         },
         ToolDef {
             name: "recall_result",
             kind: Kind::ReadOnly,
-            description: "Return the full stored output of one earlier tool call, by the \
-`call_id` a cleared result names in its place. Old tool output is trimmed from the request, \
-never from the session — so this is how you get it back without running the tool again: a \
-re-read sees whatever the file became since, and a re-run of a mutating command is work you \
-did not plan for. Refused when the result is still in your context (it is above you) and \
-when compaction has dropped it from the transcript.",
-            parameters: json!({"type":"object","properties":{"call_id":{"type":"string","description":"the call id the cleared result names"}},"required":["call_id"]}),
+            description: "Return the stored output of an earlier tool call by the `call_id` \
+shown in a `[output cleared]` stub. Pass optional `query` (to search for matching lines with \
+context) or `offset`/`limit` (1-based line window) when you only need part of a large cleared \
+output. Refused when the result is still in your live context above.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "call_id": {"type": "string", "description": "the call_id named by a [output cleared] stub"},
+                    "query": {"type": "string", "description": "optional case-insensitive substring to filter matching lines (±2 lines context)"},
+                    "offset": {"type": "integer", "description": "optional 1-based start line"},
+                    "limit": {"type": "integer", "description": "optional max lines to return (default 200 when query/offset is used)"}
+                },
+                "required": ["call_id"]
+            }),
         },
         ToolDef {
             name: "memory_write",
@@ -789,17 +788,15 @@ fn call_summary_raw(name: &str, args: &Value) -> String {
         "plan" => format!("plan {}", s("op")),
         "journal" => {
             let op = args["op"].as_str().unwrap_or("read");
-            if op == "assumptions" {
-                return "assumptions".to_string();
+            if op == "recap" {
+                let days = args["days"].as_u64().unwrap_or(3);
+                return format!("recap {days}d");
             }
             let mut parts: Vec<String> = Vec::new();
-            for key in ["kind", "step", "query", "from", "to", "session"] {
+            for key in ["kind", "query", "session"] {
                 if let Some(v) = args[key].as_str() {
                     parts.push(format!("{key}={v}"));
                 }
-            }
-            if args["after"].as_u64().is_some() {
-                parts.push("after".to_string());
             }
             if parts.is_empty() {
                 "recent records".to_string()

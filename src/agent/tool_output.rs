@@ -24,10 +24,16 @@ pub const MIN_CLEAR_BYTES: usize = 20 * 1024;
 
 /// Minimum trigger floor (96k tokens ≈ 384 KB) when scaling from a model's context window.
 pub const WINDOW_TRIGGER_FLOOR_BYTES: usize = 384 * 1024;
+/// Maximum trigger ceiling (192k tokens ≈ 768 KB) so 1M-context models do not drag megabytes of stale tool output on every turn.
+pub const WINDOW_TRIGGER_CAP_BYTES: usize = 768 * 1024;
 /// Minimum fresh-window floor (56k tokens ≈ 224 KB) when scaling from a model's context window.
 pub const WINDOW_KEEP_FLOOR_BYTES: usize = 224 * 1024;
+/// Maximum fresh-window ceiling (96k tokens ≈ 384 KB).
+pub const WINDOW_KEEP_CAP_BYTES: usize = 384 * 1024;
 /// Minimum quantization step floor (16k tokens ≈ 64 KB) when scaling from a model's context window.
 pub const WINDOW_STEP_FLOOR_BYTES: usize = 64 * 1024;
+/// Maximum quantization step ceiling (32k tokens ≈ 128 KB).
+pub const WINDOW_STEP_CAP_BYTES: usize = 128 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WireBudget {
@@ -37,10 +43,12 @@ pub struct WireBudget {
 }
 
 impl WireBudget {
-    /// Derive byte thresholds from the model's context window (at ~4 bytes/token):
-    /// - trigger: 60% of window (floor: 384 KB / 96k tok)
-    /// - keep:    35% of window (floor: 224 KB / 56k tok)
-    /// - step:    10% of window (floor: 64 KB / 16k tok)
+    /// Derive byte thresholds from the model's context window (at ~4 bytes/token),
+    /// clamped between floor and ceiling so large-window models stay fast and
+    /// resistant to context rot:
+    /// - trigger: 60% of window (384 KB ..= 768 KB)
+    /// - keep:    35% of window (224 KB ..= 384 KB)
+    /// - step:    10% of window (64 KB  ..= 128 KB)
     /// When `context_limit == 0`, falls back to the baseline constants.
     pub fn for_context_limit(context_limit: u64) -> Self {
         if context_limit == 0 {
@@ -52,9 +60,12 @@ impl WireBudget {
         }
         let window_bytes = (context_limit as usize).saturating_mul(4);
         Self {
-            trigger_bytes: (window_bytes * 60 / 100).max(WINDOW_TRIGGER_FLOOR_BYTES),
-            keep_bytes: (window_bytes * 35 / 100).max(WINDOW_KEEP_FLOOR_BYTES),
-            min_clear_bytes: (window_bytes * 10 / 100).max(WINDOW_STEP_FLOOR_BYTES),
+            trigger_bytes: (window_bytes * 60 / 100)
+                .clamp(WINDOW_TRIGGER_FLOOR_BYTES, WINDOW_TRIGGER_CAP_BYTES),
+            keep_bytes: (window_bytes * 35 / 100)
+                .clamp(WINDOW_KEEP_FLOOR_BYTES, WINDOW_KEEP_CAP_BYTES),
+            min_clear_bytes: (window_bytes * 10 / 100)
+                .clamp(WINDOW_STEP_FLOOR_BYTES, WINDOW_STEP_CAP_BYTES),
         }
     }
 }
@@ -212,8 +223,20 @@ pub fn recall_with_limit(
     call_id: &str,
     context_limit: u64,
 ) -> crate::agent::tools::Outcome {
+    recall_args_with_limit(
+        messages,
+        &serde_json::json!({ "call_id": call_id }),
+        context_limit,
+    )
+}
+
+pub fn recall_args_with_limit(
+    messages: &[Message],
+    args: &serde_json::Value,
+    context_limit: u64,
+) -> crate::agent::tools::Outcome {
     use crate::agent::tools::Outcome;
-    let call_id = call_id.trim();
+    let call_id = args["call_id"].as_str().unwrap_or_default().trim();
     if call_id.is_empty() {
         return Outcome::err("recall_result needs the call_id a cleared result names");
     }
@@ -232,9 +255,77 @@ pub fn recall_with_limit(
              that was cleared from the request"
         ));
     }
-    // Verbatim, wrapper and all: a recalled web page that arrived clean would
-    // read as host-written truth.
-    Outcome::ok(message.content.clone())
+    let query = args["query"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let offset = args["offset"].as_u64().map(|n| n.max(1) as usize);
+    let limit = args["limit"].as_u64().map(|n| n.clamp(1, 2000) as usize);
+
+    if query.is_none() && offset.is_none() && limit.is_none() {
+        // Verbatim, wrapper and all: a recalled web page that arrived clean would
+        // read as host-written truth.
+        return Outcome::ok(message.content.clone());
+    }
+
+    let all_lines: Vec<&str> = message.content.lines().collect();
+    let total_lines = all_lines.len();
+    if let Some(q) = query {
+        let q_lower = q.to_lowercase();
+        let mut keep = vec![false; total_lines];
+        let mut matches = 0usize;
+        for (i, line) in all_lines.iter().enumerate() {
+            if line.to_lowercase().contains(&q_lower) {
+                matches += 1;
+                let from = i.saturating_sub(2);
+                let to = (i + 2).min(total_lines.saturating_sub(1));
+                for flag in &mut keep[from..=to] {
+                    *flag = true;
+                }
+            }
+        }
+        if matches == 0 {
+            return Outcome::ok(format!(
+                "recall_result {call_id}: 0 matches for '{q}' across {total_lines} lines"
+            ));
+        }
+        let max_lines = limit.unwrap_or(200);
+        let mut out = format!(
+            "recall_result {call_id}: {matches} match(es) for '{q}' in {total_lines} lines\n"
+        );
+        let mut shown = 0usize;
+        let mut last_idx: Option<usize> = None;
+        for (i, line) in all_lines.iter().enumerate() {
+            if !keep[i] {
+                continue;
+            }
+            if shown >= max_lines {
+                out.push_str(&format!("\n... [truncated after {max_lines} lines]"));
+                break;
+            }
+            if let Some(prev) = last_idx
+                && i > prev + 1
+            {
+                out.push_str("...\n");
+            }
+            out.push_str(&format!("{}: {}\n", i + 1, line));
+            last_idx = Some(i);
+            shown += 1;
+        }
+        return Outcome::ok(out.trim_end().to_string());
+    }
+
+    let start_idx = offset.unwrap_or(1).saturating_sub(1).min(total_lines);
+    let count = limit.unwrap_or(200);
+    let end_idx = (start_idx + count).min(total_lines);
+    let slice = &all_lines[start_idx..end_idx];
+    let mut out = format!(
+        "[recall_result {call_id}: lines {}..{} of {total_lines}]\n",
+        if total_lines == 0 { 0 } else { start_idx + 1 },
+        end_idx
+    );
+    out.push_str(&slice.join("\n"));
+    Outcome::ok(out)
 }
 
 #[cfg(test)]
@@ -377,12 +468,12 @@ mod tests {
     }
 
     #[test]
-    fn wire_budget_scales_to_60_35_10_percent_of_context_window() {
+    fn wire_budget_scales_and_clamps_to_ceiling() {
         let b1m = WireBudget::for_context_limit(1_000_000);
-        // 1M tokens * 4 bytes = 4,000,000 bytes: 60% = 2.4 MB, 35% = 1.4 MB, 10% = 400 KB
-        assert_eq!(b1m.trigger_bytes, 2_400_000);
-        assert_eq!(b1m.keep_bytes, 1_400_000);
-        assert_eq!(b1m.min_clear_bytes, 400_000);
+        // 1M tokens clamps to ceiling (768 KB / 384 KB / 128 KB)
+        assert_eq!(b1m.trigger_bytes, WINDOW_TRIGGER_CAP_BYTES);
+        assert_eq!(b1m.keep_bytes, WINDOW_KEEP_CAP_BYTES);
+        assert_eq!(b1m.min_clear_bytes, WINDOW_STEP_CAP_BYTES);
 
         let b200k = WireBudget::for_context_limit(200_000);
         // 200k tokens * 4 bytes = 800,000 bytes: 60% = 480 KB, 35% = 280 KB, 10% = 80 KB
@@ -396,5 +487,17 @@ mod tests {
         let messages = exchange(&many);
         assert!(cleared_indices_with_limit(&messages, 1_000_000).is_empty());
         assert!(cleared_indices_with_limit(&messages, 200_000).is_empty());
+
+        // recall_args_with_limit supports query filtering
+        let mut searchable = many;
+        searchable[0] = "line 1\nneedle_token_xyz\nline 3\n".to_string() + &body;
+        let messages = exchange(&searchable);
+        let filtered = recall_args_with_limit(
+            &messages,
+            &json!({"call_id": "call_0", "query": "needle_token_xyz"}),
+            0,
+        );
+        assert!(filtered.ok, "{}", filtered.output);
+        assert!(filtered.output.contains("2: needle_token_xyz"));
     }
 }

@@ -1676,9 +1676,9 @@ async fn run_agent(
                                 }
                             }
                         }
-                        "recall_result" => crate::agent::tool_output::recall_with_limit(
+                        "recall_result" => crate::agent::tool_output::recall_args_with_limit(
                             &messages,
-                            call.args["call_id"].as_str().unwrap_or_default(),
+                            &call.args,
                             context_limit,
                         ),
                         "plan" => {
@@ -1897,15 +1897,29 @@ async fn run_agent(
                 }
                 if let Some(writer) = journal.as_mut() {
                     if call.name == "note" && outcome.ok {
-                        let _ = writer.append("note", serde_json::json!({
-                        "by": "model",
-                        "note": call.args.get("kind").and_then(|v| v.as_str()).unwrap_or("lesson"),
-                        "text": call.args.get("note").and_then(|v| v.as_str()).unwrap_or_default(),
-                        // present only when this note closes an assumption
-                        //; the dispatcher has already checked that
-                        // the target is open
-                        "resolves": call.args.get("resolves").and_then(|v| v.as_u64()),
-                    }));
+                        let note_kind = call
+                            .args
+                            .get("kind")
+                            .and_then(|v| v.as_str())
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or("decision");
+                        let note_text = call
+                            .args
+                            .get("note")
+                            .or_else(|| call.args.get("text"))
+                            .or_else(|| call.args.get("message"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .trim();
+                        let _ = writer.append(
+                            "note",
+                            serde_json::json!({
+                                "by": "model",
+                                "note": note_kind,
+                                "text": note_text,
+                            }),
+                        );
                     }
                     let duration_ms =
                         precomputed_duration_ms.unwrap_or_else(|| tool_started.elapsed().as_millis());

@@ -422,99 +422,6 @@ fn a_step_reverts_only_its_own_writes() {
 }
 
 /// an assumption is open until a note closes it by seq.
-/// Without the closure the kind exists but never settles.
-#[test]
-fn an_assumption_is_open_until_a_note_resolves_it_by_seq() {
-    let root = root();
-    let mut journal = Journal::open(&root, "session").unwrap();
-    journal.set_attribution(Some("2".into()), Some("plan".into()), "main");
-    let first = journal
-        .append(
-            "note",
-            serde_json::json!({"by": "model", "note": "assumption", "text": "the API returns UTF-8"}),
-        )
-        .unwrap();
-    let second = journal
-        .append(
-            "note",
-            serde_json::json!({"by": "model", "note": "assumption", "text": "the cache is warm"}),
-        )
-        .unwrap();
-    // an unrelated note must not close anything
-    journal
-        .append(
-            "note",
-            serde_json::json!({"by": "model", "note": "decision", "text": "use blake3"}),
-        )
-        .unwrap();
-
-    let open = Journal::open_assumptions_in(&root, "session", None).unwrap();
-    assert_eq!(
-        open.iter().map(|item| item.seq).collect::<Vec<_>>(),
-        vec![first, second]
-    );
-
-    // closing the first leaves exactly the second
-    journal
-        .append(
-            "note",
-            serde_json::json!({
-                "by": "model",
-                "note": "assumption",
-                "text": "confirmed by the test",
-                "resolves": first,
-            }),
-        )
-        .unwrap();
-    let open = Journal::open_assumptions_in(&root, "session", None).unwrap();
-    assert_eq!(open.len(), 1, "{open:?}");
-    assert_eq!(open[0].seq, second);
-    assert!(
-        open[0]
-            .label(80)
-            .starts_with(&format!("j#{second}: the cache"))
-    );
-}
-
-/// `finish` warns about the step it is finishing, not about the whole
-/// session: an assumption belonging to another step is not this step's
-/// business.
-#[test]
-fn open_assumptions_can_be_narrowed_to_one_step() {
-    let root = root();
-    let mut journal = Journal::open(&root, "session").unwrap();
-    journal.set_attribution(Some("1".into()), Some("plan".into()), "main");
-    journal
-        .append(
-            "note",
-            serde_json::json!({"by": "model", "note": "assumption", "text": "step one's"}),
-        )
-        .unwrap();
-    journal.set_attribution(Some("2".into()), Some("plan".into()), "main");
-    journal
-        .append(
-            "note",
-            serde_json::json!({"by": "model", "note": "assumption", "text": "step two's"}),
-        )
-        .unwrap();
-
-    let one = Journal::open_assumptions_in(&root, "session", Some("1")).unwrap();
-    assert_eq!(one.len(), 1);
-    assert_eq!(one[0].text, "step one's");
-    assert_eq!(
-        Journal::open_assumptions_in(&root, "session", Some("3"))
-            .unwrap()
-            .len(),
-        0
-    );
-    assert_eq!(
-        Journal::open_assumptions_in(&root, "session", None)
-            .unwrap()
-            .len(),
-        2
-    );
-}
-
 /// Step numbers restart per plan ("1" exists in every plan), so a
 /// project-wide scan merges same-numbered steps of different plans.
 /// The scoped revert sees only its own plan's writes — including the
@@ -571,35 +478,6 @@ fn step_pre_images_are_scoped_to_one_plan() {
     let other = Journal::step_pre_images_in(&root, Some("plan-b"), "1").unwrap();
     assert_eq!(other.files.len(), 1);
     assert_eq!(other.files[0].path, "b.rs");
-}
-
-/// Sequence numbers restart per journal file, so a `resolves` seq is
-/// only meaningful inside its own session — and neither are open
-/// assumption lists.
-#[test]
-fn assumptions_stay_in_their_session() {
-    let root = root();
-    let mut a = Journal::open(&root, "sess-a").unwrap();
-    a.set_attribution(Some("1".into()), Some("plan-a".into()), "main");
-    a.append(
-        "note",
-        serde_json::json!({"by": "model", "note": "assumption", "text": "a holds"}),
-    )
-    .unwrap();
-    let mut b = Journal::open(&root, "sess-b").unwrap();
-    b.set_attribution(Some("1".into()), Some("plan-b".into()), "main");
-    b.append(
-        "note",
-        serde_json::json!({"by": "model", "note": "assumption", "text": "b holds"}),
-    )
-    .unwrap();
-
-    let open_a = Journal::open_assumptions_in(&root, "sess-a", None).unwrap();
-    assert_eq!(open_a.len(), 1);
-    assert_eq!(open_a[0].text, "a holds");
-    let open_b = Journal::open_assumptions_in(&root, "sess-b", Some("1")).unwrap();
-    assert_eq!(open_b.len(), 1);
-    assert_eq!(open_b[0].text, "b holds");
 }
 
 /// What scopes `/undo`: only the paths this checkpoint's own `file_diff`

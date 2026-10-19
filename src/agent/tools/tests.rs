@@ -1572,77 +1572,6 @@ fn plan_ops_round_trip_through_the_dispatcher() {
     fs::remove_dir_all(&dir).ok();
 }
 
-/// closure moment: finishing a step with an open assumption
-/// succeeds and says so. A silent finish is how an assumption outlives the
-/// work that depended on it.
-#[test]
-fn finishing_a_step_warns_about_its_open_assumptions() {
-    let (mut ctx, dir) = proj();
-    let created = execute(
-        &mut ctx,
-        "plan",
-        &json!({
-            "op": "create",
-            "criteria": ["note"],
-            "goal": "close the assumption loop",
-            "steps": [{"title": "make the change"}],
-        }),
-    );
-    assert!(created.ok, "{}", created.output);
-
-    let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
-    let mut journal = crate::agent::journal::Journal::open(&dir, &ctx.session_id).unwrap();
-    journal.set_attribution(Some("1".into()), Some(plan_id), "main");
-    let seq = journal
-        .append(
-            "note",
-            json!({"by": "model", "note": "assumption", "text": "the config key is stable"}),
-        )
-        .unwrap();
-    // evidence for the step, so `finish` is not rejected for that
-    journal
-        .append_evidence("file_diff", json!({"path": "src/main.rs"}))
-        .unwrap();
-
-    let finished = plan_op(
-        &mut ctx,
-        &json!({"op": "finish", "id": "1", "summary": "changed it"}),
-    );
-    assert!(
-        finished.ok,
-        "the warning must not block: {}",
-        finished.output
-    );
-    assert!(
-        finished.output.contains("open assumption")
-            && finished.output.contains(&format!("j#{seq}")),
-        "{}",
-        finished.output
-    );
-
-    // and a note that closes it is accepted, while a bogus target is not
-    let bogus = execute(
-        &mut ctx,
-        "note",
-        &json!({"note": "nothing to close", "kind": "assumption", "resolves": 9999}),
-    );
-    assert!(!bogus.ok, "{}", bogus.output);
-    assert!(
-        bogus.output.contains("not an open assumption"),
-        "{}",
-        bogus.output
-    );
-
-    let closing = execute(
-        &mut ctx,
-        "note",
-        &json!({"note": "verified against the config", "kind": "assumption", "resolves": seq}),
-    );
-    assert!(closing.ok, "{}", closing.output);
-    assert!(closing.output.contains(&format!("resolves j#{seq}")));
-    fs::remove_dir_all(&dir).ok();
-}
-
 #[test]
 fn note_requires_an_allowed_kind_and_non_empty_text() {
     let (mut ctx, dir) = proj();
@@ -1662,6 +1591,10 @@ fn note_requires_an_allowed_kind_and_non_empty_text() {
         &json!({"note": "keep this", "kind": "decision"}),
     );
     assert!(accepted.ok, "{}", accepted.output);
+    // default kind (decision) and `text` alias also work
+    let defaulted = execute(&mut ctx, "note", &json!({"text": "default decision note"}));
+    assert!(defaulted.ok, "{}", defaulted.output);
+    assert!(defaulted.output.contains("decision"));
     fs::remove_dir_all(&dir).ok();
 }
 
@@ -2252,19 +2185,8 @@ fn journal_read_renders_and_filters() {
     assert!(o.output.contains("src/main.rs +3 -1"), "{}", o.output);
     assert!(!o.output.contains("j#1 "), "{}", o.output);
 
-    // time window: a bare date as `to` covers the whole day
-    let o = execute(
-        &mut ctx,
-        "journal",
-        &json!({"from": "2026-02-01", "to": "2026-02-01"}),
-    );
-    assert!(o.ok, "{}", o.output);
-    assert!(o.output.contains("j#2"), "{}", o.output);
-    assert!(!o.output.contains("j#1 "), "{}", o.output);
-    assert!(!o.output.contains("j#3 "), "{}", o.output);
-
-    // paging and tailing
-    let o = execute(&mut ctx, "journal", &json!({"after": 1, "last": 1}));
+    // tailing with `last`
+    let o = execute(&mut ctx, "journal", &json!({"last": 1}));
     assert!(o.ok, "{}", o.output);
     assert!(o.output.contains("j#3"), "{}", o.output);
     assert!(!o.output.contains("j#2"), "{}", o.output);
@@ -2274,15 +2196,11 @@ fn journal_read_renders_and_filters() {
     assert!(o.ok, "{}", o.output);
     assert!(o.output.contains("j#2"), "{}", o.output);
     assert!(!o.output.contains("j#1 "), "{}", o.output);
-
-    // malformed bounds are rejected, not ignored
-    let o = execute(&mut ctx, "journal", &json!({"from": "not-a-date"}));
-    assert!(!o.ok, "{}", o.output);
     fs::remove_dir_all(&dir).ok();
 }
 
 /// `op=recap` summarizes the recent days from host records only:
-/// counts, files, the plan a session worked on, and what stayed open.
+/// counts, files, and the plan a session worked on.
 #[test]
 fn journal_recap_summarizes_recent_sessions() {
     let (mut ctx, dir) = proj();
@@ -2334,7 +2252,6 @@ fn journal_recap_summarizes_recent_sessions() {
     );
     assert!(o.output.contains("1 call · 1 failed"), "{}", o.output);
     assert!(o.output.contains("(no plan)"), "{}", o.output);
-    assert!(o.output.contains("open: none"), "{}", o.output);
     fs::remove_dir_all(&dir).ok();
 }
 
@@ -2436,42 +2353,6 @@ fn journal_rejects_path_like_session_ids() {
     assert!(!o.ok, "{}", o.output);
     let o = execute(&mut ctx, "journal", &json!({"session": "a\\b"}));
     assert!(!o.ok, "{}", o.output);
-    fs::remove_dir_all(&dir).ok();
-}
-
-#[test]
-fn journal_assumptions_op_lists_only_open() {
-    let (mut ctx, dir) = proj();
-    let journal_dir = dir.join(".sqwai").join("journal");
-    fs::create_dir_all(&journal_dir).unwrap();
-    let mut journal = crate::agent::journal::Journal::open(&dir, "shared").unwrap();
-    let seq = journal
-        .append(
-            "note",
-            json!({"by": "model", "note": "assumption", "text": "the CI is green"}),
-        )
-        .unwrap();
-    journal
-        .append(
-            "note",
-            json!({"by": "model", "note": "lesson", "text": "closed it", "resolves": seq}),
-        )
-        .unwrap();
-
-    let o = execute(&mut ctx, "journal", &json!({"op": "assumptions"}));
-    assert!(o.ok, "{}", o.output);
-    assert!(o.output.contains("no open assumptions"), "{}", o.output);
-
-    journal
-        .append(
-            "note",
-            json!({"by": "model", "note": "assumption", "text": "the API is stable"}),
-        )
-        .unwrap();
-    let o = execute(&mut ctx, "journal", &json!({"op": "assumptions"}));
-    assert!(o.ok, "{}", o.output);
-    assert!(o.output.contains("the API is stable"), "{}", o.output);
-    assert!(!o.output.contains("the CI is green"), "{}", o.output);
     fs::remove_dir_all(&dir).ok();
 }
 
