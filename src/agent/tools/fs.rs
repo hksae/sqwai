@@ -533,6 +533,34 @@ fn normalize_to_lf(s: &str) -> String {
     s.replace("\r\n", "\n")
 }
 
+/// Normalize typographic Unicode quotes, dashes, and spaces to ASCII equivalents
+/// (OpenCode `normalizeForMatch` convention) so model-emitted ASCII punctuation
+/// matches source files containing curly quotes, en/em-dashes, or NBSPs.
+pub(crate) fn normalize_typographic(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}' => '\'',
+            '\u{201C}' | '\u{201D}' | '\u{201E}' | '\u{201F}' => '"',
+            '\u{2010}' | '\u{2011}' | '\u{2012}' | '\u{2013}' | '\u{2014}' | '\u{2015}'
+            | '\u{2212}' => '-',
+            '\u{00A0}'
+            | '\u{2002}'..='\u{200A}'
+            | '\u{202F}'
+            | '\u{205F}'
+            | '\u{3000}' => ' ',
+            other => other,
+        })
+        .collect()
+}
+
+/// Visual column width of leading whitespace (`\t` counts as 4 columns).
+fn indent_cols(line: &str) -> usize {
+    line.chars()
+        .take_while(|&c| c == ' ' || c == '\t')
+        .map(|c| if c == '\t' { 4 } else { 1 })
+        .sum()
+}
+
 /// Split `s` into lines while remembering whether the text uses CRLF.
 fn split_lines_lossless(s: &str) -> Vec<&str> {
     if s.is_empty() {
@@ -576,10 +604,14 @@ fn splice_line_range(
     joined
 }
 
-/// Stage 2 & 3 fallback matching (Aider / OpenCode style):
-/// 1. Line-trimmed match (ignores trailing spaces/tabs on each line).
+/// Stage 2–4 fallback matching (Aider / OpenCode style):
+/// 1. Line-trimmed match (ignores trailing spaces/tabs on each line, plus
+///    optional typographic quote/dash/space normalization).
 /// 2. Relative-indentation match (preserves relative indentation inside the
-///    block while adapting to the file's outer indentation prefix).
+///    block while adapting to the file's outer indentation prefix, including
+///    tab-vs-space normalization).
+/// 3. Outer blank-line trim retry if the model included extra leading/trailing
+///    blank lines around `old_string`.
 /// Only succeeds when the match is unambiguous (count == 1).
 fn try_whitespace_or_indent_replace(
     content: &str,
@@ -589,12 +621,60 @@ fn try_whitespace_or_indent_replace(
     let content_lines = split_lines_lossless(content);
     let old_lines = split_lines_lossless(old);
     let new_lines = split_lines_lossless(new);
+    if let Some(res) =
+        try_whitespace_or_indent_lines(content, &content_lines, &old_lines, &new_lines)?
+    {
+        return Ok(Some(res));
+    }
+
+    // Retry with leading/trailing empty lines stripped from old_lines (and
+    // matching leading/trailing empty lines stripped from new_lines) when the
+    // model wrapped `old_string` with an extra blank boundary line.
+    let lead_blank = old_lines.iter().take_while(|l| l.trim().is_empty()).count();
+    let trail_blank = old_lines
+        .iter()
+        .rev()
+        .take_while(|l| l.trim().is_empty())
+        .count();
+    if (lead_blank > 0 || trail_blank > 0) && lead_blank + trail_blank < old_lines.len() {
+        let trimmed_old = &old_lines[lead_blank..old_lines.len() - trail_blank];
+        let new_lead = new_lines
+            .iter()
+            .take(lead_blank)
+            .take_while(|l| l.trim().is_empty())
+            .count();
+        let new_trail = new_lines
+            .iter()
+            .rev()
+            .take(trail_blank)
+            .take_while(|l| l.trim().is_empty())
+            .count();
+        let trimmed_new = if new_lead + new_trail <= new_lines.len() {
+            &new_lines[new_lead..new_lines.len() - new_trail]
+        } else {
+            &new_lines[..]
+        };
+        if let Some(res) =
+            try_whitespace_or_indent_lines(content, &content_lines, trimmed_old, trimmed_new)?
+        {
+            return Ok(Some(res));
+        }
+    }
+    Ok(None)
+}
+
+fn try_whitespace_or_indent_lines(
+    content: &str,
+    content_lines: &[&str],
+    old_lines: &[&str],
+    new_lines: &[&str],
+) -> Result<Option<String>, String> {
     if old_lines.is_empty() || old_lines.len() > content_lines.len() {
         return Ok(None);
     }
     let window = old_lines.len();
 
-    // Pass A: match ignoring trailing whitespace on each line.
+    // Pass A1: match ignoring trailing whitespace on each line.
     let mut trimmed_hits: Vec<usize> = Vec::new();
     for i in 0..=(content_lines.len() - window) {
         let ok = (0..window).all(|k| {
@@ -615,14 +695,46 @@ fn try_whitespace_or_indent_replace(
         let rep: Vec<String> = new_lines.iter().map(|s| (*s).to_string()).collect();
         return Ok(Some(splice_line_range(
             content,
-            &content_lines,
+            content_lines,
             *hit,
             *hit + window,
             &rep,
         )));
     }
 
-    // Pass B: relative-indentation match (Aider `match_but_for_leading_whitespace`).
+    // Pass A2: match ignoring trailing whitespace + typographic quote/dash/space variants.
+    let norm_old: Vec<String> = old_lines
+        .iter()
+        .map(|l| normalize_typographic(l.trim_end_matches([' ', '\t'])))
+        .collect();
+    let mut typo_hits: Vec<usize> = Vec::new();
+    for i in 0..=(content_lines.len() - window) {
+        let ok = (0..window).all(|k| {
+            normalize_typographic(content_lines[i + k].trim_end_matches([' ', '\t']))
+                == norm_old[k]
+        });
+        if ok {
+            typo_hits.push(i);
+        }
+    }
+    if typo_hits.len() > 1 {
+        return err(format!(
+            "old_string appears {} times — provide more surrounding context or set replace_all=true",
+            typo_hits.len()
+        ));
+    }
+    if let [hit] = typo_hits.as_slice() {
+        let rep: Vec<String> = new_lines.iter().map(|s| (*s).to_string()).collect();
+        return Ok(Some(splice_line_range(
+            content,
+            content_lines,
+            *hit,
+            *hit + window,
+            &rep,
+        )));
+    }
+
+    // Pass B1: relative-indentation match (Aider `match_but_for_leading_whitespace`).
     if !old_lines.iter().any(|l| !l.trim().is_empty()) {
         return Ok(None);
     }
@@ -719,7 +831,105 @@ fn try_whitespace_or_indent_replace(
             .collect();
         return Ok(Some(splice_line_range(
             content,
-            &content_lines,
+            content_lines,
+            *hit,
+            *hit + window,
+            &rep,
+        )));
+    }
+
+    // Pass B2: column-based relative indentation + typographic normalization
+    // (handles tab-indented files when the model sent spaces, or vice versa).
+    let base_old_cols = old_lines
+        .iter()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| indent_cols(l))
+        .min()
+        .unwrap_or(0);
+    let base_new_cols = new_lines
+        .iter()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| indent_cols(l))
+        .min()
+        .unwrap_or(0);
+    let strip_cols = base_old_cols.min(base_new_cols);
+
+    let mut col_hits: Vec<(usize, usize, bool)> = Vec::new();
+    for i in 0..=(content_lines.len() - window) {
+        let mut delta_cols: Option<usize> = None;
+        let mut uses_tabs = false;
+        let mut matched = true;
+        for k in 0..window {
+            let c_line = content_lines[i + k].trim_end_matches([' ', '\t']);
+            let o_line = old_lines[k].trim_end_matches([' ', '\t']);
+            if o_line.trim().is_empty() {
+                if !c_line.trim().is_empty() {
+                    matched = false;
+                    break;
+                }
+                continue;
+            }
+            if normalize_typographic(c_line.trim_start())
+                != normalize_typographic(o_line.trim_start())
+            {
+                matched = false;
+                break;
+            }
+            let c_cols = indent_cols(c_line);
+            let o_rel_cols = indent_cols(o_line).saturating_sub(strip_cols);
+            if c_cols < o_rel_cols {
+                matched = false;
+                break;
+            }
+            if c_line.starts_with('\t') {
+                uses_tabs = true;
+            }
+            let d = c_cols - o_rel_cols;
+            match delta_cols {
+                None => delta_cols = Some(d),
+                Some(prev) if prev != d => {
+                    matched = false;
+                    break;
+                }
+                Some(_) => {}
+            }
+        }
+        if matched && let Some(d) = delta_cols {
+            col_hits.push((i, d, uses_tabs));
+        }
+    }
+    if col_hits.len() > 1 {
+        return err(format!(
+            "old_string appears {} times — provide more surrounding context or set replace_all=true",
+            col_hits.len()
+        ));
+    }
+    if let [(hit, delta_cols, uses_tabs)] = col_hits.as_slice() {
+        let rep: Vec<String> = new_lines
+            .iter()
+            .map(|l| {
+                let trimmed = l.trim_end_matches([' ', '\t']);
+                if trimmed.trim().is_empty() {
+                    String::new()
+                } else {
+                    let rel_cols = indent_cols(trimmed).saturating_sub(strip_cols);
+                    let total_cols = delta_cols + rel_cols;
+                    let indent_prefix = if *uses_tabs {
+                        format!(
+                            "{}{}",
+                            "\t".repeat(total_cols / 4),
+                            " ".repeat(total_cols % 4)
+                        )
+                    } else {
+                        " ".repeat(total_cols)
+                    };
+                    format!("{indent_prefix}{}", trimmed.trim_start())
+                }
+            })
+            .collect();
+        return Ok(Some(splice_line_range(
+            content,
+            content_lines,
             *hit,
             *hit + window,
             &rep,
@@ -787,6 +997,9 @@ pub(super) fn apply_one(
 ) -> Result<String, String> {
     if old.is_empty() {
         return err("old_string must not be empty");
+    }
+    if old == new {
+        return err("old_string and new_string are identical — no changes to apply");
     }
     let (target_old, target_new) = if content.matches(old).count() > 0 {
         (
@@ -863,32 +1076,47 @@ fn changed_span(before: &str, after: &str) -> Option<(usize, usize)> {
 }
 
 /// Where a single edit landed, in the file's new line numbers, with the first
-/// line of what went in.
-///
-/// The model wrote those bytes, so repeating them buys nothing — the address is
-/// what it cannot know, and without it a follow-up edit re-reads the window to
-/// find its own place. That re-read is what turned a 5400-line file into 70
-/// reads and 24 edits in one measured session.
+/// line of what went in plus 1–2 surrounding boundary lines with their new
+/// line numbers so consecutive edits further down never require a re-read.
 fn edit_landing(before: &str, after: &str) -> String {
+    let al: Vec<&str> = after.lines().collect();
     let Some((from, to)) = changed_span(before, after) else {
         let common = before
             .lines()
-            .zip(after.lines())
+            .zip(al.iter().copied())
             .take_while(|(x, y)| x == y)
             .count();
-        return format!("→ at line {}", common + 1);
+        let line_no = common + 1;
+        let mut out = format!("→ at line {line_no}");
+        if let Some(next_line) = al.get(common) {
+            out.push_str(&format!("\n{:>6}\t{}", line_no, next_line));
+        }
+        return out;
     };
-    let head = after.lines().nth(from - 1).unwrap_or_default().trim();
+    let head = al.get(from - 1).copied().unwrap_or_default().trim();
     let head = if head.chars().count() > 60 {
         format!("{}…", head.chars().take(60).collect::<String>())
     } else {
         head.to_string()
     };
-    if from == to {
+    let mut out = if from == to {
         format!("→ line {from}: \"{head}\"")
     } else {
         format!("→ lines {from}–{to}: \"{head}\"")
+    };
+    let mut ctx_lines = String::new();
+    if from > 1
+        && let Some(prev_line) = al.get(from - 2)
+    {
+        ctx_lines.push_str(&format!("\n{:>6}\t{}", from - 1, prev_line));
     }
+    for post_idx in to..(to + 2).min(al.len()) {
+        if let Some(post_line) = al.get(post_idx) {
+            ctx_lines.push_str(&format!("\n{:>6}\t{}", post_idx + 1, post_line));
+        }
+    }
+    out.push_str(&ctx_lines);
+    out
 }
 
 pub(super) fn edit(
@@ -1059,23 +1287,77 @@ pub(super) fn ls(ctx: &mut ToolCtx, raw: &str) -> Outcome {
     })
 }
 
+/// Split comma-separated glob patterns at brace depth 0 (`"*.rs, *.toml"` -> `["*.rs", "*.toml"]`),
+/// while preserving brace expansions like `"*.{ts,tsx}"` as a single pattern.
+fn split_glob_patterns(raw: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0usize;
+    for (idx, ch) in raw.char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                let slice = raw[start..idx].trim();
+                if !slice.is_empty() {
+                    parts.push(slice);
+                }
+                start = idx + 1;
+            }
+            _ => {}
+        }
+    }
+    let tail = raw[start..].trim();
+    if !tail.is_empty() {
+        parts.push(tail);
+    }
+    if parts.is_empty() {
+        vec![raw.trim()]
+    } else {
+        parts
+    }
+}
+
+fn sanitize_search_path(path: Option<&str>) -> Option<&str> {
+    path.map(str::trim)
+        .filter(|s| !s.is_empty() && *s != "undefined" && *s != "null")
+}
+
 pub(super) fn glob(ctx: &mut ToolCtx, pattern: &str, base: Option<&str>) -> Outcome {
-    use globset::GlobBuilder;
+    use globset::{GlobBuilder, GlobSetBuilder};
     use ignore::WalkBuilder;
 
-    let base_dir = match base {
+    let base_dir = match sanitize_search_path(base) {
         Some(b) => match ctx.resolve(b) {
             Ok(p) => p,
             Err(e) => return Outcome::err(e),
         },
         None => ctx.root.clone(),
     };
-    let glob = match GlobBuilder::new(pattern).literal_separator(true).build() {
-        Ok(g) => g.compile_matcher(),
+    let sub_patterns = split_glob_patterns(pattern);
+    let mut set_builder = GlobSetBuilder::new();
+    let mut basename_builder = GlobSetBuilder::new();
+    let mut has_basename = false;
+    for pat in sub_patterns {
+        match GlobBuilder::new(pat).literal_separator(true).build() {
+            Ok(g) => {
+                set_builder.add(g);
+            }
+            Err(e) => return Outcome::err(format!("bad glob pattern: {e}")),
+        }
+        if !pat.contains('/') && !pat.contains('\\')
+            && let Ok(bg) = GlobBuilder::new(pat).build()
+        {
+            basename_builder.add(bg);
+            has_basename = true;
+        }
+    }
+    let glob = match set_builder.build() {
+        Ok(gs) => gs,
         Err(e) => return Outcome::err(format!("bad glob pattern: {e}")),
     };
-    let basename_glob = if !pattern.contains('/') && !pattern.contains('\\') {
-        GlobBuilder::new(pattern).build().ok().map(|g| g.compile_matcher())
+    let basename_glob = if has_basename {
+        basename_builder.build().ok()
     } else {
         None
     };
@@ -1091,7 +1373,11 @@ pub(super) fn glob(ctx: &mut ToolCtx, pattern: &str, base: Option<&str>) -> Outc
         if path == host_owned || path.starts_with(&host_owned) {
             continue;
         }
-        let rel = path.strip_prefix(&base_dir).unwrap_or(path);
+        let rel = if base_dir.is_file() {
+            path.strip_prefix(&ctx.root).unwrap_or(path)
+        } else {
+            path.strip_prefix(&base_dir).unwrap_or(path)
+        };
         if rel.components().any(|c| c.as_os_str() == ".git" || c.as_os_str() == ".sqwai") {
             continue;
         }
@@ -1130,24 +1416,40 @@ pub(super) fn grep(
     include: Option<&str>,
     context: usize,
 ) -> Outcome {
+    use globset::{GlobBuilder, GlobSetBuilder};
     use ignore::WalkBuilder;
 
     let re = match regex::Regex::new(pattern) {
         Ok(r) => r,
         Err(e) => return Outcome::err(format!("bad regex: {e}")),
     };
-    let base_dir = match path {
+    let multiline_re = regex::RegexBuilder::new(pattern)
+        .multi_line(true)
+        .build()
+        .ok();
+    let base_dir = match sanitize_search_path(path) {
         Some(b) => match ctx.resolve(b) {
             Ok(p) => p,
             Err(e) => return Outcome::err(e),
         },
         None => ctx.root.clone(),
     };
-    let inc = match include {
-        Some(g) => match globset::GlobBuilder::new(g).build() {
-            Ok(gb) => Some(gb.compile_matcher()),
-            Err(e) => return Outcome::err(format!("bad include glob pattern: {e}")),
-        },
+    let inc = match include.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(g) => {
+            let mut builder = GlobSetBuilder::new();
+            for pat in split_glob_patterns(g) {
+                match GlobBuilder::new(pat).build() {
+                    Ok(gb) => {
+                        builder.add(gb);
+                    }
+                    Err(e) => return Outcome::err(format!("bad include glob pattern: {e}")),
+                }
+            }
+            match builder.build() {
+                Ok(set) => Some(set),
+                Err(e) => return Outcome::err(format!("bad include glob pattern: {e}")),
+            }
+        }
         None => None,
     };
 
@@ -1165,8 +1467,6 @@ pub(super) fn grep(
         }
     }
 
-    let mut out = String::new();
-    let mut matches = 0usize;
     // same host-owned skip as glob above (see comment there)
     let host_owned = ctx.root.join(".sqwai");
     // …with one exception, in the same spelling `resolve` hands back: a
@@ -1177,24 +1477,26 @@ pub(super) fn grep(
     // asymmetry `ctx::resolve` grants `read`.
     let spill = host_owned.join("spill");
     let spill_named = base_dir.starts_with(&spill);
-    'outer: for entry in WalkBuilder::new(&base_dir).hidden(false).build().flatten() {
-        let path = entry.path();
-        if !path.is_file() {
+
+    let mut candidates: Vec<(std::time::SystemTime, String, std::path::PathBuf)> = Vec::new();
+    for entry in WalkBuilder::new(&base_dir).hidden(false).build().flatten() {
+        let entry_path = entry.path();
+        if !entry_path.is_file() {
             continue;
         }
-        if path.starts_with(&host_owned) && !(spill_named && path.starts_with(&spill)) {
+        if entry_path.starts_with(&host_owned) && !(spill_named && entry_path.starts_with(&spill)) {
             continue;
         }
-        let rel_check = path.strip_prefix(&ctx.root).unwrap_or(path);
+        let rel_check = entry_path.strip_prefix(&ctx.root).unwrap_or(entry_path);
         if rel_check.components().any(|c| c.as_os_str() == ".git")
             || (!spill_named && rel_check.components().any(|c| c.as_os_str() == ".sqwai"))
         {
             continue;
         }
-        let disp = path.strip_prefix(&ctx.root).unwrap_or(path);
+        let disp = entry_path.strip_prefix(&ctx.root).unwrap_or(entry_path);
         let shown = disp.display().to_string().replace('\\', "/");
         if let Some(f) = &inc {
-            let name = path
+            let name = entry_path
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
@@ -1202,61 +1504,104 @@ pub(super) fn grep(
                 continue;
             }
         }
+        let mtime = entry
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .unwrap_or(std::time::UNIX_EPOCH);
+        candidates.push((mtime, shown, entry_path.to_path_buf()));
+    }
+    // Search newest modified files first so active files surface before the 200-match cap.
+    candidates.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+
+    const SHOWN_MATCH_CAP: usize = 200;
+    const SPILL_MATCH_CAP: usize = 2_000;
+    let mut out = String::new();
+    let mut spill_buf = String::new();
+    let mut total_matches = 0usize;
+    let mut byte_truncated = false;
+
+    'outer: for (_, shown, file_path) in &candidates {
         // The whole file is scanned even when some of its bytes are not valid
         // UTF-8. Collecting `Lines` into `Result<_, _>` turned the first
         // invalid byte into an empty line list, so a cp1251 source reported
         // "no matches" for a pattern sitting on its third line (#214 M18).
         // An unreadable file is skipped, not fatal: one locked path must not
         // end the search.
-        let Ok(raw) = fs::read(path) else { continue };
+        let Ok(raw) = fs::read(file_path) else { continue };
         if raw.contains(&0) {
             continue; // binary-ish
         }
         let text = String::from_utf8_lossy(&raw);
+        // Fast whole-file pre-check avoids line splitting when a file has 0 matches.
+        if let Some(mre) = &multiline_re
+            && !mre.is_match(&text)
+        {
+            continue;
+        }
         let lines: Vec<&str> = text.lines().collect();
-        let mut hits: Vec<usize> = Vec::new();
-        let mut hit_cap = false;
+        let mut shown_hits: Vec<usize> = Vec::new();
+        let mut spill_hits: Vec<usize> = Vec::new();
         for (i, line) in lines.iter().enumerate() {
             if re.is_match(line) {
-                hits.push(i);
-                matches += 1;
-                if matches >= 200 {
-                    hit_cap = true;
+                total_matches += 1;
+                if total_matches <= SHOWN_MATCH_CAP {
+                    shown_hits.push(i);
+                }
+                if total_matches <= SPILL_MATCH_CAP {
+                    spill_hits.push(i);
+                } else {
                     break;
                 }
             }
         }
-        // grep -C shape: match lines with `:`, context with `-`, `--` between groups
-        let mut last_printed: Option<usize> = None;
-        for &hit in &hits {
-            let start = hit.saturating_sub(context);
-            let end = (hit + context + 1).min(lines.len());
-            if let Some(prev) = last_printed
-                && start > prev + 1
-            {
-                out.push_str("--\n");
-            }
-            for (i, line) in lines.iter().enumerate().take(end).skip(start) {
-                if last_printed.is_some_and(|p| i <= p) {
-                    continue;
-                }
-                let sep = if i == hit { ':' } else { '-' };
-                out.push_str(&format!("{}{sep}{}: {}\n", shown, i + 1, show_line(line)));
-                last_printed = Some(i);
-            }
-            if out.len() > 300_000 {
-                out.push_str("…(output truncated)\n");
-                break 'outer;
-            }
+        if spill_hits.is_empty() {
+            continue;
         }
-        if hit_cap {
-            match spill_output(ctx, "grep", &out) {
-                Some(rel) => out.push_str(&format!(
-                    "…(more matches truncated: first 200 shown, full list in {rel} — grep it with a narrower pattern instead of re-running broad)\n"
-                )),
-                None => out.push_str("…(more matches truncated)\n"),
+
+        // Format into `spill_buf` (up to 2,000 matches) and `out` (first 200 matches).
+        let format_hits = |target: &mut String, hits: &[usize]| -> bool {
+            let mut last_printed: Option<usize> = None;
+            for &hit in hits {
+                let start = hit.saturating_sub(context);
+                let end = (hit + context + 1).min(lines.len());
+                if let Some(prev) = last_printed
+                    && start > prev + 1
+                {
+                    target.push_str("--\n");
+                }
+                for (i, line) in lines.iter().enumerate().take(end).skip(start) {
+                    if last_printed.is_some_and(|p| i <= p) {
+                        continue;
+                    }
+                    let sep = if i == hit { ':' } else { '-' };
+                    target.push_str(&format!("{}{sep}{}: {}\n", shown, i + 1, show_line(line)));
+                    last_printed = Some(i);
+                }
+                if target.len() > 300_000 {
+                    return true;
+                }
             }
+            false
+        };
+
+        if !shown_hits.is_empty() && format_hits(&mut out, &shown_hits) {
+            out.push_str("…(output truncated)\n");
+            byte_truncated = true;
             break 'outer;
+        }
+        let _ = format_hits(&mut spill_buf, &spill_hits);
+        if total_matches >= SPILL_MATCH_CAP {
+            break 'outer;
+        }
+    }
+
+    if !byte_truncated && total_matches > SHOWN_MATCH_CAP {
+        match spill_output(ctx, "grep", &spill_buf) {
+            Some(rel) => out.push_str(&format!(
+                "…(more matches truncated: first 200 shown ({total_matches} total), full list in {rel} — grep it with a narrower pattern instead of re-running broad)\n"
+            )),
+            None => out.push_str("…(more matches truncated)\n"),
         }
     }
     Outcome::ok(if out.is_empty() {
@@ -1821,5 +2166,78 @@ mod tests {
         assert!(out_res.ok, "{}", out_res.output);
         assert!(out_res.output.contains("Imports: './types'"), "{}", out_res.output);
         assert!(out_res.output.contains("Imported by (1): app.tsx:1"), "{}", out_res.output);
+    }
+
+    #[test]
+    fn edit_handles_typographic_quotes_blank_boundaries_tabs_and_noop() {
+        // 1. No-op edit (old == new) is rejected
+        assert!(apply_one("hello\n", "hello\n", "hello\n", false).is_err());
+
+        // 2. Typographic curly quotes / em-dash in source matched by ASCII old_string
+        let curly = "let msg = “Don’t touch — active”;\n";
+        let res = apply_one(
+            curly,
+            "let msg = \"Don't touch - active\";",
+            "let msg = \"Updated\";",
+            false,
+        )
+        .unwrap();
+        assert_eq!(res, "let msg = \"Updated\";\n");
+
+        // 3. Extra leading/trailing blank lines in old_string are stripped on fallback
+        let src = "fn a() {}\nfn b() {\n    call();\n}\nfn c() {}\n";
+        let res_blank = apply_one(
+            src,
+            "\nfn b() {\n    call();\n}\n\n",
+            "\nfn b() {\n    call_new();\n}\n\n",
+            false,
+        )
+        .unwrap();
+        assert_eq!(res_blank, "fn a() {}\nfn b() {\n    call_new();\n}\nfn c() {}\n");
+
+        // 4. Tab-indented file matched when model sends 4-space indentation
+        let tabbed = "class A {\n\tfn run() {\n\t\tstep();\n\t}\n}\n";
+        let res_tabs = apply_one(
+            tabbed,
+            "fn run() {\n    step();\n}",
+            "fn run() {\n    step_two();\n}",
+            false,
+        )
+        .unwrap();
+        assert_eq!(res_tabs, "class A {\n\tfn run() {\n\t\tstep_two();\n\t}\n}\n");
+    }
+
+    #[test]
+    fn grep_spills_beyond_200_and_supports_comma_separated_includes() {
+        let dir = tempfile::tempdir().unwrap();
+        let body: String = (1..=260).map(|i| format!("hit_line_{i}\n")).collect();
+        std::fs::write(dir.path().join("many_hits.rs"), body).unwrap();
+        std::fs::write(dir.path().join("cfg.toml"), "hit_line_toml = 1\n").unwrap();
+        let mut ctx = ToolCtx::new(dir.path());
+
+        // Comma-separated include pattern matches both *.rs and *.toml
+        let outcome = grep(
+            &mut ctx,
+            "hit_line_",
+            Some("undefined"),
+            Some("*.rs, *.toml"),
+            0,
+        );
+        assert!(outcome.ok, "{}", outcome.output);
+        assert!(outcome.output.contains("first 200 shown (261 total)"), "{}", outcome.output);
+
+        // And the spill file actually contains match #255 (not just the first 200!)
+        let spill_dir = dir.path().join(".sqwai").join("spill");
+        let spill_file = std::fs::read_dir(&spill_dir)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let spilled_text = std::fs::read_to_string(spill_file).unwrap();
+        assert!(
+            spilled_text.contains("hit_line_255"),
+            "spill file must contain matches beyond 200"
+        );
     }
 }
