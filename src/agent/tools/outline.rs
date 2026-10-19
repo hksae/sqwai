@@ -723,7 +723,7 @@ pub(crate) fn find_symbol_ranges(
         }
 
         for item in &items {
-            if contains_ident(&item.signature, leaf) || item.signature.contains(cleaned) {
+            if contains_ident(&item.signature, leaf) {
                 let mut start = item.line.clamp(1, total_lines);
                 let end = item.end_line.clamp(start, total_lines);
                 // Expand upward up to 6 lines for doc comments (`///`, `#`) and attributes (`#[...]`, `@`).
