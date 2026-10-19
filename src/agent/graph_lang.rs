@@ -25,15 +25,15 @@ impl TsLang {
     pub fn from_extension(ext: &str) -> Option<Self> {
         Some(match ext.to_ascii_lowercase().as_str() {
             "rs" => TsLang::Rust,
-            "py" => TsLang::Python,
+            "py" | "pyi" | "pyw" => TsLang::Python,
             "js" | "mjs" | "cjs" | "jsx" => TsLang::JavaScript,
             "ts" | "mts" | "cts" => TsLang::TypeScript,
             "tsx" => TsLang::Tsx,
             "go" => TsLang::Go,
-            "sh" | "bash" => TsLang::Bash,
+            "sh" | "bash" | "zsh" => TsLang::Bash,
             "c" | "h" => TsLang::C,
-            "cpp" | "cc" | "cxx" | "hpp" | "hh" | "hxx" => TsLang::Cpp,
-            "cs" => TsLang::CSharp,
+            "cpp" | "cc" | "cxx" | "hpp" | "hh" | "hxx" | "ipp" | "tpp" | "ino" => TsLang::Cpp,
+            "cs" | "csx" => TsLang::CSharp,
             "java" => TsLang::Java,
             _ => return None,
         })

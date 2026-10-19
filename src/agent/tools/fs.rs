@@ -1779,5 +1779,33 @@ mod tests {
         // Overwriting `b.rs` succeeds because fused `read` registered `b.rs` in `ctx2.reads`.
         let w = write_file(&mut ctx2, "b.rs", "pub struct Config {}\n");
         assert!(w.ok, "fused read must mark all paths as read: {}", w.output);
+
+        // 3. Qualified `Type::method` disambiguation (`Bar::new` vs `Foo::new`).
+        let multi_impl = "pub struct Foo;\nimpl Foo {\n    pub fn new() -> Self {\n        Foo\n    }\n}\n\npub struct Bar;\nimpl Bar {\n    pub fn new() -> Self {\n        Bar\n    }\n}\n";
+        std::fs::write(dir.path().join("impls.rs"), multi_impl).unwrap();
+        let qual_out = read(
+            &mut ctx2,
+            "impls.rs",
+            &json!({"file_path": "impls.rs", "symbol": "Bar::new"}),
+        );
+        assert!(qual_out.ok, "{}", qual_out.output);
+        assert!(qual_out.output.contains("Bar"), "{}", qual_out.output);
+        assert!(
+            !qual_out.output.contains("        Foo"),
+            "must only return Bar::new, not Foo::new:\n{}",
+            qual_out.output
+        );
+
+        // 4. TypeScript arrow-function components & hooks (`export const Button = ...`, `const useAuth = ...`).
+        let tsx_src = "export const Button = (props: Props) => {\n    return <button>{props.label}</button>;\n};\n\nconst useAuth = () => {\n    return true;\n};\n";
+        std::fs::write(dir.path().join("comp.tsx"), tsx_src).unwrap();
+        let tsx_out = read(
+            &mut ctx2,
+            "comp.tsx",
+            &json!({"file_path": "comp.tsx", "symbols": ["Button", "useAuth"]}),
+        );
+        assert!(tsx_out.ok, "{}", tsx_out.output);
+        assert!(tsx_out.output.contains("export const Button"));
+        assert!(tsx_out.output.contains("const useAuth"));
     }
 }

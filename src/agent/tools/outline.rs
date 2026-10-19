@@ -19,6 +19,7 @@ pub(crate) struct OutlineItem {
     pub(crate) end_line: usize,
     pub(crate) depth: usize,
     pub(crate) signature: String,
+    pub(crate) parent: Option<String>,
 }
 
 pub fn outline(ctx: &mut ToolCtx, args: &Value) -> Outcome {
@@ -115,7 +116,7 @@ fn extract_ts(src: &str, lang: Lang, max_depth: usize) -> Vec<OutlineItem> {
     };
 
     let mut items = Vec::new();
-    walk_node(tree.root_node(), src, lang, 1, max_depth, 0, &mut items);
+    walk_node(tree.root_node(), src, lang, 1, max_depth, 0, None, &mut items);
     items
 }
 
@@ -126,6 +127,7 @@ fn extract_ts(src: &str, lang: Lang, max_depth: usize) -> Vec<OutlineItem> {
 /// (audit H14).
 const RAW_RECURSION_LIMIT: usize = 256;
 
+#[allow(clippy::too_many_arguments)]
 fn walk_node(
     node: Node,
     src: &str,
@@ -133,6 +135,7 @@ fn walk_node(
     depth: usize,
     max_depth: usize,
     raw_depth: usize,
+    parent_sig: Option<&str>,
     out: &mut Vec<OutlineItem>,
 ) {
     if depth > max_depth || raw_depth > RAW_RECURSION_LIMIT {
@@ -145,7 +148,7 @@ fn walk_node(
     if is_transparent_container(kind, lang) {
         let mut cursor = node.walk();
         for c in node.children(&mut cursor) {
-            walk_node(c, src, lang, depth, max_depth, raw_depth + 1, out);
+            walk_node(c, src, lang, depth, max_depth, raw_depth + 1, parent_sig, out);
         }
         return;
     }
@@ -161,7 +164,8 @@ fn walk_node(
                 line,
                 end_line,
                 depth,
-                signature: sig,
+                signature: sig.clone(),
+                parent: parent_sig.map(str::to_string),
             });
 
             // If it has a body and depth < max_depth, recurse into inner declarations
@@ -169,14 +173,23 @@ fn walk_node(
                 && depth < max_depth
             {
                 // C# and C++ namespaces: children stay at current depth (top-level classes)
-                let next_depth = if is_namespace(kind, lang) {
-                    depth
+                let (next_depth, next_parent) = if is_namespace(kind, lang) {
+                    (depth, parent_sig)
                 } else {
-                    depth + 1
+                    (depth + 1, Some(sig.as_str()))
                 };
                 let mut cursor = body.walk();
                 for c in body.children(&mut cursor) {
-                    walk_node(c, src, lang, next_depth, max_depth, raw_depth + 1, out);
+                    walk_node(
+                        c,
+                        src,
+                        lang,
+                        next_depth,
+                        max_depth,
+                        raw_depth + 1,
+                        next_parent,
+                        out,
+                    );
                 }
             }
         }
@@ -186,7 +199,7 @@ fn walk_node(
     // Default: visit children at same depth (e.g. wrapper expressions, blocks at root)
     let mut cursor = node.walk();
     for c in node.children(&mut cursor) {
-        walk_node(c, src, lang, depth, max_depth, raw_depth + 1, out);
+        walk_node(c, src, lang, depth, max_depth, raw_depth + 1, parent_sig, out);
     }
 }
 
@@ -206,14 +219,17 @@ fn is_transparent_container(kind: &str, lang: Lang) -> bool {
         kind,
         "source_file" | "compilation_unit" | "translation_unit" | "program" | "script" | "module"
     ) || (matches!(lang, Lang::JavaScript | Lang::TypeScript | Lang::Tsx)
-        && kind == "export_statement")
+        && matches!(
+            kind,
+            "export_statement" | "lexical_declaration" | "variable_declaration"
+        ))
         || (lang == Lang::Python && kind == "decorated_definition")
         || (matches!(lang, Lang::C | Lang::Cpp) && kind == "template_declaration")
-        // Go declarations are grouped: `var (...)` and `const (...)` carry no
-        // name of their own, the specs inside them do. Walking past the group
-        // is what lets each `var_spec` / `const_spec` be listed on its own line,
-        // the way `type_spec` already is (#222).
-        || (lang == Lang::Go && matches!(kind, "type_declaration" | "var_declaration" | "const_declaration"))
+        || (lang == Lang::Go
+            && matches!(
+                kind,
+                "type_declaration" | "var_declaration" | "const_declaration"
+            ))
 }
 
 fn is_declaration_node(node: Node, lang: Lang) -> bool {
@@ -234,26 +250,31 @@ fn is_declaration_node(node: Node, lang: Lang) -> bool {
                 | "enum_variant"
         ),
         Lang::Python => matches!(kind, "function_definition" | "class_definition"),
-        Lang::JavaScript | Lang::TypeScript | Lang::Tsx => matches!(
-            kind,
-            "function_declaration"
-                | "class_declaration"
-                // `abstract class X` is its own node kind in this grammar, not a
-                // class_declaration with a modifier — without it the whole class
-                // was absent from the map, not just its members.
-                | "abstract_class_declaration"
-                | "interface_declaration"
-                | "type_alias_declaration"
-                | "enum_declaration"
-                | "method_definition"
-                // interface and abstract-class members carry no body, so they are
-                // a different node kind from `method_definition`: the part of an
-                // interface worth skimming was invisible (#222).
-                | "method_signature"
-                | "abstract_method_signature"
-                | "property_signature"
-                | "enum_assignment"
-        ),
+        Lang::JavaScript | Lang::TypeScript | Lang::Tsx => {
+            if matches!(
+                kind,
+                "function_declaration"
+                    | "class_declaration"
+                    | "abstract_class_declaration"
+                    | "interface_declaration"
+                    | "type_alias_declaration"
+                    | "enum_declaration"
+                    | "method_definition"
+                    | "method_signature"
+                    | "abstract_method_signature"
+                    | "property_signature"
+                    | "enum_assignment"
+            ) {
+                return true;
+            }
+            if matches!(
+                kind,
+                "variable_declarator" | "public_field_definition" | "field_definition"
+            ) {
+                return find_js_fn_value(node).is_some();
+            }
+            false
+        }
         Lang::Go => matches!(
             kind,
             "function_declaration"
@@ -322,8 +343,49 @@ fn is_declaration_node(node: Node, lang: Lang) -> bool {
     }
 }
 
+/// For a JS/TS `variable_declarator` or class field (`const Foo = (x) => { ... }`
+/// or `const Bar = React.memo((props) => { ... })`), return the underlying
+/// function node (`arrow_function` / `function_expression` / `function`).
+fn find_js_fn_value<'a>(node: Node<'a>) -> Option<Node<'a>> {
+    let val = node.child_by_field_name("value").or_else(|| {
+        let mut cursor = node.walk();
+        node.children(&mut cursor).find(|c| {
+            matches!(
+                c.kind(),
+                "arrow_function"
+                    | "function_expression"
+                    | "function"
+                    | "generator_function"
+                    | "call_expression"
+            )
+        })
+    })?;
+    match val.kind() {
+        "arrow_function" | "function_expression" | "function" | "generator_function" => Some(val),
+        "call_expression" => {
+            let args = val.child_by_field_name("arguments")?;
+            let mut cursor = args.walk();
+            args.children(&mut cursor).find(|c| {
+                matches!(
+                    c.kind(),
+                    "arrow_function" | "function_expression" | "function" | "generator_function"
+                )
+            })
+        }
+        _ => None,
+    }
+}
+
 fn find_body_node<'a>(node: Node<'a>, _lang: Lang) -> Option<Node<'a>> {
     if let Some(b) = node.child_by_field_name("body") {
+        return Some(b);
+    }
+    if matches!(
+        node.kind(),
+        "variable_declarator" | "public_field_definition" | "field_definition"
+    ) && let Some(fn_node) = find_js_fn_value(node)
+        && let Some(b) = fn_node.child_by_field_name("body")
+    {
         return Some(b);
     }
     let mut cursor = node.walk();
@@ -359,19 +421,33 @@ fn find_body_node<'a>(node: Node<'a>, _lang: Lang) -> Option<Node<'a>> {
 
 fn extract_signature(node: Node, src: &str, body_opt: Option<Node>, lang: Lang) -> (usize, String) {
     let mut start = node.start_byte();
+    let mut start_row = node.start_position().row;
 
     let mut has_parent_prefix = false;
-    // If wrapped in export_statement, template_declaration, or decorated_definition, include parent prefix
+    // If wrapped in export_statement, lexical_declaration, template_declaration, or decorated_definition, include parent prefix
     if let Some(p) = node.parent() {
         let pk = p.kind();
         if pk == "export_statement" || pk == "template_declaration" || pk == "decorated_definition"
         {
             start = p.start_byte();
+            start_row = p.start_position().row;
+            has_parent_prefix = true;
+        } else if matches!(pk, "lexical_declaration" | "variable_declaration") {
+            if let Some(gp) = p.parent()
+                && gp.kind() == "export_statement"
+            {
+                start = gp.start_byte();
+                start_row = gp.start_position().row;
+            } else {
+                start = p.start_byte();
+                start_row = p.start_position().row;
+            }
             has_parent_prefix = true;
         } else if pk == "type_declaration" && p.start_byte() < node.start_byte() {
             let prefix = &src[p.start_byte()..node.start_byte()];
             if prefix.contains("type") && !prefix.contains('(') {
                 start = p.start_byte();
+                start_row = p.start_position().row;
                 has_parent_prefix = true;
             }
         }
@@ -392,16 +468,13 @@ fn extract_signature(node: Node, src: &str, body_opt: Option<Node>, lang: Lang) 
             }
             if start < c.start_byte() {
                 start = c.start_byte();
+                start_row = c.start_position().row;
             }
             break;
         }
     }
 
-    let line = if start < src.len() {
-        src[..start].chars().filter(|&c| c == '\n').count() + 1
-    } else {
-        node.start_position().row + 1
-    };
+    let line = start_row + 1;
 
     let raw_end = if let Some(b) = body_opt {
         b.start_byte()
@@ -429,9 +502,10 @@ fn extract_signature(node: Node, src: &str, body_opt: Option<Node>, lang: Lang) 
 
 fn extract_fallback(src: &str, max_depth: usize) -> Vec<OutlineItem> {
     let mut items = Vec::new();
-    let mut indent_stack: Vec<usize> = Vec::new();
+    let mut indent_stack: Vec<(usize, String)> = Vec::new();
+    let lines: Vec<&str> = src.lines().collect();
 
-    for (idx, line) in src.lines().enumerate() {
+    for (idx, &line) in lines.iter().enumerate() {
         let line_no = idx + 1;
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -448,6 +522,7 @@ fn extract_fallback(src: &str, max_depth: usize) -> Vec<OutlineItem> {
                         end_line: line_no,
                         depth: hashes,
                         signature: clean_signature(trimmed),
+                        parent: None,
                     });
                 }
                 continue;
@@ -468,44 +543,77 @@ fn extract_fallback(src: &str, max_depth: usize) -> Vec<OutlineItem> {
         if let Some(raw_sig) = match_fallback_declaration(trimmed) {
             let indent_cols = count_indent(line);
 
-            while let Some(&top) = indent_stack.last() {
-                if indent_cols < top {
+            while let Some((top_indent, _)) = indent_stack.last() {
+                if indent_cols <= *top_indent {
                     indent_stack.pop();
                 } else {
                     break;
                 }
             }
-            if indent_stack.is_empty() || *indent_stack.last().unwrap() < indent_cols {
-                indent_stack.push(indent_cols);
-            }
-
-            let depth = indent_stack.len();
-            if depth <= max_depth {
-                let sig = clean_signature(&raw_sig);
-                if !sig.is_empty() {
+            let parent = indent_stack.last().map(|(_, s)| s.clone());
+            let sig = clean_signature(&raw_sig);
+            if !sig.is_empty() {
+                indent_stack.push((indent_cols, sig.clone()));
+                let depth = indent_stack.len();
+                if depth <= max_depth {
                     items.push(OutlineItem {
                         line: line_no,
                         end_line: line_no,
                         depth,
                         signature: sig,
+                        parent,
                     });
                 }
             }
         }
     }
 
-    let total_lines = src.lines().count().max(1);
+    let total_lines = lines.len().max(1);
     for i in 0..items.len() {
         let cur_depth = items[i].depth;
-        let next_start = items[i + 1..]
+        let start_line = items[i].line;
+        let bound_line = items[i + 1..]
             .iter()
             .find(|next| next.depth <= cur_depth)
             .map(|next| next.line.saturating_sub(1))
-            .unwrap_or(total_lines);
-        items[i].end_line = next_start.max(items[i].line);
+            .unwrap_or(total_lines)
+            .max(start_line);
+        items[i].end_line = refine_fallback_end_line(&lines, start_line, bound_line);
     }
 
     items
+}
+
+/// Refine a fallback declaration's `end_line` within `start_line..=bound_line`
+/// using brace balance `{ ... }` when braces are present, or trimming trailing
+/// blank/comment lines before the next sibling declaration.
+fn refine_fallback_end_line(lines: &[&str], start_line: usize, bound_line: usize) -> usize {
+    let mut brace_depth = 0isize;
+    let mut saw_open_brace = false;
+    for line_no in start_line..=bound_line.min(lines.len()) {
+        let line = lines[line_no - 1];
+        for ch in line.chars() {
+            if ch == '{' {
+                brace_depth += 1;
+                saw_open_brace = true;
+            } else if ch == '}' {
+                brace_depth -= 1;
+                if saw_open_brace && brace_depth <= 0 {
+                    return line_no;
+                }
+            }
+        }
+    }
+    let mut end = bound_line.min(lines.len());
+    while end > start_line {
+        let t = lines[end - 1].trim();
+        if t.is_empty() || t.starts_with("//") || t.starts_with('#') || t.starts_with("--") {
+            end -= 1;
+        } else {
+            break;
+        }
+    }
+    end
 }
 
 fn count_indent(line: &str) -> usize {
@@ -710,20 +818,49 @@ pub(crate) fn find_symbol_ranges(
             .trim_start_matches("class ")
             .trim_start_matches("def ")
             .trim_end_matches("()");
-        let leaf = cleaned
-            .rsplit("::")
-            .next()
-            .unwrap_or(cleaned)
-            .rsplit('.')
-            .next()
-            .unwrap_or(cleaned)
-            .trim();
+        let (qualifier, leaf) = if let Some((q, l)) = cleaned.rsplit_once("::") {
+            (Some(q.trim()), l.trim())
+        } else if let Some((q, l)) = cleaned.rsplit_once('.') {
+            (Some(q.trim()), l.trim())
+        } else {
+            (None, cleaned.trim())
+        };
         if leaf.is_empty() {
             continue;
         }
+        let qual_leaf = qualifier.map(|q| {
+            q.rsplit("::")
+                .next()
+                .unwrap_or(q)
+                .rsplit('.')
+                .next()
+                .unwrap_or(q)
+                .trim()
+        });
+
+        // If a qualifier (`Type::method` or `Class.method`) was given, prefer items
+        // whose enclosing parent declaration matches that qualifier.
+        let has_qualified_match = qual_leaf.is_some_and(|ql| {
+            !ql.is_empty()
+                && items.iter().any(|item| {
+                    contains_ident(&item.signature, leaf)
+                        && item
+                            .parent
+                            .as_deref()
+                            .is_some_and(|p| contains_ident(p, ql))
+                })
+        });
 
         for item in &items {
-            if contains_ident(&item.signature, leaf) {
+            let parent_ok = if has_qualified_match {
+                let ql = qual_leaf.unwrap_or_default();
+                item.parent
+                    .as_deref()
+                    .is_some_and(|p| contains_ident(p, ql))
+            } else {
+                true
+            };
+            if parent_ok && contains_ident(&item.signature, leaf) {
                 let mut start = item.line.clamp(1, total_lines);
                 let end = item.end_line.clamp(start, total_lines);
                 // Expand upward up to 6 lines for doc comments (`///`, `#`) and attributes (`#[...]`, `@`).
