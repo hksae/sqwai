@@ -141,6 +141,7 @@ impl Plan {
         let level = self.level.as_str();
         match self.status {
             Status::Applied => format!("ef:{level}"),
+            Status::Clamped { to } if to == level => format!("ef:{level}"),
             Status::Clamped { to } => format!("ef:{level}→{to}"),
             Status::Ignored { .. } => format!("ef:{level} (ignored)"),
         }
