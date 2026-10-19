@@ -266,7 +266,6 @@ impl App {
             ("ctrl+j", "newline"),
             ("ctrl+v", "paste"),
             ("ctrl+s", "sessions"),
-            ("ctrl+t", "todo"),
             ("ctrl+p", "providers"),
             ("ctrl+l", "plan"),
             ("ctrl+o", "settings"),
