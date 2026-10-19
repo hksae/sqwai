@@ -8,9 +8,35 @@ use std::path::Path;
 
 // ---------------------------------------------------------------- operations
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct NewStep {
     pub title: String,
+}
+
+impl<'de> Deserialize<'de> for NewStep {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let val = Value::deserialize(deserializer)?;
+        if let Some(s) = val.as_str() {
+            return Ok(NewStep {
+                title: s.to_string(),
+            });
+        }
+        if let Some(obj) = val.as_object() {
+            for key in ["title", "step", "description", "name", "text"] {
+                if let Some(s) = obj.get(key).and_then(Value::as_str) {
+                    return Ok(NewStep {
+                        title: s.to_string(),
+                    });
+                }
+            }
+        }
+        Err(serde::de::Error::custom(
+            "expected a step string or an object with a `title` field",
+        ))
+    }
 }
 
 /// One operation per call. `Serialize` is for the journal intent
@@ -275,6 +301,13 @@ pub fn create(
             "break the work into 3-12 steps",
         ));
     }
+    if steps.iter().any(|s| s.title.trim().is_empty()) {
+        return Err(Rejection::new(
+            "empty_title",
+            "every step in a plan needs a non-empty title",
+            "give each step a clear one-line description",
+        ));
+    }
     if steps.len() > limits.max_steps {
         return Err(Rejection::new(
             "too_many_steps",
@@ -288,6 +321,17 @@ pub fn create(
     }
 
     let ts = now();
+    let mut dedup_criteria: Vec<String> = Vec::new();
+    for text in criteria {
+        let trimmed = text.trim().to_string();
+        if !trimmed.is_empty()
+            && !dedup_criteria
+                .iter()
+                .any(|c| c.eq_ignore_ascii_case(&trimmed))
+        {
+            dedup_criteria.push(trimmed);
+        }
+    }
     let plan = Plan {
         version: PLAN_VERSION,
         id: new_id(),
@@ -296,23 +340,23 @@ pub fn create(
         sessions: Vec::new(),
         applied_events: Default::default(),
         goal: Goal {
-            text: goal,
+            text: goal.trim().to_string(),
             source: "user".to_string(),
             created: ts,
             history: Vec::new(),
         },
-        constraints,
-        criteria: criteria
+        constraints: constraints
             .into_iter()
-            .map(|text| text.trim().to_string())
-            .filter(|text| !text.is_empty())
+            .map(|c| c.trim().to_string())
+            .filter(|c| !c.is_empty())
             .collect(),
+        criteria: dedup_criteria,
         steps: steps
             .into_iter()
             .enumerate()
             .map(|(i, s)| Step {
                 id: (i + 1).to_string(),
-                title: s.title,
+                title: s.title.trim().to_string(),
                 status: StepStatus::Pending,
                 started: None,
                 finished: None,
@@ -646,15 +690,23 @@ fn finish(plan: &mut Plan, id: &str, summary: String) -> Result<Applied, Rejecti
     let step = plan.step_mut(id).expect("checked above");
     step.status = StepStatus::Done;
     step.finished = Some(now());
-    step.summary = Some(summary);
-    // One thin trigger, at the moment it is actionable: a live session closed
-    // two steps and wrote no note at all, because the `note` description is
-    // read once and forgotten. The summary says what changed; only a note can
-    // carry why, and what was rejected on the way.
+    step.summary = Some(summary.trim().to_string());
+    let next_hint = match plan
+        .steps
+        .iter()
+        .find(|s| matches!(s.status, StepStatus::Pending | StepStatus::Reopened))
+    {
+        Some(next) => format!(
+            " (next pending step: {} \"{}\")",
+            next.id,
+            next.title.chars().take(48).collect::<String>()
+        ),
+        None => " (all steps closed — ready for op: \"complete\")".to_string(),
+    };
     accept(
         plan,
         format!(
-            "step {id} done — a decision this step settled, an approach it rejected or a \
+            "step {id} done{next_hint} — a decision this step settled, an approach it rejected or a \
              lesson it learned belongs in `note`; the transcript gets compacted, the journal does not"
         ),
     )
@@ -830,8 +882,14 @@ pub(crate) fn add_criteria(plan: &mut Plan, criteria: Vec<String>) -> Result<App
         if text.is_empty() {
             continue;
         }
-        plan.criteria.push(text);
-        added += 1;
+        if !plan
+            .criteria
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(&text))
+        {
+            plan.criteria.push(text);
+            added += 1;
+        }
     }
     accept(plan, format!("criteria +{added}"))
 }
@@ -842,12 +900,20 @@ fn split(
     into: Vec<NewStep>,
     limits: &Limits,
 ) -> Result<Applied, Rejection> {
-    if into.is_empty() {
+    if into.len() < 2 {
         return reject(
             plan,
             "empty_split",
             format!("splitting step {id} needs at least two parts"),
             "give the step a smaller shape, or cancel it with a reason",
+        );
+    }
+    if into.iter().any(|s| s.title.trim().is_empty()) {
+        return reject(
+            plan,
+            "empty_title",
+            format!("splitting step {id} requires non-empty titles for every part"),
+            "give each split part a clear one-line description",
         );
     }
     let found = plan.steps.iter().position(|s| s.id == id);

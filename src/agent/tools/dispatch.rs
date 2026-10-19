@@ -841,13 +841,53 @@ fn parse_time_bound(s: &str, end_of_day: bool) -> Option<chrono::DateTime<chrono
 /// refused with the step list otherwise, so tolerance never mutates the wrong
 /// step on a guess.
 fn resolve_step_id(args: &mut Value, root: &std::path::Path, session_id: &str) {
-    const STEP_OPS: [&str; 5] = ["start", "finish", "block", "unblock", "cancel"];
+    const STEP_OPS: [&str; 6] = ["start", "finish", "block", "unblock", "cancel", "split"];
     let Some(obj) = args.as_object_mut() else {
         return;
     };
+    // Coerce numeric id / step_id / after (`1` -> `"1"`)
+    for key in ["id", "step_id", "after"] {
+        if let Some(n) = obj.get(key).and_then(Value::as_u64) {
+            obj.insert(key.into(), Value::String(n.to_string()));
+        } else if let Some(n) = obj.get(key).and_then(Value::as_i64) {
+            obj.insert(key.into(), Value::String(n.to_string()));
+        }
+    }
+    // Coerce single string `criteria` / `constraints` / `items` into a 1-element array
+    for key in ["criteria", "acceptance", "items", "constraints"] {
+        if let Some(s) = obj.get(key).and_then(Value::as_str).map(str::to_string) {
+            obj.insert(key.into(), Value::Array(vec![Value::String(s)]));
+        }
+    }
     let Some(op) = obj.get("op").and_then(Value::as_str).map(str::to_string) else {
         return;
     };
+    if op == "step_diff" {
+        if !obj.contains_key("step_id")
+            && let Some(id_val) = obj.remove("id").and_then(|v| v.as_str().map(String::from))
+        {
+            obj.insert("step_id".into(), id_val.into());
+        }
+        return;
+    }
+    if op == "finish" && !obj.contains_key("summary") {
+        for alias in ["message", "text", "note", "result"] {
+            if let Some(val) = obj.remove(alias).and_then(|v| v.as_str().map(String::from)) {
+                obj.insert("summary".into(), val.into());
+                break;
+            }
+        }
+    }
+    if matches!(op.as_str(), "block" | "cancel" | "block_plan" | "abandon")
+        && !obj.contains_key("reason")
+    {
+        for alias in ["message", "text", "note", "summary"] {
+            if let Some(val) = obj.remove(alias).and_then(|v| v.as_str().map(String::from)) {
+                obj.insert("reason".into(), val.into());
+                break;
+            }
+        }
+    }
     if !STEP_OPS.contains(&op.as_str()) {
         return;
     }
@@ -870,7 +910,7 @@ fn resolve_step_id(args: &mut Value, root: &std::path::Path, session_id: &str) {
         return;
     }
     let want = match op.as_str() {
-        "start" => plan::StepStatus::Pending,
+        "start" | "split" => plan::StepStatus::Pending,
         "unblock" => plan::StepStatus::Blocked,
         _ => plan::StepStatus::InProgress,
     };

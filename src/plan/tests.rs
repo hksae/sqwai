@@ -1352,3 +1352,76 @@ fn add_refuses_non_numeric_step_ids_instead_of_colliding() {
     assert_eq!(err.code, "bad_step_id", "{err:?}");
     assert_eq!(plan.steps.len(), 2, "a refused add stores nothing");
 }
+
+#[test]
+fn new_step_deserializes_strings_and_aliases_and_finish_names_next_step() {
+    let steps: Vec<NewStep> = serde_json::from_value(serde_json::json!([
+        "plain string step",
+        {"step": "step alias"},
+        {"description": "desc alias"}
+    ]))
+    .unwrap();
+    assert_eq!(steps.len(), 3);
+    assert_eq!(steps[0].title, "plain string step");
+    assert_eq!(steps[1].title, "step alias");
+    assert_eq!(steps[2].title, "desc alias");
+
+    let mut plan = new_plan();
+    // Single-part split is rejected
+    let bad_split = apply(
+        &mut plan,
+        Op::Split {
+            id: "1".into(),
+            into: vec![NewStep {
+                title: "only one".into(),
+            }],
+        },
+        &Limits::default(),
+        None,
+    )
+    .unwrap_err();
+    assert_eq!(bad_split.code, "empty_split");
+
+    // Duplicate criteria are deduplicated
+    apply(
+        &mut plan,
+        Op::AddCriteria {
+            criteria: vec!["cargo test must pass".into(), "new criterion".into()],
+        },
+        &Limits::default(),
+        None,
+    )
+    .unwrap();
+    assert_eq!(plan.criteria.len(), 2);
+
+    // Finishing step 1 names step 2 as the next pending step
+    apply(
+        &mut plan,
+        Op::Start {
+            id: "1".into(),
+            confirm: None,
+        },
+        &Limits::default(),
+        None,
+    )
+    .unwrap();
+    let res = apply(
+        &mut plan,
+        Op::Finish {
+            id: "1".into(),
+            summary: "done 1".into(),
+        },
+        &Limits::default(),
+        None,
+    )
+    .unwrap();
+    match res {
+        Applied::Updated { message } => {
+            assert!(
+                message.contains("next pending step: 2"),
+                "finish should point to next pending step: {message}"
+            );
+        }
+        _ => panic!("expected Updated"),
+    }
+}
