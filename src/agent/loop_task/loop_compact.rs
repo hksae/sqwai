@@ -271,9 +271,10 @@ pub(crate) async fn compact_history(
             &mut wire_history,
             policy.context_limit,
         );
+        let wire_older = &wire_history[..older.len().min(wire_history.len())];
         let (request, cache_aware) = compaction_request(
             prefix,
-            &older,
+            wire_older,
             &wire_history,
             keep_len,
             summary.as_deref(),
@@ -290,7 +291,7 @@ pub(crate) async fn compact_history(
             Err(e) => {
                 crate::providers::log_http(&format!("compaction: summarization failed: {e}"));
                 // stage 3: extract a summary locally instead of losing the turns
-                context::local_summary(&older, summary.as_deref())
+                context::local_summary(wire_older, summary.as_deref())
             }
         };
         // the wire cap is advisory: a severely over-budget answer gets one
@@ -300,7 +301,7 @@ pub(crate) async fn compact_history(
         let text = if text.chars().count() > 2 * context::SUMMARY_SHORT_MAX_CHARS {
             let (retry_request, _) = compaction_request(
                 prefix,
-                &older,
+                wire_older,
                 &wire_history,
                 keep_len,
                 summary.as_deref(),

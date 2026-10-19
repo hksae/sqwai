@@ -811,3 +811,71 @@ fn anchor_restores_files_on_redo_and_lists_recent_reads_and_blockers() {
     );
     std::fs::remove_dir_all(root).ok();
 }
+
+#[test]
+fn anchor_tracks_fused_paths_hard_trim_deducts_summary_head_and_local_summary_skips_stubs() {
+    let root = temp_root("anchor-fused-reads");
+    std::fs::remove_dir_all(&root).ok();
+    std::fs::create_dir_all(&root).unwrap();
+    let mut journal = crate::agent::journal::Journal::open(&root, "s").unwrap();
+    journal
+        .append(
+            "tool_call",
+            serde_json::json!({
+                "tool": "read",
+                "args": {"paths": ["src/one.rs", "src/two.rs"]},
+                "args_digest": "2 files"
+            }),
+        )
+        .unwrap();
+
+    let rendered = anchor(&root, "s");
+    assert!(
+        rendered.contains("src/one.rs · src/two.rs"),
+        "fused read paths must appear in recent files read: {rendered}"
+    );
+    std::fs::remove_dir_all(root).ok();
+
+    // `hard_trim` deducts the leading `<conversation-summary>` token weight from `budget`
+    let summary_msg = Message::new(
+        Role::User,
+        format!("<conversation-summary>\n{}\n</conversation-summary>", "s".repeat(400)),
+    );
+    let msgs = vec![
+        summary_msg.clone(),
+        Message::new(Role::User, "u".repeat(400)),
+        Message::new(Role::Assistant, "a".repeat(400)),
+        Message::new(Role::User, "tail"),
+    ];
+    let head_toks = estimated_tokens(std::slice::from_ref(&summary_msg));
+    let trimmed = hard_trim(&msgs, head_toks + 20);
+    assert!(
+        estimated_tokens(&trimmed) <= head_toks + 20,
+        "hard_trim must deduct summary head tokens so total stays within budget: {} > {}",
+        estimated_tokens(&trimmed),
+        head_toks + 20
+    );
+
+    // `local_summary` records tool_calls on silent assistant turns and skips cleared tool stubs
+    let silent_assistant = Message::new(Role::Assistant, "").with_tool_calls(vec![
+        crate::providers::ToolCallReq::new(
+            "c1",
+            "read",
+            serde_json::json!({"file_path": "src/main.rs"}),
+        ),
+    ]);
+    let cleared_stub = Message::tool_result(
+        "c1",
+        "[output cleared] read src/main.rs · 20 KB of output removed",
+        false,
+    );
+    let summary = local_summary(&[silent_assistant, cleared_stub], None);
+    assert!(
+        summary.contains("Agent called read"),
+        "silent assistant tool calls must be preserved in local_summary: {summary}"
+    );
+    assert!(
+        !summary.contains("[output cleared]"),
+        "cleared stubs must be skipped in local_summary: {summary}"
+    );
+}

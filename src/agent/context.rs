@@ -38,73 +38,84 @@ pub fn anchor(root: &std::path::Path, session_id: &str) -> String {
     let mut changed = Vec::new();
     let mut recent_reads: Vec<String> = Vec::new();
     let mut last_verification = None;
-    if let Ok(records) = crate::agent::journal::Journal::records_for(root, session_id) {
-        for record in records {
-            if record.kind == "file_diff"
-                && let Some(path) = record.fields.get("path").and_then(|value| value.as_str())
-            {
-                changed.push(bounded(path, 160));
+    let records =
+        crate::agent::journal::Journal::records_for(root, session_id).unwrap_or_default();
+    for record in &records {
+        if record.kind == "file_diff"
+            && let Some(path) = record.fields.get("path").and_then(|value| value.as_str())
+        {
+            changed.push(bounded(path, 160));
+        }
+        // An `/undo` takes back what it names: records arrive in sequence
+        // order, so a later write re-lists the path and the memo follows
+        // the tree instead of the session's whole history. Without this
+        // the anchor tells the model, exactly when it is re-grounded after
+        // a compaction, that reverted files still hold the agent's work.
+        if record.kind == "undo"
+            && let Some(files) = record.fields.get("files").and_then(|v| v.as_array())
+        {
+            for file in files.iter().filter_map(|v| v.as_str()) {
+                let name = bounded(file, 160);
+                changed.retain(|path: &String| *path != name);
             }
-            // An `/undo` takes back what it names: records arrive in sequence
-            // order, so a later write re-lists the path and the memo follows
-            // the tree instead of the session's whole history. Without this
-            // the anchor tells the model, exactly when it is re-grounded after
-            // a compaction, that reverted files still hold the agent's work.
-            if record.kind == "undo"
-                && let Some(files) = record.fields.get("files").and_then(|v| v.as_array())
-            {
-                for file in files.iter().filter_map(|v| v.as_str()) {
-                    let name = bounded(file, 160);
-                    changed.retain(|path: &String| *path != name);
-                }
+        }
+        // A `/redo` puts the reverted files back into the worktree.
+        if record.kind == "redo"
+            && let Some(files) = record.fields.get("files").and_then(|v| v.as_array())
+        {
+            for file in files.iter().filter_map(|v| v.as_str()) {
+                changed.push(bounded(file, 160));
             }
-            // A `/redo` puts the reverted files back into the worktree.
-            if record.kind == "redo"
-                && let Some(files) = record.fields.get("files").and_then(|v| v.as_array())
-            {
-                for file in files.iter().filter_map(|v| v.as_str()) {
-                    changed.push(bounded(file, 160));
-                }
-            }
-            if record.kind == "tool_call"
-                && record
-                    .fields
-                    .get("tool")
-                    .and_then(|v| v.as_str())
-                    .is_some_and(|t| matches!(t, "read" | "outline"))
-            {
-                let path_opt = record
-                    .fields
-                    .get("args")
-                    .and_then(|a| {
-                        a.get("file_path")
-                            .or_else(|| a.get("path"))
-                            .and_then(|v| v.as_str())
-                    })
-                    .or_else(|| record.fields.get("args_digest").and_then(|v| v.as_str()));
-                if let Some(raw_path) = path_opt {
-                    let clean = raw_path
-                        .split_whitespace()
-                        .next()
-                        .unwrap_or(raw_path)
-                        .trim();
-                    if !clean.is_empty() {
-                        let name = bounded(clean, 160);
-                        recent_reads.retain(|p| *p != name);
-                        recent_reads.push(name);
+        }
+        if record.kind == "tool_call"
+            && record
+                .fields
+                .get("tool")
+                .and_then(|v| v.as_str())
+                .is_some_and(|t| matches!(t, "read" | "outline"))
+        {
+            let mut read_paths: Vec<&str> = Vec::new();
+            if let Some(args) = record.fields.get("args") {
+                if let Some(arr) = args.get("paths").and_then(|v| v.as_array()) {
+                    for item in arr.iter().filter_map(|v| v.as_str()) {
+                        read_paths.push(item);
                     }
                 }
+                if let Some(single) = args
+                    .get("file_path")
+                    .or_else(|| args.get("path"))
+                    .and_then(|v| v.as_str())
+                {
+                    read_paths.push(single);
+                }
             }
-            if record.kind == "tool_result"
-                && record
-                    .fields
-                    .get("tool")
-                    .and_then(|value| value.as_str())
-                    .is_some_and(|tool| matches!(tool, "bash" | "git_diff" | "git_commit"))
-                && record.fields.get("ok").and_then(|value| value.as_bool()) == Some(true)
+            if read_paths.is_empty()
+                && let Some(digest) = record.fields.get("args_digest").and_then(|v| v.as_str())
             {
-                last_verification = Some(record.seq);
+                read_paths.push(digest);
             }
+            for raw_path in read_paths {
+                let clean = raw_path
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or(raw_path)
+                    .trim();
+                if !clean.is_empty() {
+                    let name = bounded(clean, 160);
+                    recent_reads.retain(|p| *p != name);
+                    recent_reads.push(name);
+                }
+            }
+        }
+        if record.kind == "tool_result"
+            && record
+                .fields
+                .get("tool")
+                .and_then(|value| value.as_str())
+                .is_some_and(|tool| matches!(tool, "bash" | "git_diff" | "git_commit"))
+            && record.fields.get("ok").and_then(|value| value.as_bool()) == Some(true)
+        {
+            last_verification = Some(record.seq);
         }
     }
     changed.sort();
@@ -171,36 +182,34 @@ pub fn anchor(root: &std::path::Path, session_id: &str) -> String {
     // needs, without re-running the command. Cancelled runs are the user's
     // doing, not failures, and stay out.
     let mut failures = Vec::new();
-    if let Ok(records) = crate::agent::journal::Journal::records_for(root, session_id) {
-        for record in records.iter().rev() {
-            if failures.len() >= 2 {
-                break;
-            }
-            if record.kind != "tool_result" {
-                continue;
-            }
-            if record.fields.get("ok").and_then(|value| value.as_bool()) != Some(false) {
-                continue;
-            }
-            if record.fields.get("code").and_then(|value| value.as_str()) == Some("cancelled") {
-                continue;
-            }
-            let tool = record
-                .fields
-                .get("tool")
-                .and_then(|value| value.as_str())
-                .unwrap_or("?");
-            let summary = record
-                .fields
-                .get("summary")
-                .and_then(|value| value.as_str())
-                .unwrap_or("");
-            failures.push(format!(
-                "{tool} j#{}: {}",
-                record.seq,
-                bounded(summary, 200)
-            ));
+    for record in records.iter().rev() {
+        if failures.len() >= 2 {
+            break;
         }
+        if record.kind != "tool_result" {
+            continue;
+        }
+        if record.fields.get("ok").and_then(|value| value.as_bool()) != Some(false) {
+            continue;
+        }
+        if record.fields.get("code").and_then(|value| value.as_str()) == Some("cancelled") {
+            continue;
+        }
+        let tool = record
+            .fields
+            .get("tool")
+            .and_then(|value| value.as_str())
+            .unwrap_or("?");
+        let summary = record
+            .fields
+            .get("summary")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+        failures.push(format!(
+            "{tool} j#{}: {}",
+            record.seq,
+            bounded(summary, 200)
+        ));
     }
     if failures.is_empty() {
         out.push_str("recent failures: none\n");
@@ -619,6 +628,9 @@ pub fn transcript(messages: &[Message]) -> String {
         if is_summary_message(message) {
             continue;
         }
+        if message.role == Role::Tool && crate::agent::tool_output::is_stub(&message.content) {
+            continue;
+        }
         let label = match message.role {
             Role::User => "User",
             Role::Assistant => "Agent",
@@ -810,13 +822,18 @@ fn summary_message(summary: &str) -> String {
 /// heavy tool traffic — where an unprotected trim would eat the summary it
 /// has just written.
 pub fn hard_trim(messages: &[Message], budget: u64) -> Vec<Message> {
-    let (head, rest) = match messages.first() {
+    let (head, rest, remaining_budget) = match messages.first() {
         Some(first) if first.content.contains("<conversation-summary>") => {
-            (Some(first.clone()), &messages[1..])
+            let head_tokens = estimated_tokens(std::slice::from_ref(first));
+            (
+                Some(first.clone()),
+                &messages[1..],
+                budget.saturating_sub(head_tokens),
+            )
         }
-        _ => (None, messages),
+        _ => (None, messages, budget),
     };
-    let trimmed = hard_trim_inner(rest, budget);
+    let trimmed = hard_trim_inner(rest, remaining_budget);
     match head {
         Some(h) => std::iter::once(h).chain(trimmed).collect(),
         None => trimmed,
@@ -902,6 +919,9 @@ pub fn local_summary(messages: &[Message], existing: Option<&str>) -> String {
         if previous.is_some() && is_summary_message(message) {
             continue;
         }
+        if message.role == Role::Tool && crate::agent::tool_output::is_stub(&message.content) {
+            continue;
+        }
         let label = match message.role {
             Role::User => "User",
             Role::Assistant => "Agent",
@@ -913,6 +933,14 @@ pub fn local_summary(messages: &[Message], existing: Option<&str>) -> String {
             lines.push(format!(
                 "- {label}: {}",
                 truncate(&snippet, SUMMARY_SNIPPET_CHARS)
+            ));
+        }
+        for call in &message.tool_calls {
+            let args = compact_whitespace(&call.args.to_string());
+            lines.push(format!(
+                "- Agent called {} with {}",
+                call.name,
+                truncate(&args, 160)
             ));
         }
     }
