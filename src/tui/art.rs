@@ -13,12 +13,6 @@ use crate::tui::theme::Theme;
 #[cfg(test)]
 pub const SQWAI_TEXT: &str = include_str!("../../assets/ascii-sqwai.txt");
 
-/// Compact wordmark for narrow terminals (quadrant-block font, 4 rows).
-/// Source rows may be ragged on the right (editors eat trailing spaces);
-/// `gradient_block` normalizes, so the file can never break the render.
-#[cfg(test)]
-pub const SQWAI_COMPACT_TEXT: &str = include_str!("../../assets/ascii-sqwai-compact.txt");
-
 /// Ramp ends: top-left `#de2f66` → bottom-right `#753a88`, berry into plum.
 /// The names still say CORAL_* because that is what the first ramp was.
 pub const CORAL_START: (u8, u8, u8) = (222, 47, 102);
@@ -62,12 +56,6 @@ pub fn coral_at(x: usize, width: usize) -> (u8, u8, u8) {
 #[cfg(test)]
 pub fn sqwai_gradient_lines() -> Vec<Line<'static>> {
     gradient_block(SQWAI_TEXT)
-}
-
-/// Same ramp over the compact wordmark for narrow terminals.
-#[cfg(test)]
-pub fn sqwai_compact_lines() -> Vec<Line<'static>> {
-    gradient_block(SQWAI_COMPACT_TEXT)
 }
 
 /// One brand ramp shared across a whole text block. Source rows are
@@ -326,29 +314,5 @@ mod tests {
                 .any(|s| s.content.contains(' ') && s.style.fg.is_none()),
             "gaps unpainted: {first:?}"
         );
-    }
-
-    #[test]
-    fn compact_wordmark_fits_narrow() {
-        use unicode_width::UnicodeWidthStr;
-        let rows: Vec<String> = SQWAI_COMPACT_TEXT
-            .lines()
-            .map(|r| r.trim_end().to_string())
-            .collect();
-        assert_eq!(rows.len(), 4, "compact wordmark is 4 rows");
-        let width = rows.iter().map(|r| r.width()).max().unwrap_or(0);
-        assert_eq!(width, 27, "compact fits narrow terminals");
-        // ragged source rows normalize to the block width, never skewing
-        // the ramp or dropping middle content
-        let lines = sqwai_compact_lines();
-        assert_eq!(lines.len(), 4);
-        for (line, src) in lines.iter().zip(&rows) {
-            let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-            assert!(
-                text.starts_with(src.as_str()),
-                "content kept, padded after: {text:?}"
-            );
-            assert_eq!(text.width(), width, "every row exact-fit: {text:?}");
-        }
     }
 }
