@@ -477,6 +477,29 @@ fn apply_record(
             }
             Ok(true)
         }
+        Some("redo_steps") => {
+            let ids: Vec<String> = fields
+                .get("ids")
+                .and_then(|value| value.as_array())
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|value| value.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            for id in &ids {
+                if let Some(step) = plan.step_mut(id) {
+                    step.status = super::StepStatus::Done;
+                    step.reason = None;
+                    if step.finished.is_none() {
+                        step.finished = Some(super::now());
+                    }
+                }
+            }
+            plan.revision = plan.revision.saturating_add(1);
+            Ok(true)
+        }
         Some("add_acceptance") | Some("add_criteria") => {
             // criteria re-append (cursor discipline prevents double-apply,
             // same as Add); the retired `add_acceptance` name replays into

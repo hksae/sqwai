@@ -25,7 +25,11 @@ fn cap(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         return s.to_string();
     }
-    let taken: String = s.chars().take(max).collect();
+    let raw: String = s.chars().take(max).collect();
+    let taken = match raw.rfind('\n') {
+        Some(pos) if pos > raw.len() / 2 => &raw[..pos],
+        _ => raw.as_str(),
+    };
     format!("{taken}\n…(truncated, {max} chars kept)")
 }
 
@@ -83,7 +87,15 @@ pub fn export_session(
             let calls: Vec<String> = message
                 .tool_calls
                 .iter()
-                .map(|c| format!("{} ({})", c.name, c.id))
+                .map(|c| {
+                    let arg_summary =
+                        cap(&screen(&crate::agent::tools::call_summary(&c.name, &c.args)), 240);
+                    if arg_summary.is_empty() {
+                        format!("{} ({})", c.name, c.id)
+                    } else {
+                        format!("{} ({}: {})", c.name, c.id, arg_summary)
+                    }
+                })
                 .collect();
             markdown.push_str(&format!("\n[calls: {}]\n", calls.join(", ")));
         }
@@ -91,7 +103,11 @@ pub fn export_session(
             "role": role_label(&message.role),
             "content": content,
             "tool_call_id": message.tool_call_id,
-            "calls": message.tool_calls.iter().map(|c| &c.name).collect::<Vec<_>>(),
+            "calls": message.tool_calls.iter().map(|c| serde_json::json!({
+                "id": c.id,
+                "name": c.name,
+                "summary": cap(&screen(&crate::agent::tools::call_summary(&c.name, &c.args)), 240),
+            })).collect::<Vec<_>>(),
         }));
     }
     let json = serde_json::json!({

@@ -73,12 +73,16 @@ fn restore_redone_steps(
                 )
             {
                 step.status = plan::StepStatus::Done;
+                step.reason = None;
+                step.finished = Some(chrono::Local::now().to_rfc3339());
                 restored.push(step_id.clone());
             }
         }
         if !restored.is_empty() {
-            active.revision += 1;
-            let _ = plan::store(root, &active);
+            let args = serde_json::json!({
+                "ids": restored,
+            });
+            let _ = plan::commit(root, session_id, &mut active, "redo_steps", "host", true, args);
         }
     }
     if let Ok(mut journal) = crate::agent::journal::Journal::open(root, session_id) {
@@ -802,16 +806,18 @@ impl App {
                     let cp_shas: Vec<String> =
                         entry.checkpoints.iter().map(|(s, _)| s.clone()).collect();
                     self.session.checkpoints.extend(entry.checkpoints);
-                    let restored = restore_redone_steps(
-                        root,
-                        &self.session.id.to_string(),
-                        &entry.reopened_steps,
-                        &cp_shas,
-                        &touched,
-                    );
-                    for st in restored {
-                        if !total_restored_steps.contains(&st) {
-                            total_restored_steps.push(st);
+                    if !touched.is_empty() || entry.files.is_empty() {
+                        let restored = restore_redone_steps(
+                            root,
+                            &self.session.id.to_string(),
+                            &entry.reopened_steps,
+                            &cp_shas,
+                            &touched,
+                        );
+                        for st in restored {
+                            if !total_restored_steps.contains(&st) {
+                                total_restored_steps.push(st);
+                            }
                         }
                     }
                 }

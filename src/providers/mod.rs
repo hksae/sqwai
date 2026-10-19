@@ -621,8 +621,15 @@ pub fn classify_response(status: u16, body: &str) -> ErrorClass {
     let overflow = [
         "context_length_exceeded",
         "context length",
+        "context window",
+        "context_window",
         "maximum context",
+        "exceeds the maximum",
+        "max_model_len",
+        "max_seq_len",
         "prompt is too long",
+        "input is too long",
+        "request too large",
         "too many tokens",
         "reduce the length",
         "exceed context limit",
@@ -632,8 +639,10 @@ pub fn classify_response(status: u16, body: &str) -> ErrorClass {
     let out_of_credit = [
         "insufficient_quota",
         "insufficient credit",
+        "insufficient balance",
         "credit balance",
         "billing",
+        "payment required",
         "exceeded your current quota",
     ]
     .iter()
@@ -675,8 +684,10 @@ pub fn classify_body(body: &str) -> Option<ErrorClass> {
     if hits(&[
         "insufficient_quota",
         "insufficient credit",
+        "insufficient balance",
         "credit balance",
         "billing",
+        "payment required",
         "exceeded your current quota",
     ]) {
         return Some(ErrorClass::Quota);
@@ -684,8 +695,15 @@ pub fn classify_body(body: &str) -> Option<ErrorClass> {
     if hits(&[
         "context_length_exceeded",
         "context length",
+        "context window",
+        "context_window",
         "maximum context",
+        "exceeds the maximum",
+        "max_model_len",
+        "max_seq_len",
         "prompt is too long",
+        "input is too long",
+        "request too large",
         "too many tokens",
         "reduce the length",
         "exceed context limit",
