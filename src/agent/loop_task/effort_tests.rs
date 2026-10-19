@@ -1290,9 +1290,9 @@ fn capture_nudge_fires_only_on_uncovered_restrictions() {
     );
     // marker + unrelated constraints → nudge
     assert!(capture_nudge("don't touch storage/btree.rs", &c("keep API stable")).is_some());
-    // RU markers behave the same
-    assert!(capture_nudge("не трогай btree", &[]).is_some());
-    assert!(capture_nudge("не трогай btree", &c("btree не трогать")).is_none());
+    // additional negative markers behave the same
+    assert!(capture_nudge("must not modify btree", &[]).is_some());
+    assert!(capture_nudge("must not modify btree", &c("do not modify btree")).is_none());
 }
 
 fn count_summaries(messages: &[Message]) -> usize {
@@ -1604,17 +1604,6 @@ async fn subagent_joins_its_parent_plan() {
     .unwrap();
     plan.sessions = vec!["parent-sess".into()];
     plan::store(&root, &plan).unwrap();
-    plan::apply(
-        &mut plan,
-        plan::Op::Start {
-            id: "1".into(),
-            confirm: None,
-        },
-        &plan::Limits::default(),
-        None,
-    )
-    .unwrap();
-    plan::store(&root, &plan).unwrap();
     let plan_id = plan.id.clone();
 
     let provider: SharedProvider = std::sync::Arc::new(MockTestProvider {
@@ -1692,19 +1681,7 @@ fn adopt_follows_the_plans_in_progress_step() {
     .unwrap();
     plan.sessions = vec!["sess".into()];
     plan::store(&root, &plan).unwrap();
-    // pending, nothing in progress: idle
-    assert_eq!(adopt_in_progress_step(&root, "sess"), None);
-    plan::apply(
-        &mut plan,
-        plan::Op::Start {
-            id: "1".into(),
-            confirm: None,
-        },
-        &plan::Limits::default(),
-        None,
-    )
-    .unwrap();
-    plan::store(&root, &plan).unwrap();
+    // step 1 starts automatically on create
     assert_eq!(adopt_in_progress_step(&root, "sess"), Some("1".to_string()));
     // the child retires the held step behind the parent's back
     plan.steps[0].status = plan::StepStatus::Done;
@@ -1731,17 +1708,6 @@ async fn subagent_ignores_a_foreign_active_plan() {
     )
     .unwrap();
     plan.sessions = vec!["other-sess".into()];
-    plan::store(&root, &plan).unwrap();
-    plan::apply(
-        &mut plan,
-        plan::Op::Start {
-            id: "1".into(),
-            confirm: None,
-        },
-        &plan::Limits::default(),
-        None,
-    )
-    .unwrap();
     plan::store(&root, &plan).unwrap();
     let plan_id = plan.id.clone();
 

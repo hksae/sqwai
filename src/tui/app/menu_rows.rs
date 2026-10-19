@@ -1378,16 +1378,11 @@ fn plan_rows(plan: &crate::plan::Plan) -> Vec<MenuRow> {
         let (marker, style) = match s.status {
             plan::StepStatus::Done => ("[x]", Theme::ok()),
             plan::StepStatus::InProgress => ("[>]", Theme::brand_ink()),
-            plan::StepStatus::Blocked => ("[!]", Theme::err()),
             plan::StepStatus::Cancelled => ("[-]", Theme::dim()),
             plan::StepStatus::Pending | plan::StepStatus::Reopened => ("[ ]", Theme::dim()),
         };
         let prefix = format!("{marker} {:<2} ", s.id);
-        let mut title = s.title.clone();
-        if s.stale_goal {
-            title.push_str("  [stale goal]");
-        }
-        push_wrapped(&mut rows, &prefix, &title, style, style);
+        push_wrapped(&mut rows, &prefix, &s.title, style, style);
         if let Some(reason) = &s.reason {
             push_wrapped(&mut rows, "       reason: ", reason, Theme::dim(), Theme::dim());
         }

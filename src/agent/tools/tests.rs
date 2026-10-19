@@ -90,7 +90,6 @@ fn subagent_write_scope_confines_file_mutations() {
     );
     assert!(created.ok, "{}", created.output);
     let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
-    assert!(plan_op(&mut ctx, &json!({"op": "start", "id": "1"})).ok);
     ctx.subagent_step = Some(plan::StepContext {
         plan_id: plan_id.clone(),
         step_id: "1".into(),
@@ -141,7 +140,6 @@ fn subagent_write_scope_confines_bash_git_and_commit_all() {
     );
     assert!(created.ok, "{}", created.output);
     let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
-    assert!(plan_op(&mut ctx, &json!({"op": "start", "id": "1"})).ok);
     ctx.subagent_step = Some(plan::StepContext {
         plan_id: plan_id.clone(),
         step_id: "1".into(),
@@ -238,7 +236,6 @@ fn subagent_scope_sees_through_wrapper_prefixes() {
     );
     assert!(created.ok, "{}", created.output);
     let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
-    assert!(plan_op(&mut ctx, &json!({"op": "start", "id": "1"})).ok);
     ctx.subagent_step = Some(plan::StepContext {
         plan_id,
         step_id: "1".into(),
@@ -330,7 +327,6 @@ fn subagent_scope_follows_symlinks_canonically() {
     );
     assert!(created.ok, "{}", created.output);
     let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
-    assert!(plan_op(&mut ctx, &json!({"op": "start", "id": "1"})).ok);
     ctx.subagent_step = Some(plan::StepContext {
         plan_id,
         step_id: "1".into(),
@@ -561,32 +557,30 @@ fn plan_ops_resolve_the_shapes_the_model_writes() {
         &json!({
             "op": "create",
             "goal": "tolerance",
-            "acceptance": ["manual: eyeball it"],
-            "steps": [{"title": "one"}, {"title": "two"}]
+            "acceptance": ["eyeball it"],
+            "steps": [{"title": "one"}, {"title": "two"}, {"title": "three"}]
         }),
     );
     assert!(created.ok, "{}", created.output);
     let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
 
-    // two steps are Pending: "start" with no id is a coin flip, and the
-    // refusal has to name the candidates
-    let ambiguous = plan_op(&mut ctx, &json!({"op": "start"}));
-    assert!(!ambiguous.ok, "a guess was made: {}", ambiguous.output);
-    assert!(
-        ambiguous.output.contains("one"),
-        "the refusal must list the steps: {}",
-        ambiguous.output
-    );
+    // step 1 is already in_progress: finishing it needs no id
+    let done1 = plan_op(&mut ctx, &json!({"op": "finish", "summary": "did one"}));
+    assert!(done1.ok, "{}", done1.output);
 
-    // the alias the model reaches for
-    let started = plan_op(&mut ctx, &json!({"op": "start", "step_id": "1"}));
-    assert!(started.ok, "{}", started.output);
-    // one step is running: finishing it needs no id
-    let done = plan_op(&mut ctx, &json!({"op": "finish", "summary": "did it"}));
-    assert!(done.ok, "{}", done.output);
-    // the plan's own id where a step id belongs, and one candidate left
-    let second = plan_op(&mut ctx, &json!({"op": "start", "id": plan_id}));
-    assert!(second.ok, "{}", second.output);
+    // step 2 is now in_progress: finishing via step_id alias works
+    let done2 = plan_op(
+        &mut ctx,
+        &json!({"op": "finish", "step_id": "2", "message": "did two"}),
+    );
+    assert!(done2.ok, "{}", done2.output);
+
+    // step 3 is now in_progress: passing the plan's own ULID in `id` resolves to step 3
+    let done3 = plan_op(
+        &mut ctx,
+        &json!({"op": "finish", "id": plan_id, "summary": "did three"}),
+    );
+    assert!(done3.ok, "{}", done3.output);
     fs::remove_dir_all(&dir).ok();
 }
 
@@ -1361,7 +1355,6 @@ fn subagent_mutation_refused_after_step_reopen() {
     assert!(created.ok, "{}", created.output);
     let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
     ctx.current_step = Some("1".into());
-    assert!(plan_op(&mut ctx, &json!({"op": "start", "id": "1"})).ok);
 
     let mut child = ToolCtx::new(&dir).in_session("sub-1");
     child.subagent_step = Some(plan::StepContext {
@@ -1480,8 +1473,6 @@ fn plan_criteria_are_visible_and_non_blocking() {
         }),
     );
     assert!(created.ok, "{}", created.output);
-    // `show` is not a model tool (the live plan rides every request):
-    // the dispatcher refuses, state is read from the plan file instead
     let shown = plan_op(&mut ctx, &json!({"op": "show"}));
     assert!(!shown.ok);
     assert!(
@@ -1490,21 +1481,21 @@ fn plan_criteria_are_visible_and_non_blocking() {
         shown.output
     );
     let plan = plan::open_active(&dir).unwrap().unwrap();
+    let plan_id = plan.id.clone();
     let rendered = plan::render(&plan);
     assert!(rendered.contains("ask Anna about scope"), "{rendered}");
-    assert!(plan_op(&mut ctx, &json!({"op": "start", "id": "1"})).ok);
-    assert!(
-        plan_op(
-            &mut ctx,
-            &json!({"op": "finish", "id": "1", "summary": "did it"})
-        )
-        .ok
+    let completed = plan_op(
+        &mut ctx,
+        &json!({"op": "finish", "id": "1", "summary": "did it"}),
     );
-    let completed = plan_op(&mut ctx, &json!({"op": "complete"}));
     assert!(
         completed.ok,
         "criteria must not block: {}",
         completed.output
+    );
+    assert_eq!(
+        plan::open(&dir, &plan_id).unwrap().status,
+        plan::PlanStatus::Completed
     );
     fs::remove_dir_all(&dir).ok();
 }
@@ -1518,9 +1509,9 @@ fn plan_ops_round_trip_through_the_dispatcher() {
             "op": "create",
             "goal": "wire the plan tool",
             "constraints": ["no new dependencies"],
-            "acceptance": ["cmd: cargo test"],
+            "acceptance": ["cargo test"],
             "steps": [
-                {"title": "add the schema", "kind": "research"},
+                {"title": "add the schema"},
                 {"title": "add the dispatcher"}
             ]
         }),
@@ -1531,41 +1522,32 @@ fn plan_ops_round_trip_through_the_dispatcher() {
         "{}",
         created.output
     );
-    // The ids come back with the create: a model that batches create+start
-    // writes the second call before this result exists.
     assert!(
         created.output.contains("1 add the schema")
             && created.output.contains("2 add the dispatcher"),
         "create must name its step ids: {}",
         created.output
     );
-    // And a rejected op names them too, instead of pointing at a context
-    // that does not contain them yet.
-    let blind_start = plan_op(&mut ctx, &json!({"op": "start"}));
-    assert!(!blind_start.ok, "start needs an id");
+    // A rejected op names the active steps in its hint
+    let bad_op = plan_op(&mut ctx, &json!({"op": "add"}));
+    assert!(!bad_op.ok, "add needs a title");
     assert!(
-        blind_start.output.contains("missing field")
-            && blind_start.output.contains("1 [pending]")
-            && blind_start.output.contains("2 [pending]"),
+        bad_op.output.contains("missing field")
+            && bad_op.output.contains("1 [in_progress]")
+            && bad_op.output.contains("2 [pending]"),
         "the rejection must list the steps: {}",
-        blind_start.output
+        bad_op.output
     );
 
     let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
-    // the writer session must be the agent's own (#171): a foreign
-    // journal file no longer attaches evidence to this plan
     let mut evidence_journal = crate::agent::journal::Journal::open(&dir, &ctx.session_id).unwrap();
     evidence_journal.set_attribution(Some("1".into()), Some(plan_id.clone()), "main");
-    assert!(plan_op(&mut ctx, &json!({"op": "start", "id": "1"})).ok);
-    evidence_journal
-        .append("plan", json!({"op": "start"}))
-        .unwrap();
     evidence_journal
         .append_evidence("tool_result", json!({"tool": "read", "ok": true}))
         .unwrap();
     let finish = plan_op(
         &mut ctx,
-        &json!({"op": "finish", "id": "1", "summary": "schema added", "evidence": [2]}),
+        &json!({"op": "finish", "id": "1", "summary": "schema added"}),
     );
     assert!(finish.ok, "{}", finish.output);
     assert!(
@@ -1583,59 +1565,9 @@ fn plan_ops_round_trip_through_the_dispatcher() {
         rendered.contains("[x] 1"),
         "step 1 should read as done:\n{rendered}"
     );
-    fs::remove_dir_all(&dir).ok();
-}
-
-#[test]
-fn finish_warns_when_evidence_predates_step_start() {
-    let (mut ctx, dir) = proj();
-    let created = plan_op(
-        &mut ctx,
-        &json!({
-            "op": "create",
-            "goal": "boundary test",
-            "criteria": ["note"],
-            "steps": [{"title": "step 1", "kind": "research"}]
-        }),
-    );
-    assert!(created.ok, "{}", created.output);
-    let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
-    let mut journal = crate::agent::journal::Journal::open(&dir, "boundary-test").unwrap();
-
-    // Premature evidence before start (seq 1)
-    journal.set_attribution(Some("1".into()), Some(plan_id.clone()), "main");
-    let premature_seq = journal
-        .append("tool_result", json!({"tool": "read", "ok": true}))
-        .unwrap();
-    assert_eq!(premature_seq, 1);
-
-    // Op start (seq 2)
-    assert!(plan_op(&mut ctx, &json!({"op": "start", "id": "1"})).ok);
-    journal
-        .append("plan", json!({"op": "start", "id": "1"}))
-        .unwrap();
-
-    // Premature evidence is in step.evidence
-    let mut plan = plan::open_active(&dir).unwrap().unwrap();
-    plan.step_mut("1")
-        .unwrap()
-        .evidence
-        .push(crate::plan::EvidenceRef {
-            session: "boundary-test".into(),
-            seq: premature_seq,
-        });
-    plan::store(&dir, &plan).unwrap();
-
-    // Finishing with premature evidence triggers warning
-    let finish = plan_op(
-        &mut ctx,
-        &json!({"op": "finish", "id": "1", "summary": "researched"}),
-    );
-    assert!(finish.ok, "finish still succeeds: {}", finish.output);
     assert!(
-        finish.output.contains("warning:") && finish.output.contains("predates step 1 start"),
-        "stale evidence must produce warning: {}",
-        finish.output
+        rendered.contains("[>] 2"),
+        "step 2 should auto-advance to in_progress:\n{rendered}"
     );
     fs::remove_dir_all(&dir).ok();
 }
@@ -1653,11 +1585,10 @@ fn finishing_a_step_warns_about_its_open_assumptions() {
             "op": "create",
             "criteria": ["note"],
             "goal": "close the assumption loop",
-            "steps": [{"title": "make the change", "kind": "change"}],
+            "steps": [{"title": "make the change"}],
         }),
     );
     assert!(created.ok, "{}", created.output);
-    assert!(plan_op(&mut ctx, &json!({"op": "start", "id": "1"})).ok);
 
     let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
     let mut journal = crate::agent::journal::Journal::open(&dir, &ctx.session_id).unwrap();
@@ -1749,25 +1680,21 @@ fn soft_finish_closes_on_summary_alone() {
         }),
     );
     assert!(created.ok, "{}", created.output);
-    assert!(plan_op(&mut ctx, &json!({"op": "start", "id": "1"})).ok);
+    let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
     // no tool calls, no journal evidence at all
     let done = plan_op(
         &mut ctx,
         &json!({"op": "finish", "id": "1", "summary": "thought about it"}),
     );
     assert!(done.ok, "{}", done.output);
-    assert_eq!(
-        plan::open_active(&dir).unwrap().unwrap().steps[0].status,
-        plan::StepStatus::Done
-    );
+    let finished_plan = plan::open(&dir, &plan_id).unwrap();
+    assert_eq!(finished_plan.steps[0].status, plan::StepStatus::Done);
+    assert_eq!(finished_plan.status, plan::PlanStatus::Completed);
     fs::remove_dir_all(&dir).ok();
 }
 
-/// #171: `plan start` on the project's active plan is an explicit
-/// adoption — the session joins (membership recorded) instead of
-/// failing or silently borrowing foreign work. Other ops stay strict.
 #[test]
-fn plan_start_joins_a_foreign_active_plan() {
+fn plan_ops_are_session_strict() {
     let (mut ctx, dir) = proj();
     let created = plan_op(
         &mut ctx,
@@ -1780,24 +1707,6 @@ fn plan_start_joins_a_foreign_active_plan() {
     );
     assert!(created.ok, "{}", created.output);
 
-    // another session, no plan of its own
-    let mut other = ToolCtx::new(&dir).in_session("other-sess");
-    let started = plan_op(&mut other, &json!({"op": "start", "id": "1"}));
-    assert!(
-        started.ok,
-        "start must join, not refuse: {}",
-        started.output
-    );
-
-    let plan = plan::open_active(&dir).unwrap().unwrap();
-    assert!(
-        plan.sessions.contains(&ctx.session_id)
-            && plan.sessions.contains(&"other-sess".to_string()),
-        "both sessions are members: {:?}",
-        plan.sessions
-    );
-
-    // ...while a non-start op from the outsider still resolves nothing
     let mut third = ToolCtx::new(&dir).in_session("third-sess");
     let shown = plan_op(&mut third, &json!({"op": "show"}));
     assert!(!shown.ok, "reads stay session-strict too: {}", shown.output);
@@ -1851,42 +1760,32 @@ fn create_refuses_empty_criteria() {
     fs::remove_dir_all(&dir).ok();
 }
 
-/// Surrender through the dispatcher: journal-first, terminal, quoted.
-/// A blocked plan refuses further work like every closed plan.
 #[test]
-fn block_plan_surrenders_with_a_quote() {
+fn abandon_surrenders_with_a_quote() {
     let (mut ctx, dir) = proj();
     let created = plan_op(
         &mut ctx,
         &json!({
             "op": "create",
             "goal": "impossible task",
-            "acceptance": ["manual: spec holds"],
+            "acceptance": ["spec holds"],
             "steps": [{"title": "try"}]
         }),
     );
     assert!(created.ok, "{}", created.output);
     let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
 
-    let blocked = plan_op(
+    let abandoned = plan_op(
         &mut ctx,
-        &json!({"op": "block_plan", "reason": "spec says 404, test expects 200"}),
+        &json!({"op": "abandon", "reason": "spec says 404, test expects 200"}),
     );
-    assert!(blocked.ok, "{}", blocked.output);
-    let plan = plan::read_plan_file(&dir, &plan_id).expect("blocked plan reads back");
-    assert_eq!(plan.status, plan::PlanStatus::Blocked);
-    assert_eq!(
-        plan.blocked_reason.as_deref(),
-        Some("spec says 404, test expects 200")
-    );
-    assert!(plan::render(&plan).contains("spec says 404"));
+    assert!(abandoned.ok, "{}", abandoned.output);
+    let plan = plan::read_plan_file(&dir, &plan_id).expect("abandoned plan reads back");
+    assert_eq!(plan.status, plan::PlanStatus::Abandoned);
 
-    // terminal: nothing resolves as active anymore, so the dispatcher
-    // guides toward a new plan (the plan_closed guard below it covers
-    // direct apply callers)
-    let start = plan_op(&mut ctx, &json!({"op": "start", "id": "1"}));
-    assert!(!start.ok, "{}", start.output);
-    assert!(start.output.contains("no active plan"), "{}", start.output);
+    let next = plan_op(&mut ctx, &json!({"op": "finish", "id": "1", "summary": "x"}));
+    assert!(!next.ok, "{}", next.output);
+    assert!(next.output.contains("no active plan"), "{}", next.output);
     fs::remove_dir_all(&dir).ok();
 }
 
@@ -1895,12 +1794,12 @@ fn plan_rejections_carry_a_code_and_a_hint() {
     let (mut ctx, dir) = proj();
     plan_op(
         &mut ctx,
-        &json!({"op": "create", "goal": "g", "criteria": ["note"], "steps": [{"title": "one"}]}),
+        &json!({"op": "create", "goal": "g", "criteria": ["note"], "steps": [{"title": "one"}, {"title": "two"}]}),
     );
-    // finishing a step that was never started
+    // finishing step 2 while step 1 is still in_progress
     let bad = plan_op(
         &mut ctx,
-        &json!({"op": "finish", "id": "1", "summary": "x"}),
+        &json!({"op": "finish", "id": "2", "summary": "x"}),
     );
     assert!(!bad.ok);
     assert!(
@@ -2612,13 +2511,6 @@ fn plan_cancel_without_id_is_refused() {
     fs::remove_dir_all(&dir).ok();
 }
 
-/// Audit C3: two sessions on one plan (cross-process `--force`)
-/// interleave load→append→store without arbitration; the later store
-/// from a stale load regressed the other session's content AND its
-/// cursor, and replay could not heal it (Start/Start collides with the
-/// single-active-step invariant and strands the stream in `stalled`).
-/// With arbitration the stale commit is REFUSED before it journals:
-/// A's work stays intact, B is told to re-read and retry.
 #[test]
 fn plan_stale_session_commit_is_refused_not_regressed() {
     let (mut ctx_a, dir) = proj();
@@ -2637,19 +2529,24 @@ fn plan_stale_session_commit_is_refused_not_regressed() {
     // session B loads the plan before A's next store
     let mut plan_b = plan::open(&dir, &plan_id).unwrap();
 
-    // A starts step 1: journal intent, then store
-    assert!(plan_op(&mut ctx_a, &json!({"op": "start", "id": "1"})).ok);
+    // A finishes step 1: journal intent, then store
+    assert!(
+        plan_op(
+            &mut ctx_a,
+            &json!({"op": "finish", "id": "1", "summary": "done 1"})
+        )
+        .ok
+    );
 
-    // B starts step 2 on its stale copy — the commit must be refused
+    // B cancels step 1 on its stale copy — the commit must be refused
     assert!(
         plan::apply(
             &mut plan_b,
-            plan::Op::Start {
-                id: "2".into(),
-                confirm: None
+            plan::Op::Cancel {
+                id: Some("1".into()),
+                reason: "stale".into(),
             },
             &plan::Limits::default(),
-            None,
         )
         .is_ok()
     );
@@ -2657,10 +2554,10 @@ fn plan_stale_session_commit_is_refused_not_regressed() {
         &dir,
         "sess-b",
         &mut plan_b,
-        "start",
+        "cancel",
         "model",
         true,
-        json!({"id": "2"}),
+        json!({"id": "1", "reason": "stale"}),
     )
     .expect_err("a stale-base commit must be refused");
     assert!(err.to_string().contains("plan_moved"), "{err:#}");
@@ -2669,46 +2566,36 @@ fn plan_stale_session_commit_is_refused_not_regressed() {
     let on_disk = plan::open(&dir, &plan_id).unwrap();
     assert_eq!(
         on_disk.step("1").unwrap().status,
-        plan::StepStatus::InProgress,
-        "A's start must survive"
+        plan::StepStatus::Done,
+        "A's finish must survive"
     );
     assert_eq!(
         on_disk.step("2").unwrap().status,
-        plan::StepStatus::Pending,
-        "B's refused op must not half-land"
+        plan::StepStatus::InProgress,
+        "step 2 is now in progress"
     );
     assert!(
         !dir.join(".sqwai/journal/sess-b.jsonl").exists(),
         "a refused commit must not journal an intent (it would stall replay)"
     );
 
-    // nothing to heal, nothing stalled
     let report = plan::replay(&dir).unwrap();
     assert!(report.stalled.is_empty(), "{report:?}");
 
-    // B's retry path: re-read, and the legitimate conflict is now
-    // VISIBLE — step 1 is in progress, so starting step 2 is rejected
-    // by the invariant instead of silently clobbering A
-    let fresh = plan::open(&dir, &plan_id).unwrap();
-    let mut fresh = fresh;
+    // B's retry path: re-read, and step 1 is already Done, so cancelling it is rejected
+    let mut fresh = plan::open(&dir, &plan_id).unwrap();
     let rejected = plan::apply(
         &mut fresh,
-        plan::Op::Start {
-            id: "2".into(),
-            confirm: None,
+        plan::Op::Cancel {
+            id: Some("1".into()),
+            reason: "stale".into(),
         },
         &plan::Limits::default(),
-        None,
     );
-    assert!(rejected.is_err(), "single-active-step must reject B now");
+    assert!(rejected.is_err(), "done step must reject cancel now");
     fs::remove_dir_all(&dir).ok();
 }
 
-/// Evidence journaled but lost from the file (crash between the journal
-/// write and the plan store) must still re-attach on replay even when a
-/// later finish already moved the cursor past it. Pre-fix: the evidence
-/// branch only saw records with `seq > cursor`, so the step finished
-/// with no evidence and the receipt was lost forever.
 #[test]
 fn plan_replay_reattaches_evidence_behind_the_cursor() {
     let (mut ctx, dir) = proj();
@@ -2723,8 +2610,6 @@ fn plan_replay_reattaches_evidence_behind_the_cursor() {
     );
     assert!(created.ok, "{}", created.output);
     let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
-    let started = plan_op(&mut ctx, &json!({"op": "start", "id": "1"}));
-    assert!(started.ok, "{}", started.output);
     // tool evidence lands in the journal (live path attaches it too)
     let mut journal = crate::agent::journal::Journal::open(&dir, &ctx.session_id).unwrap();
     journal.set_attribution(Some("1".into()), Some(plan_id.clone()), "main");
@@ -2753,9 +2638,6 @@ fn plan_replay_reattaches_evidence_behind_the_cursor() {
     fs::remove_dir_all(&dir).ok();
 }
 
-/// A plan created after an abandonment whose file tears must rebuild from
-/// the journaled create intent — not quarantine, and without resurrecting
-/// the abandoned sibling.
 #[test]
 fn plan_corrupt_rebuild_keeps_abandoned_sibling_down() {
     let (mut ctx, dir) = proj();
@@ -2788,8 +2670,8 @@ fn plan_corrupt_rebuild_keeps_abandoned_sibling_down() {
     let new_id = plan::open_active(&dir).unwrap().unwrap().id;
     assert_ne!(old_id, new_id, "the replacement is a different plan");
     // a later op on the new plan (it is the only active one)
-    let started = plan_op(&mut ctx, &json!({"op": "start", "id": "1"}));
-    assert!(started.ok, "{}", started.output);
+    let added = plan_op(&mut ctx, &json!({"op": "add", "title": "second step"}));
+    assert!(added.ok, "{}", added.output);
     // torn write on the new plan's file, journal intact
     std::fs::write(
         plan::plans_dir(&dir).join(format!("{new_id}.json")),
@@ -2798,20 +2680,13 @@ fn plan_corrupt_rebuild_keeps_abandoned_sibling_down() {
     .unwrap();
     let rebuilt = plan::open(&dir, &new_id).expect("torn plan file must rebuild");
     assert_eq!(rebuilt.goal.text, "new plan");
-    assert_eq!(
-        rebuilt.step("1").unwrap().status,
-        plan::StepStatus::InProgress,
-        "later ops must survive the rebuild"
-    );
+    assert_eq!(rebuilt.steps.len(), 2, "later ops must survive the rebuild");
     // the sibling stays abandoned — the rebuild must not resurrect it
     let sibling = plan::open(&dir, &old_id).unwrap();
     assert_eq!(sibling.status, plan::PlanStatus::Abandoned);
     fs::remove_dir_all(&dir).ok();
 }
 
-/// Finishing a step reports its blast radius in one line: the files
-/// the step wrote (journal file_diff chain, subagent sessions
-/// included). A step that wrote nothing stays silent.
 #[test]
 fn plan_finish_reports_blast_radius() {
     let (mut ctx, dir) = proj();
@@ -2820,13 +2695,12 @@ fn plan_finish_reports_blast_radius() {
         &json!({
             "op": "create",
             "goal": "blast radius",
-            "acceptance": ["manual: eyeball it"],
+            "acceptance": ["eyeball it"],
             "steps": [{"title": "work"}, {"title": "look"}]
         }),
     );
     assert!(created.ok, "{}", created.output);
     let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
-    assert!(plan_op(&mut ctx, &json!({"op": "start", "id": "1"})).ok);
     // the step wrote two files (one from a subagent session)
     let mut journal = crate::agent::journal::Journal::open(&dir, &ctx.session_id).unwrap();
     journal.set_attribution(Some("1".into()), Some(plan_id.clone()), "main");
@@ -2850,7 +2724,6 @@ fn plan_finish_reports_blast_radius() {
         finished.output
     );
     // a step that wrote nothing reports nothing
-    assert!(plan_op(&mut ctx, &json!({"op": "start", "id": "2"})).ok);
     let finished = plan_op(
         &mut ctx,
         &json!({"op": "finish", "id": "2", "summary": "looked"}),
@@ -2878,7 +2751,7 @@ fn plan_cancel_is_journaled_for_crash_recovery() {
             "op": "create",
             "criteria": ["note"],
             "goal": "cancel recovery",
-            "steps": [{"title": "step 1"}]
+            "steps": [{"title": "step 1"}, {"title": "step 2"}]
         }),
     );
     assert!(created.ok, "{}", created.output);
@@ -2898,14 +2771,14 @@ fn plan_cancel_is_journaled_for_crash_recovery() {
         }),
         "cancel intent must be journaled"
     );
-    // the cancel intent, journaled the way plan::commit journals it,
+    // the cancel intent for step 2, journaled the way plan::commit journals it,
     // with no store after it (the crash)
     let mut journal = crate::agent::journal::Journal::open(&dir, &ctx.session_id).unwrap();
     journal
         .append(
             "plan",
             serde_json::json!({
-                "op": "cancel", "id": "1", "reason": "skip",
+                "op": "cancel", "id": "2", "reason": "skip",
                 "plan_id": plan_id, "by": "model", "ok": true,
             }),
         )
@@ -2913,7 +2786,7 @@ fn plan_cancel_is_journaled_for_crash_recovery() {
     let report = plan::replay(&dir).unwrap();
     assert!(report.ops_applied >= 1, "{report:?}");
     let rebuilt = plan::open(&dir, &plan_id).unwrap();
-    let step = rebuilt.step("1").expect("step must survive");
+    let step = rebuilt.step("2").expect("step must survive");
     assert_eq!(
         step.status,
         plan::StepStatus::Cancelled,
@@ -2999,136 +2872,6 @@ fn cancel_create_cannot_rewrite_the_goal() {
     assert_eq!(after.goal.text, "original goal");
     assert_eq!(after.constraints, vec!["keep the format".to_string()]);
     assert_eq!(after.status, plan::PlanStatus::Active);
-    fs::remove_dir_all(&dir).ok();
-}
-
-#[test]
-fn step_diff_tool_flow() {
-    let (mut ctx, dir) = proj();
-    let created = plan_op(
-        &mut ctx,
-        &json!({
-            "op": "create",
-            "criteria": ["note"],
-            "goal": "step diff test",
-            "steps": [
-                {"title": "first step", "kind": "change"},
-                {"title": "second step", "kind": "change"}
-            ]
-        }),
-    );
-    assert!(created.ok);
-
-    // 1. step_diff requires step_id
-    let no_id = plan_op(&mut ctx, &json!({"op": "step_diff"}));
-    assert!(!no_id.ok);
-    assert!(no_id.output.contains("step_id"));
-
-    // 2. Pending step reports it has not started
-    let pending = plan_op(&mut ctx, &json!({"op": "step_diff", "step_id": "1"}));
-    assert!(pending.ok);
-    assert!(pending.output.contains("pending"));
-
-    // 3. Start step 1, mutate a file
-    assert!(plan_op(&mut ctx, &json!({"op": "start", "id": "1"})).ok);
-    let write1 = execute(
-        &mut ctx,
-        "write",
-        &json!({"file_path": "src/feature1.rs", "content": "pub fn feat1() {}\n"}),
-    );
-    assert!(write1.ok);
-
-    // Diff while step 1 is in progress
-    let diff_prog = plan_op(&mut ctx, &json!({"op": "step_diff", "step_id": "1"}));
-    assert!(diff_prog.ok, "{}", diff_prog.output);
-    assert!(diff_prog.output.contains("feat1"));
-    assert!(diff_prog.output.contains("feature1.rs"));
-
-    // Finish step 1
-    let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
-    let mut journal = crate::agent::journal::Journal::open(&dir, &ctx.session_id).unwrap();
-    journal.set_attribution(Some("1".into()), Some(plan_id.clone()), "main");
-    journal
-        .append("plan", json!({"op": "start", "id": "1"}))
-        .unwrap();
-    journal
-        .append_evidence(
-            "file_diff",
-            json!({
-                "path": "src/feature1.rs",
-                "added": 1,
-                "removed": 0,
-                "hash_after": "abc",
-                "mode": "100644",
-            }),
-        )
-        .unwrap();
-
-    assert!(
-        plan_op(
-            &mut ctx,
-            &json!({"op": "finish", "id": "1", "summary": "done 1"})
-        )
-        .ok
-    );
-
-    // 4. Start step 2, mutate another file
-    assert!(plan_op(&mut ctx, &json!({"op": "start", "id": "2"})).ok);
-    let write2 = execute(
-        &mut ctx,
-        "write",
-        &json!({"file_path": "src/feature2.rs", "content": "pub fn feat2() {}\n"}),
-    );
-    assert!(write2.ok);
-
-    let mut journal2 = crate::agent::journal::Journal::open(&dir, &ctx.session_id).unwrap();
-    journal2.set_attribution(Some("2".into()), Some(plan_id), "main");
-    journal2
-        .append("plan", json!({"op": "start", "id": "2"}))
-        .unwrap();
-    journal2
-        .append_evidence(
-            "file_diff",
-            json!({
-                "path": "src/feature2.rs",
-                "added": 1,
-                "removed": 0,
-                "hash_after": "xyz",
-                "mode": "100644",
-            }),
-        )
-        .unwrap();
-
-    assert!(
-        plan_op(
-            &mut ctx,
-            &json!({"op": "finish", "id": "2", "summary": "done 2"})
-        )
-        .ok
-    );
-
-    // 5. Querying step 1 diff shows only step 1 changes
-    let diff1 = plan_op(&mut ctx, &json!({"op": "step_diff", "step_id": "1"}));
-    assert!(diff1.ok, "{}", diff1.output);
-    assert!(diff1.output.contains("feature1.rs"));
-    assert!(diff1.output.contains("feat1"));
-    assert!(!diff1.output.contains("feature2.rs"));
-
-    // 6. Querying step 2 diff shows only step 2 changes
-    let diff2 = plan_op(&mut ctx, &json!({"op": "step_diff", "step_id": "2"}));
-    assert!(diff2.ok, "{}", diff2.output);
-    assert!(diff2.output.contains("feature2.rs"));
-    assert!(diff2.output.contains("feat2"));
-    assert!(!diff2.output.contains("feat1"));
-
-    // 7. Path-scoped step diff
-    let diff_path = plan_op(
-        &mut ctx,
-        &json!({"op": "step_diff", "step_id": "2", "path": "src/feature2.rs"}),
-    );
-    assert!(diff_path.ok, "{}", diff_path.output);
-    assert!(diff_path.output.contains("feature2.rs"));
-
     fs::remove_dir_all(&dir).ok();
 }
 

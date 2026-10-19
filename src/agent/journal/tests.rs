@@ -727,25 +727,12 @@ fn nudges_after_unaccounted_step_actions() {
         &crate::plan::Limits::default(),
     )
     .unwrap();
-    crate::plan::store(&root, &plan).unwrap();
-    crate::plan::apply(
-        &mut plan,
-        crate::plan::Op::Start {
-            id: "1".into(),
-            confirm: None,
-        },
-        &crate::plan::Limits::default(),
-        None,
-    )
-    .unwrap();
-    crate::plan::store(&root, &plan).unwrap();
     crate::plan::apply(
         &mut plan,
         crate::plan::Op::Join {
             session: "nudge".into(),
         },
         &crate::plan::Limits::default(),
-        None,
     )
     .unwrap();
     crate::plan::store(&root, &plan).unwrap();
@@ -765,7 +752,7 @@ fn nudges_after_unaccounted_step_actions() {
             .unwrap()
             .contains("3 actions")
     );
-    journal.append("plan", json!({"op": "show"})).unwrap();
+    journal.append("plan", json!({"op": "add"})).unwrap();
     assert!(Journal::nudge(&root, Some("nudge"), 2).unwrap().is_none());
     fs::remove_dir_all(root).ok();
 }
@@ -775,63 +762,6 @@ fn rejects_non_object_fields() {
     let root = root();
     let mut journal = Journal::open(&root, "session").unwrap();
     assert!(journal.append("bad", json!("nope")).is_err());
-    fs::remove_dir_all(root).ok();
-}
-#[test]
-fn stale_evidence_warnings_checks_sequence_boundary() {
-    let root = root();
-    let plan = crate::plan::create(
-        "test boundary".to_string(),
-        Vec::new(),
-        vec!["note".to_string()],
-        vec![crate::plan::NewStep {
-            title: "step 1".into(),
-        }],
-        &crate::plan::Limits::default(),
-    )
-    .unwrap();
-    crate::plan::store(&root, &plan).unwrap();
-
-    let mut journal = Journal::open(&root, "test-boundary-sess").unwrap();
-    // seq 1: premature record before start
-    journal.set_attribution(Some("1".into()), Some(plan.id.clone()), "main");
-    let pre_seq = journal
-        .append("tool_result", json!({"tool": "read", "ok": true}))
-        .unwrap();
-    assert_eq!(pre_seq, 1);
-
-    // seq 2: op start
-    let start_seq = journal
-        .append("plan", json!({"op": "start", "id": "1", "ok": true}))
-        .unwrap();
-    assert_eq!(start_seq, 2);
-
-    // seq 3: record after start
-    let post_seq = journal
-        .append("tool_result", json!({"tool": "read", "ok": true}))
-        .unwrap();
-    assert_eq!(post_seq, 3);
-
-    // Evidence with seq 3 (>= start_seq) must NOT produce any stale warning
-    let valid_evidence = vec![crate::plan::EvidenceRef {
-        session: "test-boundary-sess".into(),
-        seq: post_seq,
-    }];
-    let warns = Journal::stale_evidence_warnings(&root, &plan.id, "1", &valid_evidence);
-    assert!(
-        warns.is_empty(),
-        "evidence after start must not produce warning: {warns:?}"
-    );
-
-    // Evidence with seq 1 (< start_seq) MUST produce stale warning
-    let stale_evidence = vec![crate::plan::EvidenceRef {
-        session: "test-boundary-sess".into(),
-        seq: pre_seq,
-    }];
-    let warns = Journal::stale_evidence_warnings(&root, &plan.id, "1", &stale_evidence);
-    assert_eq!(warns.len(), 1);
-    assert!(warns[0].contains("predates step 1 start"));
-
     fs::remove_dir_all(root).ok();
 }
 

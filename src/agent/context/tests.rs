@@ -25,17 +25,6 @@ fn anchor_keeps_journal_facts_not_plan_state() {
     // create); without membership #171 strictness resolves nothing
     plan.sessions = vec!["anchor-session".to_string()];
     crate::plan::store(&root, &plan).unwrap();
-    crate::plan::apply(
-        &mut plan,
-        crate::plan::Op::Start {
-            id: "1".into(),
-            confirm: None,
-        },
-        &crate::plan::Limits::default(),
-        None,
-    )
-    .unwrap();
-    crate::plan::store(&root, &plan).unwrap();
 
     let mut journal = crate::agent::journal::Journal::open(&root, "anchor-session").unwrap();
     journal.set_attribution(Some("1".into()), Some(plan.id.clone()), "main");
@@ -212,7 +201,7 @@ fn anchor_carries_no_plan_goals_for_any_session() {
 #[test]
 fn resume_notice_reports_unfinished_plan_step() {
     let root = temp_root("resume");
-    let mut plan = crate::plan::create(
+    let plan = crate::plan::create(
         "resume safely".into(),
         Vec::new(),
         vec!["note".to_string()],
@@ -223,21 +212,10 @@ fn resume_notice_reports_unfinished_plan_step() {
     )
     .unwrap();
     crate::plan::store(&root, &plan).unwrap();
-    crate::plan::apply(
-        &mut plan,
-        crate::plan::Op::Start {
-            id: "1".into(),
-            confirm: None,
-        },
-        &crate::plan::Limits::default(),
-        None,
-    )
-    .unwrap();
-    crate::plan::store(&root, &plan).unwrap();
     let mut journal = crate::agent::journal::Journal::open(&root, "resume-session").unwrap();
     journal.set_attribution(Some("1".into()), Some(plan.id), "main");
     journal
-        .append("plan", serde_json::json!({"op": "start", "id": "1"}))
+        .append("plan", serde_json::json!({"op": "create"}))
         .unwrap();
     journal
         .append(

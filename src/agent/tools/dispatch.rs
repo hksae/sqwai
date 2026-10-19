@@ -5,10 +5,7 @@ use super::git;
 use super::outline;
 use super::policy::{bash_scope_hit, in_write_scope, mutation_target_paths, step_epoch_current};
 use super::specs;
-use super::verify::{
-    rejection, with_assumption_warning, with_authorship, with_blast_radius,
-    with_evidence_ts_warning,
-};
+use super::verify::{rejection, with_assumption_warning, with_authorship, with_blast_radius};
 use crate::plan;
 use serde_json::Value;
 
@@ -834,14 +831,8 @@ fn parse_time_bound(s: &str, end_of_day: bool) -> Option<chrono::DateTime<chrono
 }
 
 /// The `plan` tool: one operation per call, validated by the host.
-/// The two shapes the model writes when it batches `create` and `start` in one
-/// turn, before the create result exists: `step_id` where the op wants `id`,
-/// and the plan's own ULID in `id`. Both are answered while the intent is
-/// unambiguous — exactly one step can be started, exactly one is running — and
-/// refused with the step list otherwise, so tolerance never mutates the wrong
-/// step on a guess.
 fn resolve_step_id(args: &mut Value, root: &std::path::Path, session_id: &str) {
-    const STEP_OPS: [&str; 6] = ["start", "finish", "block", "unblock", "cancel", "split"];
+    const STEP_OPS: [&str; 2] = ["finish", "cancel"];
     let Some(obj) = args.as_object_mut() else {
         return;
     };
@@ -853,8 +844,8 @@ fn resolve_step_id(args: &mut Value, root: &std::path::Path, session_id: &str) {
             obj.insert(key.into(), Value::String(n.to_string()));
         }
     }
-    // Coerce single string `criteria` / `constraints` / `items` into a 1-element array
-    for key in ["criteria", "acceptance", "items", "constraints"] {
+    // Coerce single string `criteria` / `constraints` / `acceptance` into a 1-element array
+    for key in ["criteria", "acceptance", "constraints"] {
         if let Some(s) = obj.get(key).and_then(Value::as_str).map(str::to_string) {
             obj.insert(key.into(), Value::Array(vec![Value::String(s)]));
         }
@@ -862,14 +853,6 @@ fn resolve_step_id(args: &mut Value, root: &std::path::Path, session_id: &str) {
     let Some(op) = obj.get("op").and_then(Value::as_str).map(str::to_string) else {
         return;
     };
-    if op == "step_diff" {
-        if !obj.contains_key("step_id")
-            && let Some(id_val) = obj.remove("id").and_then(|v| v.as_str().map(String::from))
-        {
-            obj.insert("step_id".into(), id_val.into());
-        }
-        return;
-    }
     if op == "finish" && !obj.contains_key("summary") {
         for alias in ["message", "text", "note", "result"] {
             if let Some(val) = obj.remove(alias).and_then(|v| v.as_str().map(String::from)) {
@@ -878,7 +861,7 @@ fn resolve_step_id(args: &mut Value, root: &std::path::Path, session_id: &str) {
             }
         }
     }
-    if matches!(op.as_str(), "block" | "cancel" | "block_plan" | "abandon")
+    if matches!(op.as_str(), "cancel" | "abandon" | "block_plan")
         && !obj.contains_key("reason")
     {
         for alias in ["message", "text", "note", "summary"] {
@@ -898,25 +881,25 @@ fn resolve_step_id(args: &mut Value, root: &std::path::Path, session_id: &str) {
     {
         obj.insert("id".into(), step_id.into());
     }
+    if op != "finish" {
+        return;
+    }
     let Ok(Some(active)) = plan::open_active_for_session(root, Some(session_id)) else {
         return;
     };
     let given = obj.get("id").and_then(Value::as_str).map(String::from);
     let missing_or_plan_id = match &given {
         None => true,
-        Some(id) => *id == active.id,
+        Some(id) => id.trim().is_empty() || *id == active.id,
     };
     if !missing_or_plan_id {
         return;
     }
-    let want = match op.as_str() {
-        "start" | "split" => plan::StepStatus::Pending,
-        "unblock" => plan::StepStatus::Blocked,
-        _ => plan::StepStatus::InProgress,
-    };
-    let mut candidates = active.steps.iter().filter(|s| s.status == want);
+    let mut candidates = active
+        .steps
+        .iter()
+        .filter(|s| matches!(s.status, plan::StepStatus::InProgress | plan::StepStatus::Reopened));
     let (Some(first), None) = (candidates.next(), candidates.next()) else {
-        // zero or several: naming one would be the guess this refuses to make
         return;
     };
     obj.insert("id".into(), first.id.clone().into());
@@ -925,22 +908,19 @@ fn resolve_step_id(args: &mut Value, root: &std::path::Path, session_id: &str) {
 pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
     let mut args = args.clone();
     resolve_step_id(&mut args, &ctx.root, &ctx.session_id);
-    // verify was retired: the host no longer certifies checks. Catch it by
-    // name before parsing so the model gets the reason, not a schema error.
     if args.get("op").and_then(|v| v.as_str()) == Some("verify") {
         return Outcome::err(
             "verify is retired: run the command yourself (bash) and work from its observed result",
         );
     }
+    if args.get("op").and_then(|v| v.as_str()) == Some("show") {
+        return Outcome::err(
+            "no plan show tool: the current plan with its step ids is in your context above — use those ids, never re-read the plan",
+        );
+    }
     let op: plan::Op = match serde_json::from_value(args.clone()) {
         Ok(op) => op,
         Err(e) => {
-            // `id` is one flat optional field shared by twelve ops — a JSON
-            // schema cannot say "required for start/finish/block" — so a missing
-            // step id is caught here rather than by the schema, and every model
-            // hits it once per session: it batches `create` + `start` in one turn
-            // and writes the second call's arguments before the first result
-            // exists. Naming the steps turns the guess into a lookup.
             let hint = match plan::open_active_for_session(&ctx.root, Some(&ctx.session_id)) {
                 Ok(Some(active)) if !active.steps.is_empty() => format!(
                     " — active plan {} steps: {}",
@@ -962,35 +942,10 @@ pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
             return Outcome::err(format!("plan op rejected: {e}{hint}"));
         }
     };
-    // host-only ops never reach the validator: session membership is joined
-    // by the host when it spawns a child, not proposed by the model
     if matches!(op, plan::Op::Join { .. }) {
         return Outcome::err(
-            "plan op rejected: join is host-only — sessions join a plan via plan start, not this op",
+            "plan op rejected: join is host-only — sessions join a plan via subagent spawn, not this op",
         );
-    }
-    // experiment: `show` is not a model tool — the current plan always
-    // rides in the request context, there is nothing to re-read. Kept in
-    // the schema types for compat; the model must never see it succeed.
-    if matches!(op, plan::Op::Show) {
-        return Outcome::err(
-            "no plan show tool: the current plan with its step ids is in your context above — use those ids, never re-read the plan",
-        );
-    }
-    // Read-only step diffs bypass validator, journal and store: nothing is
-    // recorded, like Show (which keeps its own path below).
-    if let plan::Op::StepDiff { step_id, path } = &op {
-        return match plan::step_diff(
-            &ctx.root,
-            &ctx.session_id,
-            ctx.shadow_store,
-            ctx.checkpoint_chain(),
-            step_id,
-            path.as_deref(),
-        ) {
-            Ok(text) => Outcome::ok(text),
-            Err(r) => rejection(r),
-        };
     }
     let limits = plan::Limits {
         max_steps: ctx.plan_limits.max_steps,
@@ -1006,7 +961,7 @@ pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
             Ok(Some(existing)) => rejection(plan::Rejection {
                 code: "plan_exists",
                 reason: format!("an active plan already exists: {}", existing.id),
-                hint: "work that plan instead: start/finish its steps, do not create another one. The current plan is in your context above".to_string(),
+                hint: "work that plan instead: finish its steps, do not create another one. The current plan is in your context above".to_string(),
             }),
             Ok(None) => {
                 match plan::create(goal, constraints, criteria, steps, &limits) {
@@ -1014,8 +969,7 @@ pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                         created.sessions = vec![ctx.session_id.clone()];
                         let id = created.id.clone();
                         let step_count = created.steps.len();
-                        // Journal-first: the intent carries everything
-                        // replay needs to rebuild this plan.
+                        let first_step_id = created.steps.first().map(|s| s.id.clone());
                         let args = serde_json::json!({
                             "goal": created.goal.text,
                             "constraints": created.constraints,
@@ -1037,11 +991,19 @@ pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                             args,
                         ) {
                             Ok(_) => {
-                                // The step ids come back with the create. Without
-                                // them a model that batches `create` + `start` has
-                                // no id to write into the second call — the result
-                                // said only "created with 3 steps", and the plan
-                                // block carrying the ids exists one request later.
+                                if let Some(ref s1) = first_step_id {
+                                    ctx.current_step = Some(s1.clone());
+                                    if let Ok(Some(sha)) =
+                                        crate::agent::checkpoints::snapshot_boundary(
+                                            &ctx.root,
+                                            ctx.shadow_store,
+                                            ctx.checkpoint_chain(),
+                                            &format!("step_{s1}_start"),
+                                        )
+                                    {
+                                        ctx.journal.push((sha, format!("step_{s1}_start")));
+                                    }
+                                }
                                 let steps = created
                                     .steps
                                     .iter()
@@ -1055,7 +1017,7 @@ pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                                     .collect::<Vec<_>>()
                                     .join(" · ");
                                 Outcome::ok(format!(
-                                    "plan {id} created with {step_count} steps: {steps}"
+                                    "plan {id} created with {step_count} steps (step 1 in progress): {steps}"
                                 ))
                             }
                             Err(e) => Outcome::err(format!("plan write failed: {e:#}")),
@@ -1066,134 +1028,58 @@ pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
             }
             Err(e) => Outcome::err(format!("plan store unreadable: {e:#}")),
         },
-        plan::Op::Cancel { id, reason } => {
-            match id {
-                // No silent whole-plan kill here either: the dispatcher used
-                // to abandon directly, bypassing the pure guard below.
-                None => Outcome::err(
+        other => {
+            if let plan::Op::Cancel {
+                id: Some(ref target_id),
+                ..
+            } = other
+                && plan::list_active(&ctx.root)
+                    .iter()
+                    .any(|p| p.id == *target_id)
+            {
+                return Outcome::err(
                     serde_json::json!({
                         "ok": false,
-                        "code": "need_step_id",
-                        "reason": "cancel needs a step id",
-                        "hint": "cancel a step that will not happen, or ask the user to delete the whole plan (/plan delete)",
+                        "code": "abandon_user_only",
+                        "reason": format!("plan {target_id} cannot be cancelled as a step"),
+                        "hint": "use op=\"abandon\" with a quoted reason to abandon the whole plan, or ask the user to delete it (/plan delete)",
                     })
                     .to_string(),
-                ),
-                Some(target_id) => {
-                    // Whole-plan abandon is the user's call even with the id
-                    // spelled out — route it through the pure guard so the
-                    // refusal (not a direct status flip) is what lands.
-                    if plan::list_active(&ctx.root)
-                        .iter()
-                        .any(|p| p.id == target_id)
-                    {
-                        return Outcome::err(
-                            serde_json::json!({
-                                "ok": false,
-                                "code": "abandon_user_only",
-                                "reason": format!("plan {target_id} can only be abandoned by the user"),
-                                "hint": "surrender a contradiction with block_plan (quote it), ask the user to delete it (/plan delete), or describe the contradiction in chat",
-                            })
-                            .to_string(),
-                        );
-                    }
-                    let mut active =
-                        match plan::open_active_for_session(&ctx.root, Some(&ctx.session_id)) {
-                            Ok(Some(p)) => p,
-                            Ok(None) => {
-                                return Outcome::err(
-                                    "no active plan: create one with op=create first",
-                                );
-                            }
-                            Err(e) => return Outcome::err(format!("plan store unreadable: {e:#}")),
-                        };
-                    let op = plan::Op::Cancel {
-                        id: Some(target_id.clone()),
-                        reason: reason.clone(),
-                    };
-                    match plan::apply(&mut active, op, &limits, ctx.current_step.as_deref()) {
-                        Ok(applied) => {
-                            // journal-first like every other mutating op: a
-                            // bare store leaves crash recovery blind to the
-                            // cancellation (file moved, journal did not)
-                            if let Err(e) = plan::commit(
-                                &ctx.root,
-                                &ctx.session_id,
-                                &mut active,
-                                "cancel",
-                                "model",
-                                true,
-                                serde_json::json!({"id": target_id, "reason": reason}),
-                            ) {
-                                return Outcome::err(format!("plan write failed: {e:#}"));
-                            }
-                            match applied {
-                                plan::Applied::Updated { message } => Outcome::ok(message),
-                                _ => Outcome::ok(format!("step {target_id} cancelled")),
-                            }
-                        }
-                        Err(r) => rejection(r),
-                    }
-                }
+                );
             }
-        }
-        other => {
             let mut active = match plan::open_active_for_session(&ctx.root, Some(&ctx.session_id)) {
                 Ok(Some(p)) => p,
                 Ok(None) => {
-                    // #171: no own plan — but `start` names an explicit step
-                    // to work, so resolve the project's active plan and JOIN
-                    // it (membership recorded) instead of failing or
-                    // silently borrowing foreign work.
-                    let is_start = matches!(&other, plan::Op::Start { .. });
-                    match (is_start, plan::open_active(&ctx.root)) {
-                        (true, Ok(Some(mut foreign))) => {
-                            if !foreign.sessions.iter().any(|s| s == &ctx.session_id) {
-                                foreign.sessions.push(ctx.session_id.clone());
-                                foreign.revision += 1;
-                                if let Err(e) = plan::store(&ctx.root, &foreign) {
-                                    return Outcome::err(format!("plan join failed: {e:#}"));
-                                }
-                            }
-                            foreign
-                        }
-                        _ => {
-                            return Outcome::err(
-                                "no active plan: create one with op=create first".to_string(),
-                            );
-                        }
-                    }
+                    return Outcome::err(
+                        "no active plan: create one with op=create first".to_string(),
+                    );
                 }
                 Err(e) => return Outcome::err(format!("plan store unreadable: {e:#}")),
             };
-            // finishing a step that still carries open assumptions is
-            // allowed, but the model has to be told — this is the closure
-            // moment the `assumption` note kind never had.
-            let starting = match &other {
-                plan::Op::Start { id, .. } => Some(id.clone()),
-                _ => None,
-            };
+            let prev_in_progress = active
+                .steps
+                .iter()
+                .find(|s| s.status == plan::StepStatus::InProgress)
+                .map(|s| s.id.clone());
             let finishing = match &other {
-                plan::Op::Finish { id, .. } => Some(id.clone()),
+                plan::Op::Finish { id, .. } => {
+                    if id.trim().is_empty() {
+                        prev_in_progress.clone()
+                    } else {
+                        Some(id.trim().to_string())
+                    }
+                }
                 _ => None,
             };
-            // Journal-first: the intent is recorded ahead of the
-            // store, carrying the full op for replay. `show` is read-only
-            // and keeps the old plain store with no cursor advance.
             let op_value = serde_json::to_value(&other).unwrap_or(serde_json::Value::Null);
             let op_name = op_value
                 .get("op")
                 .and_then(|value| value.as_str())
                 .unwrap_or("unknown")
                 .to_string();
-            let readonly_show = op_name == "show";
-            match plan::apply(&mut active, other, &limits, ctx.current_step.as_deref()) {
+            match plan::apply(&mut active, other, &limits) {
                 Ok(applied) => {
-                    if readonly_show {
-                        if let Err(e) = plan::store(&ctx.root, &active) {
-                            return Outcome::err(format!("plan write failed: {e:#}"));
-                        }
-                    } else if let Err(e) = plan::commit(
+                    if let Err(e) = plan::commit(
                         &ctx.root,
                         &ctx.session_id,
                         &mut active,
@@ -1203,16 +1089,6 @@ pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                         op_value,
                     ) {
                         return Outcome::err(format!("plan write failed: {e:#}"));
-                    }
-                    if let Some(ref id) = starting
-                        && let Ok(Some(sha)) = crate::agent::checkpoints::snapshot_boundary(
-                            &ctx.root,
-                            ctx.shadow_store,
-                            ctx.checkpoint_chain(),
-                            &format!("step_{id}_start"),
-                        )
-                    {
-                        ctx.journal.push((sha, format!("step_{id}_start")));
                     }
                     if let Some(ref id) = finishing
                         && let Ok(Some(sha)) = crate::agent::checkpoints::snapshot_boundary(
@@ -1224,20 +1100,37 @@ pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                     {
                         ctx.journal.push((sha, format!("step_{id}_finish")));
                     }
+                    let new_in_progress = if active.status == plan::PlanStatus::Active {
+                        active
+                            .steps
+                            .iter()
+                            .find(|s| s.status == plan::StepStatus::InProgress)
+                            .map(|s| s.id.clone())
+                    } else {
+                        None
+                    };
+                    if let Some(ref next_id) = new_in_progress
+                        && new_in_progress != prev_in_progress
+                        && let Ok(Some(sha)) = crate::agent::checkpoints::snapshot_boundary(
+                            &ctx.root,
+                            ctx.shadow_store,
+                            ctx.checkpoint_chain(),
+                            &format!("step_{next_id}_start"),
+                        )
+                    {
+                        ctx.journal.push((sha, format!("step_{next_id}_start")));
+                    }
+                    ctx.current_step = new_in_progress;
                     match applied {
                         plan::Applied::Updated { message } => {
                             let msg = with_assumption_warning(ctx, finishing.as_deref(), message);
-                            let msg =
-                                with_evidence_ts_warning(ctx, finishing.as_deref(), &active, msg);
                             let msg = with_blast_radius(ctx, finishing.as_deref(), &active, msg);
                             Outcome::ok(msg)
                         }
-                        plan::Applied::Shown { text } => Outcome::ok(text),
-                        plan::Applied::Completed => {
-                            let mut msg = format!("plan {} completed", active.id);
-                            // soft nudge: a finished plan is a natural moment
-                            // to persist durable facts — but only nag while project
-                            // memory is still empty, so it never repeats on every plan.
+                        plan::Applied::Completed { message } => {
+                            let msg = with_assumption_warning(ctx, finishing.as_deref(), message);
+                            let mut msg =
+                                with_blast_radius(ctx, finishing.as_deref(), &active, msg);
                             let memory_empty =
                                 std::fs::read_to_string(crate::agent::memory::project_path(
                                     &ctx.root,
@@ -1259,8 +1152,6 @@ pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                     }
                 }
                 Err(r) => {
-                    // the rejection counter is plan state, so persist it too —
-                    // behind a rejection intent, keeping the cursor discipline
                     let _ = plan::commit(
                         &ctx.root,
                         &ctx.session_id,

@@ -185,7 +185,6 @@ impl App {
                                     s.status,
                                     crate::plan::StepStatus::InProgress
                                         | crate::plan::StepStatus::Pending
-                                        | crate::plan::StepStatus::Blocked
                                         | crate::plan::StepStatus::Reopened
                                 )
                             })

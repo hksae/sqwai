@@ -66,16 +66,6 @@ fn ulid_shape() {
 #[test]
 fn undo_reopens_done_step_and_clears_completion_metadata() {
     let mut plan = new_plan();
-    apply(
-        &mut plan,
-        Op::Start {
-            id: "1".into(),
-            confirm: None,
-        },
-        &Limits::default(),
-        None,
-    )
-    .unwrap();
     plan.step_mut("1").unwrap().evidence.push(EvidenceRef {
         session: "test".into(),
         seq: 42,
@@ -87,7 +77,6 @@ fn undo_reopens_done_step_and_clears_completion_metadata() {
             summary: "model added".into(),
         },
         &Limits::default(),
-        None,
     )
     .unwrap();
     let revision = plan.revision;
@@ -104,12 +93,11 @@ fn undo_reopens_done_step_and_clears_completion_metadata() {
     assert!(
         apply(
             &mut plan,
-            Op::Start {
+            Op::Finish {
                 id: "1".into(),
-                confirm: None,
+                summary: "re-did model".into(),
             },
             &Limits::default(),
-            None,
         )
         .is_ok()
     );
@@ -145,20 +133,11 @@ fn undo_rejects_unknown_step() {
 }
 
 #[test]
-fn start_then_finish() {
+fn create_starts_first_step_and_finish_advances_then_completes() {
     let mut plan = new_plan();
-    assert!(matches!(
-        apply(
-            &mut plan,
-            Op::Start {
-                id: "1".into(),
-                confirm: None
-            },
-            &Limits::default(),
-            None,
-        ),
-        Ok(Applied::Updated { .. })
-    ));
+    assert_eq!(plan.step("1").unwrap().status, StepStatus::InProgress);
+    assert_eq!(plan.step("2").unwrap().status, StepStatus::Pending);
+
     assert!(matches!(
         apply(
             &mut plan,
@@ -167,11 +146,25 @@ fn start_then_finish() {
                 summary: "model added".into()
             },
             &Limits::default(),
-            None,
         ),
         Ok(Applied::Updated { .. })
     ));
     assert_eq!(plan.step("1").unwrap().status, StepStatus::Done);
+    assert_eq!(plan.step("2").unwrap().status, StepStatus::InProgress);
+
+    assert!(matches!(
+        apply(
+            &mut plan,
+            Op::Finish {
+                id: "2".into(),
+                summary: "validator added".into()
+            },
+            &Limits::default(),
+        ),
+        Ok(Applied::Completed { .. })
+    ));
+    assert_eq!(plan.step("2").unwrap().status, StepStatus::Done);
+    assert_eq!(plan.status, PlanStatus::Completed);
 }
 
 #[test]
@@ -184,40 +177,26 @@ fn finish_requires_in_progress() {
             summary: "x".into(),
         },
         &Limits::default(),
-        None,
     )
     .unwrap_err();
     assert_eq!(err.code, "step_not_in_progress");
 }
 
 #[test]
-fn complete_requires_all_steps_closed() {
-    let mut plan = new_plan();
-    let err = apply(&mut plan, Op::Complete, &Limits::default(), None).unwrap_err();
-    assert_eq!(err.code, "steps_open");
-}
-
-#[test]
-fn closed_plans_are_read_only_except_show() {
-    // defect A: the model path could keep mutating completed or
-    // abandoned plans; only the TUI refused them.
+fn closed_plans_are_read_only() {
     let mut plan = new_plan();
     plan.status = PlanStatus::Completed;
     let err = apply(
         &mut plan,
-        Op::Start {
+        Op::Finish {
             id: "1".into(),
-            confirm: None,
+            summary: "x".into(),
         },
         &Limits::default(),
-        None,
     )
     .unwrap_err();
     assert_eq!(err.code, "plan_closed");
-    assert!(matches!(
-        apply(&mut plan, Op::Show, &Limits::default(), None),
-        Ok(Applied::Shown { .. })
-    ));
+
     plan.status = PlanStatus::Abandoned;
     let err = apply(
         &mut plan,
@@ -226,7 +205,6 @@ fn closed_plans_are_read_only_except_show() {
             summary: "x".into(),
         },
         &Limits::default(),
-        None,
     )
     .unwrap_err();
     assert_eq!(err.code, "plan_closed");
@@ -242,7 +220,6 @@ fn cancel_needs_a_step_id_and_never_abandons() {
             reason: String::new(),
         },
         &Limits::default(),
-        None,
     )
     .unwrap_err();
     assert_eq!(err.code, "need_step_id");
@@ -256,25 +233,36 @@ fn cancel_needs_a_step_id_and_never_abandons() {
             reason: String::new(),
         },
         &Limits::default(),
-        None,
     )
     .unwrap_err();
     assert_eq!(err.code, "abandon_user_only");
     assert_eq!(plan.status, PlanStatus::Active);
+
+    // Cancelling step 1 automatically starts step 2
+    assert!(matches!(
+        apply(
+            &mut plan,
+            Op::Cancel {
+                id: Some("1".into()),
+                reason: "not needed".into(),
+            },
+            &Limits::default(),
+        ),
+        Ok(Applied::Updated { .. })
+    ));
+    assert_eq!(plan.step("1").unwrap().status, StepStatus::Cancelled);
+    assert_eq!(plan.step("2").unwrap().status, StepStatus::InProgress);
 }
 
 #[test]
-fn block_plan_records_the_quoted_conflict_and_closes() {
+fn abandon_validates_reason_and_closes_plan() {
     let mut plan = new_plan();
-    // abandon refusals first (empty and thin reasons change nothing);
-    // the successful abandon path is covered by the approval-flow test
     let err = apply(
         &mut plan,
         Op::Abandon {
             reason: "   ".to_string(),
         },
         &Limits::default(),
-        None,
     )
     .unwrap_err();
     assert_eq!(err.code, "empty_reason");
@@ -284,61 +272,11 @@ fn block_plan_records_the_quoted_conflict_and_closes() {
             reason: "nope".to_string(),
         },
         &Limits::default(),
-        None,
     )
     .unwrap_err();
     assert_eq!(err.code, "thin_reason");
     assert_eq!(plan.status, PlanStatus::Active, "refusals change nothing");
-    let err = apply(
-        &mut plan,
-        Op::BlockPlan {
-            reason: "   ".to_string(),
-        },
-        &Limits::default(),
-        None,
-    )
-    .unwrap_err();
-    assert_eq!(err.code, "empty_reason");
 
-    let quote = "spec says 404, test test_missing expects 200";
-    assert!(matches!(
-        apply(
-            &mut plan,
-            Op::BlockPlan {
-                reason: quote.to_string(),
-            },
-            &Limits::default(),
-            None,
-        ),
-        Ok(Applied::Updated { .. })
-    ));
-    assert_eq!(plan.status, PlanStatus::Blocked);
-    assert_eq!(plan.blocked_reason.as_deref(), Some(quote));
-    assert!(render(&plan).contains("blocked: spec says 404"));
-
-    // terminal like every closed plan: read-only except show
-    let err = apply(
-        &mut plan,
-        Op::Start {
-            id: "1".into(),
-            confirm: None,
-        },
-        &Limits::default(),
-        None,
-    )
-    .unwrap_err();
-    assert_eq!(err.code, "plan_closed");
-    assert!(matches!(
-        apply(&mut plan, Op::Show, &Limits::default(), None),
-        Ok(Applied::Shown { .. })
-    ));
-}
-
-/// A quoted reason abandons directly (history kept as Abandoned, never
-/// deleted) — no confirm dialog on the apply path.
-#[test]
-fn abandon_applies_on_a_quoted_reason() {
-    let mut plan = new_plan();
     assert!(matches!(
         apply(
             &mut plan,
@@ -346,104 +284,25 @@ fn abandon_applies_on_a_quoted_reason() {
                 reason: "goal targets removed feature X, steps assume the deleted API".to_string(),
             },
             &Limits::default(),
-            None,
         ),
         Ok(Applied::Updated { .. })
     ));
     assert_eq!(plan.status, PlanStatus::Abandoned);
-    // closed plans stay read-only except show — same as blocked
-    assert!(matches!(
-        apply(&mut plan, Op::Show, &Limits::default(), None),
-        Ok(Applied::Shown { .. })
-    ));
-}
 
-#[test]
-fn complete_needs_only_closed_steps() {
-    let mut plan = new_plan();
-    for id in ["1", "2"] {
-        apply(
-            &mut plan,
-            Op::Start {
-                id: id.into(),
-                confirm: None,
-            },
-            &Limits::default(),
-            None,
-        )
-        .unwrap();
-        apply(
-            &mut plan,
-            Op::Finish {
-                id: id.into(),
-                summary: "done".into(),
-            },
-            &Limits::default(),
-            None,
-        )
-        .unwrap();
-    }
-    // the acceptance/validation machinery is retired: closing every step
-    // is enough to complete — nothing left for the host to certify.
-    assert!(matches!(
-        apply(&mut plan, Op::Complete, &Limits::default(), None),
-        Ok(Applied::Completed)
-    ));
-    assert_eq!(plan.status, PlanStatus::Completed);
-}
-
-#[test]
-fn goal_revision_marks_pending_steps_stale() {
-    let mut plan = new_plan();
-    apply(
-        &mut plan,
-        Op::Start {
-            id: "1".into(),
-            confirm: None,
-        },
-        &Limits::default(),
-        None,
-    )
-    .unwrap();
-    set_goal(&mut plan, "a different goal".into(), "user", None);
-    assert_eq!(plan.goal.text, "a different goal");
-    assert_eq!(plan.goal.history.len(), 1);
-    assert!(plan.step("2").unwrap().stale_goal);
-    // step 1 is in progress, so it is not marked stale
-    assert!(!plan.step("1").unwrap().stale_goal);
-}
-
-#[test]
-fn stale_step_needs_confirm() {
-    let mut plan = new_plan();
-    set_goal(&mut plan, "a different goal".into(), "user", None);
     let err = apply(
         &mut plan,
-        Op::Start {
+        Op::Finish {
             id: "1".into(),
-            confirm: None,
+            summary: "x".into(),
         },
         &Limits::default(),
-        None,
     )
     .unwrap_err();
-    assert_eq!(err.code, "stale_goal");
-    assert!(
-        apply(
-            &mut plan,
-            Op::Start {
-                id: "1".into(),
-                confirm: Some(true)
-            },
-            &Limits::default(),
-            None,
-        )
-        .is_ok()
-    );
+    assert_eq!(err.code, "plan_closed");
 }
 
 #[test]
-fn add_and_split_respect_the_limit() {
+fn add_respects_the_limit() {
     let mut plan = new_plan();
     let limits = Limits { max_steps: 3 };
     apply(
@@ -453,7 +312,6 @@ fn add_and_split_respect_the_limit() {
             title: "extra".into(),
         },
         &limits,
-        None,
     )
     .unwrap();
     assert_eq!(plan.steps.len(), 3);
@@ -464,7 +322,6 @@ fn add_and_split_respect_the_limit() {
             title: "one too many".into(),
         },
         &limits,
-        None,
     )
     .unwrap_err();
     assert_eq!(err.code, "too_many_steps");
@@ -497,42 +354,18 @@ fn corrupt_plan_is_moved_aside() {
 }
 
 #[test]
-fn complete_rejects_reopened_steps() {
-    let mut plan = new_plan();
-    plan.steps[0].status = StepStatus::Done;
-    plan.steps[1].status = StepStatus::Reopened;
-    let err = ops::complete(&mut plan).unwrap_err();
-    assert_eq!(err.code, "steps_open");
-    assert!(err.reason.contains('2'), "reason: {}", err.reason);
-}
-
-#[test]
 fn replay_heals_other_session_crash_leaving_mine_alone() {
-    // flagship: B's op journaled but never stored (crash between
-    // append and store); the old single cursor only remembered A.
     let dir = std::env::temp_dir().join(format!("sqwai-plan-multisess-{}", new_id()));
     let mut plan = new_plan();
-    // file state as after A's committed start: step running, cursors set
-    apply(
-        &mut plan,
-        Op::Start {
-            id: "1".into(),
-            confirm: None,
-        },
-        &Limits::default(),
-        None,
-    )
-    .unwrap();
     plan.applied_events.insert("aaa".to_string(), 1);
     plan.applied_events.insert("bbb".to_string(), 0);
     store(&dir, &plan).unwrap();
-    // journals: A's start intent (already reflected), then B's crash —
-    // a block B wrote to its own journal without storing
+
     let mut ja = crate::agent::journal::Journal::open(&dir, "aaa").unwrap();
     ja.append(
         "plan",
         serde_json::json!({
-            "op": "start", "id": "1",
+            "op": "add", "title": "already reflected",
             "plan_id": plan.id, "by": "model", "ok": true,
         }),
     )
@@ -541,7 +374,7 @@ fn replay_heals_other_session_crash_leaving_mine_alone() {
     jb.append(
         "plan",
         serde_json::json!({
-            "op": "block", "id": "1", "reason": "stuck",
+            "op": "cancel", "id": "1", "reason": "not needed",
             "plan_id": plan.id, "by": "model", "ok": true,
         }),
     )
@@ -550,11 +383,11 @@ fn replay_heals_other_session_crash_leaving_mine_alone() {
     let report = replay(&dir).unwrap();
     assert_eq!(report.ops_applied, 1);
     let healed = open(&dir, &plan.id).unwrap();
-    assert_eq!(healed.step("1").unwrap().status, StepStatus::Blocked);
-    // both cursors advanced independently
+    assert_eq!(healed.step("1").unwrap().status, StepStatus::Cancelled);
+    assert_eq!(healed.step("2").unwrap().status, StepStatus::InProgress);
     assert_eq!(healed.applied_events.get("aaa"), Some(&1));
     assert_eq!(healed.applied_events.get("bbb"), Some(&1));
-    // idempotent again
+
     let again = replay(&dir).unwrap();
     assert_eq!(again.ops_applied, 0);
     std::fs::remove_dir_all(&dir).ok();
@@ -564,26 +397,26 @@ fn replay_heals_other_session_crash_leaving_mine_alone() {
 fn replay_stall_in_one_session_does_not_block_the_other() {
     let dir = std::env::temp_dir().join(format!("sqwai-plan-stall-{}", new_id()));
     let mut plan = new_plan();
-    // cursors seeded, files clean: everything below is crash debris
     plan.applied_events.insert("aaa".to_string(), 0);
     plan.applied_events.insert("bbb".to_string(), 0);
     store(&dir, &plan).unwrap();
-    // aaa (sorted first) journaled a start on a missing step: diverges
+
+    // aaa journaled a finish on a missing step: diverges
     let mut ja = crate::agent::journal::Journal::open(&dir, "aaa").unwrap();
     ja.append(
         "plan",
         serde_json::json!({
-            "op": "start", "id": "99",
+            "op": "finish", "id": "99", "summary": "missing",
             "plan_id": plan.id, "by": "model", "ok": true,
         }),
     )
     .unwrap();
-    // bbb journaled a valid start on step 1
+    // bbb journaled a valid finish on step 1
     let mut jb = crate::agent::journal::Journal::open(&dir, "bbb").unwrap();
     jb.append(
         "plan",
         serde_json::json!({
-            "op": "start", "id": "1",
+            "op": "finish", "id": "1", "summary": "done 1",
             "plan_id": plan.id, "by": "model", "ok": true,
         }),
     )
@@ -592,8 +425,8 @@ fn replay_stall_in_one_session_does_not_block_the_other() {
     let report = replay(&dir).unwrap();
     assert_eq!(report.stalled, vec![plan.id.clone()]);
     let healed = open(&dir, &plan.id).unwrap();
-    // bbb's stream healed despite aaa's stall; the bad cursor holds
-    assert_eq!(healed.step("1").unwrap().status, StepStatus::InProgress);
+    assert_eq!(healed.step("1").unwrap().status, StepStatus::Done);
+    assert_eq!(healed.step("2").unwrap().status, StepStatus::InProgress);
     assert_eq!(healed.applied_events.get("aaa"), Some(&0));
     assert_eq!(healed.applied_events.get("bbb"), Some(&1));
     std::fs::remove_dir_all(&dir).ok();
@@ -603,7 +436,6 @@ fn replay_stall_in_one_session_does_not_block_the_other() {
 fn open_rebuilds_torn_plan_file_from_journal() {
     let dir = std::env::temp_dir().join(format!("sqwai-plan-rebuild-{}", new_id()));
     let id = "rebuild-me";
-    // create intent in one session, a later op in another
     let mut ja = crate::agent::journal::Journal::open(&dir, "aaa").unwrap();
     ja.append(
         "plan",
@@ -611,8 +443,8 @@ fn open_rebuilds_torn_plan_file_from_journal() {
             "op": "create", "result_id": id, "result_created": "t",
             "result_sessions": ["aaa", "bbb"],
             "goal": "ship it", "constraints": ["c1"],
-            "acceptance": ["cmd: x"], "budget_limit": 1000,
-            "steps": [{"title": "s1"}],
+            "acceptance": ["check x"], "budget_limit": 1000,
+            "steps": [{"title": "s1"}, {"title": "s2"}],
             "by": "model", "ok": true,
         }),
     )
@@ -621,12 +453,11 @@ fn open_rebuilds_torn_plan_file_from_journal() {
     jb.append(
         "plan",
         serde_json::json!({
-            "op": "start", "id": "1",
+            "op": "finish", "id": "1", "summary": "s1 done",
             "plan_id": id, "by": "model", "ok": true,
         }),
     )
     .unwrap();
-    // torn write: half a JSON document on disk
     std::fs::create_dir_all(dir.join(".sqwai/plans")).unwrap();
     std::fs::write(
         dir.join(".sqwai/plans").join(format!("{id}.json")),
@@ -636,24 +467,22 @@ fn open_rebuilds_torn_plan_file_from_journal() {
 
     let plan = open(&dir, id).expect("torn file rebuilds");
     assert_eq!(plan.goal.text, "ship it");
-    assert_eq!(plan.step("1").unwrap().status, StepStatus::InProgress);
+    assert_eq!(plan.step("1").unwrap().status, StepStatus::Done);
+    assert_eq!(plan.step("2").unwrap().status, StepStatus::InProgress);
     assert_eq!(plan.applied_events.get("aaa"), Some(&1));
     assert_eq!(plan.applied_events.get("bbb"), Some(&1));
-    // nothing quarantined: the bytes were healed, not moved aside
     assert!(
         !dir.join(".sqwai/plans/corrupt")
             .join(format!("{id}.json"))
             .exists()
     );
-    // and the rebuilt file loads cleanly straight away
     let again = open(&dir, id).expect("rebuilt file parses");
-    assert_eq!(again.step("1").unwrap().status, StepStatus::InProgress);
+    assert_eq!(again.step("1").unwrap().status, StepStatus::Done);
     std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
 fn open_quarantines_when_rebuild_diverges_or_lacks_intent() {
-    // diverged: create has one step, journal starts a missing one
     let dir = std::env::temp_dir().join(format!("sqwai-plan-diverge-{}", new_id()));
     let id = "diverged";
     let mut j = crate::agent::journal::Journal::open(&dir, "aaa").unwrap();
@@ -671,7 +500,7 @@ fn open_quarantines_when_rebuild_diverges_or_lacks_intent() {
     j.append(
         "plan",
         serde_json::json!({
-            "op": "start", "id": "99",
+            "op": "finish", "id": "99", "summary": "missing",
             "plan_id": id, "by": "model", "ok": true,
         }),
     )
@@ -689,7 +518,6 @@ fn open_quarantines_when_rebuild_diverges_or_lacks_intent() {
             .exists()
     );
 
-    // deliberate absence: plan_deleted beats any intent
     let dir2 = std::env::temp_dir().join(format!("sqwai-plan-del-{}", new_id()));
     let mut j2 = crate::agent::journal::Journal::open(&dir2, "aaa").unwrap();
     j2.append(
@@ -722,13 +550,13 @@ fn replay_heals_crash_between_journal_and_store() {
     let mut plan = new_plan();
     plan.applied_events.insert("crash".to_string(), 0);
     store(&dir, &plan).unwrap();
-    // The crash: intent journaled, plan file never caught up.
+
     let mut journal = crate::agent::journal::Journal::open(&dir, "crash").unwrap();
     let seq = journal
         .append(
             "plan",
             serde_json::json!({
-                "op": "start", "id": "1",
+                "op": "finish", "id": "1", "summary": "finished step 1",
                 "plan_id": plan.id, "by": "model", "ok": true,
             }),
         )
@@ -739,10 +567,10 @@ fn replay_heals_crash_between_journal_and_store() {
     assert_eq!(report.ops_applied, 1);
     assert_eq!(report.plans_healed, vec![plan.id.clone()]);
     let healed = open(&dir, &plan.id).unwrap();
-    assert_eq!(healed.step("1").unwrap().status, StepStatus::InProgress);
+    assert_eq!(healed.step("1").unwrap().status, StepStatus::Done);
+    assert_eq!(healed.step("2").unwrap().status, StepStatus::InProgress);
     assert_eq!(healed.applied_events.get("crash"), Some(&1));
 
-    // Idempotent: a second run changes nothing and stores nothing.
     let again = replay(&dir).unwrap();
     assert_eq!(again.ops_applied, 0);
     assert!(again.plans_healed.is_empty());
@@ -756,8 +584,7 @@ fn join_is_journal_first_idempotent_and_replayable() {
     plan.sessions = vec!["parent".to_string()];
     plan.applied_events.insert("parent".to_string(), 0);
     store(&dir, &plan).unwrap();
-    // The crash: join intent journaled in the parent's file (where the
-    // cursor points), plan file never caught up.
+
     let mut journal = crate::agent::journal::Journal::open(&dir, "parent").unwrap();
     journal
         .append(
@@ -775,7 +602,6 @@ fn join_is_journal_first_idempotent_and_replayable() {
     assert!(healed.sessions.contains(&"sub-9".to_string()));
     assert_eq!(healed.applied_events.get("parent"), Some(&1));
 
-    // Idempotent: replay and direct apply change nothing further.
     let again = replay(&dir).unwrap();
     assert_eq!(again.ops_applied, 0);
     let mut healed = healed;
@@ -785,7 +611,6 @@ fn join_is_journal_first_idempotent_and_replayable() {
             session: "sub-9".to_string(),
         },
         &Limits::default(),
-        None,
     )
     .unwrap();
     assert_eq!(healed.sessions.iter().filter(|s| *s == "sub-9").count(), 1);
@@ -804,8 +629,8 @@ fn replay_rebuilds_orphan_create_and_respects_delete() {
                 "plan_id": "01J000ORPHAN00000000000001",
                 "goal": "orphaned goal",
                 "constraints": [],
-                "acceptance": ["cmd: true"],
-                "steps": [{"title": "s1", "kind": "change", "refs": []}],
+                "acceptance": ["check true"],
+                "steps": [{"title": "s1"}],
                 "budget_limit": 20000,
                 "result_id": "01J000ORPHAN00000000000001",
                 "result_created": "2026-01-01T00:00:00+00:00",
@@ -820,7 +645,6 @@ fn replay_rebuilds_orphan_create_and_respects_delete() {
     assert_eq!(rebuilt.goal.text, "orphaned goal");
     assert_eq!(rebuilt.applied_events.get("orphan"), Some(&1));
 
-    // Deliberate absence: a later plan_deleted means do not resurrect.
     journal
         .append(
             "plan_deleted",
@@ -831,46 +655,6 @@ fn replay_rebuilds_orphan_create_and_respects_delete() {
     let report = replay(&dir).unwrap();
     assert!(report.orphans_rebuilt.is_empty());
     assert!(open(&dir, "01J000ORPHAN00000000000001").is_err());
-    std::fs::remove_dir_all(&dir).ok();
-}
-
-/// Late-added criteria survive a crash rebuild: notes re-append from the
-/// journaled intent instead of being lost when the store lagged behind.
-#[test]
-fn replay_restores_added_criteria() {
-    let dir = std::env::temp_dir().join(format!("sqwai-plan-repadd-{}", new_id()));
-    let mut plan = create(
-        "goal".to_string(),
-        Vec::new(),
-        vec!["first note".to_string()],
-        vec![NewStep {
-            title: "work".into(),
-        }],
-        &Limits::default(),
-    )
-    .unwrap();
-    plan.applied_events.insert("ra".to_string(), 0);
-    store(&dir, &plan).unwrap();
-    let mut journal = crate::agent::journal::Journal::open(&dir, "ra").unwrap();
-    journal
-        .append(
-            "plan",
-            serde_json::json!({
-                "op": "add_criteria",
-                "criteria": ["exit 3 first", "eyeball it"],
-                "plan_id": plan.id, "by": "model", "ok": true,
-            }),
-        )
-        .unwrap();
-    // the stored file predates the intent (cursor ra:0, intent at seq
-    // 1): replay re-appends the notes from the journaled intent.
-    let report = replay(&dir).unwrap();
-    assert!(report.ops_applied >= 1, "{report:?}");
-    let rebuilt = open(&dir, &plan.id).unwrap();
-    assert_eq!(rebuilt.criteria.len(), 3);
-    assert_eq!(rebuilt.criteria[0], "first note");
-    assert_eq!(rebuilt.criteria[1], "exit 3 first");
-    assert_eq!(rebuilt.criteria[2], "eyeball it");
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -885,7 +669,7 @@ fn replay_skips_rejected_intents() {
         .append(
             "plan",
             serde_json::json!({
-                "op": "start", "id": "1",
+                "op": "finish", "id": "1", "summary": "",
                 "plan_id": plan.id, "by": "model", "ok": false,
             }),
         )
@@ -895,37 +679,9 @@ fn replay_skips_rejected_intents() {
     assert_eq!(report.ops_applied, 0);
     assert_eq!(
         open(&dir, &plan.id).unwrap().step("1").unwrap().status,
-        StepStatus::Pending
+        StepStatus::InProgress
     );
     std::fs::remove_dir_all(&dir).ok();
-}
-
-#[test]
-fn complete_rejects_blocked_steps() {
-    let mut plan = new_plan();
-    apply(
-        &mut plan,
-        Op::Start {
-            id: "1".into(),
-            confirm: None,
-        },
-        &Limits::default(),
-        None,
-    )
-    .unwrap();
-    apply(
-        &mut plan,
-        Op::Block {
-            id: "1".into(),
-            reason: "waiting".into(),
-        },
-        &Limits::default(),
-        None,
-    )
-    .unwrap();
-    let err = apply(&mut plan, Op::Complete, &Limits::default(), None).unwrap_err();
-    assert_eq!(err.code, "steps_open");
-    assert!(err.reason.contains('1'), "reason: {}", err.reason);
 }
 
 #[test]
@@ -945,7 +701,7 @@ fn legacy_plan_file_loads_with_phase0_defaults() {
             "sessions": ["s1"],
             "goal": {"text": "old goal", "source": "user", "created": "..."},
             "acceptance": [
-                {"text": "cmd: cargo test", "status": "verified", "evidence": [3]},
+                {"text": "cargo test", "status": "verified", "evidence": [3]},
             ],
             "steps": [
                 {"id": "1", "title": "old step", "status": "done",
@@ -959,9 +715,6 @@ fn legacy_plan_file_loads_with_phase0_defaults() {
     )
     .unwrap();
     let plan = open(&dir, id).unwrap();
-    // a legacy v1 file still loads: the retired `acceptance` objects and
-    // step `refs` are ignored (no plain-text criteria to migrate from an
-    // object shape), so criteria defaults empty while evidence parses.
     assert!(plan.criteria.is_empty());
     assert!(plan.applied_events.is_empty());
     let step = &plan.steps[0];
@@ -971,88 +724,8 @@ fn legacy_plan_file_loads_with_phase0_defaults() {
 }
 
 #[test]
-fn start_rejected_while_session_holds_another_step() {
-    let mut plan = new_plan();
-    apply(
-        &mut plan,
-        Op::Start {
-            id: "1".into(),
-            confirm: None,
-        },
-        &Limits::default(),
-        None,
-    )
-    .unwrap();
-    // Same session holding step 1 cannot start step 2.
-    let err = apply(
-        &mut plan,
-        Op::Start {
-            id: "2".into(),
-            confirm: None,
-        },
-        &Limits::default(),
-        Some("1"),
-    )
-    .unwrap_err();
-    assert_eq!(err.code, "step_busy");
-    assert!(err.reason.contains('1'), "reason: {}", err.reason);
-    // Re-stating the held step is not "another step": falls through to
-    // the status check, which rejects with the clearer pending rule.
-    let err = apply(
-        &mut plan,
-        Op::Start {
-            id: "1".into(),
-            confirm: None,
-        },
-        &Limits::default(),
-        Some("1"),
-    )
-    .unwrap_err();
-    assert_eq!(err.code, "step_not_pending");
-}
-
-#[test]
-fn start_rejected_while_plan_has_other_in_progress() {
-    let mut plan = new_plan();
-    apply(
-        &mut plan,
-        Op::Start {
-            id: "1".into(),
-            confirm: None,
-        },
-        &Limits::default(),
-        None,
-    )
-    .unwrap();
-    // No session claim, but the plan globally holds step 1: a second
-    // InProgress step would make attribution ambiguous.
-    let err = apply(
-        &mut plan,
-        Op::Start {
-            id: "2".into(),
-            confirm: None,
-        },
-        &Limits::default(),
-        None,
-    )
-    .unwrap_err();
-    assert_eq!(err.code, "step_busy");
-    assert!(err.reason.contains('1'), "reason: {}", err.reason);
-}
-
-#[test]
 fn reopen_bumps_epoch_and_clears_evidence() {
     let mut plan = new_plan();
-    apply(
-        &mut plan,
-        Op::Start {
-            id: "1".into(),
-            confirm: None,
-        },
-        &Limits::default(),
-        None,
-    )
-    .unwrap();
     plan.step_mut("1").unwrap().evidence.push(EvidenceRef {
         session: "test".into(),
         seq: 42,
@@ -1064,7 +737,6 @@ fn reopen_bumps_epoch_and_clears_evidence() {
             summary: "model added".into(),
         },
         &Limits::default(),
-        None,
     )
     .unwrap();
     assert_eq!(plan.step("1").unwrap().step_epoch, 0);
@@ -1096,34 +768,28 @@ fn open_active_resolves_per_session_and_deterministically() {
     let parent_id = parent.id.clone();
     store(&dir, &parent).unwrap();
 
-    // Second active plan for another session (no fork: built directly).
     let mut second = new_plan();
     second.sessions = vec!["sess-child".into()];
     second.created = "2026-09-09T00:00:00+00:00".to_string();
     let child_id = second.id.clone();
     store(&dir, &second).unwrap();
 
-    // Querying with sess-parent returns parent plan
     let resolved_parent = open_active_for_session(&dir, Some("sess-parent"))
         .unwrap()
         .unwrap();
     assert_eq!(resolved_parent.id, parent_id);
 
-    // Querying with sess-child returns the second plan
     let resolved_child = open_active_for_session(&dir, Some("sess-child"))
         .unwrap()
         .unwrap();
     assert_eq!(resolved_child.id, child_id);
 
-    // Querying without session deterministically picks the newest (child)
     let resolved_default = open_active(&dir).unwrap().unwrap();
     assert_eq!(resolved_default.id, child_id);
 
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// #171: a session with no own active plan resolves to None — never to
-/// another session's plan. Silent cross-session adoption is gone.
 #[test]
 fn open_active_for_session_never_returns_a_foreign_plan() {
     let dir = std::env::temp_dir().join(format!("sqwai-plan-strict-{}", new_id()));
@@ -1137,7 +803,6 @@ fn open_active_for_session_never_returns_a_foreign_plan() {
             .is_none(),
         "a plan-less session must not adopt the foreign plan"
     );
-    // ...while the owner still resolves, and the global view is intact
     assert!(
         open_active_for_session(&dir, Some("owner"))
             .unwrap()
@@ -1149,131 +814,9 @@ fn open_active_for_session_never_returns_a_foreign_plan() {
 }
 
 #[test]
-fn split_pending_or_reopened_step_succeeds() {
-    let mut plan = new_plan();
-    let parts = vec![
-        NewStep {
-            title: "part a".into(),
-        },
-        NewStep {
-            title: "part b".into(),
-        },
-    ];
-    assert!(
-        apply(
-            &mut plan,
-            Op::Split {
-                id: "1".into(),
-                into: parts.clone()
-            },
-            &Limits::default(),
-            None,
-        )
-        .is_ok()
-    );
-    assert!(plan.step("1a").is_some());
-    assert!(plan.step("1b").is_some());
-    assert!(plan.step("1").is_none());
-
-    // Reopened step can also be split
-    plan.steps[2].status = StepStatus::Reopened;
-    assert!(
-        apply(
-            &mut plan,
-            Op::Split {
-                id: "2".into(),
-                into: parts
-            },
-            &Limits::default(),
-            None,
-        )
-        .is_ok()
-    );
-    assert!(plan.step("2a").is_some());
-    assert!(plan.step("2b").is_some());
-}
-
-#[test]
-fn split_rejects_done_in_progress_blocked_or_evidenced_steps() {
-    let mut plan = new_plan();
-    let parts = vec![
-        NewStep {
-            title: "part a".into(),
-        },
-        NewStep {
-            title: "part b".into(),
-        },
-    ];
-
-    // 1. Done step cannot be split
-    plan.steps[0].status = StepStatus::Done;
-    let err = apply(
-        &mut plan,
-        Op::Split {
-            id: "1".into(),
-            into: parts.clone(),
-        },
-        &Limits::default(),
-        None,
-    )
-    .unwrap_err();
-    assert_eq!(err.code, "step_not_splittable");
-
-    // 2. InProgress step cannot be split
-    plan.steps[0].status = StepStatus::InProgress;
-    let err = apply(
-        &mut plan,
-        Op::Split {
-            id: "1".into(),
-            into: parts.clone(),
-        },
-        &Limits::default(),
-        None,
-    )
-    .unwrap_err();
-    assert_eq!(err.code, "step_not_splittable");
-
-    // 3. Blocked step cannot be split
-    plan.steps[0].status = StepStatus::Blocked;
-    let err = apply(
-        &mut plan,
-        Op::Split {
-            id: "1".into(),
-            into: parts.clone(),
-        },
-        &Limits::default(),
-        None,
-    )
-    .unwrap_err();
-    assert_eq!(err.code, "step_not_splittable");
-
-    // 4. Pending step with recorded evidence cannot be split
-    plan.steps[0].status = StepStatus::Pending;
-    plan.steps[0].evidence.push(EvidenceRef {
-        session: "sess".into(),
-        seq: 1,
-    });
-    let err = apply(
-        &mut plan,
-        Op::Split {
-            id: "1".into(),
-            into: parts,
-        },
-        &Limits::default(),
-        None,
-    )
-    .unwrap_err();
-    assert_eq!(err.code, "step_has_evidence");
-}
-
-/// #182: the fallback picked the "newest" active plan by comparing RFC3339
-/// text, which only orders correctly while every stamp shares one UTC offset.
-/// Across a DST change the lexicographic winner is an hour older.
-#[test]
 fn open_active_for_session_falls_back_to_the_later_instant() {
     let dir = std::env::temp_dir().join(format!("sqwai-plan-order-{}", new_id()));
 
-    // Later as text (02:00 > 01:30), earlier as an instant: 23:00Z vs 23:30Z.
     let mut older = new_plan();
     older.created = "2026-10-25T02:00:00+03:00".into();
     older.sessions = vec!["older".into()];
@@ -1294,9 +837,6 @@ fn open_active_for_session_falls_back_to_the_later_instant() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// A plan file from a newer binary must never read as valid: `open`
-/// refuses without moving the file (no silent downgrade, no quarantine),
-/// `read_plan_file` and `list` skip it.
 #[test]
 fn future_plan_version_is_refused_not_adopted() {
     let dir = std::env::temp_dir().join(format!("sqwai-plan-future-{}", new_id()));
@@ -1309,7 +849,6 @@ fn future_plan_version_is_refused_not_adopted() {
         err.to_string().contains("reads up to version"),
         "must name the cause: {err:#}"
     );
-    // left in place: refusing a future file is not corruption
     assert!(
         plans_dir(&dir).join(format!("{}.json", plan.id)).exists(),
         "a future-version file must not be quarantined"
@@ -1333,8 +872,6 @@ fn future_plan_version_is_refused_not_adopted() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// A hand-edited non-numeric step id must fail loudly on `add`, never
-/// issue a colliding numeric id by silently skipping it.
 #[test]
 fn add_refuses_non_numeric_step_ids_instead_of_colliding() {
     let mut plan = new_plan();
@@ -1346,7 +883,6 @@ fn add_refuses_non_numeric_step_ids_instead_of_colliding() {
             title: "another".to_string(),
         },
         &Limits::default(),
-        None,
     )
     .unwrap_err();
     assert_eq!(err.code, "bad_step_id", "{err:?}");
@@ -1367,44 +903,6 @@ fn new_step_deserializes_strings_and_aliases_and_finish_names_next_step() {
     assert_eq!(steps[2].title, "desc alias");
 
     let mut plan = new_plan();
-    // Single-part split is rejected
-    let bad_split = apply(
-        &mut plan,
-        Op::Split {
-            id: "1".into(),
-            into: vec![NewStep {
-                title: "only one".into(),
-            }],
-        },
-        &Limits::default(),
-        None,
-    )
-    .unwrap_err();
-    assert_eq!(bad_split.code, "empty_split");
-
-    // Duplicate criteria are deduplicated
-    apply(
-        &mut plan,
-        Op::AddCriteria {
-            criteria: vec!["cargo test must pass".into(), "new criterion".into()],
-        },
-        &Limits::default(),
-        None,
-    )
-    .unwrap();
-    assert_eq!(plan.criteria.len(), 2);
-
-    // Finishing step 1 names step 2 as the next pending step
-    apply(
-        &mut plan,
-        Op::Start {
-            id: "1".into(),
-            confirm: None,
-        },
-        &Limits::default(),
-        None,
-    )
-    .unwrap();
     let res = apply(
         &mut plan,
         Op::Finish {
@@ -1412,14 +910,13 @@ fn new_step_deserializes_strings_and_aliases_and_finish_names_next_step() {
             summary: "done 1".into(),
         },
         &Limits::default(),
-        None,
     )
     .unwrap();
     match res {
         Applied::Updated { message } => {
             assert!(
-                message.contains("next pending step: 2"),
-                "finish should point to next pending step: {message}"
+                message.contains("next step in progress: 2"),
+                "finish should point to next in-progress step: {message}"
             );
         }
         _ => panic!("expected Updated"),

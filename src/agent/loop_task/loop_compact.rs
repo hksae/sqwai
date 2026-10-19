@@ -34,33 +34,29 @@ pub fn capture_nudge(user_text: &str, constraints: &[String]) -> Option<String> 
     }
     Some(
         "\n[host note: this message states a restriction that is not among the \
-         active plan's constraints — record it with `plan` (`op: \"add_criteria\"`) \
-         or `note` (`kind: \"decision\"`), or note why it needs no protection.]"
+         active plan's constraints — record it with `note` (`kind: \"decision\"`) \
+         or `memory_write`, or note why it needs no protection.]"
             .to_string(),
     )
 }
 
-/// Substring scan for negative directives (EN + RU). Checked before any
+/// Substring scan for negative directives. Checked before any
 /// disk access so ordinary turns never pay for the plan lookup.
 pub fn has_restriction_marker(lower_text: &str) -> bool {
     const MARKERS: &[&str] = &[
         "don't touch",
         "do not touch",
-        "не трогай",
         "don't change",
         "do not change",
-        "не меняй",
         "don't modify",
         "do not modify",
         "don't break",
         "do not break",
-        "не ломай",
         "don't delete",
         "do not delete",
-        "не удаляй",
-        "оставь как есть",
-        "нельзя",
-        "запрещ",
+        "leave as is",
+        "must not",
+        "forbidden",
     ];
     MARKERS.iter().any(|m| lower_text.contains(m))
 }

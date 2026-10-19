@@ -1,10 +1,7 @@
-use super::{
-    Goal, MAX_STEPS_DEFAULT, PLAN_VERSION, Plan, PlanStatus, Step, StepStatus, new_id, now, render,
-};
+use super::{Goal, MAX_STEPS_DEFAULT, PLAN_VERSION, Plan, PlanStatus, Step, StepStatus, new_id, now};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::path::Path;
 
 // ---------------------------------------------------------------- operations
 
@@ -57,21 +54,15 @@ pub enum Op {
         #[serde(default)]
         steps: Vec<NewStep>,
     },
-    Start {
-        id: String,
-        #[serde(default)]
-        confirm: Option<bool>,
-    },
     Finish {
+        #[serde(default)]
         id: String,
         summary: String,
     },
-    Block {
-        id: String,
-        reason: String,
-    },
-    Unblock {
-        id: String,
+    Add {
+        #[serde(default)]
+        after: Option<String>,
+        title: String,
     },
     Cancel {
         #[serde(default)]
@@ -79,51 +70,14 @@ pub enum Op {
         #[serde(default)]
         reason: String,
     },
-    /// Honest surrender: the task is impossible as specified. `reason`
-    /// must quote the conflict (spec vs test, contradictory requirements);
-    /// empty reasons are refused. Sets status `Blocked` — terminal and
-    /// read-only like every closed plan, but reported as an honest result,
-    /// never as failed work.
-    BlockPlan {
-        #[serde(default)]
-        reason: String,
-    },
-    /// Abandon the whole plan: it is the wrong plan (not merely a hard step).
-    /// `reason` must say why (empty/thin reasons refused); applied directly by
-    /// either actor and journaled with actor + reason — no confirm dialog. The
-    /// old plan stays on disk as `Abandoned` (history is never rewritten); a
-    /// replacement, if any, goes through a fresh `create` with all its gates.
-    /// Replayable like every op (see apply_record).
-    #[serde(alias = "propose_reset")]
+    /// Abandon the whole plan when the direction has changed or the
+    /// specification is contradictory. `reason` must explain why (empty/thin
+    /// reasons refused). The old plan stays on disk as `Abandoned` (history is
+    /// never rewritten); a replacement, if any, goes through a fresh `create`.
+    #[serde(alias = "propose_reset", alias = "block_plan")]
     Abandon {
         #[serde(default)]
         reason: String,
-    },
-    Add {
-        #[serde(default)]
-        after: Option<String>,
-        title: String,
-    },
-    /// Append done-criteria notes to a plan born with fewer than the work
-    /// now needs. Plain text, no typing gate — a criterion is the agent's
-    /// own reminder, not a check the host settles.
-    AddCriteria {
-        #[serde(default, alias = "items")]
-        criteria: Vec<String>,
-    },
-    Split {
-        id: String,
-        into: Vec<NewStep>,
-    },
-    Complete,
-    Show,
-    /// Read-only: what changed during one plan step, from shadow checkpoint
-    /// boundaries. Answered by the dispatcher without touching the plan file
-    /// (see `step_diff`); never journaled, never replayed.
-    StepDiff {
-        step_id: String,
-        #[serde(default)]
-        path: Option<String>,
     },
     /// Host-only: a child session joins its parent's plan so its evidence
     /// attaches under session-strict resolution. Never exposed to the model
@@ -156,13 +110,8 @@ impl Rejection {
 
 #[derive(Debug, Clone)]
 pub enum Applied {
-    Updated {
-        message: String,
-    },
-    Shown {
-        text: String,
-    },
-    Completed,
+    Updated { message: String },
+    Completed { message: String },
 }
 
 /// Host-only: retire the active plan. The reason travels in the journal; the
@@ -172,16 +121,17 @@ pub fn abandon(plan: &mut Plan) {
     plan.revision += 1;
 }
 
-/// Reason gate shared by BlockPlan and Abandon: the surrender must
-/// quote what is wrong (conflict or plan defect), not gesture at effort.
-/// Empty reasons are refused; one-word reasons are refused with guidance.
+/// Reason gate for `Abandon`: must explain what is wrong (spec conflict or
+/// direction change), not gesture at effort. Empty and one-word reasons are
+/// refused with guidance.
 pub fn validate_surrender_reason(reason: &str, what: &str) -> Result<String, Rejection> {
     let quoted = reason.trim().to_string();
     if quoted.is_empty() {
         return Err(Rejection::new(
             "empty_reason",
-            format!("{what} needs the quoted conflict"),
-            "cite what contradicts what: the spec line against the test or requirement".to_string(),
+            format!("{what} needs a reason"),
+            "cite what changed or contradicts what: the requirement, step, or spec conflict"
+                .to_string(),
         ));
     }
     if quoted.split_whitespace().count() < 3 {
@@ -195,20 +145,6 @@ pub fn validate_surrender_reason(reason: &str, what: &str) -> Result<String, Rej
     Ok(quoted)
 }
 
-/// Honest surrender (`BlockPlan`): the task cannot be done as specified.
-/// The quoted conflict is stored on the plan file itself — it is the
-/// artifact future readers and the bench harness judge, not the journal.
-fn block_plan(plan: &mut Plan, reason: String) -> Result<Applied, Rejection> {
-    let quoted = validate_surrender_reason(&reason, "blocking a plan")?;
-    plan.status = PlanStatus::Blocked;
-    plan.blocked_reason = Some(quoted);
-    plan.revision += 1;
-    accept(
-        plan,
-        format!("plan {} blocked: spec conflict recorded", plan.id),
-    )
-}
-
 #[derive(Debug, Clone, Copy)]
 pub struct Limits {
     pub max_steps: usize,
@@ -220,37 +156,6 @@ impl Default for Limits {
             max_steps: MAX_STEPS_DEFAULT,
         }
     }
-}
-
-/// Close the plan. The host checks only that no step is left open — the
-/// criteria are the agent's own done-notes, which nothing here runs or grades
-///. This is a completeness check on the form, not a verdict on the work.
-pub(crate) fn complete(plan: &mut Plan) -> Result<Applied, Rejection> {
-    let pending: Vec<String> = plan
-        .steps
-        .iter()
-        .filter(|s| {
-            matches!(
-                s.status,
-                StepStatus::Pending
-                    | StepStatus::InProgress
-                    | StepStatus::Blocked
-                    | StepStatus::Reopened
-            )
-        })
-        .map(|s| s.id.clone())
-        .collect();
-    if !pending.is_empty() {
-        return reject(
-            plan,
-            "steps_open",
-            format!("steps still open: {}", pending.join(", ")),
-            "finish, unblock or cancel them first",
-        );
-    }
-    plan.status = PlanStatus::Completed;
-    plan.revision += 1;
-    Ok(Applied::Completed)
 }
 
 pub(crate) fn next_id(plan: &Plan) -> Result<String, Rejection> {
@@ -268,10 +173,29 @@ pub(crate) fn next_id(plan: &Plan) -> Result<String, Rejection> {
     Ok((max + 1).to_string())
 }
 
-/// Build a new plan. Rejects an empty goal, empty criteria, zero steps and
-/// over-long plans. Criteria are the agent's own done-notes — plain text, no
-/// typing gate — but a plan must state at least one, so there is always a
-/// target that survives compaction.
+/// Promote the first `Pending` or `Reopened` step to `InProgress` whenever no
+/// step is currently running. Returns the ID of the newly started step, if any.
+pub(crate) fn auto_advance(plan: &mut Plan) -> Option<String> {
+    if plan.steps.iter().any(|s| s.status == StepStatus::InProgress) {
+        return None;
+    }
+    if let Some(next) = plan
+        .steps
+        .iter_mut()
+        .find(|s| matches!(s.status, StepStatus::Pending | StepStatus::Reopened))
+    {
+        next.status = StepStatus::InProgress;
+        if next.started.is_none() {
+            next.started = Some(now());
+        }
+        return Some(next.id.clone());
+    }
+    None
+}
+
+/// Build a new plan and immediately start step 1 (`InProgress`). Rejects an
+/// empty goal, empty criteria, zero steps, empty step titles, and over-long
+/// plans.
 pub fn create(
     goal: String,
     constraints: Vec<String>,
@@ -298,7 +222,7 @@ pub fn create(
         return Err(Rejection::new(
             "no_steps",
             "a plan needs at least one step",
-            "break the work into 3-12 steps",
+            "break the work into 3-6 steps",
         ));
     }
     if steps.iter().any(|s| s.title.trim().is_empty()) {
@@ -342,8 +266,7 @@ pub fn create(
         goal: Goal {
             text: goal.trim().to_string(),
             source: "user".to_string(),
-            created: ts,
-            history: Vec::new(),
+            created: ts.clone(),
         },
         constraints: constraints
             .into_iter()
@@ -357,167 +280,27 @@ pub fn create(
             .map(|(i, s)| Step {
                 id: (i + 1).to_string(),
                 title: s.title.trim().to_string(),
-                status: StepStatus::Pending,
-                started: None,
+                status: if i == 0 {
+                    StepStatus::InProgress
+                } else {
+                    StepStatus::Pending
+                },
+                started: if i == 0 { Some(ts.clone()) } else { None },
                 finished: None,
                 summary: None,
                 reason: None,
                 evidence: Vec::new(),
                 step_epoch: 0,
-                stale_goal: false,
             })
             .collect(),
         revision: 0,
-        blocked_reason: None,
     };
     Ok(plan)
 }
 
-/// Read-only step diff for the `step_diff` plan op: what changed during one
-/// plan step, from shadow checkpoint boundaries. Takes explicit host handles
-/// (root, session, shadow store, checkpoint chain) instead of a ToolCtx —
-/// the plan crate owns the operation, dispatch owns the context. Never
-/// journaled, never replayed.
-pub fn step_diff(
-    root: &Path,
-    session_id: &str,
-    shadow_store: crate::config::ShadowStore,
-    chain: &str,
-    step_id: &str,
-    path: Option<&str>,
-) -> Result<String, Rejection> {
-    let fail = |reason: &str| {
-        Rejection::new(
-            "step_diff_failed",
-            reason,
-            "need a started step with checkpointed work",
-        )
-    };
-    let target_path = path.map(str::trim).filter(|s| !s.is_empty());
-
-    // Check plan if present
-    if let Ok(Some(plan)) = super::store::open_active_for_session(root, Some(session_id))
-        && let Some(step) = plan.step(step_id)
-        && step.status == StepStatus::Pending
-    {
-        return Ok(format!(
-            "step '{step_id}' is pending and has not been started yet"
-        ));
-    }
-
-    let Some(shadow) = crate::agent::checkpoints::shadow_repo(root, shadow_store) else {
-        return Err(fail("shadow checkpoint repository is not available"));
-    };
-
-    // If step is currently in progress, ensure current worktree is snapshotted
-    let _ = crate::agent::checkpoints::snapshot_boundary(
-        root,
-        shadow_store,
-        chain,
-        &format!("step_{step_id}_probe"),
-    );
-
-    // Find commits in the session chain
-    let commits = match shadow.commit_log(chain) {
-        Ok(c) if !c.is_empty() => c,
-        _ => match shadow.commit_log("shared") {
-            Ok(c) => c,
-            Err(e) => return Err(fail(&format!("reading shadow history failed: {e:#}"))),
-        },
-    };
-
-    let (mut start_sha, mut finish_sha) = resolve_boundary_commits(&commits, step_id);
-
-    // Fallback to journal records if labels not in commit messages
-    if (start_sha.is_none() || finish_sha.is_none())
-        && let Ok(records) = crate::agent::journal::Journal::records_for(root, session_id)
-    {
-        for r in &records {
-            let matches_step = r.step.as_deref() == Some(step_id)
-                || r.fields.get("step").and_then(Value::as_str) == Some(step_id)
-                || (r.kind == "plan"
-                    && r.fields.get("id").and_then(Value::as_str) == Some(step_id));
-            if !matches_step {
-                continue;
-            }
-            if let Some(sha) = r.fields.get("id").and_then(Value::as_str) {
-                let reason = r.fields.get("reason").and_then(Value::as_str);
-                if reason == Some("step_start") {
-                    start_sha = Some(sha.to_string());
-                    finish_sha = None;
-                }
-                if reason == Some("step_finish") && start_sha.is_some() {
-                    finish_sha = Some(sha.to_string());
-                }
-            }
-            if let Some(sha) = r.fields.get("checkpoint").and_then(Value::as_str) {
-                start_sha = Some(sha.to_string());
-                finish_sha = None;
-            }
-        }
-    }
-
-    // If finish is still not found, use latest commit on the session chain
-    if finish_sha.is_none() {
-        finish_sha = shadow.head_of(chain).or_else(|| shadow.head_of("shared"));
-    }
-
-    let (Some(start), Some(finish)) = (start_sha, finish_sha) else {
-        return Err(fail(&format!(
-            "no checkpoint boundaries found for step '{step_id}'"
-        )));
-    };
-
-    match shadow.diff(&start, &finish, target_path) {
-        Ok(diff) => {
-            let trimmed = diff.trim();
-            if trimmed.is_empty() {
-                if let Some(path) = target_path {
-                    Ok(format!("no changes to '{path}' in step {step_id}"))
-                } else {
-                    Ok(format!("no changes recorded for step {step_id}"))
-                }
-            } else {
-                Ok(trimmed.to_string())
-            }
-        }
-        Err(e) => Err(fail(&format!("git diff failed: {e:#}"))),
-    }
-}
-
-pub(crate) fn resolve_boundary_commits(
-    commits: &[(String, String)],
-    step_id: &str,
-) -> (Option<String>, Option<String>) {
-    let start_label = format!("step_{step_id}_start");
-    let finish_label = format!("step_{step_id}_finish");
-
-    let mut start_sha: Option<String> = None;
-    let mut finish_sha: Option<String> = None;
-
-    // commits are newest first (reverse chronological order)
-    for (sha, label) in commits {
-        if label.contains(&finish_label) && finish_sha.is_none() && start_sha.is_none() {
-            finish_sha = Some(sha.clone());
-        }
-        if label.contains(&start_label) && start_sha.is_none() {
-            start_sha = Some(sha.clone());
-        }
-    }
-    (start_sha, finish_sha)
-}
-
-/// Apply one operation. Every rule except the evidence rule.
-pub fn apply(
-    plan: &mut Plan,
-    op: Op,
-    limits: &Limits,
-    current_step: Option<&str>,
-) -> Result<Applied, Rejection> {
-    // Closed plans are read-only: Show inspects, everything else belongs
-    // to an active plan. Without this the model path could keep mutating
-    // completed or abandoned plans (defect A).
-    if plan.status != PlanStatus::Active && !matches!(op, Op::Show | Op::StepDiff { .. }) {
+/// Apply one operation to an active plan.
+pub fn apply(plan: &mut Plan, op: Op, limits: &Limits) -> Result<Applied, Rejection> {
+    if plan.status != PlanStatus::Active {
         return reject(
             plan,
             "plan_closed",
@@ -527,7 +310,6 @@ pub fn apply(
                 match plan.status {
                     PlanStatus::Completed => "completed",
                     PlanStatus::Abandoned => "abandoned",
-                    PlanStatus::Blocked => "blocked",
                     PlanStatus::Active => "active",
                 }
             ),
@@ -539,33 +321,16 @@ pub fn apply(
             plan,
             "plan_exists",
             format!("an active plan already exists: {}", plan.id),
-            "work that plan instead: start/finish its steps, do not create another one. The current plan is in your context above",
+            "work that plan instead: finish its steps, do not create another one. The current plan is in your context above",
         ),
-        Op::Show => Ok(Applied::Shown { text: render(plan) }),
-        // Answered by the dispatcher (which owns root, session and shadow
-        // handles this signature lacks); reaching apply means a bug. Kept
-        // explicit so the match stays exhaustive if the dispatcher changes.
-        Op::StepDiff { .. } => reject(
-            plan,
-            "step_diff_dispatched",
-            "step diffs are answered by the dispatcher without touching the plan",
-            "call plan with op step_diff",
-        ),
-        Op::Start { id, confirm } => start(plan, &id, confirm, current_step),
         Op::Finish { id, summary } => finish(plan, &id, summary),
-        Op::Block { id, reason } => block(plan, &id, reason),
-        Op::Unblock { id } => unblock(plan, &id),
         Op::Cancel { id, reason } => cancel(plan, id.as_deref(), reason),
-        Op::BlockPlan { reason } => block_plan(plan, reason),
         Op::Abandon { reason } => {
             let quoted = validate_surrender_reason(&reason, "abandoning a plan")?;
             abandon(plan);
             accept(plan, format!("plan {} abandoned: {quoted}", plan.id))
         }
         Op::Add { after, title } => add(plan, after.as_deref(), title, limits),
-        Op::AddCriteria { criteria } => add_criteria(plan, criteria),
-        Op::Split { id, into } => split(plan, &id, into, limits),
-        Op::Complete => complete(plan),
         Op::Join { session } => join(plan, &session),
     }
 }
@@ -595,10 +360,8 @@ pub(crate) fn accept(plan: &mut Plan, message: impl Into<String>) -> Result<Appl
     })
 }
 
-/// Gate fields read without holding a borrow.
-fn step_status(plan: &Plan, id: &str) -> Option<(StepStatus, bool)> {
-    plan.step(id)
-        .map(|s| (s.status, s.stale_goal))
+fn step_status(plan: &Plan, id: &str) -> Option<StepStatus> {
+    plan.step(id).map(|s| s.status)
 }
 
 fn unknown_step(plan: &mut Plan, id: &str) -> Result<Applied, Rejection> {
@@ -610,180 +373,117 @@ fn unknown_step(plan: &mut Plan, id: &str) -> Result<Applied, Rejection> {
     )
 }
 
-fn start(
-    plan: &mut Plan,
-    id: &str,
-    confirm: Option<bool>,
-    current_step: Option<&str>,
-) -> Result<Applied, Rejection> {
-    let Some((status, stale)) = step_status(plan, id) else {
-        return unknown_step(plan, id);
-    };
-    if !matches!(status, StepStatus::Pending | StepStatus::Reopened) {
-        return reject(
-            plan,
-            "step_not_pending",
-            format!("step {id} is {}", status.as_str()),
-            "only a pending or reopened step can be started",
-        );
-    }
-    // One step at a time: the caller's session must not hold another
-    // step, and the plan must not have one in progress either (a second
-    // InProgress step would make dispatch attribution ambiguous).
-    if let Some(other) = current_step.filter(|current| *current != id) {
-        return reject(
-            plan,
-            "step_busy",
-            format!("step {other} is already the current step of this session"),
-            format!(
-                "finish, block or cancel step {other} first — or continue it instead of starting step {id}"
-            ),
-        );
-    }
-    if let Some(other) = plan.steps.iter().find_map(|step| {
-        (step.id != id && step.status == StepStatus::InProgress).then(|| step.id.clone())
-    }) {
-        return reject(
-            plan,
-            "step_busy",
-            format!("step {other} is already in progress"),
-            format!("only one step runs at a time; finish, block or cancel step {other} first"),
-        );
-    }
-    if stale && confirm != Some(true) {
-        return reject(
-            plan,
-            "stale_goal",
-            format!("step {id} predates the current goal"),
-            "re-read it against the new goal, then pass confirm: true",
-        );
-    }
-        let step = plan.step_mut(id).expect("checked above");
-    step.status = StepStatus::InProgress;
-    step.started = Some(now());
-    step.stale_goal = false;
-    accept(plan, format!("step {id} in progress"))
-}
-
 fn finish(plan: &mut Plan, id: &str, summary: String) -> Result<Applied, Rejection> {
-    let Some((status, _)) = step_status(plan, id) else {
-        return unknown_step(plan, id);
+    let target_id = if id.trim().is_empty() {
+        plan.steps
+            .iter()
+            .find(|s| s.status == StepStatus::InProgress)
+            .or_else(|| plan.steps.iter().find(|s| s.status == StepStatus::Reopened))
+            .map(|s| s.id.clone())
+            .unwrap_or_default()
+    } else {
+        id.trim().to_string()
     };
-    if status != StepStatus::InProgress {
+    let Some(status) = step_status(plan, &target_id) else {
+        return unknown_step(plan, &target_id);
+    };
+    if matches!(status, StepStatus::Done | StepStatus::Cancelled) {
         return reject(
             plan,
-            "step_not_in_progress",
-            format!("step {id} is {}", status.as_str()),
-            "start the step before finishing it",
+            "step_already_closed",
+            format!("step {target_id} is already {}", status.as_str()),
+            "only an in-progress or reopened step can be finished",
         );
+    }
+    if status == StepStatus::Pending {
+        if let Some(active) = plan
+            .steps
+            .iter()
+            .find(|s| s.id != target_id && s.status == StepStatus::InProgress)
+        {
+            return reject(
+                plan,
+                "step_not_in_progress",
+                format!(
+                    "step {target_id} is pending while step {} is in progress",
+                    active.id
+                ),
+                format!("finish or cancel step {} first", active.id),
+            );
+        }
     }
     if summary.trim().is_empty() {
         return reject(
             plan,
             "empty_summary",
-            format!("step {id} needs a summary of what was done"),
+            format!("step {target_id} needs a summary of what was done"),
             "one line: what changed and where",
         );
     }
-    // `finish` records that the work was performed and moves on. Whether it
-    // verified is the host's observation in the journal, never a gate here.
-    let step = plan.step_mut(id).expect("checked above");
+    let step = plan.step_mut(&target_id).expect("checked above");
     step.status = StepStatus::Done;
     step.finished = Some(now());
     step.summary = Some(summary.trim().to_string());
+    step.reason = None;
+
+    auto_advance(plan);
+
+    let all_closed = plan
+        .steps
+        .iter()
+        .all(|s| matches!(s.status, StepStatus::Done | StepStatus::Cancelled));
+    if all_closed {
+        plan.status = PlanStatus::Completed;
+        plan.revision += 1;
+        return Ok(Applied::Completed {
+            message: format!(
+                "step {target_id} done — all steps closed, plan {} completed",
+                plan.id
+            ),
+        });
+    }
+
     let next_hint = match plan
         .steps
         .iter()
-        .find(|s| matches!(s.status, StepStatus::Pending | StepStatus::Reopened))
+        .find(|s| matches!(s.status, StepStatus::InProgress | StepStatus::Reopened))
     {
         Some(next) => format!(
-            " (next pending step: {} \"{}\")",
+            " (next step in progress: {} \"{}\")",
             next.id,
             next.title.chars().take(48).collect::<String>()
         ),
-        None => " (all steps closed — ready for op: \"complete\")".to_string(),
+        None => String::new(),
     };
     accept(
         plan,
         format!(
-            "step {id} done{next_hint} — a decision this step settled, an approach it rejected or a \
+            "step {target_id} done{next_hint} — a decision this step settled, an approach it rejected or a \
              lesson it learned belongs in `note`; the transcript gets compacted, the journal does not"
         ),
     )
 }
 
-fn block(plan: &mut Plan, id: &str, reason: String) -> Result<Applied, Rejection> {
-    let Some((status, _)) = step_status(plan, id) else {
-        return unknown_step(plan, id);
-    };
-    if status != StepStatus::InProgress {
-        return reject(
-            plan,
-            "step_not_in_progress",
-            format!("step {id} is {}", status.as_str()),
-            "only an in-progress step can be blocked",
-        );
-    }
-    if reason.trim().is_empty() {
-        return reject(
-            plan,
-            "empty_reason",
-            format!("blocking step {id} needs a reason"),
-            "say what it is waiting for",
-        );
-    }
-    let step = plan.step_mut(id).expect("checked above");
-    step.status = StepStatus::Blocked;
-    step.reason = Some(reason);
-    accept(plan, format!("step {id} blocked"))
-}
-
-fn unblock(plan: &mut Plan, id: &str) -> Result<Applied, Rejection> {
-    let Some((status, _)) = step_status(plan, id) else {
-        return unknown_step(plan, id);
-    };
-    if status != StepStatus::Blocked {
-        return reject(
-            plan,
-            "step_not_blocked",
-            format!("step {id} is {}", status.as_str()),
-            "only a blocked step can be unblocked",
-        );
-    }
-    let step = plan.step_mut(id).expect("checked above");
-    step.status = StepStatus::Pending;
-    step.reason = None;
-    accept(plan, format!("step {id} unblocked"))
-}
-
 fn cancel(plan: &mut Plan, id: Option<&str>, reason: String) -> Result<Applied, Rejection> {
-    // No silent whole-plan kill: a missing id used to abandon the entire
-    // plan, so a model that forgot the id destroyed it by accident — and a
-    // model that remembered it could abandon + recreate around every
-    // goal/constraint guard in two calls.
-    let Some(id) = id else {
+    let Some(id) = id.map(str::trim).filter(|s| !s.is_empty()) else {
         return reject(
             plan,
             "need_step_id",
             "cancel needs a step id".to_string(),
-            "cancel a step that will not happen, or ask the user to delete the whole plan (/plan delete)".to_string(),
+            "cancel a step that will not happen, or use op=\"abandon\" with a reason to abandon the whole plan"
+                .to_string(),
         );
     };
-    // Abandoning the whole plan is the model's call (`block_plan` with a
-    // quoted contradiction, or `abandon` with a reason); the user can also
-    // delete it outright with `/plan delete`. The model surrenders
-    // contradictions with `block_plan` (quoted) instead of walking around
-    // the goal.
     if id == plan.id {
         return reject(
             plan,
             "abandon_user_only",
-            format!("plan {} can only be abandoned by the user", plan.id),
-            "surrender a contradiction with block_plan (quote it), ask the user to delete it (/plan delete), or describe the contradiction in chat"
+            format!("plan {} cannot be cancelled as a step", plan.id),
+            "use op=\"abandon\" with a quoted reason to abandon the whole plan, or ask the user to delete it (/plan delete)"
                 .to_string(),
         );
     }
-    let Some((status, _)) = step_status(plan, id) else {
+    let Some(status) = step_status(plan, id) else {
         return unknown_step(plan, id);
     };
     if status == StepStatus::Done {
@@ -797,12 +497,42 @@ fn cancel(plan: &mut Plan, id: Option<&str>, reason: String) -> Result<Applied, 
     let reason_str = if reason.trim().is_empty() {
         "cancelled".to_string()
     } else {
-        reason
+        reason.trim().to_string()
     };
     let step = plan.step_mut(id).expect("checked above");
     step.status = StepStatus::Cancelled;
     step.reason = Some(reason_str);
-    accept(plan, format!("step {id} cancelled"))
+
+    auto_advance(plan);
+
+    let all_closed = plan
+        .steps
+        .iter()
+        .all(|s| matches!(s.status, StepStatus::Done | StepStatus::Cancelled));
+    if all_closed {
+        plan.status = PlanStatus::Completed;
+        plan.revision += 1;
+        return Ok(Applied::Completed {
+            message: format!(
+                "step {id} cancelled — all steps closed, plan {} completed",
+                plan.id
+            ),
+        });
+    }
+
+    let next_hint = match plan
+        .steps
+        .iter()
+        .find(|s| matches!(s.status, StepStatus::InProgress | StepStatus::Reopened))
+    {
+        Some(next) => format!(
+            " (next step in progress: {} \"{}\")",
+            next.id,
+            next.title.chars().take(48).collect::<String>()
+        ),
+        None => String::new(),
+    };
+    accept(plan, format!("step {id} cancelled{next_hint}"))
 }
 
 fn add(
@@ -830,7 +560,7 @@ fn add(
             "merge or cancel steps first, or ask the user to raise [plan].max_steps in the config",
         );
     }
-    let index = match after {
+    let index = match after.map(str::trim).filter(|s| !s.is_empty()) {
         None => plan.steps.len(),
         Some(after_id) => {
             let found = plan.steps.iter().position(|s| s.id == after_id);
@@ -849,8 +579,8 @@ fn add(
     };
     let id = next_id(plan)?;
     let step = Step {
-        id,
-        title,
+        id: id.clone(),
+        title: title.trim().to_string(),
         status: StepStatus::Pending,
         started: None,
         finished: None,
@@ -858,163 +588,8 @@ fn add(
         reason: None,
         evidence: Vec::new(),
         step_epoch: 0,
-        stale_goal: false,
     };
-    let id = step.id.clone();
     plan.steps.insert(index, step);
+    auto_advance(plan);
     accept(plan, format!("step {id} added"))
-}
-
-/// Append done-criteria notes. Empty additions are refused; the notes are
-/// plain text with no typing gate — a criterion is the agent's own reminder.
-pub(crate) fn add_criteria(plan: &mut Plan, criteria: Vec<String>) -> Result<Applied, Rejection> {
-    if criteria.iter().all(|text| text.trim().is_empty()) {
-        return reject(
-            plan,
-            "empty_criteria",
-            "no criteria given",
-            "add at least one plain-text note on what must be true when done",
-        );
-    }
-    let mut added = 0;
-    for text in criteria {
-        let text = text.trim().to_string();
-        if text.is_empty() {
-            continue;
-        }
-        if !plan
-            .criteria
-            .iter()
-            .any(|existing| existing.eq_ignore_ascii_case(&text))
-        {
-            plan.criteria.push(text);
-            added += 1;
-        }
-    }
-    accept(plan, format!("criteria +{added}"))
-}
-
-fn split(
-    plan: &mut Plan,
-    id: &str,
-    into: Vec<NewStep>,
-    limits: &Limits,
-) -> Result<Applied, Rejection> {
-    if into.len() < 2 {
-        return reject(
-            plan,
-            "empty_split",
-            format!("splitting step {id} needs at least two parts"),
-            "give the step a smaller shape, or cancel it with a reason",
-        );
-    }
-    if into.iter().any(|s| s.title.trim().is_empty()) {
-        return reject(
-            plan,
-            "empty_title",
-            format!("splitting step {id} requires non-empty titles for every part"),
-            "give each split part a clear one-line description",
-        );
-    }
-    let found = plan.steps.iter().position(|s| s.id == id);
-    let index = match found {
-        Some(i) => i,
-        None => {
-            return reject(
-                plan,
-                "unknown_step",
-                format!("no step {id} to split"),
-                "the current steps with their ids are in your context above",
-            );
-        }
-    };
-    let step = &plan.steps[index];
-    if !matches!(step.status, StepStatus::Pending | StepStatus::Reopened) {
-        return reject(
-            plan,
-            "step_not_splittable",
-            format!("step {id} is {}", step.status.as_str()),
-            "only a pending or reopened step can be split",
-        );
-    }
-    if !step.evidence.is_empty() {
-        return reject(
-            plan,
-            "step_has_evidence",
-            format!("step {id} already has recorded evidence"),
-            "steps with recorded evidence cannot be split or deleted",
-        );
-    }
-    let resulting = plan.steps.len() - 1 + into.len();
-    if resulting > limits.max_steps {
-        return reject(
-            plan,
-            "too_many_steps",
-            format!(
-                "splitting would give {resulting} steps, over the limit of {max}",
-                max = limits.max_steps
-            ),
-            "cancel or merge steps first, or ask the user to raise [plan].max_steps in the config",
-        );
-    }
-    let suffixes = ["a", "b", "c", "d", "e", "f", "g", "h"];
-    if into.len() > suffixes.len() {
-        return reject(
-            plan,
-            "too_many_parts",
-            format!("splitting into {} parts is not supported", into.len()),
-            "split in two stages",
-        );
-    }
-    let replacements: Vec<Step> = into
-        .into_iter()
-        .enumerate()
-        .map(|(i, s)| Step {
-            id: format!("{id}{}", suffixes[i]),
-            title: s.title,
-            status: StepStatus::Pending,
-            started: None,
-            finished: None,
-            summary: None,
-            reason: None,
-            evidence: Vec::new(),
-            step_epoch: 0,
-            stale_goal: false,
-        })
-        .collect();
-    let ids: Vec<String> = replacements.iter().map(|s| s.id.clone()).collect();
-    plan.steps.splice(index..=index, replacements);
-    accept(plan, format!("step {id} split into {}", ids.join(", ")))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn resolve_boundary_commits_handles_reopened_steps() {
-        // Step was finished (cycle 1), reopened, and started again (cycle 2 in progress)
-        // Commits in reverse-chronological order (newest first):
-        let commits = vec![
-            ("sha_work".into(), "commit: work in progress".into()),
-            ("sha_start_2".into(), "checkpoint: step_1_start".into()),
-            ("sha_finish_1".into(), "checkpoint: step_1_finish".into()),
-            ("sha_start_1".into(), "checkpoint: step_1_start".into()),
-        ];
-        let (start, finish) = resolve_boundary_commits(&commits, "1");
-        assert_eq!(start.as_deref(), Some("sha_start_2"));
-        // finish must NOT pair with stale sha_finish_1 from prior cycle
-        assert_eq!(finish, None);
-
-        // Once cycle 2 finishes:
-        let commits_finished = vec![
-            ("sha_finish_2".into(), "checkpoint: step_1_finish".into()),
-            ("sha_start_2".into(), "checkpoint: step_1_start".into()),
-            ("sha_finish_1".into(), "checkpoint: step_1_finish".into()),
-            ("sha_start_1".into(), "checkpoint: step_1_start".into()),
-        ];
-        let (start, finish) = resolve_boundary_commits(&commits_finished, "1");
-        assert_eq!(start.as_deref(), Some("sha_start_2"));
-        assert_eq!(finish.as_deref(), Some("sha_finish_2"));
-    }
 }

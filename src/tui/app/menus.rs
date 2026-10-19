@@ -1243,7 +1243,6 @@ impl App {
                         plan::PlanStatus::Active => "active",
                         plan::PlanStatus::Completed => "completed",
                         plan::PlanStatus::Abandoned => "abandoned",
-                        plan::PlanStatus::Blocked => "blocked",
                     };
                     let c = plan.counts();
                     format!(" Plan · {status} ({}/{} done) ", c.done, plan.steps.len())

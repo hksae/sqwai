@@ -19,11 +19,12 @@ mod ops;
 mod render;
 pub(crate) mod store;
 pub use ops::{Applied, Limits, NewStep, Op, Rejection, apply, create};
-pub(crate) use ops::{add_criteria, step_diff};
-pub use render::{render, render_goal, render_status, set_goal};
+pub use render::{render, render_goal, render_status};
+#[cfg(test)]
+pub use store::open_active;
 pub use store::{
-    StepContext, commit, list, list_active, open, open_active, open_active_for_session,
-    read_plan_file, replay, store,
+    StepContext, commit, list, list_active, open, open_active_for_session, read_plan_file, replay,
+    store,
 };
 
 /// A host-owned journal reference. The session is part of the identity because
@@ -92,11 +93,8 @@ pub const PLAN_VERSION: u32 = 3;
 pub enum PlanStatus {
     Active,
     Completed,
+    #[serde(alias = "blocked")]
     Abandoned,
-    /// Honest terminal state: the task is impossible as specified (spec
-    /// conflict, quoted in `blocked_reason`), not failed work. Closed like
-    /// every non-active status — read-only except `show`.
-    Blocked,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -104,8 +102,8 @@ pub enum PlanStatus {
 pub enum StepStatus {
     Pending,
     InProgress,
-    Blocked,
     Done,
+    #[serde(alias = "blocked")]
     Cancelled,
     Reopened,
 }
@@ -115,7 +113,6 @@ impl StepStatus {
         match self {
             Self::Pending => "pending",
             Self::InProgress => "in_progress",
-            Self::Blocked => "blocked",
             Self::Done => "done",
             Self::Cancelled => "cancelled",
             Self::Reopened => "reopened",
@@ -124,21 +121,10 @@ impl StepStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GoalRevision {
-    pub text: String,
-    pub source: String,
-    pub at: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Goal {
     pub text: String,
     pub source: String,
     pub created: String,
-    #[serde(default)]
-    pub history: Vec<GoalRevision>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -161,9 +147,6 @@ pub struct Step {
     /// epoch does not count.
     #[serde(default)]
     pub step_epoch: u64,
-    /// Set on pending steps after a goal revision.
-    #[serde(default)]
-    pub stale_goal: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -186,17 +169,11 @@ pub struct Plan {
     /// must be true when the work is done. They survive compaction so the
     /// post-compaction agent resumes against a stated target, and the host
     /// never gates on them — no kinds, no prefixes, no settle machinery.
-    /// Replaces the old `acceptance` items and `checklist` (migrated on
-    /// load; see `store::parse_plan`).
     #[serde(default)]
     pub criteria: Vec<String>,
     #[serde(default)]
     pub steps: Vec<Step>,
     pub revision: u64,
-    /// The quoted conflict that blocked this plan (`BlockPlan`), if any.
-    /// Read by `/plan show` and the bench harness; old files simply lack it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub blocked_reason: Option<String>,
 }
 
 impl Plan {
@@ -214,7 +191,6 @@ impl Plan {
             match s.status {
                 StepStatus::Pending => c.pending += 1,
                 StepStatus::InProgress => c.in_progress += 1,
-                StepStatus::Blocked => c.blocked += 1,
                 StepStatus::Done => c.done += 1,
                 StepStatus::Cancelled => c.cancelled += 1,
                 StepStatus::Reopened => c.reopened += 1,
@@ -228,7 +204,6 @@ impl Plan {
 pub struct StepCounts {
     pub pending: usize,
     pub in_progress: usize,
-    pub blocked: usize,
     pub done: usize,
     pub cancelled: usize,
     pub reopened: usize,

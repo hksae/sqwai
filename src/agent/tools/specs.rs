@@ -488,56 +488,36 @@ guesses, or anything you would not want shown to you every session.",
         ToolDef {
             name: "plan",
             kind: Kind::Mutating,
-            description: "Work the structured plan, one operation per call. Ops: create, start, \
-finish, block, unblock, cancel, add, split, add_criteria, step_diff, complete, block_plan, abandon. To retire \
-a wrong plan, use op abandon with a reason (it is for wrong plans, not hard steps — a stuck step is \
-block or ask_user), never cancel-and-recreate around it. Plans are for \
-multi-step work that changes things: read-only inspection or a trivial one-line edit needs no plan. \
-For a multi-step change, create with goal + steps + at least one criteria note. criteria are your own \
-plain-text done-notes: what must be true when the work is done. They survive compaction and \
-keep you honest with yourself — the host runs nothing and certifies nothing, so write each one \
-as something you can check yourself (run the command with bash, read its observed result). \
-add_criteria appends more notes as the work reveals them. The current plan, \
-with its step ids, is always in your context above — use those ids, never \
-guess them and never re-read the plan through tools. The host owns the goal and the constraints; \
-changing the goal is the user's call, so if the direction has moved on, abandon the plan (op \
-abandon with a reason) and create a fresh one. finish records \
-completion of the step's work with a summary of what changed and any remaining limitations. \
-complete requires every step closed (done, cancelled or blocked with reason). block_plan surrenders \
-an impossible task: use it when the spec contradicts the tests (or itself) instead of gaming \
-either side — quote the conflict in reason.",
+            description: "Manage the structured plan for multi-step work that changes things: \
+read-only inspection or a trivial one-line edit needs no plan. Ops: create, finish, add, cancel, \
+abandon. For a multi-step change, call create with goal, steps (3-6 high-level milestones), and \
+at least one criteria note. criteria are your own plain-text done-notes of what must be true when \
+the work is done — they survive compaction and keep you honest with yourself; the host runs \
+nothing and certifies nothing, so write each one as something you can check yourself. Step 1 \
+starts (in_progress) automatically on create. finish records completion of the current step with \
+a summary of what changed and any remaining limitations, automatically starts the next pending \
+step, and automatically completes the plan when all steps are closed. add inserts a new step \
+when new work is discovered. cancel skips a step that will not happen (with id and reason) and \
+advances to the next step. abandon retires the whole plan with a quoted reason when the user's \
+direction changes or the specification contradicts the tests. The current plan and its step ids \
+always ride in your context above — use those ids and never try to re-read the plan through tools.",
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "op": {"type": "string", "enum": [
-                        "create", "start", "finish", "block", "unblock", "cancel",
-                        "add", "split", "complete", "block_plan", "abandon",
-                        "add_criteria", "step_diff"
+                        "create", "finish", "add", "cancel", "abandon"
                     ]},
-                    "id": {"type": "string", "description": "step id"},
-                    "step_id": {"type": "string", "description": "step_diff: plan step id"},
-                    "path": {"type": "string", "description": "step_diff: restrict the diff to this path"},
-                    "goal": {"type": "string", "description": "create"},
-                    "constraints": {"type": "array", "items": {"type": "string"}},
+                    "id": {"type": "string", "description": "finish / cancel: step id (optional for finish when one step is in_progress)"},
+                    "goal": {"type": "string", "description": "create: overall goal"},
+                    "constraints": {"type": "array", "items": {"type": "string"}, "description": "create: optional constraints"},
                     "criteria": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "create / add_criteria: plain-text done-notes of what must be true when finished"
+                        "description": "create: plain-text done-notes of what must be true when finished"
                     },
                     "steps": {
                         "type": "array",
-                        "description": "create: initial steps (3-12)",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "title": {"type": "string"}
-                            },
-                            "required": ["title"]
-                        }
-                    },
-                    "into": {
-                        "type": "array",
-                        "description": "split: the parts the step becomes",
+                        "description": "create: initial high-level steps (3-6)",
                         "items": {
                             "type": "object",
                             "properties": {
@@ -549,8 +529,7 @@ either side — quote the conflict in reason.",
                     "after": {"type": "string", "description": "add: insert after this step id"},
                     "title": {"type": "string", "description": "add: new step title"},
                     "summary": {"type": "string", "description": "finish: what was done, where, and any remaining limitations"},
-                    "reason": {"type": "string", "description": "block / cancel / block_plan: the quoted conflict for block_plan"},
-                    "confirm": {"type": "boolean", "description": "start: re-read a stale step"}
+                    "reason": {"type": "string", "description": "cancel / abandon: why the step is skipped or why the plan is abandoned"}
                 },
                 "required": ["op"]
             }),

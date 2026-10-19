@@ -234,7 +234,10 @@ pub fn anchor(root: &std::path::Path, session_id: &str) -> String {
 /// step is in progress.
 pub fn resume_notice(root: &std::path::Path, session_id: &str) -> Option<String> {
     let records = crate::agent::journal::Journal::records_for(root, session_id).ok()?;
-    let mut open_step = None;
+    let active = crate::plan::open_active_for_session(root, Some(session_id))
+        .ok()
+        .flatten();
+    let mut open_step: Option<(String, u64)> = None;
     for record in records.iter().filter(|record| record.kind == "plan") {
         // Rejected ops never took effect; only accepted intents resume work.
         if record.fields.get("ok") == Some(&serde_json::Value::Bool(false)) {
@@ -243,21 +246,25 @@ pub fn resume_notice(root: &std::path::Path, session_id: &str) -> Option<String>
         let op = record.fields.get("op").and_then(|value| value.as_str());
         let id = record.fields.get("id").and_then(|value| value.as_str());
         match (op, id) {
+            (Some("create"), _) => open_step = Some(("1".to_string(), record.seq)),
             (Some("start"), Some(id)) => open_step = Some((id.to_string(), record.seq)),
-            (Some("finish" | "block" | "cancel"), Some(id))
-                if open_step.as_ref().is_some_and(|(open, _)| open == id) =>
-            {
-                open_step = None;
+            (Some("finish" | "block" | "cancel"), Some(id)) => {
+                if open_step.as_ref().is_some_and(|(open, _)| open == id) {
+                    open_step = active
+                        .as_ref()
+                        .and_then(|p| {
+                            p.steps
+                                .iter()
+                                .find(|s| s.status == crate::plan::StepStatus::InProgress)
+                        })
+                        .map(|s| (s.id.clone(), record.seq));
+                }
             }
+            (Some("abandon" | "block_plan"), _) => open_step = None,
             _ => {}
         }
     }
     let (step_id, start_seq) = open_step?;
-    // cross-check against the active plan: a step that the plan does not
-    // list, or lists as not started, must not produce a phantom "resume"
-    let active = crate::plan::open_active_for_session(root, Some(session_id))
-        .ok()
-        .flatten();
     if let Some(plan) = &active {
         let in_progress = plan.steps.iter().any(|step| {
             step.id == step_id && matches!(step.status, crate::plan::StepStatus::InProgress)
@@ -282,7 +289,7 @@ pub fn resume_notice(root: &std::path::Path, session_id: &str) -> Option<String>
         )
     };
     Some(format!(
-        "Session resumed. Step {step_id} was in progress{suffix}. Continue it, block it with a reason, or ask the user."
+        "Session resumed. Step {step_id} was in progress{suffix}. Continue it, cancel it with a reason, or ask the user."
     ))
 }
 

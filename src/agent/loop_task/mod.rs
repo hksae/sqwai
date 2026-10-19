@@ -1868,6 +1868,17 @@ async fn run_agent(
                         call_id: call.id.clone(),
                     })
                     .await;
+                // `plan_op` journals its own intent records ahead of every
+                // store; resync this long-lived handle past them before
+                // appending checkpoints or tool_result records.
+                if call.name == "plan"
+                    && let Some(writer) = journal.as_mut()
+                    && let Err(e) = writer.resync()
+                {
+                    crate::providers::log_http(&format!(
+                        "journal resync failed — sequence numbers may collide: {e:#}"
+                    ));
+                }
                 // report any checkpoints taken by the mutation
                 if ctx.journal.len() > journal_mark {
                     if let Some(writer) = journal.as_mut() {
@@ -1982,105 +1993,17 @@ async fn run_agent(
                             }),
                         );
                     }
-                    if call.name == "plan" {
-                        // `plan_op` journals its own intent records ahead of every
-                        // store; resync this long-lived handle past them
-                        // so the next append cannot reuse a sequence number.
-                        // A failed resync is loud (#189): proceeding on a stale
-                        // counter would corrupt evidence refs.
-                        if let Err(e) = writer.resync() {
-                            crate::providers::log_http(&format!(
-                                "journal resync failed — sequence numbers may collide: {e:#}"
-                            ));
-                        }
-                        let op = call
-                            .args
-                            .get("op")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("unknown");
-                        let plan_step_id = call.args.get("id").and_then(|value| value.as_str());
+                    if call.name == "plan" && outcome.ok {
                         let active = plan::open_active_for_session(&root, Some(&session_id))
                             .ok()
                             .flatten();
                         let plan_id = active.as_ref().map(|p| p.id.clone());
-                        if outcome.ok
-                            && op == "start"
-                            && let Some(id) = plan_step_id
-                        {
-                            writer.set_attribution(Some(id.to_string()), plan_id, "main");
-                            // The session now holds this step.
-                            ctx.current_step = Some(id.to_string());
-                            if subagent_depth == 0 {
-                                let _ = tx
-                                    .send(AgentEvent::StepCurrent {
-                                        step: Some(id.to_string()),
-                                    })
-                                    .await;
-                            }
-                            let tag = format!("step_{id}_start");
-                            // `plan` snapshots its own boundaries and pushes the
-                            // commit into ctx.journal, which is where the record
-                            // above was written. Re-appending here journaled the
-                            // same commit twice under two different layers.
-                            let already = ctx.journal.last().is_some_and(|(_, t)| t == &tag);
-                            if !already
-                                && let Some(sha) = checkpoints::snapshot_boundary(
-                                    &root,
-                                    shadow_store,
-                                    parent_session.as_deref().unwrap_or(&session_id),
-                                    &tag,
-                                )
-                                .ok()
-                                .flatten()
-                            {
-                                ctx.journal.push((sha.clone(), tag.clone()));
-                                let _ = writer.append("checkpoint", checkpoint_fields(&sha, &tag));
-                                let _ = tx
-                                    .send(AgentEvent::Checkpoint {
-                                        sha,
-                                        label: tag,
-                                    })
-                                    .await;
-                            }
-                        } else if outcome.ok && matches!(op, "finish" | "block" | "cancel") {
-                            if op == "finish"
-                                && let Some(id) = plan_step_id
-                            {
-                                let tag = format!("step_{id}_finish");
-                                // Same as the start boundary: one commit, one
-                                // record, whatever layer name reads nicer.
-                                let already = ctx.journal.last().is_some_and(|(_, t)| t == &tag);
-                                if !already
-                                    && let Some(sha) = checkpoints::snapshot_boundary(
-                                        &root,
-                                        shadow_store,
-                                        parent_session.as_deref().unwrap_or(&session_id),
-                                        &tag,
-                                    )
-                                    .ok()
-                                    .flatten()
-                                {
-                                    ctx.journal.push((sha.clone(), tag.clone()));
-                                    let _ =
-                                        writer.append("checkpoint", checkpoint_fields(&sha, &tag));
-                                    let _ = tx
-                                        .send(AgentEvent::Checkpoint {
-                                            sha,
-                                            label: tag,
-                                        })
-                                        .await;
-                                }
-                            }
-                            writer.set_attribution(None, plan_id, "main");
-                            // The session is idle again.
-                            ctx.current_step = None;
-                            if subagent_depth == 0 {
-                                let _ = tx.send(AgentEvent::StepCurrent { step: None }).await;
-                            }
+                        let current = adopt_in_progress_step(&root, &session_id);
+                        writer.set_attribution(current.clone(), plan_id, "main");
+                        ctx.current_step = current.clone();
+                        if subagent_depth == 0 {
+                            let _ = tx.send(AgentEvent::StepCurrent { step: current }).await;
                         }
-                        // The diary entry that used to fire on finish/block/cancel
-                        // is gone: `journal op=recap` reads these same
-                        // records on demand, and the writer never produced prose.
                     }
                 }
                 if outcome.cancelled {

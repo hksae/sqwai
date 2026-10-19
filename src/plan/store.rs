@@ -1,6 +1,6 @@
 use super::{
-    EvidenceRef, Limits, NewStep, Op, Plan, PlanStatus, Rejection, add_criteria, apply, create,
-    plans_dir, reopen_for_undo, set_goal,
+    EvidenceRef, Limits, NewStep, Op, Plan, PlanStatus, Rejection, apply, create, plans_dir,
+    reopen_for_undo,
 };
 use anyhow::{Context, Result};
 use std::path::Path;
@@ -418,43 +418,6 @@ fn apply_record(
     }
     let op_name = fields.get("op").and_then(|value| value.as_str());
     match op_name {
-        Some("set_goal") => {
-            let text = fields
-                .get("text")
-                .and_then(|value| value.as_str())
-                .ok_or_else(|| Rejection::new("replay_shape", "goal intent without text", ""))?;
-            let source = fields
-                .get("source")
-                .and_then(|value| value.as_str())
-                .unwrap_or("user");
-            let reason = fields
-                .get("reason")
-                .and_then(|value| value.as_str())
-                .map(str::to_string);
-            set_goal(plan, text.to_string(), source, reason);
-            Ok(true)
-        }
-        Some("constraints") => {
-            let action = fields
-                .get("action")
-                .and_then(|value| value.as_str())
-                .unwrap_or("");
-            let text = fields
-                .get("text")
-                .and_then(|value| value.as_str())
-                .unwrap_or("");
-            match action {
-                "add" => plan.constraints.push(text.to_string()),
-                "remove" => {
-                    if let Some(index) = plan.constraints.iter().position(|c| c == text) {
-                        plan.constraints.remove(index);
-                    }
-                }
-                _ => return Ok(false),
-            }
-            plan.revision = plan.revision.saturating_add(1);
-            Ok(true)
-        }
         Some("reopen") => {
             let ids: Vec<String> = fields
                 .get("ids")
@@ -497,35 +460,21 @@ fn apply_record(
                     }
                 }
             }
+            super::ops::auto_advance(plan);
+            if plan
+                .steps
+                .iter()
+                .all(|s| matches!(s.status, super::StepStatus::Done | super::StepStatus::Cancelled))
+            {
+                plan.status = PlanStatus::Completed;
+            }
             plan.revision = plan.revision.saturating_add(1);
             Ok(true)
         }
-        Some("add_acceptance") | Some("add_criteria") => {
-            // criteria re-append (cursor discipline prevents double-apply,
-            // same as Add); the retired `add_acceptance` name replays into
-            // the same list so old journals heal without a rewrite.
-            let items: Vec<String> = fields
-                .get("items")
-                .or_else(|| fields.get("criteria"))
-                .and_then(|value| value.as_array())
-                .map(|array| {
-                    array
-                        .iter()
-                        .filter_map(|value| value.as_str().map(str::to_string))
-                        .collect()
-                })
-                .unwrap_or_default();
-            add_criteria(plan, items)
-                .map_err(|_| Rejection::new("replay_diverged", "cannot re-add criteria", ""))?;
-            Ok(true)
-        }
-        Some(
-            "start" | "finish" | "block" | "unblock" | "cancel" | "add" | "split" | "complete"
-            | "join" | "block_plan" | "abandon" | "propose_reset",
-        ) => {
+        Some("finish" | "cancel" | "add" | "join" | "abandon" | "propose_reset" | "block_plan") => {
             let op: Op = serde_json::from_value(serde_json::Value::Object(fields.clone()))
                 .map_err(|_| Rejection::new("replay_shape", "unparsable op intent", ""))?;
-            apply(plan, op, &Limits::default(), None).map(|_| true)
+            apply(plan, op, &Limits::default()).map(|_| true)
         }
         _ => Ok(false),
     }
@@ -745,6 +694,7 @@ fn rebuild_corrupt(root: &Path, id: &str) -> Option<Plan> {
 }
 
 /// At most one active plan per project.
+#[cfg(test)]
 pub fn open_active(root: &Path) -> Result<Option<Plan>> {
     open_active_for_session(root, None)
 }

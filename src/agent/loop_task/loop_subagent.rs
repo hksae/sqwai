@@ -381,9 +381,14 @@ pub(crate) fn adopt_in_progress_step(root: &Path, session_id: &str) -> Option<St
         .flatten()
         .and_then(|plan| {
             plan.steps
-                .into_iter()
+                .iter()
                 .find(|step| step.status == plan::StepStatus::InProgress)
-                .map(|step| step.id)
+                .or_else(|| {
+                    plan.steps
+                        .iter()
+                        .find(|step| step.status == plan::StepStatus::Reopened)
+                })
+                .map(|step| step.id.clone())
         })
 }
 
@@ -1073,7 +1078,6 @@ fn join_plan_session(
                 session: child_session.to_string(),
             },
             &plan::Limits::default(),
-            None,
         )
         .is_ok()
         {

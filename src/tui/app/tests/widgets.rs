@@ -462,17 +462,6 @@ fn undo_step_reports_a_step_with_no_recorded_writes() {
     .unwrap();
     active.sessions = vec![app.session.id.to_string()];
     crate::plan::store(dir.path(), &active).unwrap();
-    crate::plan::apply(
-        &mut active,
-        crate::plan::Op::Start {
-            id: "1".into(),
-            confirm: None,
-        },
-        &crate::plan::Limits::default(),
-        None,
-    )
-    .unwrap();
-    crate::plan::store(dir.path(), &active).unwrap();
 
     app.undo_step_in(dir.path(), "3");
     let status = app

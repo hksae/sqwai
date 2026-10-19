@@ -241,7 +241,6 @@ impl Recap {
                     crate::plan::PlanStatus::Active => "active",
                     crate::plan::PlanStatus::Completed => "completed",
                     crate::plan::PlanStatus::Abandoned => "abandoned",
-                    crate::plan::PlanStatus::Blocked => "blocked",
                 }
                 .to_string(),
                 closed,
@@ -1057,98 +1056,6 @@ impl Journal {
     /// still accepted, but the host notes it: the
     /// evidence was recorded before the step existed in any session, so it
     /// may be stale or from a reused `seq`. One line per stale ref, capped.
-    pub fn stale_evidence_warnings(
-        root: &Path,
-        plan: &str,
-        step: &str,
-        evidence: &[crate::plan::EvidenceRef],
-    ) -> Vec<String> {
-        let records = match Self::records(root) {
-            Ok(r) => r,
-            Err(_) => return Vec::new(),
-        };
-        // earliest start timestamp for this plan/step across all sessions
-        let earliest = records
-            .iter()
-            .filter(|r| {
-                r.plan.as_deref() == Some(plan)
-                    && (r.step.as_deref() == Some(step)
-                        || r.fields.get("id").and_then(Value::as_str) == Some(step))
-                    && r.kind == "plan"
-                    && r.fields.get("op").and_then(Value::as_str) == Some("start")
-                    && r.fields.get("ok").and_then(Value::as_bool) != Some(false)
-            })
-            .filter_map(|r| chrono::DateTime::parse_from_rfc3339(&r.ts).ok())
-            .min();
-        let Some(start) = earliest else {
-            return Vec::new();
-        };
-        let mut out = Vec::new();
-        for reference in evidence {
-            let session_records = if reference.session.is_empty() {
-                records.clone()
-            } else {
-                Self::records_for(root, &reference.session).unwrap_or_default()
-            };
-            let start_seq = session_records
-                .iter()
-                .filter(|r| {
-                    (r.plan.as_deref() == Some(plan) || r.plan.is_none())
-                        && (r.step.as_deref() == Some(step)
-                            || r.fields.get("id").and_then(Value::as_str) == Some(step))
-                        && r.kind == "plan"
-                        && r.fields.get("op").and_then(Value::as_str) == Some("start")
-                        && r.fields.get("ok").and_then(Value::as_bool) != Some(false)
-                })
-                .map(|r| r.seq)
-                .min();
-            if let Some(start_seq) = start_seq {
-                if reference.seq < start_seq {
-                    let precise = Self::evidence(root, plan, Some(step), reference, None)
-                        .ok()
-                        .flatten();
-                    let rec_ts = precise.as_ref().map(|r| r.ts.as_str()).unwrap_or("unknown");
-                    let start_ts = session_records
-                        .iter()
-                        .find(|r| r.seq == start_seq)
-                        .map(|r| r.ts.as_str())
-                        .unwrap_or("unknown");
-                    out.push(format!(
-                        "evidence {}:{} predates step {} start ({} < {})",
-                        reference.session, reference.seq, step, rec_ts, start_ts
-                    ));
-                    if out.len() >= 3 {
-                        break;
-                    }
-                }
-                continue;
-            }
-            // precise session lookup to avoid seq collision across files
-            let precise = Self::evidence(root, plan, Some(step), reference, None)
-                .ok()
-                .flatten();
-            let Some(rec) = precise else {
-                continue;
-            };
-            if let Ok(ts) = chrono::DateTime::parse_from_rfc3339(&rec.ts)
-                && ts < start
-            {
-                out.push(format!(
-                    "evidence {}:{} predates step {} start ({} < {})",
-                    reference.session,
-                    reference.seq,
-                    step,
-                    rec.ts,
-                    start.to_rfc3339()
-                ));
-                if out.len() >= 3 {
-                    break;
-                }
-            }
-        }
-        out
-    }
-
     /// Return a non-blocking reminder when a step has accumulated actions
     /// since its last plan operation. Scoped to the calling session so one
     /// session's unfinished step never nags another session's turn.

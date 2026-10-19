@@ -124,16 +124,6 @@ fn subagent_contract_parent_context_and_receipt_salvage() {
     )
     .unwrap();
     plan.sessions = vec!["parent-s1".into()];
-    crate::plan::apply(
-        &mut plan,
-        crate::plan::Op::Start {
-            id: "1".into(),
-            confirm: None,
-        },
-        &crate::plan::Limits::default(),
-        None,
-    )
-    .unwrap();
     crate::plan::store(root, &plan).unwrap();
 
     let mut j = crate::agent::journal::Journal::open(root, "parent-s1").unwrap();
