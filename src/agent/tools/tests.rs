@@ -758,7 +758,6 @@ fn host_owned_state_is_unreachable_from_file_tools() {
         format!(".sqwai/plans/{plan_id}.json"),
         ".sqwai/journal/live.jsonl".to_string(),
         ".sqwai/journal/forged.jsonl".to_string(),
-        ".sqwai/memory/MEMORY.md".to_string(),
         ".sqwai/checkpoints/head.json".to_string(),
         ".sqwai/exports/session.md".to_string(),
         ".sqwai".to_string(),
@@ -776,8 +775,6 @@ fn host_owned_state_is_unreachable_from_file_tools() {
                 "{tool} on {path} must say why: {}",
                 out.output
             );
-            // the hint is model-facing: it must name tools that exist.
-            // It used to point at a graph store that was cut in B2.
             assert!(
                 !out.output.contains("graph"),
                 "{tool} on {path} names a retired mechanism: {}",
@@ -790,6 +787,21 @@ fn host_owned_state_is_unreachable_from_file_tools() {
             );
         }
     }
+
+    // `.sqwai/memory/MEMORY.md` (and bare `MEMORY.md`) is readable via `read`,
+    // while direct file writes/edits stay refused so mutations go through `memory_write`.
+    for tool in ["write", "edit"] {
+        let out = execute(
+            &mut ctx,
+            tool,
+            &json!({"file_path": ".sqwai/memory/MEMORY.md", "content": "x",
+                    "old_string": "a", "new_string": "b"}),
+        );
+        assert!(!out.ok, "{tool} must refuse .sqwai/memory/MEMORY.md");
+        assert!(out.output.contains("host-owned state"));
+    }
+    let read_mem = execute(&mut ctx, "read", &json!({"file_path": "MEMORY.md"}));
+    assert!(read_mem.ok, "read(MEMORY.md) should resolve to .sqwai/memory/MEMORY.md: {}", read_mem.output);
 
     // the goal survived every attempt above
     let after = plan::open_active(&dir).unwrap().unwrap();

@@ -478,9 +478,10 @@ output. Refused when the result is still in your live context above.",
         ToolDef {
             name: "memory_write",
             kind: Kind::ReadOnly,
-            description: "Persist one durable fact to host memory (MEMORY.md for the \
-project, USER.md for the user) — it is injected into your context at the start of \
-every future session, so this is how knowledge outlives the conversation. Write it \
+            description: "Persist one durable fact to host memory (`.sqwai/memory/MEMORY.md` for the \
+project, global `USER.md` for the user) — non-empty memory is automatically injected into your \
+context at the start of every session (`<project_memory>` / `<user_memory>`), so this is how \
+knowledge outlives the conversation. Write it \
 as soon as you learn something that will still matter later: a stated user preference \
 or an agreement, a project convention, a decision or fact that is not derivable from \
 code or git, an environment gotcha. Use `replaces` with the old text to update a fact \

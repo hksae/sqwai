@@ -225,6 +225,17 @@ impl ToolCtx {
     /// display spelling (uncanonicalized join) and the canonical
     /// project-relative path the security decisions run on.
     fn resolve_parts(&self, p: &str, mutating: bool) -> Result<(PathBuf, PathBuf), String> {
+        let p_trimmed = p.trim().trim_start_matches("./").trim_start_matches(".\\");
+        let redirected;
+        let p = if !mutating
+            && p_trimmed.eq_ignore_ascii_case("MEMORY.md")
+            && !self.root.join(p_trimmed).exists()
+        {
+            redirected = ".sqwai/memory/MEMORY.md".to_string();
+            redirected.as_str()
+        } else {
+            p
+        };
         let joined = if Path::new(p).is_absolute() {
             PathBuf::from(p)
         } else {
@@ -466,10 +477,12 @@ fn host_owned_denial(relative: &Path, mutating: bool) -> Option<String> {
     }
     let allowed = match components.next() {
         Some(Component::Normal(second)) if second == "skills" || second == "config.toml" => true,
-        // `.sqwai/spill/<file>`: the path a truncated result pointed at. The
-        // directory itself stays invisible, so this cannot be used to browse
-        // host state — only to open what was already named.
-        Some(Component::Normal(second)) if second == "spill" && !mutating => {
+        // `.sqwai/spill/<file>` and `.sqwai/memory/MEMORY.md`: read-only access
+        // is allowed so the model can inspect spilled output or project memory,
+        // while mutations stay blocked so writes must go through `memory_write`.
+        Some(Component::Normal(second))
+            if (second == "spill" || second == "memory") && !mutating =>
+        {
             matches!(components.next(), Some(Component::Normal(_)))
         }
         // `.sqwai` itself: listing or writing the directory is not allowed

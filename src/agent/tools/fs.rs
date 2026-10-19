@@ -256,9 +256,28 @@ fn extract_requested_symbols(args: &serde_json::Value) -> Vec<String> {
 }
 
 fn read_single(ctx: &mut ToolCtx, raw: &str, args: &serde_json::Value) -> Outcome {
+    let raw_trimmed = raw.trim().trim_start_matches("./").trim_start_matches(".\\");
+    if raw_trimmed.eq_ignore_ascii_case("USER.md") && !ctx.root.join(raw_trimmed).exists() {
+        return match crate::agent::memory::user_path() {
+            Ok(user_mem) if user_mem.exists() => match fs::read_to_string(&user_mem) {
+                Ok(text) if !text.trim().is_empty() => Outcome::ok(text),
+                Ok(_) => Outcome::ok("(user memory USER.md is empty)"),
+                Err(e) => Outcome::err(format!("read failed: {e}")),
+            },
+            _ => Outcome::ok("(user memory USER.md is empty)"),
+        };
+    }
     let p = match existing(ctx, raw) {
         Ok(p) => p,
-        Err(e) => return Outcome::err(e),
+        Err(e) => {
+            let norm = raw_trimmed.replace('\\', "/");
+            if norm.eq_ignore_ascii_case("MEMORY.md")
+                || norm.eq_ignore_ascii_case(".sqwai/memory/MEMORY.md")
+            {
+                return Outcome::ok("(project memory .sqwai/memory/MEMORY.md is empty)");
+            }
+            return Outcome::err(e);
+        }
     };
     let bytes = match fs::read(&p) {
         Ok(b) => b,
