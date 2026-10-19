@@ -860,6 +860,7 @@ impl Journal {
         step: &str,
         files: &[String],
         reopened_steps: &[String],
+        redo_blobs: &[String],
     ) -> Result<u64> {
         self.append(
             "undo",
@@ -867,6 +868,7 @@ impl Journal {
                 "step": step,
                 "files": files,
                 "reopened_steps": reopened_steps,
+                "redo_blobs": redo_blobs,
             }),
         )
     }
@@ -880,12 +882,17 @@ impl Journal {
     pub fn referenced_blobs(root: &Path) -> Result<std::collections::HashSet<String>> {
         let mut ids = std::collections::HashSet::new();
         for record in Self::records(root)? {
-            if record.kind != "file_diff" {
-                continue;
-            }
-            for field in ["blob_before", "blob_after"] {
-                if let Some(id) = record.fields.get(field).and_then(Value::as_str) {
-                    ids.insert(id.to_string());
+            if record.kind == "file_diff" {
+                for field in ["blob_before", "blob_after"] {
+                    if let Some(id) = record.fields.get(field).and_then(Value::as_str) {
+                        ids.insert(id.to_string());
+                    }
+                }
+            } else if record.kind == "undo"
+                && let Some(arr) = record.fields.get("redo_blobs").and_then(Value::as_array)
+            {
+                for item in arr.iter().filter_map(Value::as_str) {
+                    ids.insert(item.to_string());
                 }
             }
         }
@@ -1078,6 +1085,7 @@ impl Journal {
         checkpoints: &[String],
         files: &[String],
         reopened_steps: &[String],
+        redo_blobs: &[String],
     ) -> Result<u64> {
         self.append(
             "undo",
@@ -1086,6 +1094,7 @@ impl Journal {
                 "checkpoints": checkpoints,
                 "files": files,
                 "reopened_steps": reopened_steps,
+                "redo_blobs": redo_blobs,
             }),
         )
     }

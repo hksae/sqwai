@@ -15,6 +15,7 @@ fn reopen_undone_steps(
     files: &[String],
     checkpoint: &str,
     undone_checkpoints: &[String],
+    redo_blobs: &[String],
 ) -> Vec<String> {
     let active_opt = plan::open_active_for_session(root, Some(session_id))
         .ok()
@@ -43,7 +44,13 @@ fn reopen_undone_steps(
     }
     if let Ok(mut journal) = crate::agent::journal::Journal::open(root, session_id) {
         journal.set_attribution(None, active_id, "host");
-        let _ = journal.append_undo_window(checkpoint, undone_checkpoints, files, &reopened);
+        let _ = journal.append_undo_window(
+            checkpoint,
+            undone_checkpoints,
+            files,
+            &reopened,
+            redo_blobs,
+        );
     }
     reopened
 }
@@ -79,6 +86,15 @@ fn restore_redone_steps(
             }
         }
         if !restored.is_empty() {
+            plan::auto_advance(&mut active);
+            if active
+                .steps
+                .iter()
+                .all(|s| matches!(s.status, plan::StepStatus::Done | plan::StepStatus::Cancelled))
+            {
+                active.status = plan::PlanStatus::Completed;
+            }
+            active.revision = active.revision.saturating_add(1);
             let args = serde_json::json!({
                 "ids": restored,
             });
@@ -435,15 +451,20 @@ impl App {
                     return;
                 }
                 let touched = report.touched();
+                let redo_files =
+                    crate::agent::checkpoints::finalize_redo_images(&root, &touched, &pre_undo);
+                let redo_blobs: Vec<String> = redo_files
+                    .iter()
+                    .filter_map(|f| f.blob_before.clone())
+                    .collect();
                 let reopened_steps = reopen_undone_steps(
                     &root,
                     &self.session.id.to_string(),
                     &touched,
                     &sha,
                     &undone,
+                    &redo_blobs,
                 );
-                let redo_files =
-                    crate::agent::checkpoints::finalize_redo_images(&root, &touched, &pre_undo);
                 self.session.redo_stack.push(crate::session::RedoEntry {
                     label: label.clone(),
                     checkpoints: undone_pairs,
@@ -594,15 +615,19 @@ impl App {
                         reopened.push(step.to_string());
                     }
                 }
+                let redo_files =
+                    crate::agent::checkpoints::finalize_redo_images(root, &touched, &pre_undo);
+                let redo_blobs: Vec<String> = redo_files
+                    .iter()
+                    .filter_map(|f| f.blob_before.clone())
+                    .collect();
                 if let Ok(mut journal) =
                     crate::agent::journal::Journal::open(root, &self.session.id.to_string())
                 {
                     // host-written, like every other undo record
                     journal.set_attribution(None, Some(plan_id.clone()), "host");
-                    let _ = journal.append_undo_step(step, &touched, &reopened);
+                    let _ = journal.append_undo_step(step, &touched, &reopened, &redo_blobs);
                 }
-                let redo_files =
-                    crate::agent::checkpoints::finalize_redo_images(root, &touched, &pre_undo);
                 self.session.redo_stack.push(crate::session::RedoEntry {
                     label: format!("step {step}"),
                     checkpoints: Vec::new(),
@@ -687,15 +712,20 @@ impl App {
                 let undone_shas: Vec<String> =
                     undone_pairs.iter().map(|(sha, _)| sha.clone()).collect();
                 let sha = undone_shas.first().cloned().unwrap_or_default();
+                let redo_files =
+                    crate::agent::checkpoints::finalize_redo_images(root, &touched, &pre_undo);
+                let redo_blobs: Vec<String> = redo_files
+                    .iter()
+                    .filter_map(|f| f.blob_before.clone())
+                    .collect();
                 let reopened_steps = reopen_undone_steps(
                     root,
                     &self.session.id.to_string(),
                     &touched,
                     &sha,
                     &undone_shas,
+                    &redo_blobs,
                 );
-                let redo_files =
-                    crate::agent::checkpoints::finalize_redo_images(root, &touched, &pre_undo);
                 self.session.redo_stack.push(crate::session::RedoEntry {
                     label: label.to_string(),
                     checkpoints: undone_pairs,
