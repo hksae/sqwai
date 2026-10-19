@@ -170,14 +170,43 @@ pub fn clean_for_prompt(raw: &str) -> Option<String> {
     Some(out.trim().to_string())
 }
 
-/// Normalize a bullet or target fragment for comparison: strips leading `- `,
-/// inline `<!-- ... -->` provenance comments, and surrounding whitespace.
+/// Normalize a bullet or target fragment for storage/comparison: strips inline
+/// `<!-- ... -->` provenance comments, collapses internal newlines/whitespace
+/// into single spaces (so multi-line text can never inject raw headings or
+/// unprefixed orphan lines), and strips leading `- ` / `* ` / `• ` markers.
 fn normalize_fact(s: &str) -> String {
-    strip_line_comments(s)
+    let joined = s
+        .lines()
+        .map(strip_line_comments)
+        .collect::<Vec<_>>()
+        .join(" ");
+    let collapsed = joined.split_whitespace().collect::<Vec<_>>().join(" ");
+    let trimmed = collapsed
         .trim()
         .trim_start_matches("- ")
-        .trim()
-        .to_string()
+        .trim_start_matches("* ")
+        .trim_start_matches("• ")
+        .trim();
+    trimmed.to_string()
+}
+
+fn normalize_for_compare(s: &str) -> String {
+    normalize_fact(s)
+        .chars()
+        .map(|c| match c {
+            '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}' => '\'',
+            '\u{201C}' | '\u{201D}' | '\u{201E}' | '\u{201F}' => '"',
+            '\u{2010}' | '\u{2011}' | '\u{2012}' | '\u{2013}' | '\u{2014}' | '\u{2015}'
+            | '\u{2212}' => '-',
+            '\u{00A0}'
+            | '\u{2002}'..='\u{200A}'
+            | '\u{202F}'
+            | '\u{205F}'
+            | '\u{3000}' => ' ',
+            other => other,
+        })
+        .collect::<String>()
+        .to_lowercase()
 }
 
 /// Apply an approved proposal to the selected host-owned memory file.
@@ -235,34 +264,21 @@ pub fn apply_proposal_with_stats(
     let op = if let Some(target_str) = target.as_deref() {
         if clean_input.is_empty() {
             // Delete / forget obsolete entry
-            if !delete_matching_fact(&mut content, section, target_str) {
-                bail!("memory replacement text was not found");
-            }
+            delete_matching_fact(&mut content, section, target_str)?;
             "deleted"
         } else {
             // Update / replace existing entry cleanly without leaving old provenance comments
-            if !replace_matching_fact(&mut content, section, target_str, &screened, &provenance) {
-                bail!("memory replacement text was not found");
-            }
+            replace_matching_fact(&mut content, section, target_str, &screened, &provenance)?;
             "updated"
         }
     } else if replace_duplicate_in_section(&mut content, section, &screened, &provenance) {
         "updated"
     } else {
-        let heading = format!("## {section}");
-        let start = content
-            .find(&heading)
-            .ok_or_else(|| anyhow::anyhow!("memory section is missing: {section}"))?;
-        let body_start = start + heading.len();
-        let end = content[body_start..]
-            .find("\n## ")
-            .map(|offset| body_start + offset)
-            .unwrap_or(content.len());
-        let entry = format!("\n- {replacement}\n");
-        content.insert_str(end, &entry);
+        append_bullet_to_section(&mut content, section, &replacement)?;
         "added"
     };
 
+    content = ensure_sections(&content);
     let used_chars = clean_for_prompt(&content)
         .map(|s| s.chars().count())
         .unwrap_or(0);
@@ -279,6 +295,20 @@ pub fn apply_proposal_with_stats(
     })
 }
 
+fn append_bullet_to_section(content: &mut String, section: &str, replacement: &str) -> Result<()> {
+    let Some((body_start, end)) = section_byte_range(content, section) else {
+        bail!("memory section is missing: {section}");
+    };
+    let slice = content[body_start..end].trim_end();
+    let updated_slice = if slice.is_empty() {
+        format!("\n- {replacement}\n")
+    } else {
+        format!("{slice}\n- {replacement}\n")
+    };
+    content.replace_range(body_start..end, &updated_slice);
+    Ok(())
+}
+
 fn section_byte_range(content: &str, section: &str) -> Option<(usize, usize)> {
     let heading = format!("## {section}");
     let start = content.find(&heading)?;
@@ -290,119 +320,198 @@ fn section_byte_range(content: &str, section: &str) -> Option<(usize, usize)> {
     Some((body_start, end))
 }
 
-/// If `screened` already exists verbatim (case-insensitive) as a bullet in
-/// `section`, refresh its line and provenance in-place instead of duplicating.
+fn section_entries_hint(content: &str, section: &str) -> String {
+    let mut entries = Vec::new();
+    if let Some((body_start, end)) = section_byte_range(content, section) {
+        for line in content[body_start..end].lines() {
+            let clean = normalize_fact(line);
+            if !clean.is_empty() {
+                entries.push(format!("  - {clean}"));
+            }
+        }
+    }
+    if entries.is_empty() {
+        format!("(section [{section}] is currently empty)")
+    } else {
+        format!("Current entries in [{section}]:\n{}", entries.join("\n"))
+    }
+}
+
+/// If `screened` already exists (case/typographic-insensitive) as a bullet in
+/// `section`, refresh its line and provenance in-place. If it exists in
+/// another section, remove the old copy and move it into `section`.
 fn replace_duplicate_in_section(
     content: &mut String,
     section: &str,
     screened: &str,
     provenance: &str,
 ) -> bool {
-    let Some((body_start, end)) = section_byte_range(content, section) else {
+    let want = normalize_for_compare(screened);
+    if want.is_empty() {
         return false;
-    };
-    let slice = &content[body_start..end];
-    let mut new_lines: Vec<String> = Vec::new();
-    let mut matched = false;
-    for line in slice.split('\n') {
-        if !matched && line.trim_start().starts_with("- ") {
-            let clean = normalize_fact(line);
-            if clean.eq_ignore_ascii_case(screened) {
-                new_lines.push(format!("- {screened} {provenance}"));
-                matched = true;
-                continue;
+    }
+    // 1. Check target `section` first
+    if let Some((body_start, end)) = section_byte_range(content, section) {
+        let slice = &content[body_start..end];
+        let mut new_lines: Vec<String> = Vec::new();
+        let mut matched = false;
+        for line in slice.split('\n') {
+            if !matched && line.trim_start().starts_with("- ") {
+                if normalize_for_compare(line) == want {
+                    new_lines.push(format!("- {screened} {provenance}"));
+                    matched = true;
+                    continue;
+                }
             }
+            new_lines.push(line.to_string());
         }
-        new_lines.push(line.to_string());
+        if matched {
+            content.replace_range(body_start..end, &new_lines.join("\n"));
+            return true;
+        }
     }
-    if matched {
-        content.replace_range(body_start..end, &new_lines.join("\n"));
+    // 2. Check other sections: if found, remove from old section and append to `section`
+    let lines: Vec<&str> = content.lines().collect();
+    if let Some(idx) = lines
+        .iter()
+        .position(|l| l.trim_start().starts_with("- ") && normalize_for_compare(l) == want)
+    {
+        let mut rebuilt: Vec<String> = lines.iter().map(|&s| s.to_string()).collect();
+        rebuilt.remove(idx);
+        *content = ensure_sections(&rebuilt.join("\n"));
+        let _ = append_bullet_to_section(content, section, &format!("{screened} {provenance}"));
+        return true;
     }
-    matched
+    false
 }
 
-/// Replace a fact matching `target_str` with `screened` + `provenance`,
-/// stripping any old `<!-- session ... -->` comment on that line so provenance
-/// comments never pile up.
+fn find_matching_bullet_indices(
+    lines: &[&str],
+    preferred_section: &str,
+    target_str: &str,
+) -> Vec<usize> {
+    let want = normalize_for_compare(target_str);
+    if want.is_empty() {
+        return Vec::new();
+    }
+    // Pass 1: exact normalized bullet match (preferred section first, then all sections)
+    for check_all_sections in [false, true] {
+        let mut current_sec = "";
+        let mut hits = Vec::new();
+        for (idx, &line) in lines.iter().enumerate() {
+            if let Some(sec) = line.trim().strip_prefix("## ") {
+                current_sec = sec.trim();
+                continue;
+            }
+            if line.trim().starts_with('#') {
+                continue;
+            }
+            if !check_all_sections && !current_sec.eq_ignore_ascii_case(preferred_section) {
+                continue;
+            }
+            let clean = normalize_for_compare(line);
+            if !clean.is_empty() && clean == want {
+                hits.push(idx);
+            }
+        }
+        if !hits.is_empty() {
+            return hits;
+        }
+    }
+    // Pass 2: case/typographic-insensitive substring match against whole bullets
+    // (preferred section first, then all sections)
+    for check_all_sections in [false, true] {
+        let mut current_sec = "";
+        let mut hits = Vec::new();
+        for (idx, &line) in lines.iter().enumerate() {
+            if let Some(sec) = line.trim().strip_prefix("## ") {
+                current_sec = sec.trim();
+                continue;
+            }
+            if line.trim().starts_with('#') {
+                continue;
+            }
+            if !check_all_sections && !current_sec.eq_ignore_ascii_case(preferred_section) {
+                continue;
+            }
+            let clean = normalize_for_compare(line);
+            if !clean.is_empty() && clean.contains(&want) {
+                hits.push(idx);
+            }
+        }
+        if !hits.is_empty() {
+            return hits;
+        }
+    }
+    Vec::new()
+}
+
+/// Replace an entire bullet matching `target_str` with `- {screened} {provenance}`.
 fn replace_matching_fact(
     content: &mut String,
     preferred_section: &str,
     target_str: &str,
     screened: &str,
     provenance: &str,
-) -> bool {
+) -> Result<()> {
     let lines: Vec<&str> = content.lines().collect();
-    // Pass 1: exact or case-insensitive full-bullet match (preferring `preferred_section`)
-    for check_all_sections in [false, true] {
-        let mut current_sec = "";
-        for (idx, &line) in lines.iter().enumerate() {
-            if let Some(sec) = line.trim().strip_prefix("## ") {
-                current_sec = sec.trim();
-                continue;
-            }
-            if !check_all_sections && !current_sec.eq_ignore_ascii_case(preferred_section) {
-                continue;
-            }
-            let clean = normalize_fact(line);
-            if !clean.is_empty()
-                && (clean == target_str || clean.eq_ignore_ascii_case(target_str))
-            {
-                let mut rebuilt: Vec<String> = lines.iter().map(|&s| s.to_string()).collect();
-                rebuilt[idx] = format!("- {screened} {provenance}");
-                *content = rebuilt.join("\n") + "\n";
-                return true;
-            }
-        }
-    }
-    // Pass 2: substring match inside a bullet line (strips old provenance on that line)
-    for (idx, &line) in lines.iter().enumerate() {
-        if line.trim().starts_with('#') {
-            continue;
-        }
-        let without_comments = strip_line_comments(line);
-        if without_comments.contains(target_str) {
-            let updated_line = without_comments.replacen(target_str, screened, 1);
-            let bullet = if updated_line.trim_start().starts_with("- ") {
-                format!("{} {provenance}", updated_line.trim_end())
-            } else {
-                format!("- {} {provenance}", updated_line.trim())
-            };
+    let hits = find_matching_bullet_indices(&lines, preferred_section, target_str);
+    match hits.as_slice() {
+        [] => bail!(
+            "memory replacement text was not found in [{preferred_section}]. {}",
+            section_entries_hint(content, preferred_section)
+        ),
+        [idx] => {
             let mut rebuilt: Vec<String> = lines.iter().map(|&s| s.to_string()).collect();
-            rebuilt[idx] = bullet;
+            rebuilt[*idx] = format!("- {screened} {provenance}");
             *content = rebuilt.join("\n") + "\n";
-            return true;
+            Ok(())
+        }
+        many => {
+            let candidates: Vec<String> = many
+                .iter()
+                .map(|&i| format!("  - {}", normalize_fact(lines[i])))
+                .collect();
+            bail!(
+                "memory replacement text matches {} entries; pass a more specific `replaces` string:\n{}",
+                many.len(),
+                candidates.join("\n")
+            )
         }
     }
-    false
 }
 
 /// Delete a bullet line matching `target_str` when `text` is empty.
-fn delete_matching_fact(content: &mut String, preferred_section: &str, target_str: &str) -> bool {
+fn delete_matching_fact(
+    content: &mut String,
+    preferred_section: &str,
+    target_str: &str,
+) -> Result<()> {
     let lines: Vec<&str> = content.lines().collect();
-    for check_all_sections in [false, true] {
-        let mut current_sec = "";
-        for (idx, &line) in lines.iter().enumerate() {
-            if let Some(sec) = line.trim().strip_prefix("## ") {
-                current_sec = sec.trim();
-                continue;
-            }
-            if !check_all_sections && !current_sec.eq_ignore_ascii_case(preferred_section) {
-                continue;
-            }
-            let clean = normalize_fact(line);
-            if !clean.is_empty()
-                && (clean == target_str
-                    || clean.eq_ignore_ascii_case(target_str)
-                    || clean.contains(target_str))
-            {
-                let mut rebuilt: Vec<String> = lines.iter().map(|&s| s.to_string()).collect();
-                rebuilt.remove(idx);
-                *content = ensure_sections(&rebuilt.join("\n"));
-                return true;
-            }
+    let hits = find_matching_bullet_indices(&lines, preferred_section, target_str);
+    match hits.as_slice() {
+        [] => bail!(
+            "memory replacement text was not found in [{preferred_section}]. {}",
+            section_entries_hint(content, preferred_section)
+        ),
+        [idx] => {
+            let mut rebuilt: Vec<String> = lines.iter().map(|&s| s.to_string()).collect();
+            rebuilt.remove(*idx);
+            *content = ensure_sections(&rebuilt.join("\n"));
+            Ok(())
+        }
+        many => {
+            let candidates: Vec<String> = many
+                .iter()
+                .map(|&i| format!("  - {}", normalize_fact(lines[i])))
+                .collect();
+            bail!(
+                "memory replacement text matches {} entries; pass a more specific `replaces` string:\n{}",
+                many.len(),
+                candidates.join("\n")
+            )
         }
     }
-    false
 }
 
 fn canonical_section(section: &str) -> Result<&'static str> {
@@ -597,6 +706,81 @@ mod tests {
             clean_for_prompt(&on_disk_del).is_none(),
             "empty template after deleting last entry should produce None for prompt"
         );
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn multiline_collapse_whole_bullet_replace_cross_section_dedup_and_miss_hint() {
+        let dir = root();
+        // 1. Multi-line text collapses to one atomic bullet line
+        apply_proposal_with_stats(
+            &dir,
+            Scope::Project,
+            "Project",
+            "Use cargo check\nand targeted cargo test",
+            None,
+            "s1",
+            3000,
+        )
+        .unwrap();
+        let disk1 = fs::read_to_string(project_path(&dir)).unwrap();
+        assert!(
+            disk1.contains("- Use cargo check and targeted cargo test <!-- session s1 "),
+            "{disk1}"
+        );
+
+        // 2. Cross-section duplicate moves/updates instead of duplicating across sections
+        let res_move = apply_proposal_with_stats(
+            &dir,
+            Scope::Project,
+            "Conventions",
+            "Use cargo check and targeted cargo test",
+            None,
+            "s2",
+            3000,
+        )
+        .unwrap();
+        assert_eq!(res_move.op, "updated");
+        let disk2 = fs::read_to_string(project_path(&dir)).unwrap();
+        assert_eq!(
+            disk2.matches("Use cargo check and targeted cargo test").count(),
+            1,
+            "must not duplicate across sections: {disk2}"
+        );
+
+        // 3. Substring `replaces` replaces the WHOLE bullet (not mid-sentence splice)
+        apply_proposal_with_stats(
+            &dir,
+            Scope::Project,
+            "Conventions",
+            "Always run cargo check before committing",
+            Some("Use cargo check"),
+            "s3",
+            3000,
+        )
+        .unwrap();
+        let disk3 = fs::read_to_string(project_path(&dir)).unwrap();
+        assert!(
+            disk3.contains("- Always run cargo check before committing <!-- session s3 "),
+            "whole bullet must be replaced, not spliced: {disk3}"
+        );
+        assert!(!disk3.contains("targeted cargo test"), "{disk3}");
+
+        // 4. Missing `replaces` lists current entries in the section
+        let miss = apply_proposal_with_stats(
+            &dir,
+            Scope::Project,
+            "Conventions",
+            "New text",
+            Some("non_existent_entry"),
+            "s4",
+            3000,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(miss.contains("Current entries in [Conventions]:"), "{miss}");
+        assert!(miss.contains("Always run cargo check before committing"), "{miss}");
+
         fs::remove_dir_all(dir).ok();
     }
 }

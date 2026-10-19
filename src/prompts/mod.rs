@@ -63,7 +63,11 @@ fn truncate_chars(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
         return text.to_string();
     }
-    let clipped: String = text.chars().take(max).collect();
+    let raw: String = text.chars().take(max).collect();
+    let clipped = match raw.rfind('\n') {
+        Some(pos) if pos > raw.len() / 2 => &raw[..pos],
+        _ => raw.as_str(),
+    };
     format!("{clipped}\n[truncated]")
 }
 
