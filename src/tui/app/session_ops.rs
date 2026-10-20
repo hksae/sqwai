@@ -32,6 +32,8 @@ impl App {
         // A drop delivered as typed characters may not have been scanned by
         // the tick yet when Enter arrives in the same batch.
         self.maybe_attach_dropped_path();
+        // Final numbering is by text order, regardless of insert/delete history.
+        self.renumber_markers();
         let mut text = self.input_text().trim().to_string();
         let mut queued_images: Option<Vec<crate::providers::ImageAttachment>> = None;
         if text.is_empty() {

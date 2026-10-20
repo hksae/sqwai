@@ -906,7 +906,7 @@ impl App {
                                 self.form_edit_key(k);
                             }
                         }
-                        _ if ctrl && handle_text_combo(&mut self.input, k) => {
+                        _ if self.composer_text_combo(k) => {
                             self.jump_to_bottom_on_typing();
                             self.dirty = true;
                         }
@@ -943,9 +943,19 @@ impl App {
                         _ if !self.menu_stack.is_empty() => {}
                         _ => {
                             self.jump_to_bottom_on_typing();
-                            if !composer_erase_key(&mut self.input, &k) {
+                            self.expand_marker_selection();
+                            if matches!(k.code, KeyCode::Backspace | KeyCode::Delete)
+                                && self.atomic_erase(k.code == KeyCode::Backspace)
+                            {
+                                // the whole marker token was removed
+                            } else if (self.input.is_selecting()
+                                && k.modifiers.is_empty()
+                                && matches!(k.code, KeyCode::Backspace | KeyCode::Delete))
+                                || !composer_erase_key(&mut self.input, &k)
+                            {
                                 self.input.input(k);
                             }
+                            self.repair_markers_after_edit();
                         }
                     }
                     if matches!(
@@ -1315,6 +1325,24 @@ impl App {
         }
         self.input_dragging = false;
         self.dirty = true;
+    }
+
+    fn composer_text_combo(&mut self, k: crossterm::event::KeyEvent) -> bool {
+        if !k.modifiers.contains(KeyModifiers::CONTROL) {
+            return false;
+        }
+        if k.code == KeyCode::Char('d') && self.atomic_erase(false) {
+            return true;
+        }
+        if matches!(k.code, KeyCode::Char('k' | 'u' | 'w')) {
+            self.remove_marker_under_cursor();
+        }
+        self.expand_marker_selection();
+        if !handle_text_combo(&mut self.input, k) {
+            return false;
+        }
+        self.repair_markers_after_edit();
+        true
     }
 
     #[allow(dead_code)]

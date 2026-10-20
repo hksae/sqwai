@@ -395,6 +395,7 @@ pub(super) fn user_box(text: &str, w: u16, hl: &Highlighter) -> Vec<Line<'static
     )
     .0;
     let surface = Style::new().fg(Theme::FG()).bg(Theme::INPUT_BG());
+    let accent = surface.fg(Theme::ACCENT());
     // Codex-style marker: bold dim `›` on the band, plain text after it.
     let marker = surface.add_modifier(Modifier::BOLD | Modifier::DIM);
     inner
@@ -405,13 +406,26 @@ pub(super) fn user_box(text: &str, w: u16, hl: &Highlighter) -> Vec<Line<'static
             let used = UnicodeWidthStr::width(text.as_str());
             let pad = " ".repeat(usize::from(inner_w).saturating_sub(used));
             let prefix = if index == 0 { "› " } else { "  " };
-            Line::from(vec![
-                Span::styled(prefix.to_string(), marker),
-                Span::styled(text, surface),
-                Span::styled(pad, surface),
-            ])
+            let mut spans = vec![Span::styled(prefix.to_string(), marker)];
+            let mut last = 0usize;
+            for (start, end) in attachments::marker_char_spans(&text) {
+                if start > last {
+                    spans.push(Span::styled(char_slice(&text, last, start), surface));
+                }
+                spans.push(Span::styled(char_slice(&text, start, end), accent));
+                last = end;
+            }
+            if last < text.chars().count() {
+                spans.push(Span::styled(char_slice(&text, last, usize::MAX), surface));
+            }
+            spans.push(Span::styled(pad, surface));
+            Line::from(spans)
         })
         .collect()
+}
+
+fn char_slice(text: &str, start: usize, end: usize) -> String {
+    text.chars().skip(start).take(end.saturating_sub(start)).collect()
 }
 
 #[derive(Clone, Copy, PartialEq)]

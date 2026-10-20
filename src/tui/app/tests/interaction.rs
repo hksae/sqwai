@@ -1,6 +1,100 @@
 use super::*;
 
 #[test]
+fn markers_renumber_in_text_order() {
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    let mut one = crate::media::test_image(8, 8, "one.png");
+    one.marker = Some(1);
+    let mut two = crate::media::test_image(9, 9, "two.png");
+    two.marker = Some(2);
+    let mut three = crate::media::test_image(10, 10, "three.png");
+    three.marker = Some(3);
+    app.pending_images = vec![one, two, three];
+    app.input = App::fresh_input("[image 3] x [image 1] y [image 2]".to_string());
+
+    app.renumber_markers();
+
+    assert_eq!(app.input_text(), "[image 1] x [image 2] y [image 3]");
+    let marker = |name: &str| {
+        app.pending_images
+            .iter()
+            .find(|image| image.name == name)
+            .unwrap()
+            .marker
+    };
+    assert_eq!(marker("three.png"), Some(1));
+    assert_eq!(marker("one.png"), Some(2));
+    assert_eq!(marker("two.png"), Some(3));
+    assert_eq!(app.image_marker, 3);
+
+    // Every live marker binds an image block, in the same text order.
+    let message = crate::providers::Message::new(
+        crate::providers::Role::User,
+        app.input_text(),
+    )
+    .with_images(app.pending_images.clone());
+    let bound: Vec<String> = crate::providers::user_parts(&message)
+        .into_iter()
+        .filter_map(|part| match part {
+            crate::providers::UserPart::Image(image) => Some(image.name.clone()),
+            crate::providers::UserPart::Text(_) => None,
+        })
+        .collect();
+    assert_eq!(bound, ["three.png", "one.png", "two.png"]);
+}
+
+#[test]
+fn backspace_removes_a_marker_as_one_token_and_renumbers() {
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    let mut one = crate::media::test_image(8, 8, "one.png");
+    one.marker = Some(1);
+    let mut two = crate::media::test_image(9, 9, "two.png");
+    two.marker = Some(2);
+    app.pending_images = vec![one, two];
+    app.input = App::fresh_input("A [image 1] B [image 2] C".to_string());
+    app.input
+        .move_cursor(tui_textarea::CursorMove::Jump(0, 11));
+
+    assert!(app.atomic_erase(true));
+
+    assert_eq!(app.input_text(), "A  B [image 1] C");
+    assert_eq!(app.pending_images.len(), 1);
+    assert_eq!(app.pending_images[0].name, "two.png");
+    assert_eq!(app.pending_images[0].marker, Some(1));
+}
+
+#[test]
+fn a_selection_over_a_marker_deletes_the_whole_token() {
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    let mut one = crate::media::test_image(8, 8, "one.png");
+    one.marker = Some(1);
+    app.pending_images = vec![one];
+    app.input = App::fresh_input("[image 1]".to_string());
+    app.input
+        .move_cursor(tui_textarea::CursorMove::Jump(0, 2));
+    app.input.start_selection();
+    app.input
+        .move_cursor(tui_textarea::CursorMove::Jump(0, 5));
+
+    assert!(app.atomic_erase(true));
+
+    assert_eq!(app.input_text(), "");
+    assert!(app.pending_images.is_empty());
+}
+
+#[test]
+fn a_manual_marker_without_an_image_stays_text() {
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.input = App::fresh_input("[image 9]".to_string());
+
+    app.renumber_markers();
+    app.repair_markers_after_edit();
+
+    assert_eq!(app.input_text(), "[image 9]");
+    assert!(app.pending_images.is_empty());
+}
+
+#[test]
 fn drafted_images_follow_their_markers() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     let mut one = crate::media::test_image(8, 8, "one.png");

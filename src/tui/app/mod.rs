@@ -327,6 +327,8 @@ pub struct App {
     image_epoch: u64,
     /// image decodes still in flight, for cap accounting and submit gating
     pending_image_jobs: Vec<attachments::PendingImageJob>,
+    /// stable id for the next worker result; renumbering changes markers, not ids
+    next_image_job: u64,
     image_jobs_tx: std::sync::mpsc::Sender<attachments::ImageJobResult>,
     image_jobs_rx: std::sync::mpsc::Receiver<attachments::ImageJobResult>,
     /// Suppress the native paste payload that may follow a Ctrl+V image
@@ -754,6 +756,7 @@ impl App {
             image_marker: 0,
             image_epoch: 0,
             pending_image_jobs: Vec::new(),
+            next_image_job: 0,
             image_jobs_tx,
             image_jobs_rx,
             paste_image_guard: None,
@@ -919,6 +922,14 @@ impl App {
         // selection must never mean anything other than "this row is picked".
         input.set_cursor_style(Theme::cursor());
         input.set_selection_style(Theme::selection());
+        // `[image N]` markers are highlighted through the built-in search
+        // highlighter; the search itself is never driven from the UI.
+        if input
+            .set_search_pattern(attachments::IMAGE_MARKER_PATTERN)
+            .is_ok()
+        {
+            input.set_search_style(Theme::accent());
+        }
         input
     }
 
