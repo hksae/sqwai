@@ -73,6 +73,24 @@ fn a_paste_attaches_only_when_every_word_is_an_image_path() {
         app.pasted_image_paths("notes.txt").is_none(),
         "only image files qualify"
     );
+
+    let spaced = dir.path().join("a b");
+    std::fs::create_dir_all(&spaced).unwrap();
+    let spaced_file = spaced.join("with space.png");
+    std::fs::write(&spaced_file, crate::media::test_png(8, 8)).unwrap();
+    assert_eq!(
+        app.pasted_image_paths(&spaced_file.display().to_string())
+            .unwrap()
+            .len(),
+        1,
+        "a single unquoted path with spaces is still one path"
+    );
+    assert_eq!(
+        app.pasted_image_paths(&format!("\"{}\"", spaced_file.display()))
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 #[test]

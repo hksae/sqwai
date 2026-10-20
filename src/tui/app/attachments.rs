@@ -371,21 +371,36 @@ impl App {
     }
 
     pub(super) fn pasted_image_paths(&self, text: &str) -> Option<Vec<PathBuf>> {
-        let tokens = split_pasted_paths(text)?;
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        // A single path may contain spaces without quotes (a copied path, a
+        // drop from a terminal that does not quote). Try the whole payload
+        // first, the way opencode's pasted-attachment resolver does.
+        if let Some(path) = self.resolve_image_path(unquote_single(trimmed)) {
+            return Some(vec![path]);
+        }
+        let tokens = split_pasted_paths(trimmed)?;
         let mut paths = Vec::new();
         for token in tokens {
-            let path = PathBuf::from(&token);
-            let path = if path.is_absolute() {
-                path
-            } else {
-                self.project_root.join(path)
-            };
-            if !is_image_path(&path) || !path.is_file() {
-                return None;
-            }
-            paths.push(path);
+            paths.push(self.resolve_image_path(&token)?);
         }
         Some(paths)
+    }
+
+    fn resolve_image_path(&self, token: &str) -> Option<PathBuf> {
+        let token = token.trim();
+        if token.is_empty() {
+            return None;
+        }
+        let path = PathBuf::from(token);
+        let path = if path.is_absolute() {
+            path
+        } else {
+            self.project_root.join(path)
+        };
+        (is_image_path(&path) && path.is_file()).then_some(path)
     }
 }
 
@@ -488,6 +503,19 @@ fn trailing_token(text: &str) -> Option<(usize, String)> {
         return None;
     }
     (!token.is_empty()).then(|| (start, token.to_string()))
+}
+
+/// Strip one pair of matching surrounding quotes, if present.
+fn unquote_single(text: &str) -> &str {
+    let bytes = text.as_bytes();
+    if bytes.len() >= 2 {
+        let first = bytes[0];
+        let last = bytes[bytes.len() - 1];
+        if (first == b'"' || first == b'\'') && first == last {
+            return &text[1..text.len() - 1];
+        }
+    }
+    text
 }
 
 fn is_image_path(path: &Path) -> bool {
