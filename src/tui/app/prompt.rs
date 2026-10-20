@@ -17,14 +17,9 @@ impl App {
             &self.cfg.memory,
             self.session.context_limit,
         );
-        let mut loaded = crate::prompts::skills::load(&self.cfg.skills, &root);
-        for selected in &self.active_skills {
-            if !loaded.iter().any(|skill| skill.name == selected.name) {
-                loaded.push(selected.clone());
-            }
-        }
-        if let Some(skills) = crate::prompts::skills::prompt(&loaded) {
-            layers.push((PrefixSection::Skills, skills));
+        let loaded = crate::prompts::skills::load(&self.cfg.skills, &root);
+        if let Some(catalog) = crate::prompts::skills::catalog_prompt(&loaded) {
+            layers.push((PrefixSection::Skills, catalog));
         }
         // Verify-command names from .sqwai/config.toml ([verify]) are static
         // project configuration: keeping them in the cached prefix avoids
@@ -103,6 +98,12 @@ impl App {
         let mut parts = self.stable_parts.clone();
         if !self.session_environment.is_empty() {
             parts.push(SystemPart::cached(self.session_environment.clone()));
+        }
+        if let Some(active_skills) = crate::prompts::skills::prompt(&self.active_skills) {
+            parts.push(
+                SystemPart::volatile(active_skills)
+                    .in_section(crate::providers::PrefixSection::Skills),
+            );
         }
         // Plan state rides every request (built in the turn loop, not
         // here): a turn-start snapshot would predate this turn's plan

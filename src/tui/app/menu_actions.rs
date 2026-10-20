@@ -57,9 +57,59 @@ impl App {
             MenuAction::ToggleSkillsAutoLoad => {
                 self.cfg.skills.auto_load = !self.cfg.skills.auto_load;
                 self.cfg.save().ok();
+                self.stable_parts = self.stable_parts();
+                self.context_bootstrap_pending = true;
                 let on = self.cfg.skills.auto_load;
                 self.status(&format!("skills auto-load: {}", on_off(on)), StatusKind::Ok);
                 self.build_menu_rows();
+            }
+            MenuAction::ToggleSkill(name) => {
+                let keep_sel = self.menu_sel;
+                if let Some(pos) = self
+                    .active_skills
+                    .iter()
+                    .position(|s| s.name.eq_ignore_ascii_case(&name))
+                {
+                    let removed = self.active_skills.remove(pos);
+                    self.context_bootstrap_pending = true;
+                    self.status(
+                        &format!("unpinned skill: {}", removed.name),
+                        StatusKind::Ok,
+                    );
+                } else {
+                    let all =
+                        crate::prompts::skills::discover(&self.cfg.skills, &self.project_root);
+                    if let Some(skill) = all.into_iter().find(|s| s.name.eq_ignore_ascii_case(&name))
+                    {
+                        let skill_name = skill.name.clone();
+                        self.active_skills.push(skill);
+                        self.context_bootstrap_pending = true;
+                        self.status(&format!("pinned skill: {skill_name}"), StatusKind::Ok);
+                    }
+                }
+                self.build_menu_rows();
+                if keep_sel < self.menu_len() {
+                    self.menu_sel = keep_sel;
+                }
+                self.dirty = true;
+            }
+            MenuAction::ViewSkill(name) => {
+                self.open_menu(Menu::SkillView { name });
+            }
+            MenuAction::ClearPinnedSkills => {
+                if self.active_skills.is_empty() {
+                    self.status("no pinned skills to clear", StatusKind::Info);
+                } else {
+                    let count = self.active_skills.len();
+                    self.active_skills.clear();
+                    self.context_bootstrap_pending = true;
+                    self.status(
+                        &format!("cleared {count} pinned skill(s)"),
+                        StatusKind::Ok,
+                    );
+                    self.build_menu_rows();
+                    self.dirty = true;
+                }
             }
             MenuAction::EditScalar(setting) => self.open_menu(Menu::EditScalar(setting)),
             MenuAction::OpenModels(p) => self.open_menu(Menu::Models { provider: p }),

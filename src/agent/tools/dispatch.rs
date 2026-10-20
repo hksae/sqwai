@@ -353,8 +353,82 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
             Outcome::err("recall_result is served by the agent loop, not by the dispatcher")
         }
         "journal" => journal_op(ctx, args),
+        "skill" => skill_op(ctx, args),
         other => Outcome::err(format!("unknown tool '{other}'")),
     }
+}
+
+fn skill_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
+    let name = args["name"].as_str().unwrap_or("").trim();
+    if name.is_empty() {
+        return Outcome::err("skill 'name' is required");
+    }
+    let all = crate::prompts::skills::discover(&ctx.skills_cfg, &ctx.root);
+    if name.eq_ignore_ascii_case("list") {
+        if all.is_empty() {
+            return Outcome::ok("no skills available in configured or project skill directories");
+        }
+        let lines: Vec<String> = all
+            .iter()
+            .map(|s| {
+                let desc = s.description.as_deref().unwrap_or("no description");
+                format!("- {} ({}) — {}", s.name, s.scope.as_str(), desc)
+            })
+            .collect();
+        return Outcome::ok(format!(
+            "available skills ({}):\n{}",
+            all.len(),
+            lines.join("\n")
+        ));
+    }
+
+    let skill = all
+        .iter()
+        .find(|s| s.name.eq_ignore_ascii_case(name))
+        .cloned()
+        .or_else(|| {
+            let mut m = crate::prompts::skills::load_matching(&ctx.skills_cfg, &ctx.root, Some(name));
+            (m.len() == 1).then(|| m.remove(0))
+        });
+
+    let Some(skill) = skill else {
+        if all.is_empty() {
+            return Outcome::err(format!("skill '{name}' not found (no skills available)"));
+        }
+        let names: Vec<&str> = all.iter().map(|s| s.name.as_str()).collect();
+        return Outcome::err(format!(
+            "skill '{name}' not found (available: {})",
+            names.join(", ")
+        ));
+    };
+
+    if let Some(file) = args["file"].as_str().map(str::trim).filter(|f| !f.is_empty()) {
+        return match crate::prompts::skills::read_skill_file(&skill, file) {
+            Ok(content) => Outcome::ok(format!(
+                "<skill_file skill=\"{}\" file=\"{}\">\n{}\n</skill_file>",
+                skill.name, file, content
+            )),
+            Err(err) => Outcome::err(err),
+        };
+    }
+
+    let key = skill.name.to_ascii_lowercase();
+    if !ctx.activated_skills.insert(key) {
+        let files_note = if skill.files.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " (bundled files available via `file`: {})",
+                skill.files.join(", ")
+            )
+        };
+        return Outcome::ok(format!(
+            "skill '{}' is already loaded in your active context above{files_note}",
+            skill.name
+        ));
+    }
+
+    Outcome::ok(crate::prompts::skills::render_skill_detail(&skill))
 }
 
 /// The `journal` tool: a read-only projection of the host journal.

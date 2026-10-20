@@ -1330,6 +1330,8 @@ impl App {
             | Some(Menu::Models { .. })
             | Some(Menu::EditModel { .. })
             | Some(Menu::Sessions)
+            | Some(Menu::Skills)
+            | Some(Menu::SkillView { .. })
             | Some(Menu::ConfirmDelete { .. })
             | Some(Menu::Approval { .. }) => {
                 let (head, win, _) = self.list_shape(area.height);
@@ -1369,6 +1371,8 @@ impl App {
                 | Some(Menu::EditModel { .. })
                 | Some(Menu::EditModelField { .. })
                 | Some(Menu::Sessions)
+                | Some(Menu::Skills)
+                | Some(Menu::SkillView { .. })
                 | Some(Menu::EditSessionTitle { .. })
                 | Some(Menu::ConfirmDelete { .. })
                 | Some(Menu::Approval { .. })
@@ -1661,6 +1665,8 @@ impl App {
                         | Some(Menu::EditModel { .. })
                         | Some(Menu::EditModelField { .. })
                         | Some(Menu::Sessions)
+                        | Some(Menu::Skills)
+                        | Some(Menu::SkillView { .. })
                         | Some(Menu::EditSessionTitle { .. })
                         | Some(Menu::ConfirmDelete { .. })
                         | Some(Menu::Approval { .. }) => {

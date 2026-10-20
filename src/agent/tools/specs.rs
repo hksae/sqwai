@@ -407,6 +407,7 @@ Pass context:N for N surrounding lines per match (like grep -C) so a follow-up r
                                         "files": {"type": "array", "items": {"type": "string"}, "description": "optional starting file/dir paths to inspect"},
                                         "write": {"type": "boolean", "description": "allow file writes, scoped to paths"},
                                         "paths": {"type": "array", "items": {"type": "string"}, "description": "write scope roots (required with write:true; or focus paths when write:false)"},
+                                        "skills": {"type": "array", "items": {"type": "string"}, "description": "optional skill names from <available_skills> to preload into this subagent"},
                                         "clean": {"type": "boolean", "description": "when true, omit <parent_context> for this task so it runs with a clean slate"}
                                     },
                                     "additionalProperties": true
@@ -419,6 +420,28 @@ Pass context:N for N surrounding lines per match (like grep -C) so a follow-up r
                     }
                 },
                 "required": ["tasks"]
+            }),
+        },
+        ToolDef {
+            name: "skill",
+            kind: Kind::ReadOnly,
+            description: "Load a specialized skill (`SKILL.md` instructions and bundled file manifest) \
+from `<available_skills>` by `name`, or read a bundled supporting file (`references/...`, \
+`scripts/...`, `assets/...`) inside that skill's directory via `file`. Use when the task matches \
+a skill's description, triggers, or file globs.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "name of the skill from <available_skills> (or 'list' to list available skills)"
+                    },
+                    "file": {
+                        "type": "string",
+                        "description": "optional relative path inside the skill directory (e.g. 'references/guide.md') to read a bundled file"
+                    }
+                },
+                "required": ["name"]
             }),
         },
         ToolDef {
@@ -766,6 +789,15 @@ fn call_summary_raw(name: &str, args: &Value) -> String {
             .as_array()
             .map(|tasks| format!("{} tasks", tasks.len()))
             .unwrap_or_else(|| s("task")),
+        "skill" => {
+            let name = s("name");
+            let file = s("file");
+            if file.is_empty() {
+                name
+            } else {
+                format!("{name} / {file}")
+            }
+        }
         "memory_write" => format!("{}: {}", s("scope"), s("text")),
         "ask_user" => {
             let single = s("question");

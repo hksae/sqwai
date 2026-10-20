@@ -324,6 +324,37 @@ impl App {
                 diff,
                 call_id,
             } => {
+                if name == "skill" && ok {
+                    // When the model loads a skill (`skill(name: "...")`), pin it
+                    // into `self.active_skills` so `/skills` shows it active and it
+                    // survives compaction.
+                    if let Some(Segment::Tool { args, .. }) = self
+                        .segments
+                        .iter()
+                        .rev()
+                        .find(|seg| matches!(seg, Segment::Tool { call_id: Some(cid), .. } if cid == &call_id))
+                    {
+                        let skill_name = args.split(" / ").next().unwrap_or(args.as_str()).trim();
+                        if !skill_name.is_empty()
+                            && !skill_name.eq_ignore_ascii_case("list")
+                            && !self
+                                .active_skills
+                                .iter()
+                                .any(|s| s.name.eq_ignore_ascii_case(skill_name))
+                        {
+                            let all = crate::prompts::skills::discover(
+                                &self.cfg.skills,
+                                &self.project_root,
+                            );
+                            if let Some(sk) = all
+                                .into_iter()
+                                .find(|s| s.name.eq_ignore_ascii_case(skill_name))
+                            {
+                                self.active_skills.push(sk);
+                            }
+                        }
+                    }
+                }
                 self.handle_tool_notice(name, summary, ok, diff, Some(call_id));
             }
             AgentEvent::Checkpoint { sha, label } => {

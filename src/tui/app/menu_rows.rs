@@ -59,6 +59,8 @@ impl App {
             } => self.build_approval_rows(command, &reason),
             Menu::AskFree { .. } => {}
             Menu::Plan => self.build_plan_rows(),
+            Menu::Skills => self.build_skills_rows(),
+            Menu::SkillView { name } => self.build_skill_view_rows(&name),
         }
         if self.menu_sel >= self.menu_len() {
             self.menu_sel = self.menu_len().saturating_sub(1);
@@ -1191,6 +1193,144 @@ impl App {
         }
     }
 
+    fn build_skills_rows(&mut self) {
+        self.menu_rows.push(row(
+            Line::from(vec![Span::styled("Search", Theme::dim())]),
+            MenuAction::FocusSearch,
+        ));
+        let q = self.skill_search.lines().join("").to_lowercase();
+        let all = crate::prompts::skills::discover(&self.cfg.skills, &self.project_root);
+        let mut matched = 0usize;
+        for skill in &all {
+            if !q.is_empty() {
+                let name_hit = skill.name.to_lowercase().contains(&q);
+                let desc_hit = skill
+                    .description
+                    .as_ref()
+                    .is_some_and(|d| d.to_lowercase().contains(&q));
+                let trig_hit = skill
+                    .triggers
+                    .iter()
+                    .any(|t| t.to_lowercase().contains(&q));
+                let glob_hit = skill
+                    .globs
+                    .iter()
+                    .any(|g| g.to_lowercase().contains(&q));
+                let scope_hit = skill.scope.as_str().contains(&q);
+                if !name_hit && !desc_hit && !trig_hit && !glob_hit && !scope_hit {
+                    continue;
+                }
+            }
+            matched += 1;
+            let is_pinned = self
+                .active_skills
+                .iter()
+                .any(|s| s.name.eq_ignore_ascii_case(&skill.name));
+            let is_active = is_pinned || skill.always;
+            let mut meta_parts = vec![skill.scope.as_str().to_string()];
+            if is_pinned {
+                meta_parts.push("pinned".to_string());
+            } else if skill.always {
+                meta_parts.push("always".to_string());
+            }
+            meta_parts.push(fmt_ctx(skill.char_len() as u64));
+            if !skill.files.is_empty() {
+                meta_parts.push(format!("{}f", skill.files.len()));
+            }
+            if let Some(desc) = &skill.description {
+                let first = desc.lines().next().unwrap_or("").trim();
+                if !first.is_empty() {
+                    let clipped = super::view::truncate_display_width(first, 42);
+                    meta_parts.push(clipped);
+                }
+            }
+            let tail = format!(" ({})", meta_parts.join(" · "));
+            let style = if is_active {
+                Theme::brand_ink()
+            } else {
+                Style::new().fg(Theme::FG())
+            };
+            self.menu_rows.push(row(
+                Line::from(vec![
+                    Span::styled(skill.name.clone(), style),
+                    Span::styled(tail, Theme::dim()),
+                ]),
+                MenuAction::ToggleSkill(skill.name.clone()),
+            ));
+        }
+        if matched == 0 {
+            let msg = if all.is_empty() {
+                "no skills found in .sqwai/skills or ~/.config/sqwai/skills"
+            } else {
+                "no matching skills"
+            };
+            self.menu_rows.push(row(
+                Line::from(vec![Span::styled(msg, Theme::dim())]),
+                MenuAction::None,
+            ));
+        }
+    }
+
+    fn build_skill_view_rows(&mut self, name: &str) {
+        let all = crate::prompts::skills::discover(&self.cfg.skills, &self.project_root);
+        let skill = all
+            .into_iter()
+            .find(|s| s.name.eq_ignore_ascii_case(name))
+            .or_else(|| {
+                self.active_skills
+                    .iter()
+                    .find(|s| s.name.eq_ignore_ascii_case(name))
+                    .cloned()
+            });
+        let md = match skill {
+            Some(s) => {
+                let is_pinned = self
+                    .active_skills
+                    .iter()
+                    .any(|a| a.name.eq_ignore_ascii_case(&s.name));
+                let status = if is_pinned {
+                    "pinned (active in session)"
+                } else if s.always {
+                    "always (active in project)"
+                } else {
+                    "catalog (loaded on demand)"
+                };
+                let mut header = format!(
+                    "# {}\n\n- **Scope:** `{}`\n- **Status:** {}\n- **Path:** `{}`\n- **Size:** {} chars\n",
+                    s.name,
+                    s.scope.as_str(),
+                    status,
+                    s.path.display(),
+                    s.char_len()
+                );
+                if let Some(desc) = &s.description {
+                    header.push_str(&format!("- **Description:** {desc}\n"));
+                }
+                if !s.triggers.is_empty() {
+                    header.push_str(&format!("- **Triggers:** `{}`\n", s.triggers.join("`, `")));
+                }
+                if !s.globs.is_empty() {
+                    header.push_str(&format!("- **Globs:** `{}`\n", s.globs.join("`, `")));
+                }
+                if !s.files.is_empty() {
+                    header.push_str(&format!(
+                        "- **Bundled files ({}):** `{}`\n",
+                        s.files.len(),
+                        s.files.join("`, `")
+                    ));
+                }
+                header.push_str("\n---\n\n");
+                header.push_str(&s.body);
+                header
+            }
+            None => format!("_Skill `{name}` not found._"),
+        };
+        let w = self.md_built_w.max(20);
+        for line in crate::tui::markdown::render(&md, w, &self.hl) {
+            self.menu_rows.push(row(line, MenuAction::None));
+        }
+    }
+
     pub(super) fn diagnostics_summary(&self) -> String {
         let log_path = crate::config::data_dir()
             .map(|d| d.join("debug.log").display().to_string())
@@ -1233,6 +1373,10 @@ impl App {
         }
 
         out.push_str("# Host Block\n\n");
+        if let Some(active_skills) = crate::prompts::skills::prompt(&self.active_skills) {
+            out.push_str(&active_skills);
+            out.push_str("\n\n");
+        }
         out.push_str(&format!(
             "Mode: {}\n\n",
             match self.mode {

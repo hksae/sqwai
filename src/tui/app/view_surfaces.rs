@@ -78,6 +78,8 @@ impl App {
                 | Some(Menu::EditSessionTitle { .. })
                 | Some(Menu::ConfirmDelete { .. })
                 | Some(Menu::Approval { .. })
+                | Some(Menu::Skills)
+                | Some(Menu::SkillView { .. })
         ) {
             return;
         }
@@ -728,7 +730,8 @@ impl App {
                 | Menu::TestAnim
                 | Menu::TestArt
                 | Menu::TestColors
-                | Menu::TestMd,
+                | Menu::TestMd
+                | Menu::SkillView { .. },
             ) => {
                 let body = self.menu_rows.len();
                 let fit = (screen_h as usize).saturating_sub(4);
@@ -746,6 +749,7 @@ impl App {
             Some(Menu::Models { .. }) => (1, dyn_win, "models"),
             Some(Menu::EditModel { .. }) => (0, 4, ""),
             Some(Menu::Sessions) => (1, dyn_win, "sessions"),
+            Some(Menu::Skills) => (1, dyn_win, "skills"),
             Some(Menu::ConfirmDelete { .. }) => (2, 2, ""),
             Some(Menu::Approval { .. }) => (self.menu_rows.len().saturating_sub(3), 3, ""),
             Some(
@@ -774,10 +778,17 @@ impl App {
                 | Menu::TestAnim
                 | Menu::TestArt
                 | Menu::TestColors
-                | Menu::TestMd,
+                | Menu::TestMd
+                | Menu::SkillView { .. },
             ) => vec![
                 ("up/down", "scroll".to_string()),
                 ("esc", "close".to_string()),
+            ],
+            Some(Menu::Skills) => vec![
+                ("ctrl+o", "view".to_string()),
+                ("ctrl+r", "reset".to_string()),
+                ("enter", "toggle".to_string()),
+                ("esc", "back".to_string()),
             ],
             Some(Menu::Providers) => vec![
                 ("ctrl+n", "add".to_string()),
@@ -891,8 +902,10 @@ impl App {
             }
         };
         let avail_w = area.width.saturating_sub(4).max(20);
-        if matches!(self.cur_menu(), Some(Menu::ContextView | Menu::TestMd))
-            && self.md_built_w != avail_w
+        if matches!(
+            self.cur_menu(),
+            Some(Menu::ContextView | Menu::TestMd | Menu::SkillView { .. })
+        ) && self.md_built_w != avail_w
         {
             self.md_built_w = avail_w;
             self.build_menu_rows();

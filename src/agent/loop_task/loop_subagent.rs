@@ -49,6 +49,7 @@ pub(crate) struct SubagentTask {
     pub(crate) paths: Vec<String>,
     pub(crate) context: Option<String>,
     pub(crate) files: Vec<String>,
+    pub(crate) skills: Vec<String>,
     pub(crate) clean: bool,
 }
 
@@ -67,7 +68,7 @@ fn normalize_rel_path_list(arr: &[serde_json::Value]) -> Vec<String> {
 
 fn subagent_task_spec(item: &serde_json::Value, default_clean: bool) -> Option<SubagentTask> {
     let label = subagent_task_text(item)?;
-    let (write, paths, context, files, clean) = match item {
+    let (write, paths, context, files, skills, clean) = match item {
         serde_json::Value::Object(map) => {
             let write = map.get("write").and_then(|v| v.as_bool()).unwrap_or(false);
             let paths = map
@@ -86,13 +87,25 @@ fn subagent_task_spec(item: &serde_json::Value, default_clean: bool) -> Option<S
                 .and_then(|v| v.as_array())
                 .map(|a| normalize_rel_path_list(a))
                 .unwrap_or_default();
+            let skills = map
+                .get("skills")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str())
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default();
             let clean = map
                 .get("clean")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(default_clean);
-            (write, paths, context, files, clean)
+            (write, paths, context, files, skills, clean)
         }
-        _ => (false, Vec::new(), None, Vec::new(), default_clean),
+        _ => (false, Vec::new(), None, Vec::new(), Vec::new(), default_clean),
     };
     Some(SubagentTask {
         label,
@@ -100,6 +113,7 @@ fn subagent_task_spec(item: &serde_json::Value, default_clean: bool) -> Option<S
         paths,
         context,
         files,
+        skills,
         clean,
     })
 }
@@ -448,6 +462,7 @@ pub(crate) async fn run_subagent(
                         "paths": task.paths,
                         "context": task.context,
                         "files": task.files,
+                        "skills": task.skills,
                         "clean": task.clean,
                     }],
                 });
@@ -562,6 +577,7 @@ pub(crate) async fn run_subagent(
             p.cacheable
                 || p.text.starts_with("Mode: ")
                 || p.text.starts_with("<turn_environment>")
+                || (!task.clean && p.text.starts_with("<skills>"))
         })
         .collect();
     child_system.push(SystemPart::volatile(build_subagent_tail(
@@ -956,6 +972,22 @@ pub(crate) fn build_subagent_tail(
     {
         block.push_str("\n\n");
         block.push_str(&parent_ctx);
+    }
+    if !task.skills.is_empty() {
+        let all = crate::prompts::skills::discover(&crate::config::SkillsConfig::default(), root);
+        let selected: Vec<crate::prompts::skills::Skill> = task
+            .skills
+            .iter()
+            .filter_map(|req| {
+                all.iter()
+                    .find(|s| s.name.eq_ignore_ascii_case(req))
+                    .cloned()
+            })
+            .collect();
+        if let Some(skills_xml) = crate::prompts::skills::prompt(&selected) {
+            block.push_str("\n\n");
+            block.push_str(&skills_xml);
+        }
     }
     block
 }

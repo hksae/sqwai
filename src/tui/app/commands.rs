@@ -81,34 +81,48 @@ impl App {
             }
             "/debug" => self.open_menu(Menu::Debug),
             "/skill" => {
-                let query = rest.split_whitespace().nth(1);
+                let Some(query) = rest.split_whitespace().nth(1) else {
+                    self.open_menu(Menu::Skills);
+                    return;
+                };
+                if matches!(query.to_ascii_lowercase().as_str(), "clear" | "off" | "reset") {
+                    self.run_action(MenuAction::ClearPinnedSkills);
+                    return;
+                }
                 let root = self.project_root.clone();
-                let loaded = crate::prompts::skills::load_matching(&self.cfg.skills, &root, query);
+                let loaded =
+                    crate::prompts::skills::load_matching(&self.cfg.skills, &root, Some(query));
                 if loaded.is_empty() {
                     self.status("skill not found", StatusKind::Warn);
                 } else {
-                    self.active_skills = loaded.clone();
-                    self.stable_parts = self.stable_parts();
+                    let mut names = Vec::new();
+                    for sk in loaded {
+                        names.push(sk.name.clone());
+                        if !self
+                            .active_skills
+                            .iter()
+                            .any(|s| s.name.eq_ignore_ascii_case(&sk.name))
+                        {
+                            self.active_skills.push(sk);
+                        }
+                    }
                     self.context_bootstrap_pending = true;
                     self.status(
-                        &format!(
-                            "loaded skill(s): {}",
-                            loaded
-                                .iter()
-                                .map(|s| s.name.as_str())
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        ),
+                        &format!("loaded skill(s): {}", names.join(", ")),
                         StatusKind::Ok,
                     );
                 }
             }
 
             "/skills" => {
-                self.active_skills.clear();
-                self.stable_parts = self.stable_parts();
-                self.context_bootstrap_pending = true;
-                self.status("automatic Skills loading restored", StatusKind::Ok);
+                if matches!(
+                    rest.split_whitespace().nth(1).map(|s| s.to_ascii_lowercase()).as_deref(),
+                    Some("clear" | "off" | "reset")
+                ) {
+                    self.run_action(MenuAction::ClearPinnedSkills);
+                } else {
+                    self.open_menu(Menu::Skills);
+                }
             }
 
             "/help" => self.open_menu(Menu::Help),

@@ -754,6 +754,18 @@ impl App {
                                 self.run_action(MenuAction::CheckProvider(p));
                             }
                         }
+                        KeyCode::Char('o') | KeyCode::Char('e')
+                            if ctrl && matches!(self.cur_menu(), Some(Menu::Skills)) =>
+                        {
+                            if let Some(name) = self.selected_skill_name() {
+                                self.run_action(MenuAction::ViewSkill(name));
+                            }
+                        }
+                        KeyCode::Char('r')
+                            if ctrl && matches!(self.cur_menu(), Some(Menu::Skills)) =>
+                        {
+                            self.run_action(MenuAction::ClearPinnedSkills);
+                        }
                         // a surface owns a real search field: keys edit it
                         // there, and it filters the list as it types. The field
                         // takes the keyboard only after it was chosen: no caret,
@@ -766,6 +778,7 @@ impl App {
                                         | Menu::Models { .. }
                                         | Menu::Sessions
                                         | Menu::Settings
+                                        | Menu::Skills
                                 )
                             ) && self.surf_focused()
                                 && !ctrl
@@ -781,6 +794,7 @@ impl App {
                                         | Menu::Models { .. }
                                         | Menu::Sessions
                                         | Menu::Settings
+                                        | Menu::Skills
                                 )
                             ) && self.surf_focused() =>
                         {

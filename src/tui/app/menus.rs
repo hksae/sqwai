@@ -280,6 +280,12 @@ pub(super) enum Menu {
     },
     /// full plan overview, opened with /plan, Ctrl+L or Ctrl+T
     Plan,
+    /// /skills: interactive skill catalog & session pin toggle
+    Skills,
+    /// /skills -> ctrl+o: rendered Markdown view of a single skill
+    SkillView {
+        name: String,
+    },
 }
 
 #[derive(Clone)]
@@ -340,6 +346,9 @@ pub(super) enum MenuAction {
     UndoCount(usize),
     RedoCount(usize),
     ToggleSkillsAutoLoad,
+    ToggleSkill(String),
+    ViewSkill(String),
+    ClearPinnedSkills,
     EditScalar(ScalarSetting),
 }
 
@@ -535,6 +544,8 @@ impl App {
                 | Some(Menu::TestArt)
                 | Some(Menu::TestColors)
                 | Some(Menu::TestMd)
+                | Some(Menu::Skills)
+                | Some(Menu::SkillView { .. })
         ) {
             self.follow = true;
         }
@@ -542,7 +553,14 @@ impl App {
             self.config_search = Self::fresh_input(String::new());
             self.config_focus = false;
         }
-        if matches!(self.cur_menu(), Some(Menu::ContextView | Menu::TestMd)) {
+        if matches!(self.cur_menu(), Some(Menu::Skills)) {
+            self.skill_search = Self::fresh_input(String::new());
+            self.skill_focus = false;
+        }
+        if matches!(
+            self.cur_menu(),
+            Some(Menu::ContextView | Menu::TestMd | Menu::SkillView { .. })
+        ) {
             self.md_built_w = 0;
         }
         if matches!(self.cur_menu(), Some(Menu::UndoShadow)) {
@@ -681,6 +699,17 @@ impl App {
                 self.menu_sel = idx;
             }
         }
+        if matches!(self.cur_menu(), Some(Menu::Skills)) {
+            if let Some(Menu::SkillView { name }) = popped
+                && let Some(idx) = self.menu_rows.iter().position(|(_, a)| {
+                    matches!(a, MenuAction::ToggleSkill(other) if other.eq_ignore_ascii_case(&name))
+                })
+            {
+                self.menu_sel = idx;
+            } else {
+                self.menu_skip_none(1);
+            }
+        }
         self.dirty = true;
     }
 
@@ -778,6 +807,7 @@ impl App {
                     | Menu::TestArt
                     | Menu::TestColors
                     | Menu::TestMd
+                    | Menu::SkillView { .. }
             )
         )
     }
@@ -793,6 +823,7 @@ impl App {
                     | Menu::TestArt
                     | Menu::TestColors
                     | Menu::TestMd
+                    | Menu::SkillView { .. }
             )
         ) {
             let step = if dir.abs() > 1 { 10 } else { 1 };
@@ -1019,6 +1050,7 @@ impl App {
             Some(Menu::Models { .. }) => &mut self.model_search,
             Some(Menu::Sessions) => &mut self.session_search,
             Some(Menu::Settings) => &mut self.config_search,
+            Some(Menu::Skills) => &mut self.skill_search,
             _ => &mut self.prov_search,
         }
     }
@@ -1028,6 +1060,7 @@ impl App {
             Some(Menu::Models { .. }) => self.model_focus,
             Some(Menu::Sessions) => self.session_focus,
             Some(Menu::Settings) => self.config_focus,
+            Some(Menu::Skills) => self.skill_focus,
             _ => self.prov_focus,
         }
     }
@@ -1037,7 +1070,15 @@ impl App {
             Some(Menu::Models { .. }) => self.model_focus = on,
             Some(Menu::Sessions) => self.session_focus = on,
             Some(Menu::Settings) => self.config_focus = on,
+            Some(Menu::Skills) => self.skill_focus = on,
             _ => self.prov_focus = on,
+        }
+    }
+
+    pub(super) fn selected_skill_name(&self) -> Option<String> {
+        match &self.menu_row_at(self.menu_sel)?.1 {
+            MenuAction::ToggleSkill(name) => Some(name.clone()),
+            _ => None,
         }
     }
 
@@ -1113,6 +1154,7 @@ impl App {
                 | Some(Menu::TestArt)
                 | Some(Menu::TestColors)
                 | Some(Menu::TestMd)
+                | Some(Menu::SkillView { .. })
         ) {
             self.menu_back();
             return;
@@ -1249,6 +1291,25 @@ impl App {
                 }
                 None => " Plan ".into(),
             },
+            Some(Menu::Skills) => {
+                let all = crate::prompts::skills::discover(&self.cfg.skills, &self.project_root);
+                let active_count = all
+                    .iter()
+                    .filter(|s| {
+                        s.always
+                            || self
+                                .active_skills
+                                .iter()
+                                .any(|a| a.name.eq_ignore_ascii_case(&s.name))
+                    })
+                    .count();
+                if active_count > 0 {
+                    format!(" Skills · {active_count} active / {} available ", all.len())
+                } else {
+                    format!(" Skills ({}) ", all.len())
+                }
+            }
+            Some(Menu::SkillView { name }) => format!(" Skill · {name} "),
             None => String::new(),
         }
     }

@@ -237,6 +237,8 @@ pub struct App {
     /// Whether the current prompt still needs the full tool-oriented context.
     context_bootstrap_pending: bool,
     active_skills: Vec<crate::prompts::skills::Skill>,
+    skill_search: TextArea<'static>,
+    skill_focus: bool,
 
     /// Project root, resolved once at construction. The status bar used to
     /// call `std::env::current_dir()` on every frame; nothing in the process
@@ -682,6 +684,8 @@ impl App {
             session_env_rx: None,
             context_bootstrap_pending: true,
             active_skills: Vec::new(),
+            skill_search: Self::fresh_input(String::new()),
+            skill_focus: false,
             cfg,
             segments: Vec::new(),
             streaming: false,
@@ -1761,6 +1765,14 @@ impl App {
     /// complete nothing.
     fn popup_level2_cmd(&self) -> Option<&'static str> {
         let t = self.input_text();
+        if t.starts_with("/skill ") {
+            let has_skills = !self.active_skills.is_empty()
+                || !crate::prompts::skills::discover(&self.cfg.skills, &self.project_root)
+                    .is_empty();
+            if has_skills {
+                return Some("/skill");
+            }
+        }
         menus::SUBCOMMANDS
             .iter()
             .map(|(cmd, _)| *cmd)
@@ -1783,16 +1795,30 @@ impl App {
     /// Level 1: top-level commands (`/plan`). Level 2: `<cmd> <sub>`.
     fn popup_items(&self) -> Vec<String> {
         let t = self.input_text();
-        if let Some(cmd) = self.popup_level2_cmd()
-            && let Some(subs) = menus::subcommands_of(cmd)
-        {
+        if let Some(cmd) = self.popup_level2_cmd() {
             let tail = t.strip_prefix(cmd).unwrap_or("").trim_start_matches(' ');
             let word = tail.split_whitespace().next().unwrap_or("");
-            return subs
-                .iter()
-                .filter(|sub| sub.starts_with(word))
-                .map(|sub| format!("{cmd} {sub}"))
-                .collect();
+            if cmd == "/skill" {
+                let word_lower = word.to_ascii_lowercase();
+                let mut subs: Vec<String> =
+                    crate::prompts::skills::discover(&self.cfg.skills, &self.project_root)
+                        .into_iter()
+                        .map(|s| s.name)
+                        .collect();
+                subs.push("clear".to_string());
+                return subs
+                    .into_iter()
+                    .filter(|sub| sub.to_ascii_lowercase().starts_with(&word_lower))
+                    .map(|sub| format!("{cmd} {sub}"))
+                    .collect();
+            }
+            if let Some(subs) = menus::subcommands_of(cmd) {
+                return subs
+                    .iter()
+                    .filter(|sub| sub.starts_with(word))
+                    .map(|sub| format!("{cmd} {sub}"))
+                    .collect();
+            }
         }
         COMMANDS
             .iter()

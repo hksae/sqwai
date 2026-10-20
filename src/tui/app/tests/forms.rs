@@ -1758,3 +1758,51 @@ fn list_surface_scales_to_half_terminal_with_eight_minimum_and_stays_compact_for
     );
 }
 
+#[test]
+fn skills_menu_toggles_views_and_completes_level2() {
+    use ratatui::buffer::Buffer;
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    let skill_dir = app.project_root.join(".sqwai/skills/tui-rules");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: tui-rules\ndescription: TUI layout invariants\ntriggers: [ratatui]\n---\nKeep rows within width.\n",
+    )
+    .unwrap();
+
+    // 1. Level-2 popup for `/skill ` dynamically lists discovered skills + `clear`
+    app.input = App::fresh_input("/skill ".into());
+    assert!(app.popup_visible());
+    assert_eq!(
+        app.popup_items(),
+        vec!["/skill tui-rules".to_string(), "/skill clear".to_string()]
+    );
+
+    // 2. `/skills` opens `Menu::Skills`
+    app.command("skills");
+    assert!(matches!(app.cur_menu(), Some(Menu::Skills)));
+    assert!(app.active_skills.is_empty());
+
+    // 3. Toggling the skill pins it without mutating `stable_parts`
+    app.stable_parts = app.stable_parts();
+    let stable_before = app.stable_parts.clone();
+    app.run_action(MenuAction::ToggleSkill("tui-rules".into()));
+    assert_eq!(app.active_skills.len(), 1);
+    assert_eq!(app.stable_parts, stable_before, "pinning a skill must not invalidate cached stable_parts");
+
+    // 4. `ViewSkill` opens `Menu::SkillView` and renders the skill markdown
+    app.run_action(MenuAction::ViewSkill("tui-rules".into()));
+    assert!(matches!(app.cur_menu(), Some(Menu::SkillView { .. })));
+    let area = Rect::new(0, 0, 100, 28);
+    let mut buf = Buffer::empty(area);
+    app.render_into(&mut buf, area);
+    assert!(!app.menu_rows.is_empty());
+
+    // 5. `menu_back` returns to `Menu::Skills` and `ClearPinnedSkills` clears active skills
+    app.menu_back();
+    assert!(matches!(app.cur_menu(), Some(Menu::Skills)));
+    app.run_action(MenuAction::ClearPinnedSkills);
+    assert!(app.active_skills.is_empty());
+}
+
+

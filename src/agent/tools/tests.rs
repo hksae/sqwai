@@ -849,6 +849,53 @@ fn skills_and_project_config_stay_reachable() {
     let _ = fs::remove_dir_all(dir);
 }
 
+#[test]
+fn skill_tool_loads_instructions_and_jailed_bundled_files() {
+    let (mut ctx, dir) = proj();
+    let skill_dir = dir.join(".sqwai/skills/tui-craft");
+    fs::create_dir_all(skill_dir.join("references")).unwrap();
+    fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: tui-craft\ndescription: TUI craft rules\ntriggers: [ratatui]\n---\nAlways respect terminal width.\n",
+    )
+    .unwrap();
+    fs::write(
+        skill_dir.join("references/springs.md"),
+        "# Springs\nUse critically damped springs.\n",
+    )
+    .unwrap();
+
+    // 1. First call returns full SKILL.md + bundled file manifest
+    let first = execute(&mut ctx, "skill", &json!({"name": "tui-craft"}));
+    assert!(first.ok, "{}", first.output);
+    assert!(first.output.contains("Always respect terminal width."));
+    assert!(first.output.contains("references/springs.md"));
+
+    // 2. Duplicate call in the same session returns a concise already-loaded pointer
+    let second = execute(&mut ctx, "skill", &json!({"name": "tui-craft"}));
+    assert!(second.ok, "{}", second.output);
+    assert!(second.output.contains("already loaded"));
+
+    // 3. Reading a bundled file inside the skill directory succeeds
+    let bundled = execute(
+        &mut ctx,
+        "skill",
+        &json!({"name": "tui-craft", "file": "references/springs.md"}),
+    );
+    assert!(bundled.ok, "{}", bundled.output);
+    assert!(bundled.output.contains("critically damped springs"));
+
+    // 4. Path traversal (`..`) outside the skill directory is refused
+    let escape = execute(
+        &mut ctx,
+        "skill",
+        &json!({"name": "tui-craft", "file": "../SKILL.md"}),
+    );
+    assert!(!escape.ok, "traversal must be refused: {}", escape.output);
+
+    let _ = fs::remove_dir_all(dir);
+}
+
 /// A symlink inside the project pointing at host-owned state must not be a
 /// way around the jail: the check runs on the canonicalized path.
 #[cfg(unix)]

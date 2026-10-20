@@ -99,8 +99,40 @@ impl App {
         self.session.push(Role::User, &text);
         self.turn_user_index = Some(self.session.messages.len().saturating_sub(1));
 
-        let system = self.system_block();
         let root = self.project_root.clone();
+        // Auto-pin any `$skill-name` mentioned inline in the user prompt, and
+        // append a 1-line skill hint when the prompt matches an inactive skill's triggers.
+        let discovered_skills = crate::prompts::skills::discover(&self.cfg.skills, &root);
+        if !discovered_skills.is_empty() {
+            let mentions =
+                crate::prompts::skills::extract_dollar_mentions(&discovered_skills, &text);
+            for sk in mentions {
+                if !self
+                    .active_skills
+                    .iter()
+                    .any(|s| s.name.eq_ignore_ascii_case(&sk.name))
+                {
+                    self.active_skills.push(sk);
+                    self.context_bootstrap_pending = true;
+                }
+            }
+            if self.cfg.skills.auto_load {
+                let active_names: Vec<String> =
+                    self.active_skills.iter().map(|s| s.name.clone()).collect();
+                if let Some(hint) = crate::prompts::skills::match_hints(
+                    &discovered_skills,
+                    &active_names,
+                    &text,
+                    &[],
+                ) && let Some(last) = self.session.messages.last_mut()
+                {
+                    last.content.push('\n');
+                    last.content.push_str(&hint);
+                }
+            }
+        }
+
+        let system = self.system_block();
         if crate::agent::loop_task::has_restriction_marker(&text.to_lowercase())
             && let Ok(Some(plan)) =
                 crate::plan::open_active_for_session(&root, Some(&self.session.id.to_string()))

@@ -527,6 +527,7 @@ pub(crate) async fn run_tool_blocking(
             ctx.journal = worker.journal;
             ctx.files_read = worker.files_read;
             ctx.read_windows = worker.read_windows;
+            ctx.activated_skills = worker.activated_skills;
             outcome
         }
         Err(e) => {

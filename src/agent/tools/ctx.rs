@@ -89,6 +89,12 @@ pub struct ToolCtx {
     /// windows so windows whose `tool_result` was later cleared from the wire
     /// can be evicted before answering "already cover X–Y, see above".
     pub current_call_id: Option<String>,
+    /// Skill discovery configuration (`[skills]` in `config.toml`).
+    pub skills_cfg: crate::config::SkillsConfig,
+    /// Lowercased names of skills already loaded via `skill(name="...")` in
+    /// this session so repeat calls can return a concise pointer instead of
+    /// duplicating the full `SKILL.md` body.
+    pub activated_skills: std::collections::BTreeSet<String>,
 }
 
 impl ToolCtx {
@@ -121,6 +127,8 @@ impl ToolCtx {
             parent_session: None,
             background_baselines: false,
             current_call_id: None,
+            skills_cfg: crate::config::SkillsConfig::default(),
+            activated_skills: std::collections::BTreeSet::new(),
         }
     }
 
@@ -407,6 +415,7 @@ impl ToolCtx {
                 slot.rebuild_ranges();
             }
         }
+        self.activated_skills.extend(child.activated_skills);
     }
 }
 
