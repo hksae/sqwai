@@ -46,8 +46,6 @@ impl PartialEq<String> for QueuedPrompt {
     }
 }
 
-pub(super) const IMAGE_MARKER_PATTERN: &str = r"\[image [0-9]+\]";
-
 #[derive(Clone, Copy, Debug)]
 struct MarkerSpan {
     /// char offset into the composer text, inclusive

@@ -435,6 +435,43 @@ fn char_slice(text: &str, start: usize, end: usize) -> String {
     text.chars().skip(start).take(end.saturating_sub(start)).collect()
 }
 
+/// Color `[image N]` in the already-rendered composer. Scanning the painted
+/// cells instead of the logical text keeps a marker that a soft wrap split
+/// across two rows accent-colored on both halves.
+fn paint_input_markers(buf: &mut ratatui::buffer::Buffer, rect: Rect) {
+    let mut text = String::new();
+    let mut cells = Vec::new();
+    for y in rect.y..rect.bottom() {
+        for x in rect.x..rect.right() {
+            let Some(cell) = buf.cell((x, y)) else {
+                continue;
+            };
+            let symbol = cell.symbol();
+            if symbol.is_empty() {
+                text.push(' ');
+                cells.push((x, y));
+            } else {
+                for ch in symbol.chars() {
+                    text.push(ch);
+                    cells.push((x, y));
+                }
+            }
+        }
+    }
+    for (start, end) in attachments::marker_char_spans(&text) {
+        let Some(span) = cells.get(start..end) else {
+            continue;
+        };
+        for &(x, y) in span {
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                let mut style = cell.style();
+                style.fg = Some(Theme::ACCENT());
+                cell.set_style(style);
+            }
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq)]
 pub(super) struct CellPos {
     pub(super) row: usize, // absolute row in cache_lines
@@ -1697,6 +1734,10 @@ impl App {
                     }
                 }
             }
+            // Accent `[image N]` after the textarea paints: its built-in
+            // search highlighter matches per visual line and misses a marker
+            // split by a soft wrap.
+            paint_input_markers(buf, input_rect);
         }
         // the chips are only clickable while the bar is on screen: scrolled up,
         // that row shows history and no chip lives there
@@ -2260,4 +2301,56 @@ fn apply_sel(l: &Line<'_>, cs: usize, ce: usize) -> Line<'static> {
         }
     }
     Line::from(out)
+}
+
+#[cfg(test)]
+mod paint_tests {
+    use super::*;
+
+    #[test]
+    fn input_marker_accent_survives_a_soft_wrap() {
+        let area = Rect::new(0, 0, 11, 2);
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        buf.set_string(0, 0, "xxxx[image ", Style::default());
+        buf.set_string(0, 1, "6]", Style::default());
+
+        paint_input_markers(&mut buf, area);
+
+        for x in 4..11 {
+            assert_eq!(
+                buf.cell((x, 0)).unwrap().style().fg,
+                Some(Theme::ACCENT()),
+                "row 0 cell {x}"
+            );
+        }
+        assert_eq!(
+            buf.cell((0, 1)).unwrap().style().fg,
+            Some(Theme::ACCENT())
+        );
+        assert_eq!(
+            buf.cell((1, 1)).unwrap().style().fg,
+            Some(Theme::ACCENT())
+        );
+        assert_ne!(
+            buf.cell((2, 1)).unwrap().style().fg,
+            Some(Theme::ACCENT())
+        );
+    }
+
+    #[test]
+    fn input_marker_accent_rejects_typos() {
+        let area = Rect::new(0, 0, 20, 1);
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        buf.set_string(0, 0, "hello [imaage 1]", Style::default());
+
+        paint_input_markers(&mut buf, area);
+
+        for x in 0..18 {
+            assert_ne!(
+                buf.cell((x, 0)).unwrap().style().fg,
+                Some(Theme::ACCENT()),
+                "cell {x}"
+            );
+        }
+    }
 }

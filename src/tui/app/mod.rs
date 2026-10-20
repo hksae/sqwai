@@ -922,14 +922,6 @@ impl App {
         // selection must never mean anything other than "this row is picked".
         input.set_cursor_style(Theme::cursor());
         input.set_selection_style(Theme::selection());
-        // `[image N]` markers are highlighted through the built-in search
-        // highlighter; the search itself is never driven from the UI.
-        if input
-            .set_search_pattern(attachments::IMAGE_MARKER_PATTERN)
-            .is_ok()
-        {
-            input.set_search_style(Theme::accent());
-        }
         input
     }
 
