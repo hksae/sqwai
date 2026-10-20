@@ -115,6 +115,70 @@ impl App {
         true
     }
 
+    /// Many terminals deliver a file drop as ordinary characters. When the
+    /// composer's trailing token is an absolute, existing image path, turn it
+    /// into markers. Absolute-only is deliberate: a manually typed relative
+    /// path must stay text.
+    pub(super) fn maybe_attach_dropped_path(&mut self) {
+        if !self.image_entry_allowed() {
+            return;
+        }
+        let text = self.input_text();
+        if self.last_drop_text == text {
+            return;
+        }
+        self.last_drop_text = text.clone();
+        let Some((start, end, paths)) = self.trailing_dropped_paths(&text) else {
+            return;
+        };
+        if self.model_cfg.vision == Some(false) {
+            self.status("this model does not accept images", StatusKind::Err);
+            return;
+        }
+        let free =
+            MAX_IMAGES.saturating_sub(self.pending_images.len() + self.pending_image_jobs.len());
+        let total = paths.len();
+        let accepted: Vec<PathBuf> = paths.into_iter().take(free).collect();
+        if accepted.is_empty() {
+            self.status(
+                &format!("image limit is {MAX_IMAGES} per message"),
+                StatusKind::Warn,
+            );
+            return;
+        }
+        let mut tokens = Vec::with_capacity(accepted.len());
+        let mut jobs = Vec::with_capacity(accepted.len());
+        for path in accepted {
+            self.image_marker += 1;
+            let marker = self.image_marker;
+            tokens.push(format!("[image {marker}]"));
+            jobs.push((marker, path));
+        }
+        let replacement = tokens.join(" ");
+        let before = &text[..start];
+        let row = before.matches('\n').count() as u16;
+        let col = before.rsplit('\n').next().unwrap_or("").chars().count() as u16
+            + replacement.chars().count() as u16;
+        let mut rebuilt = String::with_capacity(text.len() + replacement.len());
+        rebuilt.push_str(before);
+        rebuilt.push_str(&replacement);
+        rebuilt.push_str(&text[end..]);
+        self.input = Self::fresh_input(rebuilt);
+        self.input
+            .move_cursor(tui_textarea::CursorMove::Jump(row, col));
+        for (marker, path) in jobs {
+            let token = format!("[image {marker}]");
+            self.track_job(marker, token, ImageSource::File(path));
+        }
+        if total > free {
+            self.status(
+                &format!("attached {free} of {total} images — limit is {MAX_IMAGES}"),
+                StatusKind::Warn,
+            );
+        }
+        self.dirty = true;
+    }
+
     pub(super) fn poll_image_jobs(&mut self) {
         loop {
             match self.image_jobs_rx.try_recv() {
@@ -279,6 +343,33 @@ impl App {
         true
     }
 
+    /// The trailing run of absolute image paths in the composer, with the byte
+    /// range they occupy. Used for drops delivered as typed characters.
+    fn trailing_dropped_paths(&self, text: &str) -> Option<(usize, usize, Vec<PathBuf>)> {
+        let trimmed = text.trim_end();
+        if trimmed.is_empty() {
+            return None;
+        }
+        let end = trimmed.len();
+        let mut cursor = end;
+        let mut paths = Vec::new();
+        while let Some((token_start, token)) = trailing_token(&text[..cursor]) {
+            let path = PathBuf::from(&token);
+            // Extension first: an arbitrary absolute path must not cost a
+            // filesystem stat on every keystroke.
+            if !path.is_absolute() || !is_image_path(&path) || !path.is_file() {
+                break;
+            }
+            paths.push(path);
+            cursor = token_start;
+        }
+        if paths.is_empty() {
+            return None;
+        }
+        paths.reverse();
+        Some((cursor, end, paths))
+    }
+
     pub(super) fn pasted_image_paths(&self, text: &str) -> Option<Vec<PathBuf>> {
         let tokens = split_pasted_paths(text)?;
         let mut paths = Vec::new();
@@ -289,7 +380,7 @@ impl App {
             } else {
                 self.project_root.join(path)
             };
-            if !path.is_file() || !is_image_path(&path) {
+            if !is_image_path(&path) || !path.is_file() {
                 return None;
             }
             paths.push(path);
@@ -372,6 +463,33 @@ fn split_pasted_paths(text: &str) -> Option<Vec<String>> {
     (!tokens.is_empty()).then_some(tokens)
 }
 
+/// The last whitespace-separated (or quoted) token of `text` and its byte
+/// offset. `text` must not end with whitespace; an empty or unquoted tail is
+/// returned as-is.
+fn trailing_token(text: &str) -> Option<(usize, String)> {
+    let text = text.trim_end();
+    if text.is_empty() {
+        return None;
+    }
+    let last = text.chars().last()?;
+    if last == '"' || last == '\'' {
+        let before = &text[..text.len() - last.len_utf8()];
+        let open = before.rfind(last)?;
+        let token = &text[open + last.len_utf8()..text.len() - last.len_utf8()];
+        return (!token.is_empty()).then(|| (open, token.to_string()));
+    }
+    let start = match text.char_indices().rev().find(|(_, c)| c.is_whitespace()) {
+        Some((index, c)) => index + c.len_utf8(),
+        None => 0,
+    };
+    let token = &text[start..];
+    if token.starts_with(['"', '\'']) {
+        // An opening quote with no closing one is an unfinished drop.
+        return None;
+    }
+    (!token.is_empty()).then(|| (start, token.to_string()))
+}
+
 fn is_image_path(path: &Path) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
@@ -408,6 +526,20 @@ mod tests {
         );
         assert_eq!(split_pasted_paths(""), None);
         assert_eq!(split_pasted_paths("\"unclosed"), None);
+    }
+
+    #[test]
+    fn trailing_token_understands_quotes_and_plain_tails() {
+        assert_eq!(
+            trailing_token(r#""C:\a b\x.png""#),
+            Some((0, r"C:\a b\x.png".to_string()))
+        );
+        assert_eq!(
+            trailing_token(r#"hello C:\a.png"#),
+            Some((6, r"C:\a.png".to_string()))
+        );
+        assert_eq!(trailing_token("   "), None);
+        assert_eq!(trailing_token("\"unclosed"), None);
     }
 
     #[test]

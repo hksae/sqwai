@@ -17,6 +17,27 @@ fn drafted_images_follow_their_markers() {
 }
 
 #[test]
+fn a_dropped_absolute_path_typed_as_text_becomes_a_marker() {
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("dropped.png");
+    std::fs::write(&path, crate::media::test_png(12, 6)).unwrap();
+
+    // Terminals that do not emit a paste event type the path character by
+    // character, usually quoted.
+    app.input = App::fresh_input(format!("\"{}\"", path.display()));
+    app.maybe_attach_dropped_path();
+    assert_eq!(app.input_text(), "[image 1]");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while app.pending_images.is_empty() && std::time::Instant::now() < deadline {
+        app.poll_image_jobs();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(app.pending_images.len(), 1);
+    assert_eq!(app.pending_images[0].name, "dropped.png");
+}
+
+#[test]
 fn a_pasted_path_becomes_a_marker_and_then_an_attachment() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     let dir = tempfile::tempdir().unwrap();

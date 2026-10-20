@@ -329,6 +329,12 @@ pub struct App {
     pending_image_jobs: Vec<attachments::PendingImageJob>,
     image_jobs_tx: std::sync::mpsc::Sender<attachments::ImageJobResult>,
     image_jobs_rx: std::sync::mpsc::Receiver<attachments::ImageJobResult>,
+    /// Suppress the native paste payload that may follow a Ctrl+V image
+    /// (Windows terminals that forward the key and also paste text).
+    paste_image_guard: Option<Instant>,
+    /// Last composer text scanned for a dropped absolute image path. Drops in
+    /// many terminals arrive as ordinary characters, not paste events.
+    last_drop_text: String,
     /// previous turn ended successfully — gates retry notifications
     prev_turn_ok: bool,
     /// already toasted for the current retry cycle
@@ -750,6 +756,8 @@ impl App {
             pending_image_jobs: Vec::new(),
             image_jobs_tx,
             image_jobs_rx,
+            paste_image_guard: None,
+            last_drop_text: String::new(),
             prev_turn_ok: false,
             retry_notified: true, // no toast for the very first turn
             last_reveal: None,
@@ -1114,6 +1122,7 @@ impl App {
             self.poll_maintain();
             self.poll_session_env();
             self.poll_image_jobs();
+            self.maybe_attach_dropped_path();
             // typewriter: reveal queued answer text gradually, catching up when
             // the queue grows faster than the reveal speed
             if !self.pending_reveal.is_empty() {

@@ -280,11 +280,15 @@ impl App {
                     // particular, do not pass Ctrl+V through to TextArea::input:
                     // some Windows terminal/keymap combinations interpret it as
                     // an accept/submit action after the clipboard text is inserted.
-                    if ctrl && matches!(k.code, KeyCode::Char('v') | KeyCode::Char('V')) {
+                    // Windows Terminal keeps Ctrl+V for itself and sends only
+                    // the pasted text (nothing at all for an image). Alt+V is
+                    // forwarded, so it reaches the app-side clipboard read.
+                    if (ctrl || alt) && matches!(k.code, KeyCode::Char('v') | KeyCode::Char('V')) {
                         if self.image_entry_allowed()
                             && let Some((width, height, bytes)) = super::clip_get_image()
                         {
                             self.paste_enter_until = None;
+                            self.paste_image_guard = Some(now + PASTE_ENTER_GUARD);
                             self.attach_clipboard_image(width, height, bytes);
                             continue;
                         }
@@ -1196,6 +1200,22 @@ impl App {
                         }
                         continue;
                     }
+                    if self.paste_image_guard.is_some_and(|until| now < until) {
+                        self.paste_image_guard = None;
+                        self.paste_enter_until = None;
+                        continue;
+                    }
+                    // A dropped path outranks a stale clipboard image; any
+                    // other paste prefers the image, matching Ctrl+V.
+                    if self.image_entry_allowed()
+                        && self.pasted_image_paths(&p).is_none()
+                        && let Some((width, height, bytes)) = super::clip_get_image()
+                    {
+                        self.attach_clipboard_image(width, height, bytes);
+                        self.paste_image_guard = Some(now + PASTE_ENTER_GUARD);
+                        self.paste_enter_until = None;
+                        continue;
+                    }
                     self.paste_enter_until = None;
                     if !self.menu_stack.is_empty() {
                         let p = p.replace(['\r', '\n'], " ");
@@ -1207,7 +1227,7 @@ impl App {
                         self.dirty = true;
                         continue;
                     }
-                    self.paste_text(&p);
+                    self.paste_input_text(&p);
                 }
                 Event::Resize(w, h) => {
                     // timestamp only; the draw path debounces the heavy
