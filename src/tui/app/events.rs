@@ -145,6 +145,32 @@ impl App {
                         self.tab_held = false;
                         continue;
                     }
+                    // Windows Terminal consumes Ctrl+V's keydown for its own
+                    // paste and forwards only the release. Read an image-only
+                    // clipboard here; text is the terminal's paste and must
+                    // not be inserted twice.
+                    if k.kind == KeyEventKind::Release
+                        && k.modifiers.contains(KeyModifiers::CONTROL)
+                        && match k.code {
+                            KeyCode::Char('v') | KeyCode::Char('V') => true,
+                            KeyCode::Char(c) => qwerty_char(c) == Some('v'),
+                            _ => false,
+                        }
+                    {
+                        let now = Instant::now();
+                        if self.paste_image_guard.is_some_and(|until| now <= until) {
+                            // The press handler already attached this image.
+                            self.paste_image_guard = None;
+                            continue;
+                        }
+                        if self.image_entry_allowed()
+                            && super::clip_get().ok().is_none_or(|text| text.is_empty())
+                            && let Some((width, height, bytes)) = super::clip_get_image()
+                        {
+                            self.attach_clipboard_image(width, height, bytes);
+                        }
+                        continue;
+                    }
                     if k.kind != KeyEventKind::Press {
                         continue;
                     }
@@ -280,10 +306,9 @@ impl App {
                     // particular, do not pass Ctrl+V through to TextArea::input:
                     // some Windows terminal/keymap combinations interpret it as
                     // an accept/submit action after the clipboard text is inserted.
-                    // Windows Terminal keeps Ctrl+V for itself and sends only
-                    // the pasted text (nothing at all for an image). Alt+V is
-                    // forwarded, so it reaches the app-side clipboard read.
-                    if (ctrl || alt) && matches!(k.code, KeyCode::Char('v') | KeyCode::Char('V')) {
+                    // Terminals that forward Ctrl+V reach the app here;
+                    // Windows Terminal sends only the release, handled above.
+                    if ctrl && matches!(k.code, KeyCode::Char('v') | KeyCode::Char('V')) {
                         if self.image_entry_allowed()
                             && let Some((width, height, bytes)) = super::clip_get_image()
                         {

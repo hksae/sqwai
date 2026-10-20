@@ -62,7 +62,6 @@ fn main() -> Result<()> {
         // direct restore is correct. The in-TUI hook installed in run()
         // replaces this one and drains through the presenter first.
         disable_any_motion();
-        disable_experiment_bracketed_paste();
         let _ = crossterm::execute!(
             std::io::stdout(),
             crossterm::event::DisableMouseCapture,
@@ -168,25 +167,6 @@ fn disable_any_motion() {
     let _ = std::io::stdout().flush();
 }
 
-/// Temporary experiment: enable bracketed paste and watch what the terminal
-/// actually delivers. Opt-in so a normal run is unchanged.
-fn experiment_bracketed_paste() -> bool {
-    std::env::var_os("SQWAI_EXPERIMENT_BRACKETED_PASTE").is_some()
-}
-
-fn enable_experiment_bracketed_paste() -> Result<()> {
-    if experiment_bracketed_paste() {
-        crossterm::execute!(io::stdout(), crossterm::event::EnableBracketedPaste)?;
-    }
-    Ok(())
-}
-
-fn disable_experiment_bracketed_paste() {
-    if experiment_bracketed_paste() {
-        let _ = crossterm::execute!(io::stdout(), crossterm::event::DisableBracketedPaste);
-    }
-}
-
 /// dedicated presenter thread. One `terminal::size()` call per session here;
 /// steady-state sizes arrive via Resize events. Returns the UI-side handles
 /// plus the join handle (joined before restore, so no frame can interleave
@@ -201,7 +181,6 @@ fn init_presenter() -> Result<PresenterHandles> {
         crossterm::cursor::Hide
     )?;
     enable_any_motion();
-    enable_experiment_bracketed_paste()?;
     let (cols, rows) = crossterm::terminal::size()?;
     // BufWriter coalesces the hundreds of small per-cell writes of a frame
     // into one or two syscalls; every frame still ends with an explicit
@@ -228,7 +207,6 @@ fn init_presenter() -> Result<PresenterHandles> {
 
 fn restore_terminal() -> Result<()> {
     disable_any_motion();
-    disable_experiment_bracketed_paste();
     crossterm::execute!(
         io::stdout(),
         crossterm::event::DisableMouseCapture,
