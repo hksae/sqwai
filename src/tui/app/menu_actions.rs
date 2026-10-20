@@ -57,6 +57,7 @@ impl App {
             MenuAction::ToggleSkillsAutoLoad => {
                 self.cfg.skills.auto_load = !self.cfg.skills.auto_load;
                 self.cfg.save().ok();
+                self.refresh_skills();
                 self.stable_parts = self.stable_parts();
                 self.context_bootstrap_pending = true;
                 let on = self.cfg.skills.auto_load;
@@ -77,9 +78,11 @@ impl App {
                         StatusKind::Ok,
                     );
                 } else {
-                    let all =
-                        crate::prompts::skills::discover(&self.cfg.skills, &self.project_root);
-                    if let Some(skill) = all.into_iter().find(|s| s.name.eq_ignore_ascii_case(&name))
+                    if let Some(skill) = self
+                        .cached_skills()
+                        .iter()
+                        .find(|s| s.name.eq_ignore_ascii_case(&name))
+                        .cloned()
                     {
                         let skill_name = skill.name.clone();
                         self.active_skills.push(skill);

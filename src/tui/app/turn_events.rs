@@ -328,30 +328,35 @@ impl App {
                     // When the model loads a skill (`skill(name: "...")`), pin it
                     // into `self.active_skills` so `/skills` shows it active and it
                     // survives compaction.
-                    if let Some(Segment::Tool { args, .. }) = self
+                    let skill_name = self
                         .segments
                         .iter()
                         .rev()
-                        .find(|seg| matches!(seg, Segment::Tool { call_id: Some(cid), .. } if cid == &call_id))
-                    {
-                        let skill_name = args.split(" / ").next().unwrap_or(args.as_str()).trim();
-                        if !skill_name.is_empty()
-                            && !skill_name.eq_ignore_ascii_case("list")
-                            && !self
-                                .active_skills
-                                .iter()
-                                .any(|s| s.name.eq_ignore_ascii_case(skill_name))
-                        {
-                            let all = crate::prompts::skills::discover(
-                                &self.cfg.skills,
-                                &self.project_root,
-                            );
-                            if let Some(sk) = all
-                                .into_iter()
-                                .find(|s| s.name.eq_ignore_ascii_case(skill_name))
-                            {
-                                self.active_skills.push(sk);
+                        .find(|seg| {
+                            matches!(seg, Segment::Tool { call_id: Some(cid), .. } if cid == &call_id)
+                        })
+                        .and_then(|seg| match seg {
+                            Segment::Tool { args, .. } => {
+                                Some(args.split(" / ").next().unwrap_or(args.as_str()).trim().to_string())
                             }
+                            _ => None,
+                        })
+                        .unwrap_or_default();
+                    if !skill_name.is_empty()
+                        && !skill_name.eq_ignore_ascii_case("list")
+                        && !self
+                            .active_skills
+                            .iter()
+                            .any(|s| s.name.eq_ignore_ascii_case(&skill_name))
+                    {
+                        self.refresh_skills();
+                        if let Some(sk) = self
+                            .discovered_skills
+                            .iter()
+                            .find(|s| s.name.eq_ignore_ascii_case(&skill_name))
+                            .cloned()
+                        {
+                            self.active_skills.push(sk);
                         }
                     }
                 }
@@ -1110,6 +1115,9 @@ impl App {
         self.aborted = false;
         self.agent = None;
         self.retry_line = None;
+        // A turn may have created or removed skill packages on disk; pick the
+        // new catalog up so `/skills` and the popup show them without a restart.
+        self.refresh_skills();
         self.prev_turn_ok = matches!(res, Ok(()));
         if res.is_err() {
             self.context_bootstrap_pending = true;

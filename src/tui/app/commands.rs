@@ -89,9 +89,9 @@ impl App {
                     self.run_action(MenuAction::ClearPinnedSkills);
                     return;
                 }
-                let root = self.project_root.clone();
+                self.refresh_skills();
                 let loaded =
-                    crate::prompts::skills::load_matching(&self.cfg.skills, &root, Some(query));
+                    crate::prompts::skills::filter_by_query(self.cached_skills(), query);
                 if loaded.is_empty() {
                     self.status("skill not found", StatusKind::Warn);
                 } else {

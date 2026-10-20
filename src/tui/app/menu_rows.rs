@@ -1199,9 +1199,10 @@ impl App {
             MenuAction::FocusSearch,
         ));
         let q = self.skill_search.lines().join("").to_lowercase();
-        let all = crate::prompts::skills::discover(&self.cfg.skills, &self.project_root);
-        let mut matched = 0usize;
-        for skill in &all {
+        // Rendered into a scratch buffer first: the catalog is borrowed from
+        // `self`, and pushing rows into `self.menu_rows` would borrow it twice.
+        let mut rendered: Vec<(String, String, bool)> = Vec::new();
+        for skill in self.cached_skills() {
             if !q.is_empty() {
                 let name_hit = skill.name.to_lowercase().contains(&q);
                 let desc_hit = skill
@@ -1221,7 +1222,6 @@ impl App {
                     continue;
                 }
             }
-            matched += 1;
             let is_pinned = self
                 .active_skills
                 .iter()
@@ -1245,6 +1245,9 @@ impl App {
                 }
             }
             let tail = format!(" ({})", meta_parts.join(" · "));
+            rendered.push((skill.name.clone(), tail, is_active));
+        }
+        for (name, tail, is_active) in rendered {
             let style = if is_active {
                 Theme::brand_ink()
             } else {
@@ -1252,30 +1255,34 @@ impl App {
             };
             self.menu_rows.push(row(
                 Line::from(vec![
-                    Span::styled(skill.name.clone(), style),
+                    Span::styled(name.clone(), style),
                     Span::styled(tail, Theme::dim()),
                 ]),
-                MenuAction::ToggleSkill(skill.name.clone()),
+                MenuAction::ToggleSkill(name),
             ));
         }
-        if matched == 0 {
-            let msg = if all.is_empty() {
-                "no skills found in .sqwai/skills or ~/.config/sqwai/skills"
-            } else {
-                "no matching skills"
-            };
+        if self.cached_skills().is_empty() {
             self.menu_rows.push(row(
-                Line::from(vec![Span::styled(msg, Theme::dim())]),
+                Line::from(vec![Span::styled(
+                    "no skills found in .sqwai/skills or ~/.config/sqwai/skills",
+                    Theme::dim(),
+                )]),
+                MenuAction::None,
+            ));
+        } else if self.menu_rows.len() <= 1 {
+            self.menu_rows.push(row(
+                Line::from(vec![Span::styled("no matching skills", Theme::dim())]),
                 MenuAction::None,
             ));
         }
     }
 
     fn build_skill_view_rows(&mut self, name: &str) {
-        let all = crate::prompts::skills::discover(&self.cfg.skills, &self.project_root);
-        let skill = all
-            .into_iter()
+        let skill = self
+            .cached_skills()
+            .iter()
             .find(|s| s.name.eq_ignore_ascii_case(name))
+            .cloned()
             .or_else(|| {
                 self.active_skills
                     .iter()

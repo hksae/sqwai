@@ -387,7 +387,7 @@ fn skill_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
         .find(|s| s.name.eq_ignore_ascii_case(name))
         .cloned()
         .or_else(|| {
-            let mut m = crate::prompts::skills::load_matching(&ctx.skills_cfg, &ctx.root, Some(name));
+            let mut m = crate::prompts::skills::filter_by_query(&all, name);
             (m.len() == 1).then(|| m.remove(0))
         });
 

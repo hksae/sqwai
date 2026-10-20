@@ -116,29 +116,11 @@ pub fn discover(config: &SkillsConfig, project_root: &Path) -> Vec<Skill> {
     by_name.into_values().collect()
 }
 
-/// Load skills from configured directories, plus the conventional project dir,
-/// when `config.auto_load` is enabled.
-pub fn load(config: &SkillsConfig, project_root: &Path) -> Vec<Skill> {
-    if !config.auto_load {
-        return Vec::new();
-    }
-    discover(config, project_root)
-}
-
-pub fn load_matching(
-    config: &SkillsConfig,
-    project_root: &Path,
-    query: Option<&str>,
-) -> Vec<Skill> {
-    if !config.auto_load && query.is_none() {
-        return Vec::new();
-    }
-    let all = discover(config, project_root);
-    let Some(query) = query.map(str::trim).filter(|q| !q.is_empty()) else {
-        return all;
-    };
+/// Match a query against an already-discovered catalog: exact name or trigger
+/// first, then a prefix/substring fallback. Borrows the catalog so a hot path
+/// (a keystroke) never re-scans the skill directories.
+pub fn filter_by_query(all: &[Skill], query: &str) -> Vec<Skill> {
     let q_lower = query.to_ascii_lowercase();
-    // Exact name or trigger match first
     let exact: Vec<Skill> = all
         .iter()
         .filter(|skill| {
@@ -153,8 +135,7 @@ pub fn load_matching(
     if !exact.is_empty() {
         return exact;
     }
-    // Fallback to prefix/substring match on name or trigger
-    all.into_iter()
+    all.iter()
         .filter(|skill| {
             skill.name.to_ascii_lowercase().contains(&q_lower)
                 || skill
@@ -162,6 +143,7 @@ pub fn load_matching(
                     .iter()
                     .any(|t| t.to_ascii_lowercase().contains(&q_lower))
         })
+        .cloned()
         .collect()
 }
 

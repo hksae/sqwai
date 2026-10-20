@@ -554,6 +554,7 @@ impl App {
             self.config_focus = false;
         }
         if matches!(self.cur_menu(), Some(Menu::Skills)) {
+            self.refresh_skills();
             self.skill_search = Self::fresh_input(String::new());
             self.skill_focus = false;
         }
@@ -1292,7 +1293,7 @@ impl App {
                 None => " Plan ".into(),
             },
             Some(Menu::Skills) => {
-                let all = crate::prompts::skills::discover(&self.cfg.skills, &self.project_root);
+                let all = self.cached_skills();
                 let active_count = all
                     .iter()
                     .filter(|s| {
@@ -1308,8 +1309,7 @@ impl App {
                 } else {
                     format!(" Skills ({}) ", all.len())
                 }
-            }
-            Some(Menu::SkillView { name }) => format!(" Skill · {name} "),
+            }            Some(Menu::SkillView { name }) => format!(" Skill · {name} "),
             None => String::new(),
         }
     }

@@ -1771,12 +1771,36 @@ fn skills_menu_toggles_views_and_completes_level2() {
     .unwrap();
 
     // 1. Level-2 popup for `/skill ` dynamically lists discovered skills + `clear`
+    app.refresh_skills();
     app.input = App::fresh_input("/skill ".into());
     assert!(app.popup_visible());
     assert_eq!(
         app.popup_items(),
         vec!["/skill tui-rules".to_string(), "/skill clear".to_string()]
     );
+
+    // 1b. Typing more letters keeps the popup cheap and filtered: the catalog
+    // is cached, so the list is rebuilt from memory on every keystroke.
+    app.input = App::fresh_input("/skill tui".into());
+    assert_eq!(
+        app.popup_items(),
+        vec!["/skill tui-rules".to_string()]
+    );
+
+    // 1c. The catalog is cached, not re-scanned: removing the skill from disk
+    // does not change the popup, so a keystroke never touches the filesystem.
+    std::fs::remove_file(skill_dir.join("SKILL.md")).unwrap();
+    app.input = App::fresh_input("/skill ".into());
+    assert_eq!(
+        app.popup_items(),
+        vec!["/skill tui-rules".to_string(), "/skill clear".to_string()]
+    );
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: tui-rules\ndescription: TUI layout invariants\ntriggers: [ratatui]\n---\nKeep rows within width.\n",
+    )
+    .unwrap();
+    app.refresh_skills();
 
     // 2. `/skills` opens `Menu::Skills`
     app.command("skills");

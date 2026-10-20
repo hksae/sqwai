@@ -102,33 +102,33 @@ impl App {
         let root = self.project_root.clone();
         // Auto-pin any `$skill-name` mentioned inline in the user prompt, and
         // append a 1-line skill hint when the prompt matches an inactive skill's triggers.
-        let discovered_skills = crate::prompts::skills::discover(&self.cfg.skills, &root);
-        if !discovered_skills.is_empty() {
-            let mentions =
-                crate::prompts::skills::extract_dollar_mentions(&discovered_skills, &text);
-            for sk in mentions {
-                if !self
-                    .active_skills
-                    .iter()
-                    .any(|s| s.name.eq_ignore_ascii_case(&sk.name))
-                {
-                    self.active_skills.push(sk);
-                    self.context_bootstrap_pending = true;
-                }
+        let mentions = {
+            let discovered = self.cached_skills();
+            if discovered.is_empty() {
+                Vec::new()
+            } else {
+                crate::prompts::skills::extract_dollar_mentions(discovered, &text)
             }
-            if self.cfg.skills.auto_load {
-                let active_names: Vec<String> =
-                    self.active_skills.iter().map(|s| s.name.clone()).collect();
-                if let Some(hint) = crate::prompts::skills::match_hints(
-                    &discovered_skills,
-                    &active_names,
-                    &text,
-                    &[],
-                ) && let Some(last) = self.session.messages.last_mut()
-                {
-                    last.content.push('\n');
-                    last.content.push_str(&hint);
-                }
+        };
+        for sk in mentions {
+            if !self
+                .active_skills
+                .iter()
+                .any(|s| s.name.eq_ignore_ascii_case(&sk.name))
+            {
+                self.active_skills.push(sk);
+                self.context_bootstrap_pending = true;
+            }
+        }
+        if self.cfg.skills.auto_load {
+            let discovered = self.cached_skills();
+            let active_names: Vec<String> = self.active_skills.iter().map(|s| s.name.clone()).collect();
+            if let Some(hint) =
+                crate::prompts::skills::match_hints(discovered, &active_names, &text, &[])
+                && let Some(last) = self.session.messages.last_mut()
+            {
+                last.content.push('\n');
+                last.content.push_str(&hint);
             }
         }
 

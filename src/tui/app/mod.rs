@@ -236,6 +236,7 @@ pub struct App {
     session_env_rx: Option<std::sync::mpsc::Receiver<String>>,
     /// Whether the current prompt still needs the full tool-oriented context.
     context_bootstrap_pending: bool,
+    discovered_skills: Vec<crate::prompts::skills::Skill>,
     active_skills: Vec<crate::prompts::skills::Skill>,
     skill_search: TextArea<'static>,
     skill_focus: bool,
@@ -683,6 +684,7 @@ impl App {
             session_environment: String::new(),
             session_env_rx: None,
             context_bootstrap_pending: true,
+            discovered_skills: Vec::new(),
             active_skills: Vec::new(),
             skill_search: Self::fresh_input(String::new()),
             skill_focus: false,
@@ -850,6 +852,7 @@ impl App {
             .flatten()
             .map(|plan| plan.id);
         }
+        app.refresh_skills();
         app.stable_parts = app.stable_parts();
         app.rebuild_session_environment();
         app.context_bootstrap_pending = true;
@@ -1759,6 +1762,18 @@ impl App {
         self.touch_segment(seg);
     }
 
+    pub(super) fn refresh_skills(&mut self) {
+        self.discovered_skills =
+            crate::prompts::skills::discover(&self.cfg.skills, &self.project_root);
+    }
+
+    /// The discovered skill catalog, borrowed. Skills carry their full
+    /// `SKILL.md` body, so this must never clone: the popup and the menu rows
+    /// are rebuilt on every keystroke and every frame.
+    pub(super) fn cached_skills(&self) -> &[crate::prompts::skills::Skill] {
+        &self.discovered_skills
+    }
+
     /// Second-level completion target: `<cmd> <tail>` filters that
     /// command's subcommand list from [`menus::SUBCOMMANDS`].
     /// Gated commands (e.g. `/test` without the experimental flag)
@@ -1766,9 +1781,7 @@ impl App {
     fn popup_level2_cmd(&self) -> Option<&'static str> {
         let t = self.input_text();
         if t.starts_with("/skill ") {
-            let has_skills = !self.active_skills.is_empty()
-                || !crate::prompts::skills::discover(&self.cfg.skills, &self.project_root)
-                    .is_empty();
+            let has_skills = !self.active_skills.is_empty() || !self.cached_skills().is_empty();
             if has_skills {
                 return Some("/skill");
             }
@@ -1800,11 +1813,11 @@ impl App {
             let word = tail.split_whitespace().next().unwrap_or("");
             if cmd == "/skill" {
                 let word_lower = word.to_ascii_lowercase();
-                let mut subs: Vec<String> =
-                    crate::prompts::skills::discover(&self.cfg.skills, &self.project_root)
-                        .into_iter()
-                        .map(|s| s.name)
-                        .collect();
+                let mut subs: Vec<String> = self
+                    .cached_skills()
+                    .iter()
+                    .map(|s| s.name.clone())
+                    .collect();
                 subs.push("clear".to_string());
                 return subs
                     .into_iter()

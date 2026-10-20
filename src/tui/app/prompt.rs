@@ -17,8 +17,15 @@ impl App {
             &self.cfg.memory,
             self.session.context_limit,
         );
-        let loaded = crate::prompts::skills::load(&self.cfg.skills, &root);
-        if let Some(catalog) = crate::prompts::skills::catalog_prompt(&loaded) {
+        // The catalog is cached: re-scanning every skill directory on every
+        // turn cost a full directory walk plus a parse per skill, on top of
+        // the popup and menu paths that read it.
+        let loaded: &[crate::prompts::skills::Skill] = if self.cfg.skills.auto_load {
+            self.cached_skills()
+        } else {
+            &[]
+        };
+        if let Some(catalog) = crate::prompts::skills::catalog_prompt(loaded) {
             layers.push((PrefixSection::Skills, catalog));
         }
         // Verify-command names from .sqwai/config.toml ([verify]) are static
