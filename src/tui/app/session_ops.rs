@@ -182,6 +182,7 @@ impl App {
             read_only: self.read_only,
             mcp: self.cfg.mcp.clone(),
             lsp: self.cfg.lsp.clone(),
+            skills: self.cfg.skills.clone(),
             previous_response_id: if self.context_bootstrap_pending || !self.continuation_enabled()
             {
                 None
@@ -325,6 +326,7 @@ impl App {
             read_only: self.read_only,
             mcp: Default::default(),
             lsp: Default::default(),
+            skills: self.cfg.skills.clone(),
             previous_response_id: None,
             summary: self.session.summary.clone(),
             compact_only: true,

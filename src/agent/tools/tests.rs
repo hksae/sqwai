@@ -896,6 +896,31 @@ fn skill_tool_loads_instructions_and_jailed_bundled_files() {
     let _ = fs::remove_dir_all(dir);
 }
 
+/// The `skill` tool must search the same directories the TUI catalog does:
+/// a skill in a configured `[skills].dirs` entry has to be reachable by the
+/// model, not only by the `/skills` menu.
+#[test]
+fn skill_tool_sees_skills_from_configured_dirs() {
+    let (mut ctx, dir) = proj();
+    let global = dir.join("global-skills");
+    fs::create_dir_all(global.join("brand-kit")).unwrap();
+    fs::write(
+        global.join("brand-kit/SKILL.md"),
+        "---\nname: brand-kit\ndescription: Brand rules\n---\nUse the brand gradient.\n",
+    )
+    .unwrap();
+    ctx.skills_cfg = crate::config::SkillsConfig {
+        dirs: vec![global.clone()],
+        auto_load: true,
+    };
+
+    let out = execute(&mut ctx, "skill", &json!({"name": "brand-kit"}));
+    assert!(out.ok, "{}", out.output);
+    assert!(out.output.contains("brand gradient"));
+
+    let _ = fs::remove_dir_all(dir);
+}
+
 /// A symlink inside the project pointing at host-owned state must not be a
 /// way around the jail: the check runs on the canonicalized path.
 #[cfg(unix)]

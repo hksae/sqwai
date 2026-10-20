@@ -49,6 +49,7 @@ async fn a_mutation_runs_without_any_plan() {
         summary: None,
         mcp: Default::default(),
         lsp: Default::default(),
+        skills: Default::default(),
         compact_only: false, compact_focus: String::new(),
         memory: Default::default(),
         compaction: Default::default(),

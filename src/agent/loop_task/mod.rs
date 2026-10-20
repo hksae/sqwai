@@ -324,6 +324,10 @@ pub struct AgentInput {
     pub mcp: crate::config::McpConfig,
     /// LSP servers available to this agent turn.
     pub lsp: crate::config::LspConfig,
+    /// Skill discovery configuration (`[skills]`): the directories the `skill`
+    /// tool searches. Without it the tool would only ever see the project
+    /// skills and silently miss every configured global directory.
+    pub skills: crate::config::SkillsConfig,
     /// Run the compaction policy and finish without talking to the model
     /// otherwise (the `/compact` command).
     pub compact_only: bool,
@@ -701,6 +705,7 @@ async fn run_agent(
         plan_limits,
         mcp,
         lsp,
+        skills,
         shadow_store,
         subagent_depth,
         parent_step,
@@ -906,6 +911,9 @@ async fn run_agent(
     // ...and a writer child's declared scope, if any (read-only children
     // and the main agent take nothing).
     ctx.subagent_write_paths = tools::take_subagent_scope(&session_id);
+    // The `skill` tool searches the same directories the TUI catalog does —
+    // otherwise a skill visible in `/skills` would be invisible to the model.
+    ctx.skills_cfg = skills.clone();
     // ...and their shadow snapshots land on the parent chain, so the
     // parent's `/undo` sees them (ToolCtx::checkpoint_session).
     ctx.checkpoint_session = parent_session.clone();
@@ -1414,6 +1422,7 @@ async fn run_agent(
                 &system,
                 &mcp,
                 &lsp,
+                &skills,
                 read_only,
                 shadow_store,
                 &mut messages,
@@ -1618,6 +1627,7 @@ async fn run_agent(
                                 system.clone(),
                                 mcp.clone(),
                                 lsp.clone(),
+                                skills.clone(),
                                 read_only,
                                 shadow_store,
                                 memory.clone(),
