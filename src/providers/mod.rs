@@ -141,6 +141,10 @@ pub struct ImageAttachment {
     pub width: u32,
     pub height: u32,
     pub bytes: u64,
+    /// For user turns: the `[image N]` marker this attachment belongs to.
+    /// Tool results carry no marker — the call itself names them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub marker: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -235,6 +239,68 @@ impl Message {
         self.thinking_ms = ms;
         self
     }
+}
+
+/// One piece of a user message on the wire. The marker text stays in the
+/// transcript and on the wire; the image block sits right after the marker
+/// that named it, so "compare [image 1] with [image 2]" keeps its meaning.
+pub(crate) enum UserPart<'a> {
+    Text(String),
+    Image(&'a ImageAttachment),
+}
+
+/// Split a user message's text at its `[image N]` markers. Markers without an
+/// attachment stay literal text; attachments whose marker disappeared from
+/// the text are dropped.
+pub(crate) fn user_parts(message: &Message) -> Vec<UserPart<'_>> {
+    let text = message.content.as_str();
+    if message.role != Role::User || message.images.is_empty() {
+        return vec![UserPart::Text(text.to_string())];
+    }
+    let mut by_marker: std::collections::HashMap<u32, &ImageAttachment> =
+        std::collections::HashMap::new();
+    for image in &message.images {
+        if let Some(marker) = image.marker {
+            by_marker.entry(marker).or_insert(image);
+        }
+    }
+    if by_marker.is_empty() {
+        return vec![UserPart::Text(text.to_string())];
+    }
+    let mut parts = Vec::new();
+    let mut used = std::collections::HashSet::new();
+    let mut start = 0usize;
+    let bytes = text.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'['
+            && let Some((marker, len)) = parse_image_marker(&text[i..])
+            && let Some(image) = by_marker.get(&marker).copied()
+            && used.insert(marker)
+        {
+            let end = i + len;
+            parts.push(UserPart::Text(text[start..end].to_string()));
+            parts.push(UserPart::Image(image));
+            start = end;
+            i = end;
+            continue;
+        }
+        i += 1;
+    }
+    if start < text.len() {
+        parts.push(UserPart::Text(text[start..].to_string()));
+    }
+    parts
+}
+
+fn parse_image_marker(text: &str) -> Option<(u32, usize)> {
+    let rest = text.strip_prefix("[image ")?;
+    let close = rest.find(']')?;
+    let digits = &rest[..close];
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some((digits.parse().ok()?, "[image ".len() + close + 1))
 }
 
 /// Token counters reported by the provider for **one** request.

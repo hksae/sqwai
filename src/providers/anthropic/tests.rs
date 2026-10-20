@@ -793,6 +793,40 @@ fn find_kind<'a>(value: &'a serde_json::Value, kind: &str) -> Option<&'a serde_j
 }
 
 #[test]
+fn user_images_interleave_at_their_markers() {
+    let mut image = crate::media::test_image(40, 30, "shot.png");
+    image.marker = Some(1);
+    let req = ChatRequest {
+        model_id: "m".into(),
+        system: vec![],
+        messages: vec![
+            Message::new(crate::providers::Role::User, "before [image 1] after")
+                .with_images(vec![image]),
+        ],
+        effort: None,
+        effort_support: Default::default(),
+        max_tokens: None,
+        tools: vec![],
+        previous_response_id: None,
+        context_transport: crate::providers::ContextTransport::Stateless,
+    };
+    let body = build_body(&req, 8192, false);
+    let messages = body["messages"].as_array().unwrap();
+    let user = messages
+        .iter()
+        .find(|message| message["role"] == "user")
+        .expect("user turn");
+    let blocks = user["content"].as_array().expect("user images use blocks");
+    assert_eq!(blocks.len(), 3);
+    assert_eq!(blocks[0]["type"], "text");
+    assert_eq!(blocks[0]["text"], "before [image 1]");
+    assert_eq!(blocks[1]["type"], "image");
+    assert_eq!(blocks[1]["source"]["media_type"], "image/png");
+    assert_eq!(blocks[2]["type"], "text");
+    assert_eq!(blocks[2]["text"], " after");
+}
+
+#[test]
 fn tool_images_use_image_blocks_inside_the_tool_result() {
     let image = crate::media::test_image(40, 30, "shot.png");
     let req = ChatRequest {

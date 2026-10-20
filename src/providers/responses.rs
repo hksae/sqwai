@@ -50,7 +50,36 @@ fn input_items(req: &ChatRequest) -> Vec<Value> {
         match m.role {
             // legacy: a persisted system message would still map correctly
             Role::System => input.push(json!({"role": "system", "content": m.content})),
-            Role::User => input.push(json!({"role": "user", "content": m.content})),
+            Role::User => {
+                if m.images.iter().any(|image| image.marker.is_some()) {
+                    let mut content = Vec::new();
+                    for part in super::user_parts(m) {
+                        match part {
+                            super::UserPart::Text(text) => {
+                                if !text.is_empty() {
+                                    content.push(json!({"type": "input_text", "text": text}));
+                                }
+                            }
+                            super::UserPart::Image(image) => {
+                                match crate::media::data_uri(image) {
+                                    Ok(uri) => content.push(json!({
+                                        "type": "input_image",
+                                        "image_url": uri,
+                                        "detail": "auto",
+                                    })),
+                                    Err(_) => content.push(json!({
+                                        "type": "input_text",
+                                        "text": format!("[image unavailable: {}]", image.name),
+                                    })),
+                                }
+                            }
+                        }
+                    }
+                    input.push(json!({"role": "user", "content": content}));
+                } else {
+                    input.push(json!({"role": "user", "content": m.content}));
+                }
+            }
             Role::Assistant => {
                 // Replay reasoning items ahead of the assistant message they
                 // belong to, in order. Under previous_response_id continuation,

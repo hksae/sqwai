@@ -103,7 +103,7 @@ impl App {
         true
     }
 
-    fn paste_text(&mut self, text: &str) {
+    pub(super) fn paste_text(&mut self, text: &str) {
         self.jump_to_bottom_on_typing();
         self.input.insert_str(text);
         self.dirty = true;
@@ -258,7 +258,7 @@ impl App {
                                     self.touch_segment(seg);
                                 }
                             } else {
-                                self.paste_text(&text_batch);
+                                self.paste_input_text(&text_batch);
                             }
                             self.dirty = true;
                             continue;
@@ -281,6 +281,13 @@ impl App {
                     // some Windows terminal/keymap combinations interpret it as
                     // an accept/submit action after the clipboard text is inserted.
                     if ctrl && matches!(k.code, KeyCode::Char('v') | KeyCode::Char('V')) {
+                        if self.image_entry_allowed()
+                            && let Some((width, height, bytes)) = super::clip_get_image()
+                        {
+                            self.paste_enter_until = None;
+                            self.attach_clipboard_image(width, height, bytes);
+                            continue;
+                        }
                         let Ok(txt) = super::clip_get() else {
                             continue;
                         };
@@ -298,7 +305,7 @@ impl App {
                             continue;
                         }
                         self.paste_enter_until = Some(now + PASTE_ENTER_GUARD);
-                        self.paste_text(&txt);
+                        self.paste_input_text(&txt);
                         continue;
                     }
                     match k.code {
@@ -1267,6 +1274,12 @@ impl App {
 
     #[allow(dead_code)]
     pub(super) fn paste_clipboard(&mut self) {
+        if self.image_entry_allowed()
+            && let Some((width, height, bytes)) = super::clip_get_image()
+        {
+            self.attach_clipboard_image(width, height, bytes);
+            return;
+        }
         let Ok(txt) = super::clip_get() else {
             return;
         };
@@ -1280,7 +1293,7 @@ impl App {
             }
             return;
         }
-        self.paste_text(&txt);
+        self.paste_input_text(&txt);
     }
 }
 

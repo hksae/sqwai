@@ -1126,6 +1126,71 @@ fn tool_images_ride_in_a_synthetic_user_message() {
 }
 
 #[test]
+fn user_images_interleave_at_their_markers() {
+    let mut image = crate::media::test_image(64, 32, "shot.png");
+    image.marker = Some(1);
+    let req = ChatRequest {
+        model_id: "m".into(),
+        system: vec![],
+        messages: vec![
+            Message::new(
+                crate::providers::Role::User,
+                "hi look [image 1] here",
+            )
+            .with_images(vec![image]),
+        ],
+        effort: None,
+        effort_support: Default::default(),
+        max_tokens: None,
+        tools: vec![],
+        previous_response_id: None,
+        context_transport: crate::providers::ContextTransport::Stateless,
+    };
+    let body = OpenAiProvider::build_body(&req);
+    let messages = body["messages"].as_array().unwrap();
+    let user = messages
+        .iter()
+        .find(|m| m["role"] == "user")
+        .expect("user turn");
+    let parts = user["content"].as_array().expect("user images use parts");
+    assert_eq!(parts.len(), 3);
+    assert_eq!(parts[0]["type"], "text");
+    assert_eq!(parts[0]["text"], "hi look [image 1]");
+    assert_eq!(parts[1]["type"], "image_url");
+    assert_eq!(parts[2]["type"], "text");
+    assert_eq!(parts[2]["text"], " here");
+}
+
+#[test]
+fn user_parts_bind_markers_once_and_drop_orphans() {
+    let mut one = crate::media::test_image(8, 8, "one.png");
+    one.marker = Some(1);
+    let mut two = crate::media::test_image(9, 9, "two.png");
+    two.marker = Some(2);
+    let mut orphan = crate::media::test_image(10, 10, "orphan.png");
+    orphan.marker = Some(3);
+    let message = Message::new(
+        crate::providers::Role::User,
+        "[image 1] then [image 1] again [image 2]",
+    )
+    .with_images(vec![one, two, orphan]);
+    let parts = crate::providers::user_parts(&message);
+    let mut texts = Vec::new();
+    let mut images = Vec::new();
+    for part in parts {
+        match part {
+            crate::providers::UserPart::Text(text) => texts.push(text),
+            crate::providers::UserPart::Image(image) => images.push(image.name.clone()),
+        }
+    }
+    assert_eq!(
+        texts.concat(),
+        "[image 1] then [image 1] again [image 2]"
+    );
+    assert_eq!(images, ["one.png", "two.png"]);
+}
+
+#[test]
 fn a_missing_blob_becomes_a_text_marker_not_a_broken_turn() {
     let image = crate::providers::ImageAttachment {
         id: "0".repeat(64),
@@ -1134,6 +1199,7 @@ fn a_missing_blob_becomes_a_text_marker_not_a_broken_turn() {
         width: 10,
         height: 10,
         bytes: 0,
+        marker: None,
     };
     let body = OpenAiProvider::build_body(&image_request(image));
     let messages = body["messages"].as_array().unwrap();

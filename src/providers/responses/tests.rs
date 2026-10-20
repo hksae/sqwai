@@ -744,15 +744,50 @@ fn images_survive_serde_and_old_messages_stay_readable() {
         width: 10,
         height: 20,
         bytes: 3,
+        marker: Some(2),
     };
     let message = Message::tool_result("c", "x", false).with_images(vec![image.clone()]);
     let mut value = serde_json::to_value(&message).unwrap();
     assert!(value.get("images").is_some());
     let back: Message = serde_json::from_value(value.clone()).unwrap();
     assert_eq!(back.images, vec![image]);
+    assert_eq!(back.images[0].marker, Some(2));
     value.as_object_mut().unwrap().remove("images");
     let old: Message = serde_json::from_value(value).unwrap();
     assert!(old.images.is_empty());
+}
+
+#[test]
+fn user_images_interleave_at_their_markers() {
+    let mut image = crate::media::test_image(48, 48, "pic.png");
+    image.marker = Some(1);
+    let req = ChatRequest {
+        model_id: "m".into(),
+        system: vec![],
+        messages: vec![
+            Message::new(crate::providers::Role::User, "before [image 1] after")
+                .with_images(vec![image]),
+        ],
+        effort: None,
+        effort_support: Default::default(),
+        max_tokens: None,
+        tools: vec![],
+        previous_response_id: None,
+        context_transport: crate::providers::ContextTransport::Stateless,
+    };
+    let body = build_body(&req);
+    let input = body["input"].as_array().unwrap();
+    let user = input
+        .iter()
+        .find(|item| item["role"] == "user")
+        .expect("user turn");
+    let parts = user["content"].as_array().expect("user images use parts");
+    assert_eq!(parts.len(), 3);
+    assert_eq!(parts[0]["type"], "input_text");
+    assert_eq!(parts[0]["text"], "before [image 1]");
+    assert_eq!(parts[1]["type"], "input_image");
+    assert_eq!(parts[2]["type"], "input_text");
+    assert_eq!(parts[2]["text"], " after");
 }
 
 #[test]

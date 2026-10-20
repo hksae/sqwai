@@ -1,6 +1,60 @@
 use super::*;
 
 #[test]
+fn drafted_images_follow_their_markers() {
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    let mut one = crate::media::test_image(8, 8, "one.png");
+    one.marker = Some(1);
+    let mut two = crate::media::test_image(9, 9, "two.png");
+    two.marker = Some(2);
+    app.pending_images = vec![one, two];
+
+    assert!(app.has_marked_images("keep [image 2] only"));
+    let images = app.take_submitted_images("keep [image 2] only");
+    assert_eq!(images.len(), 1, "the deleted marker drops its image");
+    assert_eq!(images[0].marker, Some(2));
+    assert!(!app.has_marked_images("[image 3]"));
+}
+
+#[test]
+fn a_pasted_path_becomes_a_marker_and_then_an_attachment() {
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    let dir = tempfile::tempdir().unwrap();
+    app.project_root = dir.path().to_path_buf();
+    std::fs::write(dir.path().join("shot.png"), crate::media::test_png(20, 10)).unwrap();
+
+    app.paste_input_text("\"shot.png\"");
+    assert_eq!(app.input_text(), "[image 1]");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while app.pending_images.is_empty() && std::time::Instant::now() < deadline {
+        app.poll_image_jobs();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(app.pending_images.len(), 1);
+    assert_eq!(app.pending_images[0].marker, Some(1));
+    assert_eq!(app.pending_images[0].name, "shot.png");
+}
+
+#[test]
+fn a_paste_attaches_only_when_every_word_is_an_image_path() {
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    let dir = tempfile::tempdir().unwrap();
+    app.project_root = dir.path().to_path_buf();
+    std::fs::write(dir.path().join("shot.png"), crate::media::test_png(8, 8)).unwrap();
+    std::fs::write(dir.path().join("notes.txt"), "x").unwrap();
+
+    assert_eq!(app.pasted_image_paths("shot.png").unwrap().len(), 1);
+    assert!(
+        app.pasted_image_paths("look at shot.png").is_none(),
+        "prose with a path is ordinary text"
+    );
+    assert!(
+        app.pasted_image_paths("notes.txt").is_none(),
+        "only image files qualify"
+    );
+}
+
+#[test]
 fn debug_enter_updates_visible_value() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.open_menu(Menu::Settings);

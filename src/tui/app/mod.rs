@@ -63,6 +63,7 @@ fn reopened_step_ids(
         .collect()
 }
 
+mod attachments;
 mod commands;
 mod events;
 mod forms;
@@ -104,6 +105,16 @@ fn clip_get() -> Result<String, arboard::Error> {
     arboard::Clipboard::new().and_then(|mut cb| cb.get_text())
 }
 
+/// Clipboard bitmap, when the platform provides one. Text paste is tried only
+/// when this returns `None`, so a screenshot copied from a browser (where the
+/// clipboard often also carries a URL) still pastes as an image.
+#[cfg(not(test))]
+fn clip_get_image() -> Option<(usize, usize, Vec<u8>)> {
+    let mut clipboard = arboard::Clipboard::new().ok()?;
+    let image = clipboard.get_image().ok()?;
+    Some((image.width, image.height, image.bytes.into_owned()))
+}
+
 #[cfg(test)]
 static CLIP_TEST: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
 
@@ -116,6 +127,11 @@ fn clip_set(text: &str) -> Result<(), arboard::Error> {
 #[cfg(test)]
 fn clip_get() -> Result<String, arboard::Error> {
     Ok(CLIP_TEST.lock().unwrap().clone())
+}
+
+#[cfg(test)]
+fn clip_get_image() -> Option<(usize, usize, Vec<u8>)> {
+    None
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -301,7 +317,18 @@ pub struct App {
     toast: Option<Toast>,
     /// user messages typed mid-turn: sent as new turns FIFO after the
     /// running one ends (or on abort); cleared on session switch
-    pending_queue: Vec<String>,
+    pending_queue: Vec<attachments::QueuedPrompt>,
+    /// images drafted in the composer, each tied to an `[image N]` marker
+    pending_images: Vec<crate::providers::ImageAttachment>,
+    /// last marker number handed out in the current composition
+    image_marker: u32,
+    /// bumped whenever the composer is cleared; late worker results from an
+    /// older composition are discarded instead of attaching to a new one
+    image_epoch: u64,
+    /// image decodes still in flight, for cap accounting and submit gating
+    pending_image_jobs: Vec<attachments::PendingImageJob>,
+    image_jobs_tx: std::sync::mpsc::Sender<attachments::ImageJobResult>,
+    image_jobs_rx: std::sync::mpsc::Receiver<attachments::ImageJobResult>,
     /// previous turn ended successfully — gates retry notifications
     prev_turn_ok: bool,
     /// already toasted for the current retry cycle
@@ -624,6 +651,7 @@ impl App {
     }
 
     pub fn new(cfg: Config, session: Session, startup: bool, read_only: bool) -> Result<Self> {
+        let (image_jobs_tx, image_jobs_rx) = std::sync::mpsc::channel();
         let model_key = session.model_key.clone();
         let model_cfg = cfg
             .models
@@ -716,6 +744,12 @@ impl App {
             read_only,
             toast: None,
             pending_queue: Vec::new(),
+            pending_images: Vec::new(),
+            image_marker: 0,
+            image_epoch: 0,
+            pending_image_jobs: Vec::new(),
+            image_jobs_tx,
+            image_jobs_rx,
             prev_turn_ok: false,
             retry_notified: true, // no toast for the very first turn
             last_reveal: None,
@@ -1079,6 +1113,7 @@ impl App {
             self.poll_builtin_update();
             self.poll_maintain();
             self.poll_session_env();
+            self.poll_image_jobs();
             // typewriter: reveal queued answer text gradually, catching up when
             // the queue grows faster than the reveal speed
             if !self.pending_reveal.is_empty() {

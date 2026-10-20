@@ -304,6 +304,18 @@ impl Session {
     /// request and belongs to no session. Anything that needs to reach the
     /// model as instructions goes through `AgentInput::system`.
     pub fn push(&mut self, role: Role, content: impl Into<String>) {
+        self.push_with_images(role, content, Vec::new());
+    }
+
+    /// Push a turn that carries images (user attachments). The images are
+    /// counted toward the session estimate; the wire accounting re-derives
+    /// the same number from the message itself.
+    pub fn push_with_images(
+        &mut self,
+        role: Role,
+        content: impl Into<String>,
+        images: Vec<crate::providers::ImageAttachment>,
+    ) {
         if role == Role::System {
             return;
         }
@@ -315,9 +327,14 @@ impl Session {
         if self.messages.is_empty() && role == Role::User {
             self.title = title_from(&content);
         }
-        self.estimated_tokens += (content.len() as u64).div_ceil(4);
+        self.estimated_tokens += (content.len() as u64).div_ceil(4)
+            + images
+                .iter()
+                .map(|image| crate::media::pressure_tokens(image.width, image.height))
+                .sum::<u64>();
         self.last_message_at = Some(now);
-        self.messages.push(Message::new(role, content));
+        self.messages
+            .push(Message::new(role, content).with_images(images));
     }
 
     /// One-shot pruning of older `thinking_blocks` / `reasoning_items` when a

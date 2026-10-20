@@ -1179,7 +1179,18 @@ impl App {
             && (matches!(&res, Ok(())) || matches!(&res, Err(e) if e == "aborted"));
         if send_queued {
             let next = self.pending_queue.remove(0);
-            self.input = Self::fresh_input(next);
+            self.input = Self::fresh_input(next.text);
+            // Restore the queued turn's images as draft state; submit resolves
+            // them against the markers that are still in its text.
+            self.image_epoch = self.image_epoch.wrapping_add(1);
+            self.image_marker = next
+                .images
+                .iter()
+                .filter_map(|image| image.marker)
+                .max()
+                .unwrap_or(0);
+            self.pending_image_jobs.clear();
+            self.pending_images = next.images;
             self.submit();
         }
     }

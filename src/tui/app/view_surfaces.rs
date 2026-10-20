@@ -1237,7 +1237,11 @@ impl App {
 
     pub(super) fn queue_line(&self, w: u16) -> Line<'static> {
         let n = self.pending_queue.len();
-        let first = self.pending_queue.first().map(String::as_str).unwrap_or("");
+        let first = self
+            .pending_queue
+            .first()
+            .map(|queued| queued.text.as_str())
+            .unwrap_or("");
         let head = format!("  queued {n}:");
         let mut tail = format!(" {first}");
         if n > 1 {

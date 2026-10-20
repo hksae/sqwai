@@ -76,7 +76,35 @@ impl OpenAiProvider {
     fn message_json(m: &super::Message) -> Value {
         match m.role {
             Role::System => json!({"role": "system", "content": m.content}),
-            Role::User => json!({"role": "user", "content": m.content}),
+            Role::User => {
+                if m.images.iter().any(|image| image.marker.is_some()) {
+                    let mut content = Vec::new();
+                    for part in super::user_parts(m) {
+                        match part {
+                            super::UserPart::Text(text) => {
+                                if !text.is_empty() {
+                                    content.push(json!({"type": "text", "text": text}));
+                                }
+                            }
+                            super::UserPart::Image(image) => {
+                                match crate::media::data_uri(image) {
+                                    Ok(uri) => content.push(json!({
+                                        "type": "image_url",
+                                        "image_url": {"url": uri, "detail": "auto"},
+                                    })),
+                                    Err(_) => content.push(json!({
+                                        "type": "text",
+                                        "text": format!("[image unavailable: {}]", image.name),
+                                    })),
+                                }
+                            }
+                        }
+                    }
+                    json!({"role": "user", "content": content})
+                } else {
+                    json!({"role": "user", "content": m.content})
+                }
+            }
             Role::Tool => json!({
                 "role": "tool",
                 "tool_call_id": m.tool_call_id.clone().unwrap_or_default(),

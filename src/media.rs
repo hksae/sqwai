@@ -85,6 +85,7 @@ pub fn prepare(source: &[u8], name: &str) -> Result<Prepared, String> {
         width: 0,
         height: 0,
         bytes: bytes.len() as u64,
+        marker: None,
     };
     // Dimensions are read back from the encoded rendition so metadata always
     // describes exactly the bytes the provider will see.

@@ -71,8 +71,33 @@ fn thinking_blocks(m: &super::Message, thinking_on: bool) -> Vec<Value> {
 
 fn content_blocks(m: &super::Message, thinking_on: bool) -> Vec<Value> {
     let mut blocks = thinking_blocks(m, thinking_on);
-    // a tool result's payload lives inside the tool_result block itself
-    if !m.content.is_empty() && m.role != Role::Tool {
+    // a tool result's payload lives inside the tool_result block itself;
+    // user turns with image markers interleave text and images at the markers
+    if m.role == Role::User && m.images.iter().any(|image| image.marker.is_some()) {
+        for part in super::user_parts(m) {
+            match part {
+                super::UserPart::Text(text) => {
+                    if !text.is_empty() {
+                        blocks.push(json!({"type": "text", "text": text}));
+                    }
+                }
+                super::UserPart::Image(image) => match crate::media::base64_data(image) {
+                    Ok(data) => blocks.push(json!({
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": image.media_type,
+                            "data": data,
+                        },
+                    })),
+                    Err(_) => blocks.push(json!({
+                        "type": "text",
+                        "text": format!("[image unavailable: {}]", image.name),
+                    })),
+                },
+            }
+        }
+    } else if !m.content.is_empty() && m.role != Role::Tool {
         blocks.push(json!({"type": "text", "text": m.content}));
     }
     for c in &m.tool_calls {

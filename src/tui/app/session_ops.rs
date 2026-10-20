@@ -26,7 +26,11 @@ impl App {
         self.retry_notified = false;
         self.retry_line = None;
         self.last_checkpoint = None;
+        // Finish any image that was still decoding, so the submit either sees
+        // the attachment or blocks instead of sending a bare marker.
+        self.poll_image_jobs();
         let mut text = self.input_text().trim().to_string();
+        let mut queued_images: Option<Vec<crate::providers::ImageAttachment>> = None;
         if text.is_empty() {
             if self.startup {
                 let active = self.session_plan();
@@ -46,15 +50,27 @@ impl App {
                 && !self.pending_queue.is_empty()
                 && self.menu_stack.is_empty()
             {
-                text = self.pending_queue.remove(0);
+                let queued = self.pending_queue.remove(0);
+                text = queued.text;
+                queued_images = Some(queued.images);
             } else {
                 return;
             }
         }
+        if queued_images.is_none() && self.has_pending_images_in(&text) {
+            self.status("image still processing — try again", StatusKind::Info);
+            return;
+        }
         if self.streaming {
             if !text.starts_with('/') {
-                self.pending_queue.push(text);
+                let images = match queued_images {
+                    Some(images) => images,
+                    None => self.take_submitted_images(&text),
+                };
+                self.pending_queue
+                    .push(super::attachments::QueuedPrompt { text, images });
                 self.input = Self::fresh_input(String::new());
+                self.reset_image_draft();
                 self.status("queued — will send when the turn ends", StatusKind::Info);
                 return;
             }
@@ -84,19 +100,44 @@ impl App {
             );
             return;
         }
-        self.input = Self::fresh_input(String::new());
-        self.popup_dismiss = false;
-        self.hover = None;
         if let Some(rest) = text.strip_prefix('/') {
+            self.input = Self::fresh_input(String::new());
+            self.popup_dismiss = false;
+            self.hover = None;
+            self.reset_image_draft();
             self.command(rest);
             return;
         }
+        let from_queue = queued_images.is_some();
+        let images = match queued_images {
+            Some(images) => images,
+            None => {
+                if self.model_cfg.vision == Some(false) && self.has_marked_images(&text) {
+                    self.status("this model does not accept images", StatusKind::Err);
+                    return;
+                }
+                self.take_submitted_images(&text)
+            }
+        };
+        if !images.is_empty() && self.model_cfg.vision == Some(false) {
+            let failure = "this model does not accept images";
+            self.status(failure, StatusKind::Err);
+            if from_queue {
+                self.pending_queue
+                    .insert(0, super::attachments::QueuedPrompt { text, images });
+            }
+            return;
+        }
+        self.input = Self::fresh_input(String::new());
+        self.popup_dismiss = false;
+        self.hover = None;
+        self.reset_image_draft();
         self.startup = false;
         self.rebuild_provider();
         self.stable_parts = self.stable_parts();
         crate::providers::set_conversation_id(&self.session.id.to_string());
         self.push_segment(Segment::User(text.clone()));
-        self.session.push(Role::User, &text);
+        self.session.push_with_images(Role::User, &text, images);
         self.turn_user_index = Some(self.session.messages.len().saturating_sub(1));
 
         let root = self.project_root.clone();
@@ -374,6 +415,7 @@ impl App {
         self.resume_notice_armed = !self.session.messages.is_empty();
         crate::providers::set_conversation_id(&self.session.id.to_string());
         self.pending_queue.clear();
+        self.reset_image_draft();
         if let Some(ref plan_id) = self.session.plan_id
             && crate::plan::open(&self.project_root, plan_id).is_err()
         {
@@ -472,6 +514,7 @@ impl App {
         self.session.project = Some(self.project_root.clone());
         crate::providers::set_conversation_id(&self.session.id.to_string());
         self.pending_queue.clear();
+        self.reset_image_draft();
         self.session.plan_id = crate::plan::open_active_for_session(
             &self.project_root,
             Some(&self.session.id.to_string()),
