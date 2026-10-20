@@ -222,21 +222,89 @@ pub fn store(prepared: &Prepared) -> Result<(), String> {
     Ok(())
 }
 
-pub fn load(attachment: &ImageAttachment) -> Result<Vec<u8>, String> {
-    if !valid_id(&attachment.id) {
-        return Err(format!("invalid media id for {}", attachment.name));
+fn blob_path(id: &str, media_type: &str) -> Result<PathBuf, String> {
+    if !valid_id(id) {
+        return Err("invalid media id".to_string());
     }
-    let path = store_dir()?.join(format!(
-        "{}.{}",
-        attachment.id,
-        ext_for(&attachment.media_type)?
-    ));
+    Ok(store_dir()?.join(format!("{id}.{}", ext_for(media_type)?)))
+}
+
+pub fn load(attachment: &ImageAttachment) -> Result<Vec<u8>, String> {
+    let path = blob_path(&attachment.id, &attachment.media_type)
+        .map_err(|_| format!("invalid media id for {}", attachment.name))?;
     std::fs::read(&path).map_err(|e| {
         format!(
             "image '{}' is missing from the media store ({e}); view it again",
             attachment.name
         )
     })
+}
+
+/// Open a stored rendition in the system image viewer. Used by transcript
+/// clicks; the blob is host-owned, so no user path is launched here.
+pub fn open_blob(id: &str, media_type: &str, name: &str) -> Result<(), String> {
+    let path = blob_path(id, media_type)
+        .map_err(|_| format!("invalid media id for {name}"))?;
+    if !path.exists() {
+        return Err(format!("image '{name}' is missing from the media store"));
+    }
+    open_path(&path)
+}
+
+#[cfg(windows)]
+fn open_path(path: &std::path::Path) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    let file: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let verb: Vec<u16> = "open"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let result = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            verb.as_ptr(),
+            file.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    if (result as usize) <= 32 {
+        return Err(format!(
+            "cannot open the image viewer for {}",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn open_path(path: &std::path::Path) -> Result<(), String> {
+    open_with("open", path)
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn open_path(path: &std::path::Path) -> Result<(), String> {
+    open_with("xdg-open", path)
+}
+
+#[cfg(not(windows))]
+fn open_with(command: &str, path: &std::path::Path) -> Result<(), String> {
+    std::process::Command::new(command)
+        .arg(path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("cannot open the image viewer: {e}"))
 }
 
 pub fn base64_data(attachment: &ImageAttachment) -> Result<String, String> {

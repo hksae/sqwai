@@ -71,6 +71,14 @@ pub(super) struct ImageJobResult {
     result: Result<ImageAttachment, String>,
 }
 
+/// Marker number under a character column of a rendered line, if any.
+pub(super) fn marker_at_char(text: &str, column: usize) -> Option<u32> {
+    scan_marker_spans(text)
+        .into_iter()
+        .find(|span| column >= span.start && column < span.end)
+        .map(|span| span.marker)
+}
+
 pub(super) fn marker_char_spans(text: &str) -> Vec<(usize, usize)> {
     scan_marker_spans(text)
         .into_iter()
@@ -914,6 +922,13 @@ mod tests {
         );
         assert_eq!(split_pasted_paths(""), None);
         assert_eq!(split_pasted_paths("\"unclosed"), None);
+    }
+
+    #[test]
+    fn marker_at_char_hits_only_the_token() {
+        assert_eq!(marker_at_char("› hi [image 2] x", 6), Some(2));
+        assert_eq!(marker_at_char("› hi [image 2] x", 0), None);
+        assert_eq!(marker_at_char("› hi", 3), None);
     }
 
     #[test]

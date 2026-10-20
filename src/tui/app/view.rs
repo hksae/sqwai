@@ -111,6 +111,13 @@ pub(super) enum ClickTarget {
     Link {
         url: String,
     },
+    /// Image marker in a user message, resolved at press. Firing opens the
+    /// stored rendition in the system viewer; the blob id is pinned.
+    Image {
+        name: String,
+        id: String,
+        media_type: String,
+    },
 }
 
 /// Preview of a tool's shown body, computed once when the output lands —
@@ -571,6 +578,46 @@ impl App {
         }
     }
 
+    /// An `[image N]` marker in a user message resolves to its stored
+    /// rendition. Works for restored sessions: the nth user segment maps to
+    /// the nth user message, which carries the attachments.
+    pub(super) fn image_target_at(
+        &self,
+        seg_idx: usize,
+        line: &str,
+        char_col: usize,
+    ) -> Option<ClickTarget> {
+        if self.active_subagent.is_some() {
+            return None;
+        }
+        let (segs, _) = self.view_transcript();
+        if !matches!(segs.get(seg_idx), Some(Segment::User(_))) {
+            return None;
+        }
+        let marker = attachments::marker_at_char(line, char_col)?;
+        let ordinal = segs
+            .get(..=seg_idx)?
+            .iter()
+            .filter(|segment| matches!(segment, Segment::User(_)))
+            .count()
+            .saturating_sub(1);
+        let message = self
+            .session
+            .messages
+            .iter()
+            .filter(|message| message.role == Role::User)
+            .nth(ordinal)?;
+        let image = message
+            .images
+            .iter()
+            .find(|image| image.marker == Some(marker))?;
+        Some(ClickTarget::Image {
+            name: image.name.clone(),
+            id: image.id.clone(),
+            media_type: image.media_type.clone(),
+        })
+    }
+
     /// Semantic target under a chat row, resolved against the shown frame.
     /// `screen` is the press row for anchoring; `abs` indexes the layout
     /// this frame was painted from; `char_col` is the press column mapped
@@ -588,6 +635,11 @@ impl App {
         let tag = self.cache_rowseg.get(abs).copied()??;
         let (segs, meta) = self.view_transcript();
         let id = meta.get(tag).map(|m| m.id)?;
+        if let Some(line) = self.cache_lines.get(abs)
+            && let Some(target) = self.image_target_at(tag, &line_text(line), char_col)
+        {
+            return Some(target);
+        }
         // code lives in assistant text only: probe the wrapped rows solely
         // for those segments (and never for tool/thinking/status rows)
         if matches!(segs.get(tag), Some(Segment::Assistant { .. }))
@@ -881,6 +933,15 @@ impl App {
     /// at a stale row number.
     fn fire_target(&mut self, target: ClickTarget) {
         match target {
+            ClickTarget::Image {
+                name,
+                id,
+                media_type,
+            } => {
+                if let Err(error) = crate::media::open_blob(&id, &media_type, &name) {
+                    self.status(&error, StatusKind::Err);
+                }
+            }
             ClickTarget::Ask { seg, row } => {
                 let Some(idx) = self.index_of_seg(seg) else {
                     return;

@@ -1,6 +1,47 @@
 use super::*;
 
 #[test]
+fn a_history_marker_resolves_to_the_image_target() {
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    let mut image = crate::media::test_image(8, 8, "shot.png");
+    image.marker = Some(1);
+    app.session.messages = vec![
+        crate::providers::Message::new(
+            crate::providers::Role::User,
+            "look [image 1]",
+        )
+        .with_images(vec![image.clone()]),
+    ];
+    app.push_segment(Segment::User("look [image 1]".into()));
+
+    let line = "› look [image 1]";
+    let marker_col = line.chars().position(|c| c == '[').unwrap();
+    match app.image_target_at(0, line, marker_col) {
+        Some(crate::tui::app::view::ClickTarget::Image {
+            name,
+            id,
+            media_type,
+        }) => {
+            assert_eq!(name, "shot.png");
+            assert_eq!(id, image.id);
+            assert_eq!(media_type, "image/png");
+        }
+        _ => panic!("marker click must resolve to the image target"),
+    }
+    assert!(
+        app.image_target_at(0, line, 0).is_none(),
+        "clicking the message prefix does nothing"
+    );
+}
+
+#[test]
+fn a_missing_blob_is_reported_not_opened() {
+    let error = crate::media::open_blob(&"0".repeat(64), "image/png", "gone.png")
+        .expect_err("a missing blob must not launch a viewer");
+    assert!(error.contains("missing"), "{error}");
+}
+
+#[test]
 fn markers_renumber_in_text_order() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     let mut one = crate::media::test_image(8, 8, "one.png");
