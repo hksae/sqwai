@@ -806,7 +806,8 @@ fn tool_images_use_image_blocks_inside_the_tool_result() {
                     serde_json::json!({"path": "shot.png"}),
                 ),
             ]),
-            Message::tool_result("c1", "view_image: shot.png", false).with_images(vec![image]),
+            Message::tool_result("c1", "40×30 · image/png · 1 KB · ~10 tokens", false)
+                .with_images(vec![image]),
         ],
         effort: None,
         effort_support: Default::default(),

@@ -109,7 +109,7 @@ assets. `read` refuses binary files — this is the way to see them. The file is
 most 1568 px on the long edge and costs roughly one token per 28×28 patch (a 1280×720 screenshot \
 is about 1.2k tokens), so prefer one focused image over a series. Viewing the same unchanged image \
 again while it is still visible in context returns a pointer instead of a second copy; call again \
-after it was cleared. Returns the pixels plus a one-line record with path, dimensions and cost.",
+after it was cleared. Returns the pixels plus a one-line record with dimensions, format, size and cost.",
             parameters: json!({
                 "type": "object",
                 "properties": {

@@ -765,7 +765,8 @@ fn tool_images_use_the_function_call_output_array() {
             Message::new(crate::providers::Role::Assistant, "").with_tool_calls(vec![
                 crate::providers::ToolCallReq::new("c1", "view_image", json!({"path": "pic.png"})),
             ]),
-            Message::tool_result("c1", "view_image: pic.png", false).with_images(vec![image]),
+            Message::tool_result("c1", "48×48 · image/png · 1 KB · ~10 tokens", false)
+                .with_images(vec![image]),
         ],
         effort: None,
         effort_support: Default::default(),

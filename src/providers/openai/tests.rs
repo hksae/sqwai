@@ -1088,7 +1088,8 @@ fn image_request(image: crate::providers::ImageAttachment) -> ChatRequest {
             Message::new(crate::providers::Role::Assistant, "").with_tool_calls(vec![
                 crate::providers::ToolCallReq::new("c1", "view_image", json!({"path": "shot.png"})),
             ]),
-            Message::tool_result("c1", "view_image: shot.png", false).with_images(vec![image]),
+            Message::tool_result("c1", "64×32 · image/png · 1 KB · ~10 tokens", false)
+                .with_images(vec![image]),
         ],
         effort: None,
         effort_support: Default::default(),
@@ -1105,7 +1106,7 @@ fn tool_images_ride_in_a_synthetic_user_message() {
     let body = OpenAiProvider::build_body(&image_request(image));
     let messages = body["messages"].as_array().unwrap();
     let tool = messages.iter().find(|m| m["role"] == "tool").unwrap();
-    assert_eq!(tool["content"], "view_image: shot.png");
+    assert_eq!(tool["content"], "64×32 · image/png · 1 KB · ~10 tokens");
     let user = messages
         .iter()
         .find(|m| m["role"] == "user")

@@ -46,16 +46,17 @@ pub(super) fn view(ctx: &mut ToolCtx, args: &Value) -> Outcome {
     let attachment = prepared.attachment.clone();
     if ctx.visible_images.contains(&attachment.id) {
         return Outcome::ok(format!(
-            "image already in context: {} · {}×{} — no second copy attached",
-            attachment.name, attachment.width, attachment.height
+            "already in context · {}×{} — no second copy attached",
+            attachment.width, attachment.height
         ));
     }
     if let Err(e) = media::store(&prepared) {
         return Outcome::err(e);
     }
+    // The call line already names the tool and the path; repeat only what it
+    // does not say.
     let summary = format!(
-        "view_image: {} · {}×{} · {} · {} KB · {} tokens",
-        attachment.name,
+        "{}×{} · {} · {} KB · {} tokens",
         attachment.width,
         attachment.height,
         attachment.media_type,
@@ -88,6 +89,12 @@ mod tests {
         assert_eq!(image.name, "shot.png");
         assert!(out.output.contains("120×80"), "{}", out.output);
         assert!(out.output.contains("tokens"), "{}", out.output);
+        assert!(!out.output.contains("view_image:"), "{}", out.output);
+        assert!(
+            !out.output.contains("shot.png"),
+            "the call line already names the file: {}",
+            out.output
+        );
         assert!(crate::media::load(image).is_ok());
     }
 
