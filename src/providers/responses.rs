@@ -88,11 +88,38 @@ fn input_items(req: &ChatRequest) -> Vec<Value> {
                     }));
                 }
             }
-            Role::Tool => input.push(json!({
-                "type": "function_call_output",
-                "call_id": m.tool_call_id.clone().unwrap_or_default(),
-                "output": m.content,
-            })),
+            Role::Tool => {
+                let call_id = m.tool_call_id.clone().unwrap_or_default();
+                if m.images.is_empty() {
+                    input.push(json!({
+                        "type": "function_call_output",
+                        "call_id": call_id,
+                        "output": m.content,
+                    }));
+                } else {
+                    // Responses documents an array of text/image/file items
+                    // here, so no synthetic turn is needed.
+                    let mut output = vec![json!({"type": "input_text", "text": m.content})];
+                    for image in &m.images {
+                        match crate::media::data_uri(image) {
+                            Ok(uri) => output.push(json!({
+                                "type": "input_image",
+                                "image_url": uri,
+                                "detail": "auto",
+                            })),
+                            Err(_) => output.push(json!({
+                                "type": "input_text",
+                                "text": format!("[image unavailable: {}]", image.name),
+                            })),
+                        }
+                    }
+                    input.push(json!({
+                        "type": "function_call_output",
+                        "call_id": call_id,
+                        "output": output,
+                    }));
+                }
+            }
         }
     }
     input

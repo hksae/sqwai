@@ -283,6 +283,11 @@ fn read_single(ctx: &mut ToolCtx, raw: &str, args: &serde_json::Value) -> Outcom
         Ok(b) => b,
         Err(e) => return Outcome::err(format!("read failed: {e}")),
     };
+    if crate::media::is_supported_image(&bytes) {
+        return Outcome::err(format!(
+            "image file — use view_image(path=\"{raw_trimmed}\") to see it"
+        ));
+    }
     if is_binary(&bytes) {
         return Outcome::err("binary file — cannot display");
     }

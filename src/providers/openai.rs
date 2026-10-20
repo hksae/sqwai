@@ -48,6 +48,31 @@ impl OpenAiProvider {
         })
     }
 
+    /// Chat Completions allows only text in a `tool` message (the API schema
+    /// says so outright), so tool-returned pixels ride in one synthetic user
+    /// message after the tool batch. This exists on the wire only; the stored
+    /// transcript still holds them on the tool result.
+    fn image_message(images: &[&super::ImageAttachment]) -> Value {
+        let mut content = Vec::new();
+        for image in images {
+            content.push(json!({
+                "type": "text",
+                "text": format!("image returned by view_image: {}", image.name),
+            }));
+            match crate::media::data_uri(image) {
+                Ok(uri) => content.push(json!({
+                    "type": "image_url",
+                    "image_url": {"url": uri, "detail": "auto"},
+                })),
+                Err(_) => content.push(json!({
+                    "type": "text",
+                    "text": format!("[image unavailable: {}]", image.name),
+                })),
+            }
+        }
+        json!({"role": "user", "content": content})
+    }
+
     fn message_json(m: &super::Message) -> Value {
         match m.role {
             Role::System => json!({"role": "system", "content": m.content}),
@@ -105,11 +130,25 @@ impl OpenAiProvider {
         if last_user.is_none() && !tail.trim().is_empty() {
             msgs.push(json!({"role": "system", "content": super::host_tail(&tail)}));
         }
+        let mut pending_images: Vec<&super::ImageAttachment> = Vec::new();
         for (i, m) in req.messages.iter().enumerate() {
             if Some(i) == last_user && !tail.trim().is_empty() {
                 msgs.push(json!({"role": "system", "content": super::host_tail(&tail)}));
             }
+            // Flush the image carrier only when the contiguous tool batch
+            // ends: tool messages must stay consecutive after the assistant
+            // call that requested them.
+            if m.role != Role::Tool && !pending_images.is_empty() {
+                msgs.push(Self::image_message(&pending_images));
+                pending_images.clear();
+            }
+            if m.role == Role::Tool {
+                pending_images.extend(m.images.iter());
+            }
             msgs.push(Self::message_json(m));
+        }
+        if !pending_images.is_empty() {
+            msgs.push(Self::image_message(&pending_images));
         }
         let mut body = json!({
             "model": req.model_id,

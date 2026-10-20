@@ -680,6 +680,13 @@ impl Session {
     /// Remove a session file at an explicit path.
     pub fn delete_at(path: &std::path::Path) -> Result<()> {
         std::fs::remove_file(path).context("deleting session")?;
+        // Pixels referenced only by the deleted transcript become garbage.
+        // The sweep scans the remaining files, so it must run after the
+        // removal; the age guard protects concurrent saves.
+        #[cfg(not(test))]
+        if let Ok(dir) = Self::sessions_dir() {
+            crate::media::sweep_orphans(&dir);
+        }
         Ok(())
     }
 }

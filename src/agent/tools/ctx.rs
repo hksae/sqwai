@@ -95,6 +95,14 @@ pub struct ToolCtx {
     /// this session so repeat calls can return a concise pointer instead of
     /// duplicating the full `SKILL.md` body.
     pub activated_skills: std::collections::BTreeSet<String>,
+    /// Whether the driving model accepts image input. `true` when the catalog
+    /// says so or says nothing; only a declared `vision = false` blocks
+    /// `view_image`.
+    pub vision: bool,
+    /// Media ids that are still visible on the wire. `view_image` answers a
+    /// repeat view with a pointer while the earlier pixels are still in
+    /// context; once the result is cleared, a re-view attaches them again.
+    pub visible_images: std::sync::Arc<std::collections::HashSet<String>>,
 }
 
 impl ToolCtx {
@@ -129,7 +137,28 @@ impl ToolCtx {
             current_call_id: None,
             skills_cfg: crate::config::SkillsConfig::default(),
             activated_skills: std::collections::BTreeSet::new(),
+            vision: true,
+            visible_images: std::sync::Arc::new(std::collections::HashSet::new()),
         }
+    }
+
+    pub fn with_vision(mut self, vision: bool) -> Self {
+        self.vision = vision;
+        self
+    }
+
+    /// Refresh the ids still visible on the wire; called before a tool batch.
+    pub fn set_visible_images(&mut self, ids: std::collections::HashSet<String>) {
+        self.visible_images = std::sync::Arc::new(ids);
+    }
+
+    /// A result with pixels just joined the live context. Kept even when the
+    /// set is shared with clones: losing the update would only risk a
+    /// duplicate image later, never a missing one.
+    pub fn note_visible_image(&mut self, id: &str) {
+        let mut ids = (*self.visible_images).clone();
+        ids.insert(id.to_string());
+        self.visible_images = std::sync::Arc::new(ids);
     }
 
     /// External taint that trust gates must honor: this session's own

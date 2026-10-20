@@ -753,13 +753,11 @@ fn mid_history_anchor_stays_stationary_on_user_turns_and_precedes_volatile_tail(
     let b = build_body(&multi_turn, 8192, true);
     let msgs = b["messages"].as_array().unwrap();
     assert_eq!(
-        msgs[1]["content"][0]["cache_control"]["type"],
-        "ephemeral",
+        msgs[1]["content"][0]["cache_control"]["type"], "ephemeral",
         "msgs[u_idx - 1] must be marked before host_tail"
     );
     assert_eq!(
-        msgs[2]["content"][1]["cache_control"]["type"],
-        "ephemeral",
+        msgs[2]["content"][1]["cache_control"]["type"], "ephemeral",
         "msgs.last() is also marked"
     );
 }
@@ -779,4 +777,52 @@ fn cache_breakpoint_skips_thinking_and_empty_text_blocks() {
         "must refuse to mark thinking or empty text block"
     );
     let _ = (&mut blk, &mut empty_txt);
+}
+
+fn find_kind<'a>(value: &'a serde_json::Value, kind: &str) -> Option<&'a serde_json::Value> {
+    match value {
+        serde_json::Value::Object(map) => {
+            if map.get("type").and_then(|v| v.as_str()) == Some(kind) {
+                return Some(value);
+            }
+            map.values().find_map(|child| find_kind(child, kind))
+        }
+        serde_json::Value::Array(items) => items.iter().find_map(|child| find_kind(child, kind)),
+        _ => None,
+    }
+}
+
+#[test]
+fn tool_images_use_image_blocks_inside_the_tool_result() {
+    let image = crate::media::test_image(40, 30, "shot.png");
+    let req = ChatRequest {
+        model_id: "m".into(),
+        system: vec![],
+        messages: vec![
+            Message::new(crate::providers::Role::Assistant, "").with_tool_calls(vec![
+                crate::providers::ToolCallReq::new(
+                    "c1",
+                    "view_image",
+                    serde_json::json!({"path": "shot.png"}),
+                ),
+            ]),
+            Message::tool_result("c1", "view_image: shot.png", false).with_images(vec![image]),
+        ],
+        effort: None,
+        effort_support: Default::default(),
+        max_tokens: None,
+        tools: vec![],
+        previous_response_id: None,
+        context_transport: crate::providers::ContextTransport::Stateless,
+    };
+    let body = build_body(&req, 8192, false);
+    let result = find_kind(&body, "tool_result").expect("tool_result block");
+    let content = result["content"]
+        .as_array()
+        .expect("images force the array form");
+    assert_eq!(content[0]["type"], "text");
+    assert_eq!(content[1]["type"], "image");
+    assert_eq!(content[1]["source"]["type"], "base64");
+    assert_eq!(content[1]["source"]["media_type"], "image/png");
+    assert!(!content[1]["source"]["data"].as_str().unwrap().is_empty());
 }

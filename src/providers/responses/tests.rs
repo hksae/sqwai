@@ -734,3 +734,61 @@ fn message_without_provider_state_omits_field_and_deserializes() {
         "final_answer"
     );
 }
+
+#[test]
+fn images_survive_serde_and_old_messages_stay_readable() {
+    let image = crate::providers::ImageAttachment {
+        id: "a".repeat(64),
+        name: "pic.png".into(),
+        media_type: "image/png".into(),
+        width: 10,
+        height: 20,
+        bytes: 3,
+    };
+    let message = Message::tool_result("c", "x", false).with_images(vec![image.clone()]);
+    let mut value = serde_json::to_value(&message).unwrap();
+    assert!(value.get("images").is_some());
+    let back: Message = serde_json::from_value(value.clone()).unwrap();
+    assert_eq!(back.images, vec![image]);
+    value.as_object_mut().unwrap().remove("images");
+    let old: Message = serde_json::from_value(value).unwrap();
+    assert!(old.images.is_empty());
+}
+
+#[test]
+fn tool_images_use_the_function_call_output_array() {
+    let image = crate::media::test_image(48, 48, "pic.png");
+    let req = ChatRequest {
+        model_id: "m".into(),
+        system: vec![],
+        messages: vec![
+            Message::new(crate::providers::Role::Assistant, "").with_tool_calls(vec![
+                crate::providers::ToolCallReq::new("c1", "view_image", json!({"path": "pic.png"})),
+            ]),
+            Message::tool_result("c1", "view_image: pic.png", false).with_images(vec![image]),
+        ],
+        effort: None,
+        effort_support: Default::default(),
+        max_tokens: None,
+        tools: vec![],
+        previous_response_id: None,
+        context_transport: crate::providers::ContextTransport::Stateless,
+    };
+    let body = build_body(&req);
+    let input = body["input"].as_array().unwrap();
+    let output = input
+        .iter()
+        .find(|item| item["type"] == "function_call_output")
+        .unwrap()["output"]
+        .as_array()
+        .expect("image results use the array form");
+    assert_eq!(output[0]["type"], "input_text");
+    assert_eq!(output[1]["type"], "input_image");
+    assert!(
+        output[1]["image_url"]
+            .as_str()
+            .unwrap()
+            .starts_with("data:image/png;base64,")
+    );
+    assert_eq!(output[1]["detail"], "auto");
+}

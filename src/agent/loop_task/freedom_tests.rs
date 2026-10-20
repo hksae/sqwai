@@ -42,6 +42,7 @@ async fn a_mutation_runs_without_any_plan() {
         web_allow_hosts: vec![],
         plan_mode: false,
         context_limit: 10000,
+        vision: true,
         enable_tools: true,
         background_baselines: false,
         read_only: false,

@@ -306,6 +306,8 @@ pub struct AgentInput {
     pub plan_mode: bool,
     /// model context limit used to enforce the plan size budget
     pub context_limit: u64,
+    /// Whether the target model accepts image input; unknown counts as yes.
+    pub vision: bool,
     /// Whether this request may use agent tools.
     pub enable_tools: bool,
     /// Slow baseline capture runs in the background instead of blocking
@@ -563,6 +565,22 @@ fn call_key_ref(call: &ToolCallReq) -> Option<String> {
     ))
 }
 
+/// Media ids still visible on the wire, for `view_image` repeat suppression.
+/// Recomputed at a tool-batch boundary: results attached inside the batch are
+/// noted into `ctx` as they land.
+fn refresh_visible_images(ctx: &mut ToolCtx, messages: &[Message], context_limit: u64) {
+    let cleared = crate::agent::tool_output::cleared_indices_with_limit(messages, context_limit);
+    let mut ids = std::collections::HashSet::new();
+    for (index, message) in messages.iter().enumerate() {
+        if message.role == Role::Tool && !cleared.contains(&index) {
+            for image in &message.images {
+                ids.insert(image.id.clone());
+            }
+        }
+    }
+    ctx.set_visible_images(ids);
+}
+
 /// Whether `call` is a pure read-only tool that can safely execute in parallel
 /// with adjacent read-only calls (Codex-style shared read lock).
 fn is_parallel_read_only_call(call: &ToolCallReq) -> bool {
@@ -693,6 +711,7 @@ async fn run_agent(
         web_allow_hosts,
         plan_mode,
         mut context_limit,
+        vision,
         enable_tools,
         background_baselines,
         read_only,
@@ -893,7 +912,8 @@ async fn run_agent(
         .in_session(&session_id)
         .with_shadow_store(shadow_store)
         .with_plan_limits(plan_limits, context_limit)
-        .with_cancel(cancel_tool);
+        .with_cancel(cancel_tool)
+        .with_vision(vision);
     // slow baseline capture defers to the background worker on interactive
     // turns; everywhere else the tool call captures synchronously
     ctx.background_baselines = background_baselines;
@@ -1416,6 +1436,7 @@ async fn run_agent(
                 &web_allow_hosts,
                 plan_mode,
                 context_limit,
+                vision,
                 effort,
                 effort_support,
                 max_tokens,
@@ -1434,6 +1455,7 @@ async fn run_agent(
             )
             .await;
         } else {
+            refresh_visible_images(&mut ctx, &messages, context_limit);
             let mut parallel_outcomes: std::collections::HashMap<
                 usize,
                 (u128, tools::Outcome, Option<ToolCtx>),
@@ -1621,6 +1643,7 @@ async fn run_agent(
                                 &web_allow_hosts,
                                 plan_mode,
                                 context_limit,
+                                vision,
                                 effort,
                                 effort_support,
                                 max_tokens,
@@ -2095,7 +2118,13 @@ async fn run_agent(
                         RepeatVerdict::Withheld(stub) => outcome.output = stub,
                     }
                 }
-                messages.push(Message::tool_result(&call.id, outcome.output, !outcome.ok));
+                messages.push(
+                    Message::tool_result(&call.id, outcome.output, !outcome.ok)
+                        .with_images(outcome.images.clone()),
+                );
+                for image in &outcome.images {
+                    ctx.note_visible_image(&image.id);
+                }
                 if interrupted {
                     // Esc means stop — the remaining calls in this batch
                     // (if the model requested several) do not run. Each of them

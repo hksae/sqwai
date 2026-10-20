@@ -41,6 +41,8 @@ pub struct Outcome {
     pub file_diff: Option<FileDiff>,
     /// host-derived metadata for all modified files (e.g. multi-file patch)
     pub file_diffs: Vec<FileDiff>,
+    /// images the tool returned to the model (view_image today)
+    pub images: Vec<crate::providers::ImageAttachment>,
     /// the user pressed Esc while this tool was running. Distinct from
     /// an ordinary failure — the journal records `code: "cancelled"` rather
     /// than folding it into an error the model is expected to react to.
@@ -56,6 +58,7 @@ impl Outcome {
             diff: None,
             file_diff: None,
             file_diffs: Vec::new(),
+            images: Vec::new(),
             cancelled: false,
         }
     }
@@ -67,6 +70,7 @@ impl Outcome {
             diff: None,
             file_diff: None,
             file_diffs: Vec::new(),
+            images: Vec::new(),
             cancelled: false,
         }
     }
@@ -81,8 +85,15 @@ impl Outcome {
             diff: None,
             file_diff: None,
             file_diffs: Vec::new(),
+            images: Vec::new(),
             cancelled: true,
         }
+    }
+    /// Attach pixels to a successful result. Kept separate from `ok` so every
+    /// existing constructor stays image-free by default.
+    pub fn with_images(mut self, images: Vec<crate::providers::ImageAttachment>) -> Self {
+        self.images = images;
+        self
     }
     /// attach the child exit code to a host-built outcome
     pub fn with_exit_code(mut self, code: Option<i32>) -> Self {
@@ -257,6 +268,7 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
 
     match name {
         "read" => fs::read(ctx, args["file_path"].as_str().unwrap_or_default(), args),
+        "view_image" => super::view_image::view(ctx, args),
         "write" => fs::write_file(
             ctx,
             args["file_path"].as_str().unwrap_or_default(),

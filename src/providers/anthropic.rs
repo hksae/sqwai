@@ -84,10 +84,33 @@ fn content_blocks(m: &super::Message, thinking_on: bool) -> Vec<Value> {
         }));
     }
     if m.role == Role::Tool {
+        let content = if m.images.is_empty() {
+            json!(m.content)
+        } else {
+            // Anthropic documents image blocks inside tool_result content.
+            let mut parts = vec![json!({"type": "text", "text": m.content})];
+            for image in &m.images {
+                match crate::media::base64_data(image) {
+                    Ok(data) => parts.push(json!({
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": image.media_type,
+                            "data": data,
+                        },
+                    })),
+                    Err(_) => parts.push(json!({
+                        "type": "text",
+                        "text": format!("[image unavailable: {}]", image.name),
+                    })),
+                }
+            }
+            json!(parts)
+        };
         blocks.push(json!({
             "type": "tool_result",
             "tool_use_id": m.tool_call_id.clone().unwrap_or_default(),
-            "content": m.content,
+            "content": content,
             "is_error": m.is_error,
         }));
     }

@@ -726,7 +726,10 @@ mod live_cache {
         crate::providers::set_conversation_id("cache-probe");
         let cfg = crate::config::Config::load().expect("user config must load");
         let key = &cfg.last_model;
-        let mc = cfg.models.get(key).expect("last_model must exist in config");
+        let mc = cfg
+            .models
+            .get(key)
+            .expect("last_model must exist in config");
         let resolved = cfg.resolve_provider(mc).expect("provider must resolve");
         let provider = crate::providers::create(&resolved).expect("provider must create");
         Live {
@@ -1077,3 +1080,64 @@ fn uses_max_completion_tokens_covers_gpt6_and_newer() {
     assert!(uses_max_completion_tokens("gpt-4o", true));
 }
 
+fn image_request(image: crate::providers::ImageAttachment) -> ChatRequest {
+    ChatRequest {
+        model_id: "m".into(),
+        system: vec![],
+        messages: vec![
+            Message::new(crate::providers::Role::Assistant, "").with_tool_calls(vec![
+                crate::providers::ToolCallReq::new("c1", "view_image", json!({"path": "shot.png"})),
+            ]),
+            Message::tool_result("c1", "view_image: shot.png", false).with_images(vec![image]),
+        ],
+        effort: None,
+        effort_support: Default::default(),
+        max_tokens: None,
+        tools: vec![],
+        previous_response_id: None,
+        context_transport: crate::providers::ContextTransport::Stateless,
+    }
+}
+
+#[test]
+fn tool_images_ride_in_a_synthetic_user_message() {
+    let image = crate::media::test_image(64, 32, "shot.png");
+    let body = OpenAiProvider::build_body(&image_request(image));
+    let messages = body["messages"].as_array().unwrap();
+    let tool = messages.iter().find(|m| m["role"] == "tool").unwrap();
+    assert_eq!(tool["content"], "view_image: shot.png");
+    let user = messages
+        .iter()
+        .find(|m| m["role"] == "user")
+        .expect("synthetic image carrier");
+    let parts = user["content"].as_array().unwrap();
+    assert_eq!(parts.len(), 2);
+    assert_eq!(parts[0]["type"], "text");
+    assert_eq!(parts[0]["text"], "image returned by view_image: shot.png");
+    assert_eq!(parts[1]["type"], "image_url");
+    assert!(
+        parts[1]["image_url"]["url"]
+            .as_str()
+            .unwrap()
+            .starts_with("data:image/png;base64,")
+    );
+    assert_eq!(parts[1]["image_url"]["detail"], "auto");
+}
+
+#[test]
+fn a_missing_blob_becomes_a_text_marker_not_a_broken_turn() {
+    let image = crate::providers::ImageAttachment {
+        id: "0".repeat(64),
+        name: "gone.png".into(),
+        media_type: "image/png".into(),
+        width: 10,
+        height: 10,
+        bytes: 0,
+    };
+    let body = OpenAiProvider::build_body(&image_request(image));
+    let messages = body["messages"].as_array().unwrap();
+    let user = messages.iter().find(|m| m["role"] == "user").unwrap();
+    let parts = user["content"].as_array().unwrap();
+    assert_eq!(parts[1]["type"], "text");
+    assert_eq!(parts[1]["text"], "[image unavailable: gone.png]");
+}

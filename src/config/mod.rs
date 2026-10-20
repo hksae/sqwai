@@ -263,6 +263,12 @@ pub struct ModelConfig {
     /// until the user switches). Absent means active.
     #[serde(default, skip_serializing_if = "ModelStatus::is_active")]
     pub status: ModelStatus,
+    /// Whether the model accepts image input. Absent means unknown, which is
+    /// treated as "yes": most current models are multimodal, and a wrong
+    /// refusal would disable `view_image` on a capable model. A declared
+    /// `false` blocks the tool before any request is paid for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vision: Option<bool>,
 }
 
 /// Lifecycle of a catalog model. Tombstones retire without deleting:

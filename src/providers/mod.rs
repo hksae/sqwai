@@ -128,10 +128,28 @@ pub struct ToolSpec {
     pub parameters: serde_json::Value,
 }
 
+/// One image carried by a tool result. The pixels live in the media store,
+/// keyed by `id`; this record is what the transcript and the wire adapters
+/// use. `id` is the sha256 of the stored rendition, so identical images
+/// deduplicate and a repeat view can be recognised without reading pixels.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageAttachment {
+    pub id: String,
+    /// original file name, for provenance on the wire and in the TUI
+    pub name: String,
+    pub media_type: String,
+    pub width: u32,
+    pub height: u32,
+    pub bytes: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub role: Role,
     pub content: String,
+    /// images attached to this message (tool results today, user turns later)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ImageAttachment>,
     /// assistant message requesting tool executions
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<ToolCallReq>,
@@ -167,6 +185,7 @@ impl Message {
         Self {
             role,
             content: content.into(),
+            images: Vec::new(),
             tool_calls: Vec::new(),
             tool_call_id: None,
             is_error: false,
@@ -184,6 +203,7 @@ impl Message {
         Self {
             role: Role::Tool,
             content: output.into(),
+            images: Vec::new(),
             tool_calls: Vec::new(),
             tool_call_id: Some(call_id.into()),
             is_error,
@@ -195,6 +215,11 @@ impl Message {
 
     pub fn with_tool_calls(mut self, calls: Vec<ToolCallReq>) -> Self {
         self.tool_calls = calls;
+        self
+    }
+
+    pub fn with_images(mut self, images: Vec<ImageAttachment>) -> Self {
+        self.images = images;
         self
     }
 
@@ -452,6 +477,15 @@ impl RequestBreakdown {
                     .tool_calls
                     .iter()
                     .map(|call| call.name.len() as u64 + json_byte_len(&call.args))
+                    .sum::<u64>()
+                // Images have no text bytes but do occupy the window; one
+                // patch-token is charged as the four bytes the other rows use.
+                + message
+                    .images
+                    .iter()
+                    .map(|image| {
+                        crate::media::pressure_tokens(image.width, image.height) * 4
+                    })
                     .sum::<u64>();
             match message.role {
                 Role::System => out.system_bytes += bytes,

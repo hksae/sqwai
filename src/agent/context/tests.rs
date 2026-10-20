@@ -9,6 +9,19 @@ fn temp_root(label: &str) -> std::path::PathBuf {
 }
 
 #[test]
+fn image_tokens_count_toward_estimated_and_wire_pressure() {
+    let image = crate::media::test_image(1280, 720, "shot.png");
+    let plain = Message::tool_result("c1", "view_image", false);
+    let with_image = plain.clone().with_images(vec![image]);
+    let expected = crate::media::pressure_tokens(1280, 720);
+    let stored = estimated_tokens(std::slice::from_ref(&with_image))
+        - estimated_tokens(std::slice::from_ref(&plain));
+    assert_eq!(stored, expected);
+    let wire = wire_estimated_tokens(&[with_image], 0) - wire_estimated_tokens(&[plain], 0);
+    assert_eq!(wire, expected);
+}
+
+#[test]
 fn anchor_keeps_journal_facts_not_plan_state() {
     let root = temp_root("anchor");
     let mut plan = crate::plan::create(

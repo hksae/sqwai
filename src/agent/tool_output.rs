@@ -113,7 +113,7 @@ pub fn cleared_indices_with_limit(messages: &[Message], context_limit: u64) -> V
         .iter()
         .enumerate()
         .filter(|(_, m)| clearable(m))
-        .map(|(i, m)| (i, m.content.len()))
+        .map(|(i, m)| (i, m.content.len() + image_wire_bytes(m)))
         .collect();
     let total: usize = pool.iter().map(|(_, bytes)| bytes).sum();
     if total <= budget.trigger_bytes {
@@ -181,9 +181,22 @@ pub fn trim_for_wire_with_limit(messages: &mut [Message], context_limit: u64) {
             .get(&call_id)
             .cloned()
             .unwrap_or_else(|| ("tool".to_string(), String::new()));
-        let bytes = message.content.len();
+        let bytes = message.content.len() + image_wire_bytes(message);
         messages[index].content = stub(&name, &target, bytes, &call_id);
+        // Pixels are part of the cleared result: the stored transcript keeps
+        // them for display and recall, the request clone must not.
+        messages[index].images.clear();
     }
+}
+
+/// Approximate wire weight of a result's images, in the byte units this
+/// module otherwise thinks in. Only the magnitude matters for the budget.
+fn image_wire_bytes(message: &Message) -> usize {
+    message
+        .images
+        .iter()
+        .map(|image| crate::media::pressure_tokens(image.width, image.height) as usize * 4)
+        .sum()
 }
 
 /// Whether this call's result would still be on the wire. The store holds
@@ -256,6 +269,9 @@ pub fn recall_args_with_limit(
              that was cleared from the request"
         ));
     }
+    // A cleared image result is recalled with its pixels: the stub promises
+    // that recall returns the result, and the text record alone would not.
+    let with_pixels = |outcome: Outcome| outcome.with_images(message.images.clone());
     let query = args["query"]
         .as_str()
         .map(str::trim)
@@ -266,7 +282,7 @@ pub fn recall_args_with_limit(
     if query.is_none() && offset.is_none() && limit.is_none() {
         // Verbatim, wrapper and all: a recalled web page that arrived clean would
         // read as host-written truth.
-        return Outcome::ok(message.content.clone());
+        return with_pixels(Outcome::ok(message.content.clone()));
     }
 
     let all_lines: Vec<&str> = message.content.lines().collect();
@@ -286,9 +302,9 @@ pub fn recall_args_with_limit(
             }
         }
         if matches == 0 {
-            return Outcome::ok(format!(
+            return with_pixels(Outcome::ok(format!(
                 "recall_result {call_id}: 0 matches for '{q}' across {total_lines} lines"
-            ));
+            )));
         }
         let max_lines = limit.unwrap_or(200);
         let mut out = format!(
@@ -313,7 +329,7 @@ pub fn recall_args_with_limit(
             last_idx = Some(i);
             shown += 1;
         }
-        return Outcome::ok(out.trim_end().to_string());
+        return with_pixels(Outcome::ok(out.trim_end().to_string()));
     }
 
     let start_idx = offset.unwrap_or(1).saturating_sub(1).min(total_lines);
@@ -326,7 +342,7 @@ pub fn recall_args_with_limit(
         end_idx
     );
     out.push_str(&slice.join("\n"));
-    Outcome::ok(out)
+    with_pixels(Outcome::ok(out))
 }
 
 #[cfg(test)]
@@ -350,6 +366,51 @@ mod tests {
             out.push(Message::tool_result(&id, body, false));
         }
         out
+    }
+
+    fn image_exchange() -> Vec<Message> {
+        let image = crate::media::test_image(1280, 720, "shot.png");
+        vec![
+            Message::new(Role::Assistant, "").with_tool_calls(vec![ToolCallReq::new(
+                "old",
+                "view_image",
+                json!({"path": "shot.png"}),
+            )]),
+            // Big enough to cross the quantized clear step on its own: the
+            // budget never rewrites a result for a handful of bytes.
+            Message::tool_result(
+                "old",
+                format!("view_image: shot.png\n{}", "x".repeat(30 * 1024)),
+                false,
+            )
+            .with_images(vec![image]),
+            Message::new(Role::Assistant, "").with_tool_calls(vec![ToolCallReq::new(
+                "mid",
+                "read",
+                json!({"file_path": "a.rs"}),
+            )]),
+            Message::tool_result("mid", "y".repeat(300 * 1024), false),
+            Message::new(Role::User, "next"),
+        ]
+    }
+
+    #[test]
+    fn clearing_a_result_drops_its_pixels_from_the_wire() {
+        let mut messages = image_exchange();
+        trim_for_wire_with_limit(&mut messages, 0);
+        assert!(is_stub(&messages[1].content));
+        assert!(
+            messages[1].images.is_empty(),
+            "cleared result must not carry pixels on the wire"
+        );
+    }
+
+    #[test]
+    fn recall_reattaches_pixels_of_a_cleared_image_result() {
+        let messages = image_exchange();
+        let out = recall_with_limit(&messages, "old", 0);
+        assert!(out.ok, "{}", out.output);
+        assert_eq!(out.images.len(), 1, "recall must return the pixels it names");
     }
 
     fn contents(messages: &[Message]) -> Vec<String> {

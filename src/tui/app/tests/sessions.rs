@@ -138,6 +138,7 @@ fn apply_session_renders_history_and_switches_model() {
             effort_always_on: false,
             fallback: None,
             status: crate::config::ModelStatus::Active,
+            vision: None,
         },
     );
     let mut s = Session::new("m2".into(), 2000);

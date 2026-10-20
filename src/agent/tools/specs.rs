@@ -102,6 +102,23 @@ Must be called once before `replace_all` edits and overwrites of existing files;
             }),
         },
         ToolDef {
+            name: "view_image",
+            kind: Kind::ReadOnly,
+            description: "Look at an image file inside the project: screenshots, photos, diagrams, \
+assets. `read` refuses binary files — this is the way to see them. The file is downscaled to at \
+most 1568 px on the long edge and costs roughly one token per 28×28 patch (a 1280×720 screenshot \
+is about 1.2k tokens), so prefer one focused image over a series. Viewing the same unchanged image \
+again while it is still visible in context returns a pointer instead of a second copy; call again \
+after it was cleared. Returns the pixels plus a one-line record with path, dimensions and cost.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "image path relative to the project root"}
+                },
+                "required": ["path"]
+            }),
+        },
+        ToolDef {
             name: "write",
             kind: Kind::Mutating,
             description: "Create a new file or completely overwrite an existing one. \
@@ -710,6 +727,7 @@ fn call_summary_raw(name: &str, args: &Value) -> String {
                 String::new()
             }
         }
+        "view_image" => s("path"),
         "write" | "edit" | "multi_edit" => s("file_path"),
         "bash" => s("command"),
         "bash_output" => {

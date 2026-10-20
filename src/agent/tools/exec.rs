@@ -470,6 +470,7 @@ fn run_blocking(
         diff: None,
         file_diff: None,
         file_diffs: Vec::new(),
+        images: Vec::new(),
         cancelled: false,
     }
 }

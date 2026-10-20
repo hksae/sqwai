@@ -37,6 +37,7 @@ fn jitter_test_app() -> App {
             effort_always_on: false,
             fallback: None,
             status: crate::config::ModelStatus::Active,
+            vision: None,
         },
     );
     let cfg = Config {

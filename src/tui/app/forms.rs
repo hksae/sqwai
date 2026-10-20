@@ -743,6 +743,7 @@ impl App {
                         .as_ref()
                         .map(|p| p.status)
                         .unwrap_or(ModelStatus::Active),
+                    vision: previous.as_ref().and_then(|p| p.vision),
                 };
                 self.cfg.models.insert(new_key.clone(), updated.clone());
                 if self.session.model_key == new_key {
@@ -1000,6 +1001,7 @@ impl App {
             effort_always_on: false,
             fallback: None,
             status: ModelStatus::Active,
+            vision: None,
         };
         self.cfg.models.insert(new_key.clone(), updated);
         self.cfg.save().ok();

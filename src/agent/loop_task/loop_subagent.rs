@@ -206,6 +206,7 @@ pub(crate) async fn run_subagent_batch(
     web_allow_hosts: &[String],
     plan_mode: bool,
     context_limit: u64,
+    vision: bool,
     effort: Option<EffortLevel>,
     effort_support: crate::config::EffortSupport,
     max_tokens: Option<u32>,
@@ -300,6 +301,7 @@ pub(crate) async fn run_subagent_batch(
                         &web_allow_hosts,
                         plan_mode,
                         context_limit,
+                        vision,
                         effort,
                         effort_support,
                         max_tokens,
@@ -352,7 +354,10 @@ pub(crate) async fn run_subagent_batch(
         if outcome.cancelled {
             interrupted = true;
         }
-        messages.push(Message::tool_result(&call.id, outcome.output, !outcome.ok));
+        messages.push(
+            Message::tool_result(&call.id, outcome.output, !outcome.ok)
+                .with_images(outcome.images.clone()),
+        );
     }
     if cutoff < calls.len() {
         // the call that saw the flag: a cancelled result row, exactly like
@@ -432,6 +437,7 @@ pub(crate) async fn run_subagent(
     web_allow_hosts: &[String],
     plan_mode: bool,
     context_limit: u64,
+    vision: bool,
     effort: Option<EffortLevel>,
     effort_support: crate::config::EffortSupport,
     max_tokens: Option<u32>,
@@ -490,6 +496,7 @@ pub(crate) async fn run_subagent(
                         web_allow_hosts,
                         plan_mode,
                         context_limit,
+                        vision,
                         effort,
                         effort_support,
                         max_tokens,
@@ -610,6 +617,7 @@ pub(crate) async fn run_subagent(
         web_allow_hosts: web_allow_hosts.to_vec(),
         plan_mode,
         context_limit,
+        vision,
         enable_tools: true,
         // subagent baselines stay synchronous: short tasks, and progress
         // events would land on the parent's channel out of context

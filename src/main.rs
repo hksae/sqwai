@@ -3,6 +3,7 @@ mod config;
 mod lock;
 mod lsp;
 mod mcp;
+mod media;
 mod plan;
 mod prompts;
 mod providers;
