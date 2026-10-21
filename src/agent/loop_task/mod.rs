@@ -799,8 +799,8 @@ async fn run_agent(
         compaction.keep_turns,
         compaction.threshold,
     );
-    // Tools are part of the request prefix: sorted for stability, narrowed in
-    // PLAN mode, and omitted entirely for requests that cannot call them.
+    // Tools are part of the request prefix: sorted for stability, one set in
+    // both modes, and omitted entirely for requests that cannot call them.
     let tools: Vec<crate::providers::ToolSpec> = if enable_tools {
         let base = tools::tool_specs(plan_mode);
         if let Some(registry) = &mcp_registry {
@@ -1602,7 +1602,7 @@ async fn run_agent(
                     && call.name != "plan"
                 {
                     tools::Outcome::err(format!(
-                        "PLAN mode is read-only: '{}' is disabled. Switch to ACT (Tab) to use it.",
+                        "PLAN mode is read-only: '{}' is disabled. Switch to ACT to use it.",
                         call.name
                     ))
                 } else {

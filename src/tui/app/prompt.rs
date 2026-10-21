@@ -9,12 +9,11 @@ const PLAN_MODE_PROMPT: &str = "## Plan mode
 The workspace is read-only: write/edit/shell calls are refused in Plan mode. Never end a \
 change request with \"I cannot modify files\" — the plan is the deliverable.
 - A change to the repo: explore first, then return a decision-complete plan (goal, \
-constraints/assumptions, changes, verification) and close with one line: switch to Act \
-(Tab) and say go. For an open-ended request, propose a concrete plan with stated \
-assumptions instead of interrogating.
+constraints/assumptions, changes, verification) and close with one line: switch to Act and \
+say go. For an open-ended request, propose a concrete plan with stated assumptions instead \
+of interrogating.
 - Exploration or a question: answer or report findings and stop; no plan.
 - \"Go\" while in Plan: do not execute; point to Act if a plan exists, otherwise plan.
-Do not call the plan tool here: it tracks execution, which starts in Act.
 Never claim the plan was approved; only the user switches modes.";
 
 impl App {

@@ -1138,7 +1138,7 @@ fn plan_mode_prompt_asks_for_a_plan_but_not_for_exploration() {
     assert!(
         texts
             .iter()
-            .any(|t| t.contains("Plan mode") && t.contains("switch to Act (Tab)")),
+            .any(|t| t.contains("Plan mode") && t.contains("switch to Act")),
         "plan mode must hand off to Act: {texts:?}"
     );
     assert!(

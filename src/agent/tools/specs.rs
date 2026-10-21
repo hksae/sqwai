@@ -41,32 +41,16 @@ struct ToolDef {
 fn bash_description() -> &'static str {
     static TEXT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     TEXT.get_or_init(|| {
-        let guidance = match crate::agent::shell::ShellKind::detect() {
-            crate::agent::shell::ShellKind::PowerShell => {
-                "The shell here is PowerShell: no POSIX coreutils — do not use it to read or \
-search files (`cat`, `sed`, `grep`, `Select-String`); use the dedicated `read`, `grep`, `glob`, \
-and `outline` tools instead."
-            }
-            crate::agent::shell::ShellKind::Cmd => {
-                "The shell here is cmd.exe: no POSIX coreutils and no PowerShell cmdlets — \
-do not use it to read or search files; use the dedicated `read`, `grep`, `glob`, and `outline` \
-tools instead."
-            }
-            crate::agent::shell::ShellKind::Bash | crate::agent::shell::ShellKind::Sh => {
-                "The shell here is bash: pipes work, and PowerShell cmdlets like `Select-Object` \
-do not. Do not use `bash` (`sed`, `cat`, `head`, `tail`, `grep`, `find`) to read or search files \
-— use the dedicated `read`, `grep`, `glob`, and `outline` tools instead."
-            }
+        let shell = match crate::agent::shell::ShellKind::detect() {
+            crate::agent::shell::ShellKind::PowerShell => "PowerShell",
+            crate::agent::shell::ShellKind::Cmd => "cmd.exe",
+            crate::agent::shell::ShellKind::Bash | crate::agent::shell::ShellKind::Sh => "bash",
         };
         format!(
-            "Run a shell command in the project directory — the way to build, test, \
-install and inspect anything the file tools cannot reach. Destructive or risky shapes (rm -rf, \
-sudo, disk ops, force-push, sending data outward) stop at the classifier for one user approval: \
-that is the seatbelt doing its job, so name what the command does rather than reaching around it. \
-{guidance} \
-Long output is truncated to a tail and the full log path is returned. Use background=true when the \
-command may outlast the tool timeout; wait on it with bash_output(id, wait_secs) or sleep(seconds); \
-await its result before dependent changes or reporting success."
+            "Run a shell command in the project directory. The shell here is {shell}: use its \
+syntax. Destructive or risky shapes need approval or are refused — never work around that. \
+Long output is truncated to a tail with the full log path. Use background=true for long jobs; \
+wait with bash_output."
         )
     })
 }
@@ -76,11 +60,10 @@ fn defs() -> Vec<ToolDef> {
         ToolDef {
             name: "read",
             kind: Kind::ReadOnly,
-            description: "Read one or more files from the project. Supports three fast modes: \
-(1) `file_path` with `offset`/`limit` (use 200–500 line windows; first read of a large file carries its structural outline); \
-(2) `file_path` with `symbols: [\"fn_name\", \"StructName\"]` (or `symbol`) to extract the exact AST bodies of specific functions, methods, or types via tree-sitter in one step without calling `outline` first; \
-(3) `paths: [\"a.rs\", \"b.rs\", ...]` (up to 16 files) to read multiple files in a single fused call. \
-Must be called once before `replace_all` edits and overwrites of existing files; the host tracks freshness and answers repeat reads of unchanged windows with a pointer.",
+            description: "Read one or more files. Modes: `file_path` with `offset`/`limit` \
+(200–500-line windows; a large file's first read carries its outline); `file_path` with \
+`symbols`/`symbol` for exact AST bodies; `paths` (up to 16) to fuse reads. Required once \
+before `replace_all` edits and overwrites; repeat reads of unchanged windows return a pointer.",
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -104,12 +87,10 @@ Must be called once before `replace_all` edits and overwrites of existing files;
         ToolDef {
             name: "view_image",
             kind: Kind::ReadOnly,
-            description: "Look at an image file inside the project: screenshots, photos, diagrams, \
-assets. `read` refuses binary files — this is the way to see them. The file is downscaled to at \
-most 1568 px on the long edge and costs roughly one token per 28×28 patch (a 1280×720 screenshot \
-is about 1.2k tokens), so prefer one focused image over a series. Viewing the same unchanged image \
-again while it is still visible in context returns a pointer instead of a second copy; call again \
-after it was cleared. Returns the pixels plus a one-line record with dimensions, format, size and cost.",
+            description: "Look at one image file in the project. Downscaled to 1568 px on the \
+long edge; a 1280×720 screenshot costs about 1.2k tokens, so prefer focused images. A repeat \
+view while the image is still in context returns a pointer. Returns pixels plus dimensions, \
+format, size and cost.",
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -121,12 +102,9 @@ after it was cleared. Returns the pixels plus a one-line record with dimensions,
         ToolDef {
             name: "view_document",
             kind: Kind::ReadOnly,
-            description: "Read a PDF inside the project as a document: the model receives the \
-actual pages, not extracted text, so scans, tables and charts stay readable. A whole PDF may \
-be read in one call only up to 10 pages; for anything longer pass `pages` (1-indexed, e.g. \
-\"1-5\" or \"3,7-9\"), at most 20 pages per call. Each page costs roughly 2.5k tokens, so ask \
-for the pages you need instead of the whole file. Returns the document plus a one-line record \
-with page count, format, size and cost.",
+            description: "Read a PDF as a document, not extracted text. A whole PDF may be read \
+only up to 10 pages; pass `pages` (1-indexed, at most 20 per call) for anything longer. About \
+2.5k tokens per page. Returns the document plus page count, format, size and cost.",
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -171,7 +149,9 @@ mismatch); replace_all needs one. Never edit on a stale read — the host refuse
         ToolDef {
             name: "multi_edit",
             kind: Kind::Mutating,
-            description: "Apply multiple exact replacements to one file atomically in a single call. Prefer this over sequential `edit` calls when changing several places in the same file. Exact single matches check freshness automatically; any entry with `replace_all: true` requires a prior `read` of the file.",
+            description: "Apply multiple exact replacements to one file atomically. Prefer this \
+over sequential `edit` calls. Single exact matches check freshness; `replace_all` entries need a \
+prior `read`.",
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -233,7 +213,9 @@ Pass context:N for N surrounding lines per match (like grep -C) so a follow-up r
         ToolDef {
             name: "outline",
             kind: Kind::ReadOnly,
-            description: "Structural outline and dependency map of ONE source file (not a directory): shows outgoing `Imports`, incoming `Imported by` (project files that import/reference this module), and all functions, methods, arrow-function components, classes, structs, enums, interfaces, and modules with line numbers. Supports 11 languages via tree-sitter AST (Rust, Python, JS, TS, TSX, Go, Bash, C, C++, C#, Java) and a universal brace/indentation fallback for other files.",
+            description: "Symbols and dependency map of ONE source file (not a directory): \
+imports, importers, functions, methods and types with line numbers. `max_depth` controls symbol \
+nesting (default 2; 1 = top-level only).",
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -261,7 +243,9 @@ Pass context:N for N surrounding lines per match (like grep -C) so a follow-up r
         ToolDef {
             name: "bash_output",
             kind: Kind::ReadOnly,
-            description: "Wait for a background command and read its output. ALWAYS prefer wait_secs (0-60): it parks until the job exits or the timeout lapses, then returns everything accumulated. Reads without it on a running job are free twice, then force-waited (15s, then 30s). Output is incremental (first read: tail; later: only new bytes; from_start=true re-reads the tail). Only this session's jobs are visible. A finished job is reported once with its exit code, then cleaned up. Without id: list this session's background jobs.",
+            description: "Wait for a background command and read its output. Prefer `wait_secs` \
+(0–60) to park until it exits; output is incremental (first read: tail; later: new bytes; \
+`from_start` re-reads). Without `id`, list this session's jobs.",
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -287,7 +271,8 @@ Pass context:N for N surrounding lines per match (like grep -C) so a follow-up r
         ToolDef {
             name: "sleep",
             kind: Kind::ReadOnly,
-            description: "Wait N seconds (0-60, clamped) without doing anything: for pauses a file, a server, or a human needs. Esc cancels the wait. For background jobs prefer bash_output(id, wait_secs): it wakes on fresh output instead of sleeping blind.",
+            description: "Wait N seconds (0–60): for a file, a server, or a human. Prefer \
+bash_output(id, wait_secs) for background jobs.",
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -371,7 +356,8 @@ Pass context:N for N surrounding lines per match (like grep -C) so a follow-up r
         ToolDef {
             name: "websearch",
             kind: Kind::ReadOnly,
-            description: "Multi-source web & developer meta-search (Google/Startpage, Bing, DuckDuckGo, StackOverflow, GitHub, crates.io, npm, HackerNews, Wikipedia, ArXiv) fused via Reciprocal Rank Fusion and BM25. By default (`deep: true`) also fetches the top results in parallel, caches them locally, and returns the most relevant Markdown sections and code blocks in a single call.",
+            description: "Search the web and developer sources. `deep` (default) fetches and \
+extracts the most relevant sections and code blocks; `category` narrows the focus.",
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -379,7 +365,7 @@ Pass context:N for N surrounding lines per match (like grep -C) so a follow-up r
                     "category": {
                         "type": "string",
                         "enum": ["auto", "docs", "code", "packages", "discussions", "papers"],
-                        "description": "search focus: 'auto' (default: web + StackOverflow + GitHub + packages), 'docs' (official docs + docs.rs), 'code' (GitHub repos/issues + StackOverflow), 'packages' (crates.io + npm + PyPI), 'discussions' (HN + StackOverflow + GitHub issues), 'papers' (ArXiv + Wikipedia)"
+                        "description": "focus: auto (default), docs (official docs), code (repos/issues), packages (registries), discussions (HN/SO), papers (arXiv/Wikipedia)"
                     },
                     "deep": {
                         "type": "boolean",
@@ -394,7 +380,8 @@ Pass context:N for N surrounding lines per match (like grep -C) so a follow-up r
         ToolDef {
             name: "webfetch",
             kind: Kind::ReadOnly,
-            description: "Fetch an HTTP(S) URL and convert it into structured Markdown (preserving headings, fenced code blocks, tables, and links) with native adapters for GitHub (files, repos, issues, PRs), StackOverflow, crates.io, npm, PyPI, Reddit, Wikipedia, and `/llms.txt` v2. Pages are cached locally by section: pass `query` to rank and extract the most relevant sections & code blocks via BM25, or `section` to read a specific heading from the page outline.",
+            description: "Fetch an HTTP(S) URL as Markdown. For large pages, pass `query` to rank \
+relevant sections and code blocks, or `section` to read one heading.",
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -419,7 +406,11 @@ Pass context:N for N surrounding lines per match (like grep -C) so a follow-up r
         ToolDef {
             name: "subagent",
             kind: Kind::ReadOnly,
-            description: "Delegate 1–8 focused tasks to isolated child agents (up to 4 run concurrently). Children inherit the cached project/system prefix and by default receive a host-generated `<parent_context>` brief (active plan goal/step, parent's recent files and notes) plus a `<subagent_contract>` tailored to their mode: Read-Only Explorer (`write: false`, default) for broad multi-file research without polluting parent context, or Scoped Writer (`write: true, paths: [...]`, non-overlapping across siblings) for isolated implementation. Pass `clean: true` when spawning an independent code-review or verification subagent so it inspects the diff/files with a clean slate and zero parent bias. Pass optional `files` or `context` in task objects to point children at known starting points. Returns each child's report with a host-verified `[Subagent receipt: ...]` of executed tools and modified files.",
+            description: "Delegate 1–8 focused tasks to isolated child agents (up to 4 \
+concurrently). Read-only explorers gather broadly without polluting parent context; scoped \
+writers get `write: true, paths` with non-overlapping scopes. Pass `files`, `context`, `skills` \
+and `clean` as needed. Returns each report with a host-verified receipt of executed tools and \
+modified files.",
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -460,10 +451,8 @@ Pass context:N for N surrounding lines per match (like grep -C) so a follow-up r
         ToolDef {
             name: "skill",
             kind: Kind::ReadOnly,
-            description: "Load a specialized skill (`SKILL.md` instructions and bundled file manifest) \
-from `<available_skills>` by `name`, or read a bundled supporting file (`references/...`, \
-`scripts/...`, `assets/...`) inside that skill's directory via `file`. Use when the task matches \
-a skill's description, triggers, or file globs.",
+            description: "Load a skill from `<available_skills>` by `name`, or one bundled file \
+via `file`.",
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -482,10 +471,8 @@ a skill's description, triggers, or file globs.",
         ToolDef {
             name: "note",
             kind: Kind::ReadOnly,
-            description: "Record a concise reasoning note in the host journal so it survives \
-compaction and feeds the post-compaction ANCHOR. Use it to capture what context trimming would \
-otherwise lose: a `decision` you made and why (default), a `rejected` approach so it is not \
-retried, a `lesson` learned, a `blocker`, or an `assumption` you are relying on.",
+            description: "Record a reasoning note in the host journal so it survives compaction \
+and feeds ANCHOR. Kinds: decision (default), rejected, assumption, lesson, blocker.",
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -498,17 +485,15 @@ retried, a `lesson` learned, a `blocker`, or an `assumption` you are relying on.
         ToolDef {
             name: "journal",
             kind: Kind::ReadOnly,
-            description: "Read the host journal: the factual event log of this project \
-(user messages, tool calls and results, file diffs, plan ops, notes, checkpoints, undo/redo). \
-Use op=read (default) with `query` (e.g. a filename or symbol) or `kind` to inspect what was \
-changed, tried, or decided earlier — your context memory is lossy after compaction, the journal \
-is not. For a cross-session digest of recent work in this project, use op=recap.",
+            description: "Read the host journal: the project's event log (messages, tools, \
+diffs, plan ops, notes, checkpoints, undo). Filter by `query` or `kind`; `op: recap` gives a \
+cross-session digest.",
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "op": {"type": "string", "enum": ["read", "recap"], "description": "read journal records (default) or recap recent sessions"},
                     "query": {"type": "string", "description": "case-insensitive substring matched against the rendered record"},
-                    "kind": {"type": "string", "description": "filter by record kind: file_diff|note|tool_call|tool_result|plan|user_msg|memory|undo|redo|checkpoint"},
+                    "kind": {"type": "string", "description": "filter by record kind (e.g. file_diff, note, tool_result, plan)"},
                     "session": {"type": "string", "description": "whose journal to read: 'current' (default), 'all', or a session id / prefix from op=recap"},
                     "last": {"type": "integer", "description": "max records to return for op=read (default 40, max 200)"},
                     "days": {"type": "integer", "description": "recap only: how many days back, today included (default 3, max 7)"}
@@ -518,10 +503,8 @@ is not. For a cross-session digest of recent work in this project, use op=recap.
         ToolDef {
             name: "recall_result",
             kind: Kind::ReadOnly,
-            description: "Return the stored output of an earlier tool call by the `call_id` \
-shown in a `[output cleared]` stub. Pass optional `query` (to search for matching lines with \
-context) or `offset`/`limit` (1-based line window) when you only need part of a large cleared \
-output. Refused when the result is still in your live context above.",
+            description: "Return a cleared tool result by the `call_id` in its `[output cleared]` \
+stub. Optional `query` or `offset`/`limit` for part of a large result.",
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -536,34 +519,19 @@ output. Refused when the result is still in your live context above.",
         ToolDef {
             name: "memory_write",
             kind: Kind::ReadOnly,
-            description: "Persist one durable fact to host memory (`.sqwai/memory/MEMORY.md` for the \
-project, global `USER.md` for the user) — non-empty memory is automatically injected into your \
-context at the start of every session (`<project_memory>` / `<user_memory>`), so this is how \
-knowledge outlives the conversation. Write it \
-as soon as you learn something that will still matter later: a stated user preference \
-or an agreement, a project convention, a decision or fact that is not derivable from \
-code or git, an environment gotcha. Use `replaces` with the old text to update a fact \
-in place instead of duplicating it, or pass `replaces` with `text: \"\"` to delete an \
-outdated entry. Store durable truths only — not transient task state, \
-guesses, or anything you would not want shown to you every session.",
+            description: "Persist one durable fact to project or user memory: preferences, \
+agreements, conventions, environment gotchas. Not transient task state or guesses. `replaces` \
+updates or deletes an entry in place.",
             parameters: json!({"type":"object","properties":{"section":{"type":"string","enum":["Project","Conventions","User","Agreements"]},"scope":{"type":"string","enum":["project","user"]},"text":{"type":"string","description":"new fact to record, or empty string when using `replaces` to delete an outdated entry"},"replaces":{"type":"string","description":"existing fact text to update in place (or delete when `text` is empty)"}},"required":["section","text"]}),
         },
         ToolDef {
             name: "plan",
             kind: Kind::Mutating,
-            description: "Manage the structured plan for multi-step work that changes things: \
-read-only inspection or a trivial one-line edit needs no plan. Ops: create, finish, add, cancel, \
-abandon. For a multi-step change, call create with goal, steps (3-6 high-level milestones), and \
-at least one criteria note. criteria are your own plain-text done-notes of what must be true when \
-the work is done — they survive compaction and keep you honest with yourself; the host runs \
-nothing and certifies nothing, so write each one as something you can check yourself. Step 1 \
-starts (in_progress) automatically on create. finish records completion of the current step with \
-a summary of what changed and any remaining limitations, automatically starts the next pending \
-step, and automatically completes the plan when all steps are closed. add inserts a new step \
-when new work is discovered. cancel skips a step that will not happen (with id and reason) and \
-advances to the next step. abandon retires the whole plan with a quoted reason when the user's \
-direction changes or the specification contradicts the tests. The current plan and its step ids \
-always ride in your context above — use those ids and never try to re-read the plan through tools.",
+            description: "Manage the host plan for multi-step work. `create` sets goal, \
+constraints, criteria and 3–6 steps (step 1 starts); criteria are your done-notes and the host \
+runs nothing. `finish` closes the current step and advances; `add` inserts scope; `cancel` skips \
+a step; `abandon` retires a plan whose direction changed. Use the live step ids; never re-read \
+the plan through tools.",
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -605,7 +573,9 @@ always ride in your context above — use those ids and never try to re-read the
         ToolDef {
             name: "ask_user",
             kind: Kind::ReadOnly,
-            description: "Ask the user structured questions (1-4) with 2-5 answer options each. Use only for decisions that materially change the outcome (approach, library, schema), never for trivial clarification. The user can pick options (single or multiple per question) and/or type a custom answer per question. Evidence before escalation: never ask the user to resolve a question of fact about the past (what changed, who deleted what) — query the journal first; ask only when the journal cannot answer.",
+            description: "Ask the user (1-4) structured questions with 2-5 options each. Use only \
+for material decisions, never trivial clarification or facts you can look up; query the journal \
+before asking about past work.",
             parameters: json!({
                 "type": "object",
                 "properties": {
