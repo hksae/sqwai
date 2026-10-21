@@ -6,7 +6,7 @@
 use super::*;
 
 const PLAN_MODE_PROMPT: &str = "## Plan mode
-The workspace is read-only: write/edit/shell tools are intentionally absent. Never end a \
+The workspace is read-only: write/edit/shell calls are refused in Plan mode. Never end a \
 change request with \"I cannot modify files\" — the plan is the deliverable.
 - A change to the repo: explore first, then return a decision-complete plan (goal, \
 constraints/assumptions, changes, verification) and close with one line: switch to Act \

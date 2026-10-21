@@ -1142,6 +1142,10 @@ fn plan_mode_prompt_asks_for_a_plan_but_not_for_exploration() {
         "plan mode must hand off to Act: {texts:?}"
     );
     assert!(
+        texts.iter().any(|t| t.contains("refused in Plan mode")),
+        "the tools stay listed, so the prompt must say refused, not absent: {texts:?}"
+    );
+    assert!(
         texts
             .iter()
             .any(|t| t.contains("Exploration or a question") && t.contains("no plan")),

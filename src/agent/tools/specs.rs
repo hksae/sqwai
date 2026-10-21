@@ -233,7 +233,7 @@ Pass context:N for N surrounding lines per match (like grep -C) so a follow-up r
         ToolDef {
             name: "outline",
             kind: Kind::ReadOnly,
-            description: "Structural outline and dependency map of a source file: shows outgoing `Imports`, incoming `Imported by` (project files that import/reference this module), and all functions, methods, arrow-function components, classes, structs, enums, interfaces, and modules with line numbers. Supports 11 languages via tree-sitter AST (Rust, Python, JS, TS, TSX, Go, Bash, C, C++, C#, Java) and a universal brace/indentation fallback for other files.",
+            description: "Structural outline and dependency map of ONE source file (not a directory): shows outgoing `Imports`, incoming `Imported by` (project files that import/reference this module), and all functions, methods, arrow-function components, classes, structs, enums, interfaces, and modules with line numbers. Supports 11 languages via tree-sitter AST (Rust, Python, JS, TS, TSX, Go, Bash, C, C++, C#, Java) and a universal brace/indentation fallback for other files.",
             parameters: json!({
                 "type": "object",
                 "properties": {

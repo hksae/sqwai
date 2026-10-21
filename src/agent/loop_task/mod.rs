@@ -1602,8 +1602,7 @@ async fn run_agent(
                     && call.name != "plan"
                 {
                     tools::Outcome::err(format!(
-                        "PLAN mode is read-only: '{}' is not allowed. Explore first, then ask the \
-                     user to switch to ACT (Tab) before changing anything.",
+                        "PLAN mode is read-only: '{}' is disabled. Switch to ACT (Tab) to use it.",
                         call.name
                     ))
                 } else {
