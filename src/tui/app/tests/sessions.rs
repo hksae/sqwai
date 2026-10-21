@@ -1126,6 +1126,47 @@ fn start_new_session_stamps_project() {
 /// always-on notice taught the model that context is restored every
 /// turn, and it re-verified the plan before each step.
 #[test]
+fn plan_mode_prompt_asks_for_a_plan_but_not_for_exploration() {
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.mode = Mode::Plan;
+    let texts: Vec<String> = app
+        .system_block()
+        .iter()
+        .filter(|p| !p.cacheable)
+        .map(|p| p.text.clone())
+        .collect();
+    assert!(
+        texts
+            .iter()
+            .any(|t| t.contains("Plan mode") && t.contains("switch to Act (Tab)")),
+        "plan mode must hand off to Act: {texts:?}"
+    );
+    assert!(
+        texts
+            .iter()
+            .any(|t| t.contains("Exploration or a question") && t.contains("no plan")),
+        "exploration must not be forced into a plan: {texts:?}"
+    );
+    assert!(
+        texts
+            .iter()
+            .any(|t| t.contains("Never claim the plan was approved")),
+        "mode switch is not approval: {texts:?}"
+    );
+    app.mode = Mode::Act;
+    let texts: Vec<String> = app
+        .system_block()
+        .iter()
+        .filter(|p| !p.cacheable)
+        .map(|p| p.text.clone())
+        .collect();
+    assert!(
+        !texts.iter().any(|t| t.contains("Plan mode")),
+        "the contract belongs to Plan only: {texts:?}"
+    );
+}
+
+#[test]
 fn resume_notice_arms_once_and_disarms_on_use() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     assert!(!app.resume_notice_armed);

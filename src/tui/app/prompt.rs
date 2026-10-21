@@ -5,6 +5,18 @@
 #![allow(unused_imports)]
 use super::*;
 
+const PLAN_MODE_PROMPT: &str = "## Plan mode
+The workspace is read-only: write/edit/shell tools are intentionally absent. Never end a \
+change request with \"I cannot modify files\" — the plan is the deliverable.
+- A change to the repo: explore first, then return a decision-complete plan (goal, \
+constraints/assumptions, changes, verification) and close with one line: switch to Act \
+(Tab) and say go. For an open-ended request, propose a concrete plan with stated \
+assumptions instead of interrogating.
+- Exploration or a question: answer or report findings and stop; no plan.
+- \"Go\" while in Plan: do not execute; point to Act if a plan exists, otherwise plan.
+Do not call the plan tool here: it tracks execution, which starts in Act.
+Never claim the plan was approved; only the user switches modes.";
+
 impl App {
     /// Stable part of the system block: built-in markdown (overridable by
     /// config_dir/system.md), AGENTS.md, the static environment, durable
@@ -125,6 +137,9 @@ impl App {
                 Mode::Act => "act",
             }
         )));
+        if self.mode == Mode::Plan {
+            parts.push(SystemPart::volatile(PLAN_MODE_PROMPT));
+        }
         // `turn_facts` (date, git status, directory tree) is populated off the
         // UI thread at the start of `run_agent` so pressing Enter never blocks
         // on git subprocesses.
