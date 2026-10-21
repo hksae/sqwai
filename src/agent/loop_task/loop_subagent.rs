@@ -207,6 +207,7 @@ pub(crate) async fn run_subagent_batch(
     plan_mode: bool,
     context_limit: u64,
     vision: bool,
+    pdf: bool,
     effort: Option<EffortLevel>,
     effort_support: crate::config::EffortSupport,
     max_tokens: Option<u32>,
@@ -302,6 +303,7 @@ pub(crate) async fn run_subagent_batch(
                         plan_mode,
                         context_limit,
                         vision,
+                        pdf,
                         effort,
                         effort_support,
                         max_tokens,
@@ -356,7 +358,8 @@ pub(crate) async fn run_subagent_batch(
         }
         messages.push(
             Message::tool_result(&call.id, outcome.output, !outcome.ok)
-                .with_images(outcome.images.clone()),
+                .with_images(outcome.images.clone())
+                .with_documents(outcome.documents.clone()),
         );
     }
     if cutoff < calls.len() {
@@ -438,6 +441,7 @@ pub(crate) async fn run_subagent(
     plan_mode: bool,
     context_limit: u64,
     vision: bool,
+    pdf: bool,
     effort: Option<EffortLevel>,
     effort_support: crate::config::EffortSupport,
     max_tokens: Option<u32>,
@@ -497,6 +501,7 @@ pub(crate) async fn run_subagent(
                         plan_mode,
                         context_limit,
                         vision,
+                        pdf,
                         effort,
                         effort_support,
                         max_tokens,
@@ -618,6 +623,7 @@ pub(crate) async fn run_subagent(
         plan_mode,
         context_limit,
         vision,
+        pdf,
         enable_tools: true,
         // subagent baselines stay synchronous: short tasks, and progress
         // events would land on the parent's channel out of context

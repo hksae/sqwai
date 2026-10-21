@@ -308,6 +308,8 @@ pub struct AgentInput {
     pub context_limit: u64,
     /// Whether the target model accepts image input; unknown counts as yes.
     pub vision: bool,
+    /// Whether the target model accepts PDF documents; unknown counts as no.
+    pub pdf: bool,
     /// Whether this request may use agent tools.
     pub enable_tools: bool,
     /// Slow baseline capture runs in the background instead of blocking
@@ -565,20 +567,25 @@ fn call_key_ref(call: &ToolCallReq) -> Option<String> {
     ))
 }
 
-/// Media ids still visible on the wire, for `view_image` repeat suppression.
-/// Recomputed at a tool-batch boundary: results attached inside the batch are
-/// noted into `ctx` as they land.
-fn refresh_visible_images(ctx: &mut ToolCtx, messages: &[Message], context_limit: u64) {
+/// Media ids still visible on the wire, for `view_image`/`view_document`
+/// repeat suppression. Recomputed at a tool-batch boundary: results attached
+/// inside the batch are noted into `ctx` as they land.
+fn refresh_visible_media(ctx: &mut ToolCtx, messages: &[Message], context_limit: u64) {
     let cleared = crate::agent::tool_output::cleared_indices_with_limit(messages, context_limit);
-    let mut ids = std::collections::HashSet::new();
+    let mut images = std::collections::HashSet::new();
+    let mut documents = std::collections::HashSet::new();
     for (index, message) in messages.iter().enumerate() {
         if message.role == Role::Tool && !cleared.contains(&index) {
             for image in &message.images {
-                ids.insert(image.id.clone());
+                images.insert(image.id.clone());
+            }
+            for document in &message.documents {
+                documents.insert(document.id.clone());
             }
         }
     }
-    ctx.set_visible_images(ids);
+    ctx.set_visible_images(images);
+    ctx.set_visible_documents(documents);
 }
 
 /// Whether `call` is a pure read-only tool that can safely execute in parallel
@@ -712,6 +719,7 @@ async fn run_agent(
         plan_mode,
         mut context_limit,
         vision,
+        pdf,
         enable_tools,
         background_baselines,
         read_only,
@@ -913,7 +921,8 @@ async fn run_agent(
         .with_shadow_store(shadow_store)
         .with_plan_limits(plan_limits, context_limit)
         .with_cancel(cancel_tool)
-        .with_vision(vision);
+        .with_vision(vision)
+        .with_pdf(pdf);
     // slow baseline capture defers to the background worker on interactive
     // turns; everywhere else the tool call captures synchronously
     ctx.background_baselines = background_baselines;
@@ -1437,6 +1446,7 @@ async fn run_agent(
                 plan_mode,
                 context_limit,
                 vision,
+                pdf,
                 effort,
                 effort_support,
                 max_tokens,
@@ -1455,7 +1465,7 @@ async fn run_agent(
             )
             .await;
         } else {
-            refresh_visible_images(&mut ctx, &messages, context_limit);
+            refresh_visible_media(&mut ctx, &messages, context_limit);
             let mut parallel_outcomes: std::collections::HashMap<
                 usize,
                 (u128, tools::Outcome, Option<ToolCtx>),
@@ -1644,6 +1654,7 @@ async fn run_agent(
                                 plan_mode,
                                 context_limit,
                                 vision,
+                                pdf,
                                 effort,
                                 effort_support,
                                 max_tokens,
@@ -2109,8 +2120,13 @@ async fn run_agent(
                 // Repeat handling: the first identical re-run is
                 // reported with a note, the next one loses its bytes — the note
                 // alone did not stop a live session from calling the same
-                // `git_diff` five times over the same 18KB.
-                if outcome.ok {
+                // `git_diff` five times over the same 18KB. Media results are
+                // exempt: their attachment is the delivery, and a cleared
+                // earlier copy makes the duplicate check meaningless.
+                if outcome.ok
+                    && outcome.images.is_empty()
+                    && outcome.documents.is_empty()
+                {
                     match repeat_verdict_with_limit(&messages, call, &outcome.output, context_limit)
                     {
                         RepeatVerdict::Fresh => {}
@@ -2120,10 +2136,14 @@ async fn run_agent(
                 }
                 messages.push(
                     Message::tool_result(&call.id, outcome.output, !outcome.ok)
-                        .with_images(outcome.images.clone()),
+                        .with_images(outcome.images.clone())
+                        .with_documents(outcome.documents.clone()),
                 );
                 for image in &outcome.images {
                     ctx.note_visible_image(&image.id);
+                }
+                for document in &outcome.documents {
+                    ctx.note_visible_document(&document.id);
                 }
                 if interrupted {
                     // Esc means stop — the remaining calls in this batch

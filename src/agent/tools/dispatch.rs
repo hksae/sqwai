@@ -43,6 +43,8 @@ pub struct Outcome {
     pub file_diffs: Vec<FileDiff>,
     /// images the tool returned to the model (view_image today)
     pub images: Vec<crate::providers::ImageAttachment>,
+    /// PDF documents the tool returned to the model (view_document today)
+    pub documents: Vec<crate::providers::DocumentAttachment>,
     /// the user pressed Esc while this tool was running. Distinct from
     /// an ordinary failure — the journal records `code: "cancelled"` rather
     /// than folding it into an error the model is expected to react to.
@@ -59,6 +61,7 @@ impl Outcome {
             file_diff: None,
             file_diffs: Vec::new(),
             images: Vec::new(),
+            documents: Vec::new(),
             cancelled: false,
         }
     }
@@ -71,6 +74,7 @@ impl Outcome {
             file_diff: None,
             file_diffs: Vec::new(),
             images: Vec::new(),
+            documents: Vec::new(),
             cancelled: false,
         }
     }
@@ -86,6 +90,7 @@ impl Outcome {
             file_diff: None,
             file_diffs: Vec::new(),
             images: Vec::new(),
+            documents: Vec::new(),
             cancelled: true,
         }
     }
@@ -93,6 +98,14 @@ impl Outcome {
     /// existing constructor stays image-free by default.
     pub fn with_images(mut self, images: Vec<crate::providers::ImageAttachment>) -> Self {
         self.images = images;
+        self
+    }
+
+    pub fn with_documents(
+        mut self,
+        documents: Vec<crate::providers::DocumentAttachment>,
+    ) -> Self {
+        self.documents = documents;
         self
     }
     /// attach the child exit code to a host-built outcome
@@ -269,6 +282,7 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
     match name {
         "read" => fs::read(ctx, args["file_path"].as_str().unwrap_or_default(), args),
         "view_image" => super::view_image::view(ctx, args),
+        "view_document" => super::view_document::view(ctx, args),
         "write" => fs::write_file(
             ctx,
             args["file_path"].as_str().unwrap_or_default(),

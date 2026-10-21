@@ -38,6 +38,7 @@ fn jitter_test_app() -> App {
             fallback: None,
             status: crate::config::ModelStatus::Active,
             vision: None,
+            pdf: None,
         },
     );
     let cfg = Config {

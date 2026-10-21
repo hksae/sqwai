@@ -37,9 +37,8 @@ pub fn tool_taint(name: &str, is_mcp: bool) -> Option<TaintClass> {
     match name {
         "webfetch" | "websearch" => Some(TaintClass::External),
         _ if is_mcp => Some(TaintClass::External),
-        "read" | "view_image" | "grep" | "glob" | "outline" | "bash" | "bash_output" => {
-            Some(TaintClass::Local)
-        }
+        "read" | "view_image" | "view_document" | "grep" | "glob" | "outline" | "bash"
+        | "bash_output" => Some(TaintClass::Local),
         _ => None,
     }
 }

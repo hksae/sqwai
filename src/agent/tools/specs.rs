@@ -119,6 +119,24 @@ after it was cleared. Returns the pixels plus a one-line record with dimensions,
             }),
         },
         ToolDef {
+            name: "view_document",
+            kind: Kind::ReadOnly,
+            description: "Read a PDF inside the project as a document: the model receives the \
+actual pages, not extracted text, so scans, tables and charts stay readable. A whole PDF may \
+be read in one call only up to 10 pages; for anything longer pass `pages` (1-indexed, e.g. \
+\"1-5\" or \"3,7-9\"), at most 20 pages per call. Each page costs roughly 2.5k tokens, so ask \
+for the pages you need instead of the whole file. Returns the document plus a one-line record \
+with page count, format, size and cost.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "PDF path relative to the project root"},
+                    "pages": {"type": "string", "description": "optional 1-indexed page range, e.g. \"1-5\" or \"3,7-9\""}
+                },
+                "required": ["path"]
+            }),
+        },
+        ToolDef {
             name: "write",
             kind: Kind::Mutating,
             description: "Create a new file or completely overwrite an existing one. \
@@ -728,6 +746,19 @@ fn call_summary_raw(name: &str, args: &Value) -> String {
             }
         }
         "view_image" => s("path"),
+        "view_document" => {
+            let path = s("path");
+            let pages = args["pages"]
+                .as_str()
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
+                .map(str::to_string)
+                .or_else(|| args["pages"].as_u64().map(|page| page.to_string()));
+            match pages {
+                Some(pages) if !path.is_empty() => format!("{path} · pages {pages}"),
+                _ => path,
+            }
+        }
         "write" | "edit" | "multi_edit" => s("file_path"),
         "bash" => s("command"),
         "bash_output" => {

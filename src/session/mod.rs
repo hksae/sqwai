@@ -761,6 +761,34 @@ mod tests {
     }
 
     #[test]
+    fn a_tool_result_keeps_its_document_across_a_save_and_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("doc-session.json");
+        let mut s = Session::new("m".into(), 1000);
+        s.push(Role::User, "read the report");
+        s.messages.push(
+            Message::tool_result("c1", "3 pages · application/pdf", false).with_documents(vec![
+                crate::providers::DocumentAttachment {
+                    id: "a".repeat(64),
+                    name: "report.pdf".into(),
+                    media_type: "application/pdf".into(),
+                    bytes: 4096,
+                    pages: 3,
+                    total_pages: 6,
+                    range: Some("1-3".into()),
+                },
+            ]),
+        );
+        s.save_to(&path).unwrap();
+        let back = Session::load_from(&path).unwrap();
+        let documents = &back.messages[1].documents;
+        assert_eq!(documents.len(), 1);
+        assert_eq!(documents[0].name, "report.pdf");
+        assert_eq!(documents[0].pages, 3);
+        assert_eq!(documents[0].range.as_deref(), Some("1-3"));
+    }
+
+    #[test]
     fn project_belongs_here_legacy_and_foreign() {
         use std::path::{Path, PathBuf};
         let root = Path::new("/proj/a");

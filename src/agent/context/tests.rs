@@ -22,6 +22,19 @@ fn image_tokens_count_toward_estimated_and_wire_pressure() {
 }
 
 #[test]
+fn document_pages_count_toward_estimated_and_wire_pressure() {
+    let document = crate::media::test_document(3, "report.pdf");
+    let plain = Message::tool_result("c1", "view_document", false);
+    let with_document = plain.clone().with_documents(vec![document]);
+    let expected = crate::pdf::document_tokens(3);
+    let stored = estimated_tokens(std::slice::from_ref(&with_document))
+        - estimated_tokens(std::slice::from_ref(&plain));
+    assert_eq!(stored, expected);
+    let wire = wire_estimated_tokens(&[with_document], 0) - wire_estimated_tokens(&[plain], 0);
+    assert_eq!(wire, expected);
+}
+
+#[test]
 fn anchor_keeps_journal_facts_not_plan_state() {
     let root = temp_root("anchor");
     let mut plan = crate::plan::create(

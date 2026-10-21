@@ -1829,6 +1829,7 @@ fn session_recovery_with_deleted_or_broken_plan_id() {
             fallback: None,
             status: crate::config::ModelStatus::Active,
             vision: None,
+            pdf: None,
         },
     );
     let cfg = Config {

@@ -43,6 +43,7 @@ async fn a_mutation_runs_without_any_plan() {
         plan_mode: false,
         context_limit: 10000,
         vision: true,
+        pdf: true,
         enable_tools: true,
         background_baselines: false,
         read_only: false,

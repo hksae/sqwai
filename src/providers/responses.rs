@@ -119,7 +119,7 @@ fn input_items(req: &ChatRequest) -> Vec<Value> {
             }
             Role::Tool => {
                 let call_id = m.tool_call_id.clone().unwrap_or_default();
-                if m.images.is_empty() {
+                if m.images.is_empty() && m.documents.is_empty() {
                     input.push(json!({
                         "type": "function_call_output",
                         "call_id": call_id,
@@ -139,6 +139,19 @@ fn input_items(req: &ChatRequest) -> Vec<Value> {
                             Err(_) => output.push(json!({
                                 "type": "input_text",
                                 "text": format!("[image unavailable: {}]", image.name),
+                            })),
+                        }
+                    }
+                    for document in &m.documents {
+                        match crate::media::data_uri_document(document) {
+                            Ok(uri) => output.push(json!({
+                                "type": "input_file",
+                                "filename": document.name,
+                                "file_data": uri,
+                            })),
+                            Err(_) => output.push(json!({
+                                "type": "input_text",
+                                "text": format!("[document unavailable: {}]", document.name),
                             })),
                         }
                     }

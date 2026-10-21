@@ -152,6 +152,7 @@ pub fn result_outcome(output: String, is_error: bool) -> crate::agent::tools::Ou
         file_diff: None,
         file_diffs: Vec::new(),
         images: Vec::new(),
+        documents: Vec::new(),
         cancelled: false,
     }
 }

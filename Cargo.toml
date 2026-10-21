@@ -20,6 +20,7 @@ http = "1"
 globset = "0.4"
 ignore = "0.4"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+lopdf = "0.46"
 tree-sitter = "0.26"
 tree-sitter-bash = "0.25"
 ratatui = "0.29"

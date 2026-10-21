@@ -828,3 +828,46 @@ fn tool_images_use_the_function_call_output_array() {
     );
     assert_eq!(output[1]["detail"], "auto");
 }
+
+#[test]
+fn tool_documents_use_the_function_call_output_array() {
+    let document = crate::media::test_document(2, "report.pdf");
+    let req = ChatRequest {
+        model_id: "m".into(),
+        system: vec![],
+        messages: vec![
+            Message::new(crate::providers::Role::Assistant, "").with_tool_calls(vec![
+                crate::providers::ToolCallReq::new(
+                    "c1",
+                    "view_document",
+                    json!({"path": "report.pdf"}),
+                ),
+            ]),
+            Message::tool_result("c1", "2 pages · application/pdf · 1 KB · ~5.0k tokens", false)
+                .with_documents(vec![document]),
+        ],
+        effort: None,
+        effort_support: Default::default(),
+        max_tokens: None,
+        tools: vec![],
+        previous_response_id: None,
+        context_transport: crate::providers::ContextTransport::Stateless,
+    };
+    let body = build_body(&req);
+    let input = body["input"].as_array().unwrap();
+    let output = input
+        .iter()
+        .find(|item| item["type"] == "function_call_output")
+        .unwrap()["output"]
+        .as_array()
+        .expect("document results use the array form");
+    assert_eq!(output[0]["type"], "input_text");
+    assert_eq!(output[1]["type"], "input_file");
+    assert_eq!(output[1]["filename"], "report.pdf");
+    assert!(
+        output[1]["file_data"]
+            .as_str()
+            .unwrap()
+            .starts_with("data:application/pdf;base64,")
+    );
+}

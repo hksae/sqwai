@@ -269,6 +269,12 @@ pub struct ModelConfig {
     /// `false` blocks the tool before any request is paid for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vision: Option<bool>,
+    /// Whether the model accepts PDF documents. Absent means unknown and is
+    /// treated as "no": a PDF sent to a model without document support is a
+    /// hard API error, unlike an image on a text-only model which most
+    /// providers reject the same way but far less often.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pdf: Option<bool>,
 }
 
 /// Lifecycle of a catalog model. Tombstones retire without deleting:

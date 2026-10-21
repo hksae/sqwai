@@ -1208,3 +1208,52 @@ fn a_missing_blob_becomes_a_text_marker_not_a_broken_turn() {
     assert_eq!(parts[1]["type"], "text");
     assert_eq!(parts[1]["text"], "[image unavailable: gone.png]");
 }
+
+#[test]
+fn tool_documents_ride_in_a_synthetic_user_message() {
+    let document = crate::media::test_document(2, "report.pdf");
+    let req = ChatRequest {
+        model_id: "m".into(),
+        system: vec![],
+        messages: vec![
+            Message::new(crate::providers::Role::Assistant, "").with_tool_calls(vec![
+                crate::providers::ToolCallReq::new(
+                    "c1",
+                    "view_document",
+                    json!({"path": "report.pdf"}),
+                ),
+            ]),
+            Message::tool_result("c1", "2 pages · application/pdf · 1 KB · ~5.0k tokens", false)
+                .with_documents(vec![document]),
+        ],
+        effort: None,
+        effort_support: Default::default(),
+        max_tokens: None,
+        tools: vec![],
+        previous_response_id: None,
+        context_transport: crate::providers::ContextTransport::Stateless,
+    };
+    let body = OpenAiProvider::build_body(&req);
+    let messages = body["messages"].as_array().unwrap();
+    let tool = messages.iter().find(|m| m["role"] == "tool").unwrap();
+    assert!(tool["content"].is_string(), "tool messages stay text-only");
+    let user = messages
+        .iter()
+        .find(|m| m["role"] == "user")
+        .expect("synthetic document carrier");
+    let parts = user["content"].as_array().unwrap();
+    assert_eq!(parts.len(), 2);
+    assert_eq!(parts[0]["type"], "text");
+    assert_eq!(
+        parts[0]["text"],
+        "document returned by view_document: report.pdf"
+    );
+    assert_eq!(parts[1]["type"], "file");
+    assert_eq!(parts[1]["file"]["filename"], "report.pdf");
+    assert!(
+        parts[1]["file"]["file_data"]
+            .as_str()
+            .unwrap()
+            .starts_with("data:application/pdf;base64,")
+    );
+}

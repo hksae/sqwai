@@ -288,6 +288,11 @@ fn read_single(ctx: &mut ToolCtx, raw: &str, args: &serde_json::Value) -> Outcom
             "image file — use view_image(path=\"{raw_trimmed}\") to see it"
         ));
     }
+    if crate::pdf::is_pdf(&bytes) {
+        return Outcome::err(format!(
+            "PDF document — use view_document(path=\"{raw_trimmed}\") to read its pages"
+        ));
+    }
     if is_binary(&bytes) {
         return Outcome::err("binary file — cannot display");
     }

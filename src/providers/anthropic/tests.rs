@@ -861,3 +861,40 @@ fn tool_images_use_image_blocks_inside_the_tool_result() {
     assert_eq!(content[1]["source"]["media_type"], "image/png");
     assert!(!content[1]["source"]["data"].as_str().unwrap().is_empty());
 }
+
+#[test]
+fn tool_documents_use_document_blocks_inside_the_tool_result() {
+    let document = crate::media::test_document(3, "report.pdf");
+    let req = ChatRequest {
+        model_id: "m".into(),
+        system: vec![],
+        messages: vec![
+            Message::new(crate::providers::Role::Assistant, "").with_tool_calls(vec![
+                crate::providers::ToolCallReq::new(
+                    "c1",
+                    "view_document",
+                    serde_json::json!({"path": "report.pdf"}),
+                ),
+            ]),
+            Message::tool_result("c1", "3 pages · application/pdf · 1 KB · ~7.5k tokens", false)
+                .with_documents(vec![document]),
+        ],
+        effort: None,
+        effort_support: Default::default(),
+        max_tokens: None,
+        tools: vec![],
+        previous_response_id: None,
+        context_transport: crate::providers::ContextTransport::Stateless,
+    };
+    let body = build_body(&req, 8192, false);
+    let result = find_kind(&body, "tool_result").expect("tool_result block");
+    let content = result["content"]
+        .as_array()
+        .expect("documents force the array form");
+    assert_eq!(content[0]["type"], "text");
+    assert_eq!(content[1]["type"], "document");
+    assert_eq!(content[1]["source"]["type"], "base64");
+    assert_eq!(content[1]["source"]["media_type"], "application/pdf");
+    assert_eq!(content[1]["title"], "report.pdf");
+    assert!(!content[1]["source"]["data"].as_str().unwrap().is_empty());
+}

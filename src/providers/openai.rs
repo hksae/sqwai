@@ -49,10 +49,13 @@ impl OpenAiProvider {
     }
 
     /// Chat Completions allows only text in a `tool` message (the API schema
-    /// says so outright), so tool-returned pixels ride in one synthetic user
-    /// message after the tool batch. This exists on the wire only; the stored
-    /// transcript still holds them on the tool result.
-    fn image_message(images: &[&super::ImageAttachment]) -> Value {
+    /// says so outright), so tool-returned pixels and PDFs ride in one
+    /// synthetic user message after the tool batch. This exists on the wire
+    /// only; the stored transcript still holds them on the tool result.
+    fn media_message(
+        images: &[&super::ImageAttachment],
+        documents: &[&super::DocumentAttachment],
+    ) -> Value {
         let mut content = Vec::new();
         for image in images {
             content.push(json!({
@@ -67,6 +70,24 @@ impl OpenAiProvider {
                 Err(_) => content.push(json!({
                     "type": "text",
                     "text": format!("[image unavailable: {}]", image.name),
+                })),
+            }
+        }
+        for document in documents {
+            content.push(json!({
+                "type": "text",
+                "text": format!("document returned by view_document: {}", document.name),
+            }));
+            match crate::media::data_uri_document(document) {
+                // Chat Completions accepts only PDF here, which is exactly
+                // what view_document produces.
+                Ok(uri) => content.push(json!({
+                    "type": "file",
+                    "file": {"filename": document.name, "file_data": uri},
+                })),
+                Err(_) => content.push(json!({
+                    "type": "text",
+                    "text": format!("[document unavailable: {}]", document.name),
                 })),
             }
         }
@@ -159,24 +180,28 @@ impl OpenAiProvider {
             msgs.push(json!({"role": "system", "content": super::host_tail(&tail)}));
         }
         let mut pending_images: Vec<&super::ImageAttachment> = Vec::new();
+        let mut pending_documents: Vec<&super::DocumentAttachment> = Vec::new();
         for (i, m) in req.messages.iter().enumerate() {
             if Some(i) == last_user && !tail.trim().is_empty() {
                 msgs.push(json!({"role": "system", "content": super::host_tail(&tail)}));
             }
-            // Flush the image carrier only when the contiguous tool batch
+            // Flush the media carrier only when the contiguous tool batch
             // ends: tool messages must stay consecutive after the assistant
             // call that requested them.
-            if m.role != Role::Tool && !pending_images.is_empty() {
-                msgs.push(Self::image_message(&pending_images));
+            if m.role != Role::Tool && !(pending_images.is_empty() && pending_documents.is_empty())
+            {
+                msgs.push(Self::media_message(&pending_images, &pending_documents));
                 pending_images.clear();
+                pending_documents.clear();
             }
             if m.role == Role::Tool {
                 pending_images.extend(m.images.iter());
+                pending_documents.extend(m.documents.iter());
             }
             msgs.push(Self::message_json(m));
         }
-        if !pending_images.is_empty() {
-            msgs.push(Self::image_message(&pending_images));
+        if !(pending_images.is_empty() && pending_documents.is_empty()) {
+            msgs.push(Self::media_message(&pending_images, &pending_documents));
         }
         let mut body = json!({
             "model": req.model_id,

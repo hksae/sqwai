@@ -147,6 +147,24 @@ pub struct ImageAttachment {
     pub marker: Option<u32>,
 }
 
+/// A PDF carried by a tool result. Unlike an image, the original bytes are
+/// stored as-is (a page range may be sliced into a smaller PDF); providers
+/// receive a native document/file block, never extracted text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocumentAttachment {
+    pub id: String,
+    pub name: String,
+    pub media_type: String,
+    pub bytes: u64,
+    /// pages in this stored document (the slice, when a range was read)
+    pub pages: u32,
+    /// pages in the source file
+    pub total_pages: u32,
+    /// canonical page range for display, e.g. `1-5,8`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub range: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub role: Role,
@@ -154,6 +172,9 @@ pub struct Message {
     /// images attached to this message (tool results today, user turns later)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<ImageAttachment>,
+    /// PDF documents attached to this message (tool results today)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub documents: Vec<DocumentAttachment>,
     /// assistant message requesting tool executions
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<ToolCallReq>,
@@ -190,6 +211,7 @@ impl Message {
             role,
             content: content.into(),
             images: Vec::new(),
+            documents: Vec::new(),
             tool_calls: Vec::new(),
             tool_call_id: None,
             is_error: false,
@@ -208,6 +230,7 @@ impl Message {
             role: Role::Tool,
             content: output.into(),
             images: Vec::new(),
+            documents: Vec::new(),
             tool_calls: Vec::new(),
             tool_call_id: Some(call_id.into()),
             is_error,
@@ -224,6 +247,11 @@ impl Message {
 
     pub fn with_images(mut self, images: Vec<ImageAttachment>) -> Self {
         self.images = images;
+        self
+    }
+
+    pub fn with_documents(mut self, documents: Vec<DocumentAttachment>) -> Self {
+        self.documents = documents;
         self
     }
 
@@ -552,6 +580,13 @@ impl RequestBreakdown {
                     .map(|image| {
                         crate::media::pressure_tokens(image.width, image.height) * 4
                     })
+                    .sum::<u64>()
+                // A PDF costs roughly one text+image page per document page;
+                // same four-bytes-per-token conversion as images.
+                + message
+                    .documents
+                    .iter()
+                    .map(|document| crate::pdf::document_tokens(document.pages) * 4)
                     .sum::<u64>();
             match message.role {
                 Role::System => out.system_bytes += bytes,

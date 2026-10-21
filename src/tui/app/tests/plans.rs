@@ -423,6 +423,7 @@ fn model_menu_row_formats_ctx() {
             fallback: None,
             status: crate::config::ModelStatus::Active,
             vision: None,
+            pdf: None,
         },
     );
     app.open_menu(Menu::Models {

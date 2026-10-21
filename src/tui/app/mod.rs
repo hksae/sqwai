@@ -675,6 +675,7 @@ impl App {
                 fallback: None,
                 status: ModelStatus::Active,
                 vision: None,
+                pdf: None,
             });
         let resolved = cfg.resolve_provider(&model_cfg)?;
         let provider = providers::create(&resolved)?;

@@ -8,7 +8,7 @@
 //! journal/shadow/compaction walk them, and a base64 blob would ride through
 //! every one of those paths.
 
-use crate::providers::ImageAttachment;
+use crate::providers::{DocumentAttachment, ImageAttachment};
 use base64::Engine as _;
 use image::{DynamicImage, ImageDecoder, ImageFormat, ImageReader, metadata::Orientation};
 use sha2::{Digest, Sha256};
@@ -168,11 +168,11 @@ fn encode_jpeg(img: &DynamicImage, quality: u8) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
-fn hex_digest(bytes: &[u8]) -> String {
+pub(crate) fn hex_digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-fn clean_name(name: &str) -> String {
+pub(crate) fn clean_name(name: &str) -> String {
     let raw = std::path::Path::new(name)
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -197,22 +197,26 @@ fn clean_name(name: &str) -> String {
 /// Content-addressed write. Returns `Ok(())` when the blob is already there:
 /// the same image viewed twice produces the same hash and one file.
 pub fn store(prepared: &Prepared) -> Result<(), String> {
+    store_bytes(
+        &prepared.attachment.id,
+        &prepared.attachment.media_type,
+        &prepared.bytes,
+    )
+}
+
+pub fn store_document(attachment: &DocumentAttachment, bytes: &[u8]) -> Result<(), String> {
+    store_bytes(&attachment.id, &attachment.media_type, bytes)
+}
+
+fn store_bytes(id: &str, media_type: &str, bytes: &[u8]) -> Result<(), String> {
     let dir = store_dir()?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create media store: {e}"))?;
-    let path = dir.join(format!(
-        "{}.{}",
-        prepared.attachment.id,
-        ext_for(&prepared.attachment.media_type)?
-    ));
+    let path = dir.join(format!("{id}.{}", ext_for(media_type)?));
     if path.exists() {
         return Ok(());
     }
-    let tmp = dir.join(format!(
-        ".{}.{}.tmp",
-        prepared.attachment.id,
-        std::process::id()
-    ));
-    std::fs::write(&tmp, &prepared.bytes).map_err(|e| format!("cannot write media blob: {e}"))?;
+    let tmp = dir.join(format!(".{id}.{}.tmp", std::process::id()));
+    std::fs::write(&tmp, bytes).map_err(|e| format!("cannot write media blob: {e}"))?;
     if std::fs::rename(&tmp, &path).is_err() {
         let _ = std::fs::remove_file(&tmp);
         if !path.exists() {
@@ -307,6 +311,30 @@ fn open_with(command: &str, path: &std::path::Path) -> Result<(), String> {
         .map_err(|e| format!("cannot open the image viewer: {e}"))
 }
 
+pub fn load_document(document: &DocumentAttachment) -> Result<Vec<u8>, String> {
+    let path = blob_path(&document.id, &document.media_type)
+        .map_err(|_| format!("invalid media id for {}", document.name))?;
+    std::fs::read(&path).map_err(|e| {
+        format!(
+            "document '{}' is missing from the media store ({e}); read it again",
+            document.name
+        )
+    })
+}
+
+pub fn base64_document(document: &DocumentAttachment) -> Result<String, String> {
+    let bytes = load_document(document)?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
+}
+
+pub fn data_uri_document(document: &DocumentAttachment) -> Result<String, String> {
+    Ok(format!(
+        "data:{};base64,{}",
+        document.media_type,
+        base64_document(document)?
+    ))
+}
+
 pub fn base64_data(attachment: &ImageAttachment) -> Result<String, String> {
     let bytes = load(attachment)?;
     Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
@@ -353,7 +381,7 @@ fn sweep_unreferenced(
     for entry in entries.flatten() {
         let path = entry.path();
         let ext = path.extension().and_then(|e| e.to_str());
-        if !matches!(ext, Some("png" | "jpg" | "webp")) {
+        if !matches!(ext, Some("png" | "jpg" | "webp" | "pdf")) {
             continue;
         }
         let Some(id) = path.file_stem().and_then(|s| s.to_str()) else {
@@ -422,6 +450,7 @@ fn ext_for(media_type: &str) -> Result<&'static str, String> {
         "image/png" => Ok("png"),
         "image/jpeg" => Ok("jpg"),
         "image/webp" => Ok("webp"),
+        "application/pdf" => Ok("pdf"),
         other => Err(format!("unsupported media type '{other}'")),
     }
 }
@@ -457,6 +486,15 @@ pub fn test_png(width: u32, height: u32) -> Vec<u8> {
 pub fn test_image(width: u32, height: u32, name: &str) -> ImageAttachment {
     let prepared = prepare(&test_png(width, height), name).expect("prepare test image");
     store(&prepared).expect("store test image");
+    prepared.attachment
+}
+
+/// A stored PDF attachment for wire/counter tests.
+#[cfg(test)]
+pub fn test_document(pages: u32, name: &str) -> DocumentAttachment {
+    let source = crate::pdf::test_pdf(pages);
+    let prepared = crate::pdf::prepare(&source, name, None).expect("prepare test document");
+    store_document(&prepared.attachment, &prepared.bytes).expect("store test document");
     prepared.attachment
 }
 
@@ -588,9 +626,18 @@ mod tests {
         let sessions = tempfile::tempdir().unwrap();
         let referenced = prepare(&test_png(8, 8), "a.png").unwrap();
         let orphan = prepare(&test_png(9, 9), "b.png").unwrap();
+        let kept_document = crate::pdf::prepare(&crate::pdf::test_pdf(1), "k.pdf", None).unwrap();
+        let orphan_document = crate::pdf::prepare(&crate::pdf::test_pdf(2), "o.pdf", None).unwrap();
         for prepared in [&referenced, &orphan] {
             std::fs::write(
                 media.path().join(format!("{}.png", prepared.attachment.id)),
+                &prepared.bytes,
+            )
+            .unwrap();
+        }
+        for prepared in [&kept_document, &orphan_document] {
+            std::fs::write(
+                media.path().join(format!("{}.pdf", prepared.attachment.id)),
                 &prepared.bytes,
             )
             .unwrap();
@@ -601,13 +648,16 @@ mod tests {
                 "messages": [{"images": [{
                     "id": referenced.attachment.id,
                     "media_type": "image/png",
+                }], "documents": [{
+                    "id": kept_document.attachment.id,
+                    "media_type": "application/pdf",
                 }]}],
             })
             .to_string(),
         )
         .unwrap();
         let removed = sweep_unreferenced(media.path(), sessions.path(), std::time::Duration::ZERO);
-        assert_eq!(removed, 1);
+        assert_eq!(removed, 2);
         assert!(
             media
                 .path()
@@ -618,6 +668,18 @@ mod tests {
             !media
                 .path()
                 .join(format!("{}.png", orphan.attachment.id))
+                .exists()
+        );
+        assert!(
+            media
+                .path()
+                .join(format!("{}.pdf", kept_document.attachment.id))
+                .exists()
+        );
+        assert!(
+            !media
+                .path()
+                .join(format!("{}.pdf", orphan_document.attachment.id))
                 .exists()
         );
     }

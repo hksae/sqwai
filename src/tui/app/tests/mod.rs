@@ -73,6 +73,7 @@ fn test_app(url: String) -> App {
             fallback: None,
             status: crate::config::ModelStatus::Active,
             vision: None,
+            pdf: None,
         },
     );
     let cfg = Config {
@@ -174,6 +175,7 @@ async fn real_zen_smoke() {
             fallback: None,
             status: crate::config::ModelStatus::Active,
             vision: None,
+            pdf: None,
         },
     );
     let cfg = Config {

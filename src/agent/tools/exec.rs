@@ -471,6 +471,7 @@ fn run_blocking(
         file_diff: None,
         file_diffs: Vec::new(),
         images: Vec::new(),
+        documents: Vec::new(),
         cancelled: false,
     }
 }

@@ -109,10 +109,11 @@ fn content_blocks(m: &super::Message, thinking_on: bool) -> Vec<Value> {
         }));
     }
     if m.role == Role::Tool {
-        let content = if m.images.is_empty() {
+        let content = if m.images.is_empty() && m.documents.is_empty() {
             json!(m.content)
         } else {
-            // Anthropic documents image blocks inside tool_result content.
+            // Anthropic accepts image and document blocks inside tool_result
+            // content.
             let mut parts = vec![json!({"type": "text", "text": m.content})];
             for image in &m.images {
                 match crate::media::base64_data(image) {
@@ -127,6 +128,23 @@ fn content_blocks(m: &super::Message, thinking_on: bool) -> Vec<Value> {
                     Err(_) => parts.push(json!({
                         "type": "text",
                         "text": format!("[image unavailable: {}]", image.name),
+                    })),
+                }
+            }
+            for document in &m.documents {
+                match crate::media::base64_document(document) {
+                    Ok(data) => parts.push(json!({
+                        "type": "document",
+                        "source": {
+                            "type": "base64",
+                            "media_type": document.media_type,
+                            "data": data,
+                        },
+                        "title": document.name,
+                    })),
+                    Err(_) => parts.push(json!({
+                        "type": "text",
+                        "text": format!("[document unavailable: {}]", document.name),
                     })),
                 }
             }

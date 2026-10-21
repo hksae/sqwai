@@ -14,6 +14,7 @@ mod policy;
 mod specs;
 mod verify;
 mod view_image;
+mod view_document;
 pub(crate) mod web;
 
 pub(crate) use ctx::{ReadState, ToolCtx};

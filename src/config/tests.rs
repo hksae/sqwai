@@ -433,6 +433,7 @@ fn builtins_merge_without_overwriting_user_edits() {
             fallback: None,
             status: ModelStatus::Active,
             vision: None,
+            pdf: None,
         },
     );
     cfg.apply_builtins();
@@ -778,6 +779,7 @@ fn test_resolve_fallback_chain_handles_order_and_cycles() {
             fallback: Some("m_b".into()),
             status: ModelStatus::Active,
             vision: None,
+            pdf: None,
         },
     );
     cfg.models.insert(
@@ -792,6 +794,7 @@ fn test_resolve_fallback_chain_handles_order_and_cycles() {
             fallback: Some("m_c".into()),
             status: ModelStatus::Active,
             vision: None,
+            pdf: None,
         },
     );
     cfg.models.insert(
@@ -806,6 +809,7 @@ fn test_resolve_fallback_chain_handles_order_and_cycles() {
             fallback: Some("m_a".into()), // cycle back to A
             status: ModelStatus::Active,
             vision: None,
+            pdf: None,
         },
     );
 

@@ -744,6 +744,7 @@ impl App {
                         .map(|p| p.status)
                         .unwrap_or(ModelStatus::Active),
                     vision: previous.as_ref().and_then(|p| p.vision),
+                    pdf: previous.as_ref().and_then(|p| p.pdf),
                 };
                 self.cfg.models.insert(new_key.clone(), updated.clone());
                 if self.session.model_key == new_key {
@@ -1002,6 +1003,7 @@ impl App {
             fallback: None,
             status: ModelStatus::Active,
             vision: None,
+            pdf: None,
         };
         self.cfg.models.insert(new_key.clone(), updated);
         self.cfg.save().ok();

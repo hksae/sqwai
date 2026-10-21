@@ -4,6 +4,7 @@ mod lock;
 mod lsp;
 mod mcp;
 mod media;
+mod pdf;
 mod plan;
 mod prompts;
 mod providers;

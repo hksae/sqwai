@@ -452,19 +452,25 @@ pub fn estimated_tokens(messages: &[Message]) -> u64 {
                     .map(|c| c.name.len() as u64 + c.args.to_string().len() as u64)
                     .sum::<u64>())
             .div_ceil(4)
-                + image_tokens(m)
+                + media_tokens(m)
         })
         .sum()
 }
 
-/// Provider-agnostic image pressure: the larger of the Anthropic and OpenAI
-/// patch counts, so compaction never undercounts a picture.
-fn image_tokens(message: &Message) -> u64 {
+/// Provider-agnostic media pressure: the larger of the Anthropic and OpenAI
+/// patch counts per image, plus the per-page document estimate, so compaction
+/// never undercounts attached media.
+fn media_tokens(message: &Message) -> u64 {
     message
         .images
         .iter()
         .map(|image| crate::media::pressure_tokens(image.width, image.height))
-        .sum()
+        .sum::<u64>()
+        + message
+            .documents
+            .iter()
+            .map(|document| crate::pdf::document_tokens(document.pages))
+            .sum::<u64>()
 }
 
 /// Estimated tokens the history occupies on the WIRE. Aged-out tool results
@@ -498,7 +504,7 @@ pub fn wire_estimated_tokens(messages: &[Message], context_limit: u64) -> u64 {
                 + if cleared.contains(&i) {
                     0
                 } else {
-                    image_tokens(m)
+                    media_tokens(m)
                 }
         })
         .sum()
