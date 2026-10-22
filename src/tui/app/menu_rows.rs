@@ -78,7 +78,7 @@ impl App {
         let q = self.config_search.lines().join("").to_lowercase();
         let groups: Vec<SettingsGroup> = vec![
             (
-                "ui",
+                "UI",
                 vec![
                     (
                         "typewriter",
@@ -113,7 +113,7 @@ impl App {
                 ],
             ),
             (
-                "tools",
+                "Tools",
                 vec![
                     (
                         "skills auto-load",
@@ -168,7 +168,7 @@ impl App {
                 ],
             ),
             (
-                "limits",
+                "Limits",
                 vec![
                     (
                         "max tool calls per turn",
@@ -188,7 +188,7 @@ impl App {
                 ],
             ),
             (
-                "plan",
+                "Plan",
                 vec![
                     (
                         "max steps",
@@ -203,7 +203,7 @@ impl App {
                 ],
             ),
             (
-                "memory",
+                "Memory",
                 vec![
                     (
                         "load budget ratio",
@@ -223,7 +223,7 @@ impl App {
                 ],
             ),
             (
-                "compaction",
+                "Compaction",
                 vec![
                     (
                         "threshold",
@@ -243,7 +243,7 @@ impl App {
                 ],
             ),
             (
-                "undo",
+                "Undo",
                 vec![
                     (
                         "keep per session",
@@ -270,7 +270,7 @@ impl App {
         ];
         let sel_before = self.menu_sel;
         for (section, entries) in groups {
-            let section_match = !q.is_empty() && section.contains(&q);
+            let section_match = !q.is_empty() && section.to_lowercase().contains(&q);
             let visible: Vec<_> = entries
                 .into_iter()
                 .filter(|(label, val, _)| {
@@ -284,7 +284,7 @@ impl App {
                 continue;
             }
             self.menu_rows.push(row(
-                Line::from(vec![Span::styled(section.to_uppercase(), Theme::META())]),
+                Line::from(vec![Span::styled(section, day_section_style())]),
                 MenuAction::None,
             ));
             for (label, val, action) in visible {
