@@ -10,7 +10,15 @@ use reqwest::{Client, Url};
 use scraper::{Html, Selector};
 use serde_json::Value;
 
-pub const MAX_BODY_BYTES: usize = 1_500_000;
+static BODY_LIMIT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1_500_000);
+
+pub fn set_max_body_bytes(bytes: usize) {
+    BODY_LIMIT.store(bytes.max(1_024), std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn max_body_bytes() -> usize {
+    BODY_LIMIT.load(std::sync::atomic::Ordering::Relaxed)
+}
 const REDDIT_API_UA: &str = "linux:sqwai:v0.1.0 (by /u/sqwai_cli)";
 
 /// Attach `Accept: application/vnd.github+json` and optional `Authorization: Bearer`
@@ -327,7 +335,7 @@ async fn fetch_standard_http(
 
     if response
         .content_length()
-        .is_some_and(|n| n as usize > MAX_BODY_BYTES)
+        .is_some_and(|n| n as usize > max_body_bytes())
     {
         return Err("webfetch response is too large (maximum 1.5 MB)".into());
     }
@@ -336,7 +344,7 @@ async fn fetch_standard_http(
         .bytes()
         .await
         .map_err(|e| format!("webfetch read failed: {e}"))?;
-    if bytes.len() > MAX_BODY_BYTES {
+    if bytes.len() > max_body_bytes() {
         return Err("webfetch response is too large (maximum 1.5 MB)".into());
     }
 
@@ -440,7 +448,7 @@ async fn fetch_standard_http(
             .await
         && alt_resp.status().is_success()
         && let Ok(alt_bytes) = alt_resp.bytes().await
-        && alt_bytes.len() <= MAX_BODY_BYTES
+        && alt_bytes.len() <= max_body_bytes()
     {
         let alt_text = String::from_utf8_lossy(&alt_bytes);
         if !super::looks_like_html(&alt_text) && alt_text.trim().len() >= 64 {
@@ -502,7 +510,7 @@ async fn fetch_github_blob(
         return Err(format!("raw github status {}", resp.status()));
     }
     let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
-    if bytes.len() > MAX_BODY_BYTES {
+    if bytes.len() > max_body_bytes() {
         return Err("raw file too large".into());
     }
     let content = String::from_utf8_lossy(&bytes);
@@ -661,7 +669,7 @@ async fn fetch_github_repo(
     if let Ok(rd_resp) = readme_res
         && rd_resp.status().is_success()
         && let Ok(bytes) = rd_resp.bytes().await
-        && bytes.len() <= MAX_BODY_BYTES
+        && bytes.len() <= max_body_bytes()
     {
         let readme = String::from_utf8_lossy(&bytes);
         if !readme.trim().is_empty() {
@@ -771,7 +779,7 @@ async fn fetch_crates_io(
                     .await
                 && rd_resp.status().is_success()
                 && let Ok(bytes) = rd_resp.bytes().await
-                && bytes.len() <= MAX_BODY_BYTES
+                && bytes.len() <= max_body_bytes()
             {
                 let readme = String::from_utf8_lossy(&bytes);
                 if !readme.trim().is_empty() {
@@ -1016,7 +1024,7 @@ async fn fetch_old_reddit_html(
         return Err(format!("old.reddit status {}", resp.status()));
     }
     let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
-    if bytes.len() > MAX_BODY_BYTES {
+    if bytes.len() > max_body_bytes() {
         return Err("old.reddit response too large".into());
     }
     let html = String::from_utf8_lossy(&bytes);

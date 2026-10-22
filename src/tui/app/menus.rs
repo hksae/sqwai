@@ -312,6 +312,8 @@ pub(super) enum MenuAction {
     DeleteSession(String),
     ToggleTypewriter,
     ToggleHttpLog,
+    ToggleOpenAttachments,
+    ToggleMouse,
     ToggleExperimentalTest,
     TogglePerfLog,
     ClearDebugLog,

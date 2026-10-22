@@ -12,9 +12,6 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-const DEFAULT_TIMEOUT_SECS: u64 = 120;
-/// bytes beyond which output is spilled to a temp file and only its tail returned
-const MAX_RETURNED: usize = 30_000;
 /// default tail `bash_output` returns for one job
 const BG_TAIL_DEFAULT: usize = 10_000;
 const BG_TAIL_MAX: usize = 50_000;
@@ -192,7 +189,9 @@ pub(super) fn bash_with_workdir(
     if background {
         return run_background(ctx, command, workdir);
     }
-    let timeout_secs = timeout.unwrap_or(DEFAULT_TIMEOUT_SECS).max(1);
+    let timeout_secs = timeout
+        .unwrap_or(ctx.tools.bash.timeout_secs)
+        .clamp(1, 3_600);
     run_blocking(ctx, command, timeout_secs, workdir)
 }
 
@@ -442,7 +441,8 @@ fn run_blocking(
     } else {
         format!("(exit code {code_str})")
     };
-    let body = if combined.len() > MAX_RETURNED || dropped > 0 {
+    let max_returned = ctx.tools.bash.output_bytes.max(1_024);
+    let body = if combined.len() > max_returned || dropped > 0 {
         // One home for oversized output, and it is a home the file tools can
         // open. This used to be `%TEMP%\sqwai-cmd\`: a path outside the
         // project jail, so the promise in the note was one only `bash` could
@@ -458,7 +458,7 @@ fn run_blocking(
             ),
             (None, _) => "output too large to show".to_string(),
         };
-        format!("{note}\n{}", super::trim_middle(&combined, MAX_RETURNED))
+        format!("{note}\n{}", super::trim_middle(&combined, max_returned))
     } else {
         combined
     };
@@ -477,6 +477,21 @@ fn run_blocking(
 }
 
 fn run_background(ctx: &ToolCtx, command: &str, workdir: Option<&str>) -> Outcome {
+    let limit = ctx.tools.bash.background_jobs;
+    if limit > 0 {
+        poll_jobs();
+        let active = bg_jobs()
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|job| job.session == ctx.session_id && job.running())
+            .count();
+        if active >= limit {
+            return Outcome::err(format!(
+                "background job limit reached ({limit} for this session)"
+            ));
+        }
+    }
     let dir = std::env::temp_dir().join("sqwai-bg");
     let _ = std::fs::create_dir_all(&dir);
     let stamp = std::time::SystemTime::now()

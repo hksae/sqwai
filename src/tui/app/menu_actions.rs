@@ -167,6 +167,26 @@ impl App {
                 self.status(&format!("typewriter: {}", on_off(on)), StatusKind::Ok);
                 self.build_menu_rows();
             }
+            MenuAction::ToggleOpenAttachments => {
+                self.cfg.ui.open_attachments = !self.cfg.ui.open_attachments;
+                self.cfg.save().ok();
+                let on = self.cfg.ui.open_attachments;
+                self.status(
+                    &format!("open attachments on click: {}", on_off(on)),
+                    StatusKind::Ok,
+                );
+                self.build_menu_rows();
+            }
+            MenuAction::ToggleMouse => {
+                self.cfg.ui.mouse = !self.cfg.ui.mouse;
+                self.cfg.save().ok();
+                let on = self.cfg.ui.mouse;
+                self.status(
+                    &format!("mouse capture: {} — restart to apply", on_off(on)),
+                    StatusKind::Ok,
+                );
+                self.build_menu_rows();
+            }
             MenuAction::ToggleHttpLog => {
                 self.cfg.ui.http_log = !self.cfg.ui.http_log;
                 self.cfg.save().ok();

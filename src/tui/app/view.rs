@@ -624,7 +624,7 @@ impl App {
         line: &str,
         char_col: usize,
     ) -> Option<ClickTarget> {
-        if self.active_subagent.is_some() {
+        if self.active_subagent.is_some() || !self.cfg.ui.open_attachments {
             return None;
         }
         let (segs, _) = self.view_transcript();

@@ -7,8 +7,6 @@ use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const READ_MAX_LINES: usize = 2000;
-
 fn err<T>(msg: impl Into<String>) -> Result<T, String> {
     Err(msg.into())
 }
@@ -279,9 +277,20 @@ fn read_single(ctx: &mut ToolCtx, raw: &str, args: &serde_json::Value) -> Outcom
             return Outcome::err(e);
         }
     };
-    let bytes = match fs::read(&p) {
-        Ok(b) => b,
-        Err(e) => return Outcome::err(format!("read failed: {e}")),
+    let bytes = match fs::metadata(&p) {
+        Ok(meta)
+            if ctx.tools.read.max_file_bytes > 0 && meta.len() > ctx.tools.read.max_file_bytes =>
+        {
+            return Outcome::err(format!(
+                "file is {} bytes — [tools.read].max_file_bytes is {}",
+                meta.len(),
+                ctx.tools.read.max_file_bytes
+            ));
+        }
+        _ => match fs::read(&p) {
+            Ok(b) => b,
+            Err(e) => return Outcome::err(format!("read failed: {e}")),
+        },
     };
     if crate::media::is_supported_image(&bytes) {
         return Outcome::err(format!(
@@ -303,6 +312,7 @@ fn read_single(ctx: &mut ToolCtx, raw: &str, args: &serde_json::Value) -> Outcom
     let (text, _had_bom) = split_bom(&decoded);
     let window_hash = content_hash(&bytes);
     let total_lines = text.lines().count();
+    let window = ctx.tools.read.window.clamp(1, 10_000);
 
     // Symbol-targeted read (`symbol` / `symbols: ["fn_a", "StructB"]`) via tree-sitter AST:
     // extracts the exact line spans of matching functions/types/methods in one step
@@ -315,7 +325,7 @@ fn read_single(ctx: &mut ToolCtx, raw: &str, args: &serde_json::Value) -> Outcom
             let lines_vec: Vec<&str> = text.lines().collect();
             let mut out = String::new();
             for (sig, start, end) in &ranges {
-                let capped_end = (*end).min(start + READ_MAX_LINES - 1).min(lines_vec.len());
+                let capped_end = (*end).min(start + window - 1).min(lines_vec.len());
                 if !out.is_empty() {
                     out.push('\n');
                 }
@@ -344,8 +354,7 @@ fn read_single(ctx: &mut ToolCtx, raw: &str, args: &serde_json::Value) -> Outcom
     }
 
     let offset = args["offset"].as_u64().unwrap_or(1).max(1) as usize;
-    let limit =
-        (args["limit"].as_u64().unwrap_or(READ_MAX_LINES as u64) as usize).min(READ_MAX_LINES);
+    let limit = (args["limit"].as_u64().unwrap_or(window as u64) as usize).min(window);
     // repeat reads of an unchanged window collapse to a stub: re-reading
     // the same files in circles was the top context burner, and the
     // freshness guard (require_read) already forces a fresh read when the
@@ -2267,6 +2276,31 @@ mod tests {
         assert!(
             spilled_text.contains("hit_line_255"),
             "spill file must contain matches beyond 200"
+        );
+    }
+
+    #[test]
+    fn read_window_and_max_file_bytes_are_configurable() {
+        let dir = tempfile::tempdir().unwrap();
+        let body: String = (0..50).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(dir.path().join("many.txt"), &body).unwrap();
+        let mut ctx = ToolCtx::new(dir.path());
+        ctx.tools.read.window = 5;
+        let out = read(&mut ctx, "many.txt", &json!({}));
+        assert!(out.ok, "{}", out.output);
+        assert!(
+            out.output.contains("showing lines 1–5 of 50"),
+            "configured window must cap the read: {}",
+            out.output
+        );
+
+        ctx.tools.read.max_file_bytes = 10;
+        let out = read(&mut ctx, "many.txt", &json!({}));
+        assert!(!out.ok);
+        assert!(
+            out.output.contains("[tools.read].max_file_bytes"),
+            "{}",
+            out.output
         );
     }
 }

@@ -49,6 +49,8 @@ fn jitter_test_app() -> App {
         safety: Default::default(),
         web: Default::default(),
         ui: Default::default(),
+        tools: Default::default(),
+        limits: Default::default(),
         mcp: Default::default(),
         lsp: Default::default(),
         skills: Default::default(),

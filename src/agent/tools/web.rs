@@ -89,7 +89,11 @@ fn redirect_policy(allow_hosts: Vec<String>) -> reqwest::redirect::Policy {
     })
 }
 
-pub async fn fetch(args: &Value, allow_hosts: &[String]) -> Outcome {
+pub async fn fetch(
+    args: &Value,
+    allow_hosts: &[String],
+    tools: &crate::config::ToolsConfig,
+) -> Outcome {
     let url = match url_arg(args, allow_hosts) {
         Ok(url) => url,
         Err(error) => return Outcome::err(error),
@@ -143,7 +147,11 @@ pub async fn fetch(args: &Value, allow_hosts: &[String]) -> Outcome {
         return Outcome::ok(ranker::project_page(&cached, query, section));
     }
 
-    let timeout = args.get("timeout").and_then(Value::as_u64).unwrap_or(15);
+    let timeout = args
+        .get("timeout")
+        .and_then(Value::as_u64)
+        .unwrap_or(tools.web.timeout_secs)
+        .clamp(1, 60);
     let client = match client(timeout, crate::providers::USER_AGENT, allow_hosts.to_vec()) {
         Ok(c) => c,
         Err(e) => return Outcome::err(format!("webfetch {e}")),
@@ -176,7 +184,7 @@ fn select_fragments(html: &str, selector: &str) -> Result<String, String> {
     markdown::extract_selector_markdown(html, selector, None)
 }
 
-pub async fn search(args: &Value) -> Outcome {
+pub async fn search(args: &Value, tools: &crate::config::ToolsConfig) -> Outcome {
     let query = args
         .get("query")
         .and_then(Value::as_str)
@@ -191,9 +199,13 @@ pub async fn search(args: &Value) -> Outcome {
     let count = args
         .get("count")
         .and_then(Value::as_u64)
-        .unwrap_or(6)
-        .clamp(1, 10) as usize;
-    let timeout = args.get("timeout").and_then(Value::as_u64).unwrap_or(15);
+        .unwrap_or(tools.web.results as u64)
+        .clamp(1, 20) as usize;
+    let timeout = args
+        .get("timeout")
+        .and_then(Value::as_u64)
+        .unwrap_or(tools.web.timeout_secs)
+        .clamp(1, 60);
     let category = meta_search::SearchCategory::parse(args.get("category").and_then(Value::as_str));
     let deep = args.get("deep").and_then(Value::as_bool).unwrap_or(true);
 
@@ -835,11 +847,14 @@ let y = 2;</pre></td>
     #[tokio::test]
     #[ignore = "hits live internet endpoints; run with --ignored"]
     async fn live_meta_search_and_cached_section_fetch_smoke() {
-        let search_out = search(&json!({
-            "query": "rust tokio spawn",
-            "count": 5,
-            "deep": true
-        }))
+        let search_out = search(
+            &json!({
+                "query": "rust tokio spawn",
+                "count": 5,
+                "deep": true
+            }),
+            &crate::config::ToolsConfig::default(),
+        )
         .await;
         assert!(search_out.ok, "search failed: {}", search_out.output);
         println!("=== LIVE META-SEARCH OUTPUT ===\n{}\n", search_out.output);
@@ -853,6 +868,7 @@ let y = 2;</pre></td>
                 "query": "JoinHandle await"
             }),
             &[],
+            &crate::config::ToolsConfig::default(),
         )
         .await;
         assert!(fetch_out.ok, "fetch failed: {}", fetch_out.output);

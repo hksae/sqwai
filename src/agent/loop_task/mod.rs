@@ -310,6 +310,10 @@ pub struct AgentInput {
     pub vision: bool,
     /// Whether the target model accepts PDF documents; unknown counts as no.
     pub pdf: bool,
+    /// `[tools]` caps for the built-in tools.
+    pub tools: crate::config::ToolsConfig,
+    /// `[limits]` per-turn and concurrency guardrails.
+    pub limits: crate::config::LimitsConfig,
     /// Whether this request may use agent tools.
     pub enable_tools: bool,
     /// Slow baseline capture runs in the background instead of blocking
@@ -612,12 +616,15 @@ fn is_parallel_read_only_call(call: &ToolCallReq) -> bool {
 /// a duplicate `call_key` (so `repeat_verdict` can catch identical re-runs
 /// sequentially), or before a second `read` on the same `file_path` (so window
 /// coverage from the first `read` is visible to the second).
-pub(crate) fn parallel_read_only_batch_end(calls: &[ToolCallReq], start_idx: usize) -> usize {
-    const MAX_PARALLEL_TOOLS: usize = 24;
+pub(crate) fn parallel_read_only_batch_end(
+    calls: &[ToolCallReq],
+    start_idx: usize,
+    max_parallel: usize,
+) -> usize {
     let mut keys: Vec<String> = Vec::new();
     let mut read_paths: Vec<String> = Vec::new();
     let mut end = start_idx;
-    while end < calls.len() && (end - start_idx) < MAX_PARALLEL_TOOLS {
+    while end < calls.len() && (end - start_idx) < max_parallel {
         let call = &calls[end];
         if !is_parallel_read_only_call(call) {
             break;
@@ -661,9 +668,9 @@ pub(crate) async fn execute_parallel_read_only_call(
     match c.name.as_str() {
         "webfetch" | "websearch" => {
             let mut out = if c.name == "webfetch" {
-                tools::web::fetch(&c.args, &allow_hosts).await
+                tools::web::fetch(&c.args, &allow_hosts, &child_ctx.tools).await
             } else {
-                tools::web::search(&c.args).await
+                tools::web::search(&c.args, &child_ctx.tools).await
             };
             if out.ok {
                 out.output = crate::agent::trust::banner_wrap(&out.output);
@@ -720,6 +727,8 @@ async fn run_agent(
         mut context_limit,
         vision,
         pdf,
+        tools: tool_caps,
+        limits,
         enable_tools,
         background_baselines,
         read_only,
@@ -923,6 +932,9 @@ async fn run_agent(
         .with_cancel(cancel_tool)
         .with_vision(vision)
         .with_pdf(pdf);
+    ctx.tools = tool_caps.clone();
+    ctx.limits = limits.clone();
+    crate::agent::tools::web::router::set_max_body_bytes(tool_caps.web.fetch_bytes.max(1024));
     // slow baseline capture defers to the background worker on interactive
     // turns; everywhere else the tool call captures synchronously
     ctx.background_baselines = background_baselines;
@@ -1055,6 +1067,8 @@ async fn run_agent(
         ts
     };
     let mut turn_system = build_turn_system(&system, &root, &session_id);
+    let mut turn_tokens_used: u64 = 0;
+    let mut tool_calls_used: usize = 0;
 
     loop {
         // Transcript sync for hard-abort survival (main agent only — a
@@ -1398,6 +1412,14 @@ async fn run_agent(
         };
         compacted_for_overflow = false;
 
+        if let Some(usage) = turn.usage {
+            turn_tokens_used = turn_tokens_used
+                .saturating_add(usage.prompt_tokens)
+                .saturating_add(usage.completion_tokens);
+        }
+        let token_limit_hit =
+            limits.max_tokens_per_turn > 0 && turn_tokens_used >= limits.max_tokens_per_turn;
+
         if turn.calls.is_empty() {
             // final answer
             let text = turn.text.clone();
@@ -1417,10 +1439,25 @@ async fn run_agent(
                 .with_thinking(turn.reasoning_text, turn.reasoning_ms),
         );
 
+        if token_limit_hit {
+            for call in &turn.calls {
+                messages.push(Message::tool_result(
+                    &call.id,
+                    format!(
+                        "not run: turn token limit reached ({} tokens)",
+                        limits.max_tokens_per_turn
+                    ),
+                    true,
+                ));
+            }
+            break;
+        }
+
         // once the user cancels one call, no further calls in
         // this batch run and no further model turns are requested — Esc means
         // stop, not "let the model decide what to do about it".
         let mut interrupted = false;
+        let mut limit_hit = false;
 
         // A turn that only delegates to subagents fans the calls out
         // concurrently (each awaits its children inside run_subagent);
@@ -1431,39 +1468,59 @@ async fn run_agent(
             && !turn.calls.is_empty()
             && turn.calls.iter().all(|call| call.name == "subagent");
         if pure_subagents {
-            interrupted = run_subagent_batch(
-                &turn.calls,
-                &session_id,
-                &root,
-                &ctx.cancel,
-                &mut journal,
-                &tx,
-                ctx.current_step.clone(),
-                &provider,
-                &model_id,
-                &blocked_patterns,
-                &web_allow_hosts,
-                plan_mode,
-                context_limit,
-                vision,
-                pdf,
-                effort,
-                effort_support,
-                max_tokens,
-                &system,
-                &mcp,
-                &lsp,
-                &skills,
-                read_only,
-                shadow_store,
-                &mut messages,
-                memory.clone(),
-                compaction.clone(),
-                plan_limits,
-                fallback_chain.clone(),
-                std::time::Duration::from_secs(SUBAGENT_TIMEOUT_SECS),
-            )
-            .await;
+            let remaining = limits
+                .max_tool_calls_per_turn
+                .saturating_sub(tool_calls_used);
+            if limits.max_tool_calls_per_turn > 0 && turn.calls.len() > remaining {
+                for call in &turn.calls {
+                    messages.push(Message::tool_result(
+                        &call.id,
+                        format!(
+                            "not run: tool-call limit reached ({} per turn)",
+                            limits.max_tool_calls_per_turn
+                        ),
+                        true,
+                    ));
+                }
+                limit_hit = true;
+            } else {
+                tool_calls_used += turn.calls.len();
+                interrupted = run_subagent_batch(
+                    &turn.calls,
+                    &session_id,
+                    &root,
+                    &ctx.cancel,
+                    &mut journal,
+                    &tx,
+                    ctx.current_step.clone(),
+                    &provider,
+                    &model_id,
+                    &blocked_patterns,
+                    &web_allow_hosts,
+                    plan_mode,
+                    context_limit,
+                    vision,
+                    pdf,
+                    &tool_caps,
+                    &limits,
+                    effort,
+                    effort_support,
+                    max_tokens,
+                    &system,
+                    &mcp,
+                    &lsp,
+                    &skills,
+                    read_only,
+                    shadow_store,
+                    &mut messages,
+                    memory.clone(),
+                    compaction.clone(),
+                    plan_limits,
+                    fallback_chain.clone(),
+                    std::time::Duration::from_secs(SUBAGENT_TIMEOUT_SECS),
+                )
+                .await;
+            }
         } else {
             refresh_visible_media(&mut ctx, &messages, context_limit);
             let mut parallel_outcomes: std::collections::HashMap<
@@ -1485,10 +1542,31 @@ async fn run_agent(
                 }
             }
             for (call_index, call) in turn.calls.iter().enumerate() {
+                if limits.max_tool_calls_per_turn > 0
+                    && tool_calls_used >= limits.max_tool_calls_per_turn
+                {
+                    for rest in &turn.calls[call_index..] {
+                        messages.push(Message::tool_result(
+                            &rest.id,
+                            format!(
+                                "not run: tool-call limit reached ({} per turn)",
+                                limits.max_tool_calls_per_turn
+                            ),
+                            true,
+                        ));
+                    }
+                    limit_hit = true;
+                    break;
+                }
+                tool_calls_used += 1;
                 if !parallel_outcomes.contains_key(&call_index)
                     && !ctx.cancel.load(std::sync::atomic::Ordering::Relaxed)
                 {
-                    let batch_end = parallel_read_only_batch_end(&turn.calls, call_index);
+                    let batch_end = parallel_read_only_batch_end(
+                        &turn.calls,
+                        call_index,
+                        limits.max_parallel_tools.clamp(1, 64),
+                    );
                     if batch_end - call_index > 1 {
                         if turn.calls[call_index..batch_end]
                             .iter()
@@ -1522,7 +1600,7 @@ async fn run_agent(
                                 .map(|(idx, c, child_ctx, allow_hosts)| {
                                     execute_parallel_read_only_call(idx, c, child_ctx, allow_hosts)
                                 })
-                                .buffer_unordered(24)
+                                .buffer_unordered(limits.max_parallel_tools.clamp(1, 64))
                                 .collect()
                                 .await;
                         for (idx, dur_ms, out, child_ctx) in results {
@@ -1627,9 +1705,9 @@ async fn run_agent(
                         }
                         "webfetch" | "websearch" => {
                             let mut outcome = if call.name == "webfetch" {
-                                tools::web::fetch(&call.args, &web_allow_hosts).await
+                                tools::web::fetch(&call.args, &web_allow_hosts, &tool_caps).await
                             } else {
-                                tools::web::search(&call.args).await
+                                tools::web::search(&call.args, &tool_caps).await
                             };
                             // R banner: external bytes travel delimited
                             // so the boundary survives into context. Failures
@@ -1654,6 +1732,8 @@ async fn run_agent(
                                 context_limit,
                                 vision,
                                 pdf,
+                                &tool_caps,
+                                &limits,
                                 effort,
                                 effort_support,
                                 max_tokens,
@@ -2163,7 +2243,7 @@ async fn run_agent(
                 }
             }
         }
-        if interrupted {
+        if interrupted || limit_hit {
             // and no further model turn is requested this round; the turn
             // ends with what was accumulated, the same shape as a normal
             // final answer.

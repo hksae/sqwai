@@ -32,6 +32,12 @@ fn a_history_marker_resolves_to_the_image_target() {
         app.image_target_at(0, line, 0).is_none(),
         "clicking the message prefix does nothing"
     );
+
+    app.cfg.ui.open_attachments = false;
+    assert!(
+        app.image_target_at(0, line, marker_col).is_none(),
+        "open_attachments=false disables the marker target"
+    );
 }
 
 #[test]

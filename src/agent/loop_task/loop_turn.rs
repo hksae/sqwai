@@ -100,6 +100,8 @@ pub(crate) struct TurnOutcome {
     pub(crate) calls: Vec<ToolCallReq>,
     /// how many retries it took to get this answer, for the journal
     pub(crate) retries: u32,
+    /// provider-reported counters for this successful request
+    pub(crate) usage: Option<crate::providers::Usage>,
     /// reasoning tokens the provider reported for this turn, when it counts
     /// them at all. `Some(0)` is evidence that a requested effort level was
     /// not acted on; `None` says nothing either way.
@@ -173,6 +175,7 @@ pub(crate) async fn run_turn_with_prefetch(
 
     loop {
         let mut reasoning_tokens: Option<u64> = None;
+        let mut usage: Option<crate::providers::Usage> = None;
         // reasoning content actually arrived in this turn
         let mut saw_reasoning = false;
         let mut got_delta = false;
@@ -221,6 +224,7 @@ pub(crate) async fn run_turn_with_prefetch(
                     }
                 }
                 Ok(StreamEvent::Usage(u)) => {
+                    usage = Some(u);
                     if u.prompt_tokens > 0 {
                         *prompt_size = u.prompt_tokens;
                     }
@@ -253,7 +257,11 @@ pub(crate) async fn run_turn_with_prefetch(
                             if !base_ctx
                                 .cancel
                                 .load(std::sync::atomic::Ordering::Relaxed)
-                                && super::parallel_read_only_batch_end(&calls, 0) == calls.len()
+                                && super::parallel_read_only_batch_end(
+                                    &calls,
+                                    0,
+                                    base_ctx.limits.max_parallel_tools.clamp(1, 64),
+                                ) == calls.len()
                             {
                                 let c = calls[idx].clone();
                                 let mut child_ctx = base_ctx.clone();
@@ -314,6 +322,7 @@ pub(crate) async fn run_turn_with_prefetch(
                 reasoning_ms,
                 effort_rejected,
                 retries: attempt,
+                usage,
                 provider_state,
                 prefetched,
             });

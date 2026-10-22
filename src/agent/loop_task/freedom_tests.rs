@@ -44,6 +44,8 @@ async fn a_mutation_runs_without_any_plan() {
         context_limit: 10000,
         vision: true,
         pdf: true,
+        tools: Default::default(),
+        limits: Default::default(),
         enable_tools: true,
         background_baselines: false,
         read_only: false,
@@ -52,7 +54,8 @@ async fn a_mutation_runs_without_any_plan() {
         mcp: Default::default(),
         lsp: Default::default(),
         skills: Default::default(),
-        compact_only: false, compact_focus: String::new(),
+        compact_only: false,
+        compact_focus: String::new(),
         memory: Default::default(),
         compaction: Default::default(),
         plan_limits: crate::config::PlanConfig::default(),
@@ -101,6 +104,164 @@ async fn a_mutation_runs_without_any_plan() {
     assert!(
         crate::plan::open_active(&temp_dir).unwrap().is_none(),
         "no plan was invented to justify the write"
+    );
+    std::fs::remove_dir_all(&temp_dir).ok();
+}
+
+fn limited_input(
+    provider: SharedProvider,
+    root: std::path::PathBuf,
+    limits: crate::config::LimitsConfig,
+) -> AgentInput {
+    AgentInput {
+        provider,
+        model_id: "m".into(),
+        model_key: "primary".into(),
+        effort: None,
+        effort_support: crate::config::EffortSupport::default(),
+        max_tokens: None,
+        system: vec![],
+        messages: vec![Message::new(Role::User, "do the work")],
+        root,
+        session_id: "limit-sess".into(),
+        blocked_patterns: vec![],
+        web_allow_hosts: vec![],
+        plan_mode: false,
+        context_limit: 10000,
+        vision: true,
+        pdf: true,
+        tools: Default::default(),
+        limits,
+        enable_tools: true,
+        background_baselines: false,
+        read_only: false,
+        previous_response_id: None,
+        summary: None,
+        mcp: Default::default(),
+        lsp: Default::default(),
+        skills: Default::default(),
+        compact_only: false,
+        compact_focus: String::new(),
+        memory: Default::default(),
+        compaction: Default::default(),
+        plan_limits: crate::config::PlanConfig::default(),
+        shadow_store: crate::config::ShadowStore::Off,
+        subagent_depth: 0,
+        parent_step: None,
+        parent_session: None,
+        fallback_chain: vec![],
+    }
+}
+
+#[tokio::test]
+async fn tool_call_limit_refuses_the_rest_of_the_batch() {
+    let provider: SharedProvider = std::sync::Arc::new(MockTestProvider {
+        events: std::sync::Mutex::new(vec![
+            vec![
+                Ok(crate::providers::StreamEvent::ToolCall(
+                    crate::providers::ToolCallReq::new(
+                        "c1",
+                        "ls",
+                        serde_json::json!({"path": "."}),
+                    ),
+                )),
+                Ok(crate::providers::StreamEvent::ToolCall(
+                    crate::providers::ToolCallReq::new(
+                        "c2",
+                        "ls",
+                        serde_json::json!({"path": "."}),
+                    ),
+                )),
+            ],
+            vec![Ok(crate::providers::StreamEvent::Text("done".into()))],
+        ]),
+    });
+    let temp_dir = std::env::temp_dir().join(format!("sqwai-call-limit-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let limits = crate::config::LimitsConfig {
+        max_tool_calls_per_turn: 1,
+        ..Default::default()
+    };
+    let mut handle = spawn_agent(limited_input(provider, temp_dir.clone(), limits));
+    let mut notices = 0usize;
+    let mut outcome = None;
+    while let Some(ev) = handle.rx.recv().await {
+        match ev {
+            AgentEvent::ToolNotice { .. } => notices += 1,
+            AgentEvent::Completed(Ok(done)) => {
+                outcome = Some(done);
+                break;
+            }
+            AgentEvent::Completed(Err(e)) => panic!("unexpected error: {e}"),
+            _ => {}
+        }
+    }
+    assert_eq!(notices, 1, "only the allowed call may run");
+    let messages = outcome.expect("turn must complete").messages;
+    assert!(
+        messages
+            .iter()
+            .any(|m| { m.role == Role::Tool && m.content.contains("tool-call limit reached") }),
+        "the refused call must carry a result: {messages:?}"
+    );
+    std::fs::remove_dir_all(&temp_dir).ok();
+}
+
+#[tokio::test]
+async fn token_limit_stops_before_dispatching_the_tool_batch() {
+    let provider: SharedProvider = std::sync::Arc::new(MockTestProvider {
+        events: std::sync::Mutex::new(vec![
+            vec![
+                Ok(crate::providers::StreamEvent::Usage(
+                    crate::providers::Usage {
+                        prompt_tokens: 200,
+                        completion_tokens: 10,
+                        ..Default::default()
+                    },
+                )),
+                Ok(crate::providers::StreamEvent::ToolCall(
+                    crate::providers::ToolCallReq::new(
+                        "c1",
+                        "ls",
+                        serde_json::json!({"path": "."}),
+                    ),
+                )),
+            ],
+            vec![Ok(crate::providers::StreamEvent::Text("done".into()))],
+        ]),
+    });
+    let temp_dir = std::env::temp_dir().join(format!("sqwai-token-limit-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let limits = crate::config::LimitsConfig {
+        max_tokens_per_turn: 100,
+        ..Default::default()
+    };
+    let mut handle = spawn_agent(limited_input(provider, temp_dir.clone(), limits));
+    let mut notices = 0usize;
+    let mut outcome = None;
+    while let Some(ev) = handle.rx.recv().await {
+        match ev {
+            AgentEvent::ToolNotice { .. } => notices += 1,
+            AgentEvent::Completed(Ok(done)) => {
+                outcome = Some(done);
+                break;
+            }
+            AgentEvent::Completed(Err(e)) => panic!("unexpected error: {e}"),
+            _ => {}
+        }
+    }
+    assert_eq!(
+        notices, 0,
+        "no tool may run after the token budget is spent"
+    );
+    let messages = outcome.expect("turn must complete").messages;
+    assert!(
+        messages
+            .iter()
+            .any(|m| { m.role == Role::Tool && m.content.contains("turn token limit reached") }),
+        "the skipped call must carry a result: {messages:?}"
     );
     std::fs::remove_dir_all(&temp_dir).ok();
 }

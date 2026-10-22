@@ -208,6 +208,8 @@ pub(crate) async fn run_subagent_batch(
     context_limit: u64,
     vision: bool,
     pdf: bool,
+    tools: &crate::config::ToolsConfig,
+    limits: &crate::config::LimitsConfig,
     effort: Option<EffortLevel>,
     effort_support: crate::config::EffortSupport,
     max_tokens: Option<u32>,
@@ -288,6 +290,8 @@ pub(crate) async fn run_subagent_batch(
                 let memory = memory.clone();
                 let compaction = compaction.clone();
                 let fallback_chain = fallback_chain.clone();
+                let tools = tools.clone();
+                let limits = limits.clone();
                 let parent_cancel = cancel.clone();
                 async move {
                     let outcome = run_subagent(
@@ -304,6 +308,8 @@ pub(crate) async fn run_subagent_batch(
                         context_limit,
                         vision,
                         pdf,
+                        &tools,
+                        &limits,
                         effort,
                         effort_support,
                         max_tokens,
@@ -442,6 +448,8 @@ pub(crate) async fn run_subagent(
     context_limit: u64,
     vision: bool,
     pdf: bool,
+    tools: &crate::config::ToolsConfig,
+    limits: &crate::config::LimitsConfig,
     effort: Option<EffortLevel>,
     effort_support: crate::config::EffortSupport,
     max_tokens: Option<u32>,
@@ -487,6 +495,8 @@ pub(crate) async fn run_subagent(
                 let memory = memory.clone();
                 let compaction = compaction.clone();
                 let fallback_chain = fallback_chain.clone();
+                let tools = tools.clone();
+                let limits = limits.clone();
                 async move {
                     let outcome = run_subagent(
                         &one,
@@ -502,6 +512,8 @@ pub(crate) async fn run_subagent(
                         context_limit,
                         vision,
                         pdf,
+                        &tools,
+                        &limits,
                         effort,
                         effort_support,
                         max_tokens,
@@ -624,6 +636,8 @@ pub(crate) async fn run_subagent(
         context_limit,
         vision,
         pdf,
+        tools: tools.clone(),
+        limits: limits.clone(),
         enable_tools: true,
         // subagent baselines stay synchronous: short tasks, and progress
         // events would land on the parent's channel out of context

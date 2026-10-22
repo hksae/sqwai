@@ -80,6 +80,16 @@ impl App {
                 MenuAction::ToggleTypewriter,
             ),
             (
+                "open attachments on click",
+                on_off(self.cfg.ui.open_attachments),
+                MenuAction::ToggleOpenAttachments,
+            ),
+            (
+                "mouse capture (restart)",
+                on_off(self.cfg.ui.mouse),
+                MenuAction::ToggleMouse,
+            ),
+            (
                 "http debug log",
                 on_off(self.cfg.ui.http_log),
                 MenuAction::ToggleHttpLog,

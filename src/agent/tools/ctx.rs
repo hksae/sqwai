@@ -102,6 +102,10 @@ pub struct ToolCtx {
     /// Whether the model accepts PDF documents. Absent/unknown is `false`:
     /// a PDF sent to a model without document support is a hard API error.
     pub pdf: bool,
+    /// `[tools]` caps for the built-in tools.
+    pub tools: crate::config::ToolsConfig,
+    /// `[limits]` concurrency caps shared with the loop.
+    pub limits: crate::config::LimitsConfig,
     /// Media ids that are still visible on the wire. `view_image` answers a
     /// repeat view with a pointer while the earlier pixels are still in
     /// context; once the result is cleared, a re-view attaches them again.
@@ -145,6 +149,8 @@ impl ToolCtx {
             activated_skills: std::collections::BTreeSet::new(),
             vision: true,
             pdf: false,
+            tools: Default::default(),
+            limits: Default::default(),
             visible_images: std::sync::Arc::new(std::collections::HashSet::new()),
             visible_documents: std::sync::Arc::new(std::collections::HashSet::new()),
         }

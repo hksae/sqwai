@@ -918,3 +918,62 @@ fn public_hosts_ignore_the_list() {
     assert!(gate("https://8.8.8.8/", &[]).is_ok());
     assert!(gate("http://example.com./", &[]).is_ok());
 }
+
+#[test]
+fn tool_and_turn_limit_defaults_preserve_the_old_constants() {
+    let cfg = Config::default();
+    assert_eq!(cfg.tools.bash.timeout_secs, 120);
+    assert_eq!(cfg.tools.bash.output_bytes, 30_000);
+    assert_eq!(cfg.tools.bash.background_jobs, 8);
+    assert_eq!(cfg.tools.read.window, 2_000);
+    assert_eq!(cfg.tools.read.max_file_bytes, 16 * 1024 * 1024);
+    assert_eq!(cfg.tools.outline.max_file_bytes, 2_097_152);
+    assert_eq!(cfg.tools.web.results, 6);
+    assert_eq!(cfg.tools.web.timeout_secs, 15);
+    assert_eq!(cfg.tools.web.fetch_bytes, 1_500_000);
+    assert_eq!(cfg.limits.max_tool_calls_per_turn, 0);
+    assert_eq!(cfg.limits.max_tokens_per_turn, 0);
+    assert_eq!(cfg.limits.max_parallel_tools, 24);
+    assert!(cfg.ui.open_attachments);
+    assert!(cfg.ui.mouse);
+}
+
+#[test]
+fn tools_limits_and_ui_toggles_parse_from_the_user_file() {
+    let cfg: Config = toml::from_str(
+        r#"
+[tools.bash]
+timeout_secs = 30
+output_bytes = 9000
+background_jobs = 2
+
+[tools.read]
+window = 120
+max_file_bytes = 4096
+
+[tools.web]
+results = 3
+timeout_secs = 5
+fetch_bytes = 65536
+
+[limits]
+max_tool_calls_per_turn = 12
+max_tokens_per_turn = 50000
+max_parallel_tools = 2
+
+[ui]
+open_attachments = false
+mouse = false
+"#,
+    )
+    .unwrap();
+    assert_eq!(cfg.tools.bash.timeout_secs, 30);
+    assert_eq!(cfg.tools.bash.background_jobs, 2);
+    assert_eq!(cfg.tools.read.window, 120);
+    assert_eq!(cfg.tools.web.results, 3);
+    assert_eq!(cfg.limits.max_tool_calls_per_turn, 12);
+    assert_eq!(cfg.limits.max_tokens_per_turn, 50_000);
+    assert_eq!(cfg.limits.max_parallel_tools, 2);
+    assert!(!cfg.ui.open_attachments);
+    assert!(!cfg.ui.mouse);
+}

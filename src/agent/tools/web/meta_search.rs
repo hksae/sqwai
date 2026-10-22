@@ -488,7 +488,7 @@ async fn search_startpage(client: &Client, query: &str) -> Vec<RawSearchHit> {
     let Ok(bytes) = resp.bytes().await else {
         return Vec::new();
     };
-    if bytes.len() > router::MAX_BODY_BYTES {
+    if bytes.len() > router::max_body_bytes() {
         return Vec::new();
     }
     parse_startpage_results(&String::from_utf8_lossy(&bytes), 10)
@@ -573,7 +573,7 @@ async fn search_bing(client: &Client, query: &str) -> Vec<RawSearchHit> {
     let Ok(bytes) = resp.bytes().await else {
         return Vec::new();
     };
-    if bytes.len() > router::MAX_BODY_BYTES {
+    if bytes.len() > router::max_body_bytes() {
         return Vec::new();
     }
     parse_bing_results(&String::from_utf8_lossy(&bytes), 10)
@@ -696,7 +696,7 @@ async fn search_duckduckgo(client: &Client, query: &str) -> Vec<RawSearchHit> {
     let Ok(bytes) = resp.bytes().await else {
         return Vec::new();
     };
-    if bytes.len() > router::MAX_BODY_BYTES {
+    if bytes.len() > router::max_body_bytes() {
         return Vec::new();
     }
     let html = String::from_utf8_lossy(&bytes);

@@ -10,7 +10,6 @@ use super::{Outcome, ToolCtx};
 use serde_json::Value;
 use tree_sitter::Node;
 
-const MAX_FILE_BYTES: u64 = 2_097_152;
 const MAX_SIG_LEN: usize = 120;
 
 #[derive(Debug, Clone)]
@@ -53,8 +52,12 @@ pub fn outline(ctx: &mut ToolCtx, args: &Value) -> Outcome {
         Ok(m) => m,
         Err(e) => return Outcome::err(format!("cannot stat {path_arg}: {e}")),
     };
-    if meta.len() > MAX_FILE_BYTES {
-        return Outcome::err("file too large for outline (max 2MB)");
+    let max_bytes = ctx.tools.outline.max_file_bytes;
+    if max_bytes > 0 && meta.len() > max_bytes {
+        return Outcome::err(format!(
+            "file is {} bytes — [tools.outline].max_file_bytes is {max_bytes}",
+            meta.len()
+        ));
     }
 
     let bytes = match std::fs::read(&full_path) {

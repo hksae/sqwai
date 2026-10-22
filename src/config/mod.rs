@@ -919,7 +919,7 @@ impl Default for SkillsConfig {
     }
 }
 
-/// runtime-tweakable ui behavior (`/debug`, `/theme`)
+/// runtime-tweakable ui behavior (`/debug`)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UiConfig {
     /// reveal assistant text gradually instead of per-chunk
@@ -931,6 +931,13 @@ pub struct UiConfig {
     /// unlock /test ... commands (off by default, /settings -> Experimental)
     #[serde(default)]
     pub experimental_test: bool,
+    /// open an `[image N]` marker in the OS viewer on click
+    #[serde(default = "default_true")]
+    pub open_attachments: bool,
+    /// capture mouse events; off restores the terminal's native selection.
+    /// Takes effect on the next launch.
+    #[serde(default = "default_true")]
+    pub mouse: bool,
 }
 
 impl Default for UiConfig {
@@ -939,8 +946,159 @@ impl Default for UiConfig {
             typewriter: true,
             http_log: false,
             experimental_test: false,
+            open_attachments: true,
+            mouse: true,
         }
     }
+}
+
+/// `[tools]` — per-tool caps. Defaults keep the old limits where they existed;
+/// the new file-size and background-job caps are conservative.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ToolsConfig {
+    #[serde(default)]
+    pub bash: BashToolConfig,
+    #[serde(default)]
+    pub read: ReadToolConfig,
+    #[serde(default)]
+    pub outline: OutlineToolConfig,
+    #[serde(default)]
+    pub web: WebToolConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BashToolConfig {
+    #[serde(default = "default_bash_timeout_secs")]
+    pub timeout_secs: u64,
+    #[serde(default = "default_bash_output_bytes")]
+    pub output_bytes: usize,
+    /// 0 disables the cap
+    #[serde(default = "default_bash_background_jobs")]
+    pub background_jobs: usize,
+}
+
+impl Default for BashToolConfig {
+    fn default() -> Self {
+        Self {
+            timeout_secs: default_bash_timeout_secs(),
+            output_bytes: default_bash_output_bytes(),
+            background_jobs: default_bash_background_jobs(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReadToolConfig {
+    /// max lines per read and the default window when `limit` is omitted
+    #[serde(default = "default_read_window")]
+    pub window: usize,
+    /// 0 disables the cap
+    #[serde(default = "default_read_max_file_bytes")]
+    pub max_file_bytes: u64,
+}
+
+impl Default for ReadToolConfig {
+    fn default() -> Self {
+        Self {
+            window: default_read_window(),
+            max_file_bytes: default_read_max_file_bytes(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OutlineToolConfig {
+    /// 0 disables the cap
+    #[serde(default = "default_outline_max_file_bytes")]
+    pub max_file_bytes: u64,
+}
+
+impl Default for OutlineToolConfig {
+    fn default() -> Self {
+        Self {
+            max_file_bytes: default_outline_max_file_bytes(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebToolConfig {
+    /// default number of search results; 1..=20
+    #[serde(default = "default_web_results")]
+    pub results: usize,
+    /// default per-request timeout in seconds; 1..=60
+    #[serde(default = "default_web_timeout_secs")]
+    pub timeout_secs: u64,
+    /// max response body bytes read by webfetch/websearch
+    #[serde(default = "default_web_fetch_bytes")]
+    pub fetch_bytes: usize,
+}
+
+impl Default for WebToolConfig {
+    fn default() -> Self {
+        Self {
+            results: default_web_results(),
+            timeout_secs: default_web_timeout_secs(),
+            fetch_bytes: default_web_fetch_bytes(),
+        }
+    }
+}
+
+/// `[limits]` — per-turn and concurrency guardrails. Zero disables a per-turn
+/// cap; `max_parallel_tools` is clamped to 1..=64.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LimitsConfig {
+    /// tool calls executed in one user turn; 0 disables the cap
+    #[serde(default)]
+    pub max_tool_calls_per_turn: usize,
+    /// provider-reported prompt+completion tokens in one user turn;
+    /// 0 disables the cap
+    #[serde(default)]
+    pub max_tokens_per_turn: u64,
+    /// concurrent read-only tool calls; clamped to 1..=64
+    #[serde(default = "default_max_parallel_tools")]
+    pub max_parallel_tools: usize,
+}
+
+impl Default for LimitsConfig {
+    fn default() -> Self {
+        Self {
+            max_tool_calls_per_turn: 0,
+            max_tokens_per_turn: 0,
+            max_parallel_tools: default_max_parallel_tools(),
+        }
+    }
+}
+
+fn default_bash_timeout_secs() -> u64 {
+    120
+}
+fn default_bash_output_bytes() -> usize {
+    30_000
+}
+fn default_bash_background_jobs() -> usize {
+    8
+}
+fn default_read_window() -> usize {
+    2_000
+}
+fn default_read_max_file_bytes() -> u64 {
+    16 * 1024 * 1024
+}
+fn default_outline_max_file_bytes() -> u64 {
+    2_097_152
+}
+fn default_web_results() -> usize {
+    6
+}
+fn default_web_timeout_secs() -> u64 {
+    15
+}
+fn default_web_fetch_bytes() -> usize {
+    1_500_000
+}
+fn default_max_parallel_tools() -> usize {
+    24
 }
 
 fn default_true() -> bool {
@@ -1141,6 +1299,8 @@ struct UiOverride {
     typewriter: Option<bool>,
     http_log: Option<bool>,
     experimental_test: Option<bool>,
+    open_attachments: Option<bool>,
+    mouse: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -1180,11 +1340,17 @@ struct MemoryOverride {
 /// (table, keys) accepted from a project file. Anything else present is
 /// ignored and reported. Keep in sync with the `*Override` structs above.
 const PROJECT_ALLOWLIST: &[(&str, &[&str])] = &[
-    ("ui", &["typewriter", "http_log", "experimental_test"]),
     (
-        "compaction",
-        &["threshold", "keep_turns", "anchor_ratio"],
+        "ui",
+        &[
+            "typewriter",
+            "http_log",
+            "experimental_test",
+            "open_attachments",
+            "mouse",
+        ],
     ),
+    ("compaction", &["threshold", "keep_turns", "anchor_ratio"]),
     (
         "undo",
         &[
@@ -1259,6 +1425,10 @@ pub struct Config {
     #[serde(default)]
     pub ui: UiConfig,
     #[serde(default)]
+    pub tools: ToolsConfig,
+    #[serde(default)]
+    pub limits: LimitsConfig,
+    #[serde(default)]
     pub mcp: McpConfig,
     #[serde(default)]
     pub lsp: LspConfig,
@@ -1329,6 +1499,8 @@ impl Default for Config {
             safety: SafetyConfig::default(),
             web: WebConfig::default(),
             ui: UiConfig::default(),
+            tools: ToolsConfig::default(),
+            limits: LimitsConfig::default(),
             mcp: McpConfig::default(),
             lsp: LspConfig::default(),
             skills: SkillsConfig::default(),
@@ -1569,6 +1741,12 @@ impl Config {
         }
         if let Some(v) = o.experimental_test {
             ui.experimental_test = v;
+        }
+        if let Some(v) = o.open_attachments {
+            ui.open_attachments = v;
+        }
+        if let Some(v) = o.mouse {
+            ui.mouse = v;
         }
         let compaction = &mut self.compaction;
         let o = &overrides.compaction;
