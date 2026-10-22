@@ -17,6 +17,9 @@ fn row(l: Line<'static>, a: MenuAction) -> MenuRow {
     (l, a)
 }
 
+type SettingsEntry = (&'static str, String, MenuAction);
+type SettingsGroup = (&'static str, Vec<SettingsEntry>);
+
 impl App {
     pub(super) fn build_menu_rows(&mut self) {
         self.menu_rows.clear();
@@ -73,178 +76,226 @@ impl App {
             MenuAction::FocusSearch,
         ));
         let q = self.config_search.lines().join("").to_lowercase();
-        let entries: Vec<(&str, String, MenuAction)> = vec![
+        let groups: Vec<SettingsGroup> = vec![
             (
-                "typewriter",
-                on_off(self.cfg.ui.typewriter),
-                MenuAction::ToggleTypewriter,
+                "ui",
+                vec![
+                    (
+                        "typewriter",
+                        on_off(self.cfg.ui.typewriter),
+                        MenuAction::ToggleTypewriter,
+                    ),
+                    (
+                        "open attachments on click",
+                        on_off(self.cfg.ui.open_attachments),
+                        MenuAction::ToggleOpenAttachments,
+                    ),
+                    (
+                        "mouse capture (restart)",
+                        on_off(self.cfg.ui.mouse),
+                        MenuAction::ToggleMouse,
+                    ),
+                    (
+                        "http debug log",
+                        on_off(self.cfg.ui.http_log),
+                        MenuAction::ToggleHttpLog,
+                    ),
+                    (
+                        "perf frame log",
+                        on_off(self.perf.enabled()),
+                        MenuAction::TogglePerfLog,
+                    ),
+                    (
+                        "experimental test commands",
+                        on_off(self.cfg.ui.experimental_test),
+                        MenuAction::ToggleExperimentalTest,
+                    ),
+                ],
             ),
             (
-                "open attachments on click",
-                on_off(self.cfg.ui.open_attachments),
-                MenuAction::ToggleOpenAttachments,
+                "tools",
+                vec![
+                    (
+                        "skills auto-load",
+                        on_off(self.cfg.skills.auto_load),
+                        MenuAction::ToggleSkillsAutoLoad,
+                    ),
+                    (
+                        "bash timeout secs",
+                        ScalarSetting::BashTimeoutSecs.current(&self.cfg),
+                        MenuAction::EditScalar(ScalarSetting::BashTimeoutSecs),
+                    ),
+                    (
+                        "bash output bytes",
+                        ScalarSetting::BashOutputBytes.current(&self.cfg),
+                        MenuAction::EditScalar(ScalarSetting::BashOutputBytes),
+                    ),
+                    (
+                        "bash background jobs",
+                        ScalarSetting::BashBackgroundJobs.current(&self.cfg),
+                        MenuAction::EditScalar(ScalarSetting::BashBackgroundJobs),
+                    ),
+                    (
+                        "read window lines",
+                        ScalarSetting::ReadWindow.current(&self.cfg),
+                        MenuAction::EditScalar(ScalarSetting::ReadWindow),
+                    ),
+                    (
+                        "read max file bytes",
+                        ScalarSetting::ReadMaxFileBytes.current(&self.cfg),
+                        MenuAction::EditScalar(ScalarSetting::ReadMaxFileBytes),
+                    ),
+                    (
+                        "outline max file bytes",
+                        ScalarSetting::OutlineMaxFileBytes.current(&self.cfg),
+                        MenuAction::EditScalar(ScalarSetting::OutlineMaxFileBytes),
+                    ),
+                    (
+                        "web results",
+                        ScalarSetting::WebResults.current(&self.cfg),
+                        MenuAction::EditScalar(ScalarSetting::WebResults),
+                    ),
+                    (
+                        "web timeout secs",
+                        ScalarSetting::WebTimeoutSecs.current(&self.cfg),
+                        MenuAction::EditScalar(ScalarSetting::WebTimeoutSecs),
+                    ),
+                    (
+                        "web fetch bytes",
+                        ScalarSetting::WebFetchBytes.current(&self.cfg),
+                        MenuAction::EditScalar(ScalarSetting::WebFetchBytes),
+                    ),
+                ],
             ),
             (
-                "mouse capture (restart)",
-                on_off(self.cfg.ui.mouse),
-                MenuAction::ToggleMouse,
+                "limits",
+                vec![
+                    (
+                        "max tool calls per turn",
+                        ScalarSetting::LimitMaxToolCalls.current(&self.cfg),
+                        MenuAction::EditScalar(ScalarSetting::LimitMaxToolCalls),
+                    ),
+                    (
+                        "max tokens per turn",
+                        ScalarSetting::LimitMaxTokens.current(&self.cfg),
+                        MenuAction::EditScalar(ScalarSetting::LimitMaxTokens),
+                    ),
+                    (
+                        "max parallel tools",
+                        ScalarSetting::LimitMaxParallelTools.current(&self.cfg),
+                        MenuAction::EditScalar(ScalarSetting::LimitMaxParallelTools),
+                    ),
+                ],
             ),
             (
-                "http debug log",
-                on_off(self.cfg.ui.http_log),
-                MenuAction::ToggleHttpLog,
+                "plan",
+                vec![
+                    (
+                        "max steps",
+                        ScalarSetting::PlanMaxSteps.current(&self.cfg),
+                        MenuAction::EditScalar(ScalarSetting::PlanMaxSteps),
+                    ),
+                    (
+                        "nudge after",
+                        ScalarSetting::PlanNudgeAfter.current(&self.cfg),
+                        MenuAction::EditScalar(ScalarSetting::PlanNudgeAfter),
+                    ),
+                ],
             ),
             (
-                "perf frame log",
-                on_off(self.perf.enabled()),
-                MenuAction::TogglePerfLog,
+                "memory",
+                vec![
+                    (
+                        "load budget ratio",
+                        ScalarSetting::MemoryLoadBudgetRatio.current(&self.cfg),
+                        MenuAction::EditScalar(ScalarSetting::MemoryLoadBudgetRatio),
+                    ),
+                    (
+                        "max tokens",
+                        ScalarSetting::MemoryMaxTokens.current(&self.cfg),
+                        MenuAction::EditScalar(ScalarSetting::MemoryMaxTokens),
+                    ),
+                    (
+                        "max proposals",
+                        ScalarSetting::MemoryMaxProposals.current(&self.cfg),
+                        MenuAction::EditScalar(ScalarSetting::MemoryMaxProposals),
+                    ),
+                ],
             ),
             (
-                "experimental test commands",
-                on_off(self.cfg.ui.experimental_test),
-                MenuAction::ToggleExperimentalTest,
+                "compaction",
+                vec![
+                    (
+                        "threshold",
+                        ScalarSetting::CompactionThreshold.current(&self.cfg),
+                        MenuAction::EditScalar(ScalarSetting::CompactionThreshold),
+                    ),
+                    (
+                        "keep turns",
+                        ScalarSetting::CompactionKeepTurns.current(&self.cfg),
+                        MenuAction::EditScalar(ScalarSetting::CompactionKeepTurns),
+                    ),
+                    (
+                        "anchor ratio",
+                        ScalarSetting::CompactionAnchorRatio.current(&self.cfg),
+                        MenuAction::EditScalar(ScalarSetting::CompactionAnchorRatio),
+                    ),
+                ],
             ),
             (
-                "skills auto-load",
-                on_off(self.cfg.skills.auto_load),
-                MenuAction::ToggleSkillsAutoLoad,
-            ),
-            (
-                "bash timeout secs",
-                ScalarSetting::BashTimeoutSecs.current(&self.cfg),
-                MenuAction::EditScalar(ScalarSetting::BashTimeoutSecs),
-            ),
-            (
-                "bash output bytes",
-                ScalarSetting::BashOutputBytes.current(&self.cfg),
-                MenuAction::EditScalar(ScalarSetting::BashOutputBytes),
-            ),
-            (
-                "bash background jobs",
-                ScalarSetting::BashBackgroundJobs.current(&self.cfg),
-                MenuAction::EditScalar(ScalarSetting::BashBackgroundJobs),
-            ),
-            (
-                "read window lines",
-                ScalarSetting::ReadWindow.current(&self.cfg),
-                MenuAction::EditScalar(ScalarSetting::ReadWindow),
-            ),
-            (
-                "read max file bytes",
-                ScalarSetting::ReadMaxFileBytes.current(&self.cfg),
-                MenuAction::EditScalar(ScalarSetting::ReadMaxFileBytes),
-            ),
-            (
-                "outline max file bytes",
-                ScalarSetting::OutlineMaxFileBytes.current(&self.cfg),
-                MenuAction::EditScalar(ScalarSetting::OutlineMaxFileBytes),
-            ),
-            (
-                "web results",
-                ScalarSetting::WebResults.current(&self.cfg),
-                MenuAction::EditScalar(ScalarSetting::WebResults),
-            ),
-            (
-                "web timeout secs",
-                ScalarSetting::WebTimeoutSecs.current(&self.cfg),
-                MenuAction::EditScalar(ScalarSetting::WebTimeoutSecs),
-            ),
-            (
-                "web fetch bytes",
-                ScalarSetting::WebFetchBytes.current(&self.cfg),
-                MenuAction::EditScalar(ScalarSetting::WebFetchBytes),
-            ),
-            (
-                "max tool calls per turn",
-                ScalarSetting::LimitMaxToolCalls.current(&self.cfg),
-                MenuAction::EditScalar(ScalarSetting::LimitMaxToolCalls),
-            ),
-            (
-                "max tokens per turn",
-                ScalarSetting::LimitMaxTokens.current(&self.cfg),
-                MenuAction::EditScalar(ScalarSetting::LimitMaxTokens),
-            ),
-            (
-                "max parallel tools",
-                ScalarSetting::LimitMaxParallelTools.current(&self.cfg),
-                MenuAction::EditScalar(ScalarSetting::LimitMaxParallelTools),
-            ),
-            (
-                "plan max steps",
-                ScalarSetting::PlanMaxSteps.current(&self.cfg),
-                MenuAction::EditScalar(ScalarSetting::PlanMaxSteps),
-            ),
-            (
-                "plan nudge after",
-                ScalarSetting::PlanNudgeAfter.current(&self.cfg),
-                MenuAction::EditScalar(ScalarSetting::PlanNudgeAfter),
-            ),
-            (
-                "memory load budget ratio",
-                ScalarSetting::MemoryLoadBudgetRatio.current(&self.cfg),
-                MenuAction::EditScalar(ScalarSetting::MemoryLoadBudgetRatio),
-            ),
-            (
-                "memory max tokens",
-                ScalarSetting::MemoryMaxTokens.current(&self.cfg),
-                MenuAction::EditScalar(ScalarSetting::MemoryMaxTokens),
-            ),
-            (
-                "memory max proposals",
-                ScalarSetting::MemoryMaxProposals.current(&self.cfg),
-                MenuAction::EditScalar(ScalarSetting::MemoryMaxProposals),
-            ),
-            (
-                "compaction threshold",
-                ScalarSetting::CompactionThreshold.current(&self.cfg),
-                MenuAction::EditScalar(ScalarSetting::CompactionThreshold),
-            ),
-            (
-                "compaction keep turns",
-                ScalarSetting::CompactionKeepTurns.current(&self.cfg),
-                MenuAction::EditScalar(ScalarSetting::CompactionKeepTurns),
-            ),
-            (
-                "compaction anchor ratio",
-                ScalarSetting::CompactionAnchorRatio.current(&self.cfg),
-                MenuAction::EditScalar(ScalarSetting::CompactionAnchorRatio),
-            ),
-            (
-                "undo keep per session",
-                ScalarSetting::UndoKeepPerSession.current(&self.cfg),
-                MenuAction::EditScalar(ScalarSetting::UndoKeepPerSession),
-            ),
-            (
-                "undo blob grace secs",
-                ScalarSetting::UndoBlobGraceSecs.current(&self.cfg),
-                MenuAction::EditScalar(ScalarSetting::UndoBlobGraceSecs),
-            ),
-            (
-                "undo shadow",
-                self.cfg.undo.shadow.as_str().to_string(),
-                MenuAction::OpenUndoShadow,
-            ),
-            (
-                "undo shadow max bytes",
-                ScalarSetting::UndoShadowMaxBytes.current(&self.cfg),
-                MenuAction::EditScalar(ScalarSetting::UndoShadowMaxBytes),
+                "undo",
+                vec![
+                    (
+                        "keep per session",
+                        ScalarSetting::UndoKeepPerSession.current(&self.cfg),
+                        MenuAction::EditScalar(ScalarSetting::UndoKeepPerSession),
+                    ),
+                    (
+                        "blob grace secs",
+                        ScalarSetting::UndoBlobGraceSecs.current(&self.cfg),
+                        MenuAction::EditScalar(ScalarSetting::UndoBlobGraceSecs),
+                    ),
+                    (
+                        "shadow",
+                        self.cfg.undo.shadow.as_str().to_string(),
+                        MenuAction::OpenUndoShadow,
+                    ),
+                    (
+                        "shadow max bytes",
+                        ScalarSetting::UndoShadowMaxBytes.current(&self.cfg),
+                        MenuAction::EditScalar(ScalarSetting::UndoShadowMaxBytes),
+                    ),
+                ],
             ),
         ];
         let sel_before = self.menu_sel;
-        for (label, val, action) in entries {
-            if !q.is_empty()
-                && !label.to_lowercase().contains(&q)
-                && !val.to_lowercase().contains(&q)
-            {
+        for (section, entries) in groups {
+            let section_match = !q.is_empty() && section.contains(&q);
+            let visible: Vec<_> = entries
+                .into_iter()
+                .filter(|(label, val, _)| {
+                    q.is_empty()
+                        || section_match
+                        || label.to_lowercase().contains(&q)
+                        || val.to_lowercase().contains(&q)
+                })
+                .collect();
+            if visible.is_empty() {
                 continue;
             }
             self.menu_rows.push(row(
-                Line::from(vec![
-                    Span::styled(format!("{label:<28}"), Style::new().fg(Theme::FG())),
-                    Span::styled(val, Theme::dim()),
-                ]),
-                action,
+                Line::from(vec![Span::styled(section.to_uppercase(), Theme::META())]),
+                MenuAction::None,
             ));
+            for (label, val, action) in visible {
+                self.menu_rows.push(row(
+                    Line::from(vec![
+                        Span::styled(format!("{label:<28}"), Style::new().fg(Theme::FG())),
+                        Span::styled(val, Theme::dim()),
+                    ]),
+                    action,
+                ));
+            }
         }
         self.menu_sel = sel_before;
     }

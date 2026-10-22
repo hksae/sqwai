@@ -260,7 +260,7 @@ impl App {
                 self.form_fields = vec![f];
             }
             Some(Menu::EditScalar(setting)) => {
-                let mut f = FormField::text(setting.label(), setting.current(&self.cfg));
+                let mut f = FormField::text(setting.label(), setting.edit_value(&self.cfg));
                 if let FormField::Text { ta, .. } = &mut f {
                     ta.move_cursor(tui_textarea::CursorMove::End);
                 }

@@ -760,17 +760,21 @@ fn settings_hub_reuses_existing_menus() {
         .collect();
     assert!(labels[0].contains("Search"));
     assert!(labels.iter().any(|row| row.contains("typewriter")));
-    assert!(labels.iter().any(|row| row.contains("plan max steps")));
-    assert!(labels.iter().any(|row| row.contains("compaction threshold")));
-    assert!(labels.iter().any(|row| row.contains("undo shadow")));
+    assert!(labels.iter().any(|row| row.contains("max steps")));
+    assert!(labels.iter().any(|row| row.contains("threshold")));
+    assert!(labels.iter().any(|row| row.contains("shadow")));
 }
 
 #[test]
 fn settings_hub_rows_have_no_hint_subtitles() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.open_menu(Menu::Settings);
-    // every config row (past Search) aligns its label to 28 columns before the value
+    // every config row (past Search) aligns its label to 28 columns before the value;
+    // section headers are single-span rows
     for (line, _) in app.menu_rows.iter().skip(1) {
+        if line.spans.len() == 1 {
+            continue;
+        }
         assert_eq!(line.spans.len(), 2);
         assert_eq!(line.spans[0].content.chars().count(), 28);
     }
@@ -1057,6 +1061,36 @@ fn settings_hub_lists_agent_safety_undo_sections() {
     app.menu_activate();
     assert!(matches!(app.cur_menu(), Some(Menu::Settings)));
     assert_eq!(app.cfg.undo.shadow.as_str(), "user");
+}
+
+#[test]
+fn bytes_settings_show_human_and_accept_units() {
+    use super::super::menus::ScalarSetting;
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.open_menu(Menu::EditScalar(ScalarSetting::ReadMaxFileBytes));
+    // edit form keeps the exact raw value, so Enter cannot round it
+    assert_eq!(app.form_fields[0].trimmed(), "16777216");
+    app.form_fields[0] = super::super::forms::FormField::text("read max file bytes", "4MB".into());
+    app.form_save();
+    assert_eq!(app.cfg.tools.read.max_file_bytes, 4 * 1024 * 1024);
+
+    app.open_menu(Menu::Settings);
+    let labels: Vec<String> = app
+        .menu_rows
+        .iter()
+        .map(|(line, _)| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref().to_string())
+                .collect::<String>()
+        })
+        .collect();
+    assert!(
+        labels
+            .iter()
+            .any(|row| row.contains("read max file bytes") && row.contains("4 MB")),
+        "the row must show human bytes: {labels:?}"
+    );
 }
 
 #[test]

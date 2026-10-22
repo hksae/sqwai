@@ -400,6 +400,156 @@ where
     }
 }
 
+fn human_bytes(n: u64) -> String {
+    const K: f64 = 1024.0;
+    const M: f64 = K * 1024.0;
+    const G: f64 = M * 1024.0;
+    let v = n as f64;
+    if v >= G {
+        format_unit(v / G, "GB")
+    } else if v >= M {
+        format_unit(v / M, "MB")
+    } else if v >= K {
+        format_unit(v / K, "KB")
+    } else {
+        format!("{n} B")
+    }
+}
+
+fn format_unit(value: f64, unit: &str) -> String {
+    if (value - value.round()).abs() < 0.05 {
+        format!("{:.0} {unit}", value)
+    } else {
+        format!("{value:.1} {unit}")
+    }
+}
+
+fn human_count(n: u64) -> String {
+    if n >= 1_000_000 {
+        format_count(n as f64 / 1_000_000.0, "M")
+    } else if n >= 1_000 {
+        format_count(n as f64 / 1_000.0, "k")
+    } else {
+        n.to_string()
+    }
+}
+
+fn format_count(value: f64, suffix: &str) -> String {
+    if (value - value.round()).abs() < 0.05 {
+        format!("{:.0}{suffix}", value)
+    } else {
+        format!("{value:.1}{suffix}")
+    }
+}
+
+fn parse_bytes(raw: &str) -> Result<u64, ()> {
+    let s: String = raw
+        .trim()
+        .to_lowercase()
+        .chars()
+        .filter(|c| !c.is_whitespace() && *c != '_')
+        .collect();
+    if s.is_empty() {
+        return Err(());
+    }
+    let (number, mult) = if let Some(v) = s.strip_suffix("gib").or_else(|| s.strip_suffix("gb")) {
+        (v, 1024.0_f64.powi(3))
+    } else if let Some(v) = s.strip_suffix('g') {
+        (v, 1024.0_f64.powi(3))
+    } else if let Some(v) = s.strip_suffix("mib").or_else(|| s.strip_suffix("mb")) {
+        (v, 1024.0_f64.powi(2))
+    } else if let Some(v) = s.strip_suffix('m') {
+        (v, 1024.0_f64.powi(2))
+    } else if let Some(v) = s.strip_suffix("kib").or_else(|| s.strip_suffix("kb")) {
+        (v, 1024.0)
+    } else if let Some(v) = s.strip_suffix('k') {
+        (v, 1024.0)
+    } else if let Some(v) = s.strip_suffix('b') {
+        (v, 1.0)
+    } else {
+        (s.as_str(), 1.0)
+    };
+    let value: f64 = number.parse().map_err(|_| ())?;
+    if !value.is_finite() || value < 0.0 {
+        return Err(());
+    }
+    let bytes = (value * mult).round();
+    if bytes > u64::MAX as f64 {
+        return Err(());
+    }
+    Ok(bytes as u64)
+}
+
+fn apply_bytes(label: &str, raw: &str, slot: &mut u64, default: u64) -> String {
+    match parse_bytes(raw) {
+        Ok(v) => {
+            *slot = v;
+            format!("{label} = {}", human_bytes(v))
+        }
+        Err(_) => {
+            *slot = default;
+            format!(
+                "invalid number, reset to default ({})",
+                human_bytes(default)
+            )
+        }
+    }
+}
+
+fn apply_bytes_usize(label: &str, raw: &str, slot: &mut usize, default: usize) -> String {
+    let mut parsed = 0u64;
+    let message = apply_bytes(label, raw, &mut parsed, default as u64);
+    match usize::try_from(parsed) {
+        Ok(v) => {
+            *slot = v;
+            message
+        }
+        Err(_) => {
+            *slot = default;
+            format!(
+                "invalid number, reset to default ({})",
+                human_bytes(default as u64)
+            )
+        }
+    }
+}
+
+fn parse_count(raw: &str) -> Result<u64, ()> {
+    let s = raw.trim().to_lowercase();
+    let (number, mult) = if let Some(v) = s.strip_suffix('m') {
+        (v, 1_000_000.0)
+    } else if let Some(v) = s.strip_suffix('k') {
+        (v, 1_000.0)
+    } else {
+        (s.as_str(), 1.0)
+    };
+    let value: f64 = number.parse().map_err(|_| ())?;
+    if !value.is_finite() || value < 0.0 {
+        return Err(());
+    }
+    let count = (value * mult).round();
+    if count > u64::MAX as f64 {
+        return Err(());
+    }
+    Ok(count as u64)
+}
+
+fn apply_count(label: &str, raw: &str, slot: &mut u64, default: u64) -> String {
+    match parse_count(raw) {
+        Ok(v) => {
+            *slot = v;
+            format!("{label} = {}", human_count(v))
+        }
+        Err(_) => {
+            *slot = default;
+            format!(
+                "invalid number, reset to default ({})",
+                human_count(default)
+            )
+        }
+    }
+}
+
 impl ScalarSetting {
     pub(super) fn label(self) -> &'static str {
         match self {
@@ -432,16 +582,16 @@ impl ScalarSetting {
     pub(super) fn current(self, cfg: &Config) -> String {
         match self {
             Self::BashTimeoutSecs => cfg.tools.bash.timeout_secs.to_string(),
-            Self::BashOutputBytes => cfg.tools.bash.output_bytes.to_string(),
+            Self::BashOutputBytes => human_bytes(cfg.tools.bash.output_bytes as u64),
             Self::BashBackgroundJobs => cfg.tools.bash.background_jobs.to_string(),
             Self::ReadWindow => cfg.tools.read.window.to_string(),
-            Self::ReadMaxFileBytes => cfg.tools.read.max_file_bytes.to_string(),
-            Self::OutlineMaxFileBytes => cfg.tools.outline.max_file_bytes.to_string(),
+            Self::ReadMaxFileBytes => human_bytes(cfg.tools.read.max_file_bytes),
+            Self::OutlineMaxFileBytes => human_bytes(cfg.tools.outline.max_file_bytes),
             Self::WebResults => cfg.tools.web.results.to_string(),
             Self::WebTimeoutSecs => cfg.tools.web.timeout_secs.to_string(),
-            Self::WebFetchBytes => cfg.tools.web.fetch_bytes.to_string(),
+            Self::WebFetchBytes => human_bytes(cfg.tools.web.fetch_bytes as u64),
             Self::LimitMaxToolCalls => cfg.limits.max_tool_calls_per_turn.to_string(),
-            Self::LimitMaxTokens => cfg.limits.max_tokens_per_turn.to_string(),
+            Self::LimitMaxTokens => human_count(cfg.limits.max_tokens_per_turn),
             Self::LimitMaxParallelTools => cfg.limits.max_parallel_tools.to_string(),
             Self::PlanMaxSteps => cfg.plan.max_steps.to_string(),
             Self::PlanNudgeAfter => cfg.plan.nudge_after.to_string(),
@@ -453,7 +603,21 @@ impl ScalarSetting {
             Self::CompactionAnchorRatio => cfg.compaction.anchor_ratio.to_string(),
             Self::UndoKeepPerSession => cfg.undo.keep_per_session.to_string(),
             Self::UndoBlobGraceSecs => cfg.undo.blob_grace_secs.to_string(),
+            Self::UndoShadowMaxBytes => human_bytes(cfg.undo.shadow_max_bytes),
+        }
+    }
+
+    /// Value prefilled into the edit form: raw for byte/count settings, so
+    /// committing without changes never rounds the stored number.
+    pub(super) fn edit_value(self, cfg: &Config) -> String {
+        match self {
+            Self::BashOutputBytes => cfg.tools.bash.output_bytes.to_string(),
+            Self::ReadMaxFileBytes => cfg.tools.read.max_file_bytes.to_string(),
+            Self::OutlineMaxFileBytes => cfg.tools.outline.max_file_bytes.to_string(),
+            Self::WebFetchBytes => cfg.tools.web.fetch_bytes.to_string(),
+            Self::LimitMaxTokens => cfg.limits.max_tokens_per_turn.to_string(),
             Self::UndoShadowMaxBytes => cfg.undo.shadow_max_bytes.to_string(),
+            _ => self.current(cfg),
         }
     }
 
@@ -467,7 +631,7 @@ impl ScalarSetting {
                 &mut cfg.tools.bash.timeout_secs,
                 def.tools.bash.timeout_secs,
             ),
-            Self::BashOutputBytes => apply_num(
+            Self::BashOutputBytes => apply_bytes_usize(
                 label,
                 raw,
                 &mut cfg.tools.bash.output_bytes,
@@ -485,13 +649,13 @@ impl ScalarSetting {
                 &mut cfg.tools.read.window,
                 def.tools.read.window,
             ),
-            Self::ReadMaxFileBytes => apply_num(
+            Self::ReadMaxFileBytes => apply_bytes(
                 label,
                 raw,
                 &mut cfg.tools.read.max_file_bytes,
                 def.tools.read.max_file_bytes,
             ),
-            Self::OutlineMaxFileBytes => apply_num(
+            Self::OutlineMaxFileBytes => apply_bytes(
                 label,
                 raw,
                 &mut cfg.tools.outline.max_file_bytes,
@@ -509,7 +673,7 @@ impl ScalarSetting {
                 &mut cfg.tools.web.timeout_secs,
                 def.tools.web.timeout_secs,
             ),
-            Self::WebFetchBytes => apply_num(
+            Self::WebFetchBytes => apply_bytes_usize(
                 label,
                 raw,
                 &mut cfg.tools.web.fetch_bytes,
@@ -521,7 +685,7 @@ impl ScalarSetting {
                 &mut cfg.limits.max_tool_calls_per_turn,
                 def.limits.max_tool_calls_per_turn,
             ),
-            Self::LimitMaxTokens => apply_num(
+            Self::LimitMaxTokens => apply_count(
                 label,
                 raw,
                 &mut cfg.limits.max_tokens_per_turn,
@@ -587,7 +751,7 @@ impl ScalarSetting {
                 &mut cfg.undo.blob_grace_secs,
                 def.undo.blob_grace_secs,
             ),
-            Self::UndoShadowMaxBytes => apply_num(
+            Self::UndoShadowMaxBytes => apply_bytes(
                 label,
                 raw,
                 &mut cfg.undo.shadow_max_bytes,
@@ -1430,4 +1594,32 @@ pub(super) fn table_budget(menu_rect_w: u16) -> usize {
         return 72;
     }
     (menu_rect_w as usize).saturating_sub(6).max(30)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bytes_render_human_and_parse_back() {
+        assert_eq!(human_bytes(30_000), "29.3 KB");
+        assert_eq!(human_bytes(16 * 1024 * 1024), "16 MB");
+        assert_eq!(human_bytes(1_500_000), "1.4 MB");
+        assert_eq!(human_bytes(1023), "1023 B");
+        assert_eq!(parse_bytes("16MB"), Ok(16 * 1024 * 1024));
+        assert_eq!(parse_bytes("1.5 gb"), Ok(3 * 1024 * 1024 * 1024 / 2));
+        assert_eq!(parse_bytes("30000"), Ok(30_000));
+        assert!(parse_bytes("-1MB").is_err());
+        assert!(parse_bytes("nope").is_err());
+    }
+
+    #[test]
+    fn token_counts_render_compact_and_parse_back() {
+        assert_eq!(human_count(50_000), "50k");
+        assert_eq!(human_count(1_000_000), "1M");
+        assert_eq!(human_count(900), "900");
+        assert_eq!(parse_count("50k"), Ok(50_000));
+        assert_eq!(parse_count("1.5M"), Ok(1_500_000));
+        assert!(parse_count("lots").is_err());
+    }
 }
