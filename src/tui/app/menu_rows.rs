@@ -110,6 +110,66 @@ impl App {
                 MenuAction::ToggleSkillsAutoLoad,
             ),
             (
+                "bash timeout secs",
+                ScalarSetting::BashTimeoutSecs.current(&self.cfg),
+                MenuAction::EditScalar(ScalarSetting::BashTimeoutSecs),
+            ),
+            (
+                "bash output bytes",
+                ScalarSetting::BashOutputBytes.current(&self.cfg),
+                MenuAction::EditScalar(ScalarSetting::BashOutputBytes),
+            ),
+            (
+                "bash background jobs",
+                ScalarSetting::BashBackgroundJobs.current(&self.cfg),
+                MenuAction::EditScalar(ScalarSetting::BashBackgroundJobs),
+            ),
+            (
+                "read window lines",
+                ScalarSetting::ReadWindow.current(&self.cfg),
+                MenuAction::EditScalar(ScalarSetting::ReadWindow),
+            ),
+            (
+                "read max file bytes",
+                ScalarSetting::ReadMaxFileBytes.current(&self.cfg),
+                MenuAction::EditScalar(ScalarSetting::ReadMaxFileBytes),
+            ),
+            (
+                "outline max file bytes",
+                ScalarSetting::OutlineMaxFileBytes.current(&self.cfg),
+                MenuAction::EditScalar(ScalarSetting::OutlineMaxFileBytes),
+            ),
+            (
+                "web results",
+                ScalarSetting::WebResults.current(&self.cfg),
+                MenuAction::EditScalar(ScalarSetting::WebResults),
+            ),
+            (
+                "web timeout secs",
+                ScalarSetting::WebTimeoutSecs.current(&self.cfg),
+                MenuAction::EditScalar(ScalarSetting::WebTimeoutSecs),
+            ),
+            (
+                "web fetch bytes",
+                ScalarSetting::WebFetchBytes.current(&self.cfg),
+                MenuAction::EditScalar(ScalarSetting::WebFetchBytes),
+            ),
+            (
+                "max tool calls per turn",
+                ScalarSetting::LimitMaxToolCalls.current(&self.cfg),
+                MenuAction::EditScalar(ScalarSetting::LimitMaxToolCalls),
+            ),
+            (
+                "max tokens per turn",
+                ScalarSetting::LimitMaxTokens.current(&self.cfg),
+                MenuAction::EditScalar(ScalarSetting::LimitMaxTokens),
+            ),
+            (
+                "max parallel tools",
+                ScalarSetting::LimitMaxParallelTools.current(&self.cfg),
+                MenuAction::EditScalar(ScalarSetting::LimitMaxParallelTools),
+            ),
+            (
                 "plan max steps",
                 ScalarSetting::PlanMaxSteps.current(&self.cfg),
                 MenuAction::EditScalar(ScalarSetting::PlanMaxSteps),

@@ -358,6 +358,18 @@ pub(super) enum MenuAction {
 /// shadow) are cycle rows, not scalars.
 #[derive(Clone, Copy)]
 pub(super) enum ScalarSetting {
+    BashTimeoutSecs,
+    BashOutputBytes,
+    BashBackgroundJobs,
+    ReadWindow,
+    ReadMaxFileBytes,
+    OutlineMaxFileBytes,
+    WebResults,
+    WebTimeoutSecs,
+    WebFetchBytes,
+    LimitMaxToolCalls,
+    LimitMaxTokens,
+    LimitMaxParallelTools,
     PlanMaxSteps,
     PlanNudgeAfter,
     MemoryLoadBudgetRatio,
@@ -391,6 +403,18 @@ where
 impl ScalarSetting {
     pub(super) fn label(self) -> &'static str {
         match self {
+            Self::BashTimeoutSecs => "bash timeout secs",
+            Self::BashOutputBytes => "bash output bytes",
+            Self::BashBackgroundJobs => "bash background jobs",
+            Self::ReadWindow => "read window lines",
+            Self::ReadMaxFileBytes => "read max file bytes",
+            Self::OutlineMaxFileBytes => "outline max file bytes",
+            Self::WebResults => "web results",
+            Self::WebTimeoutSecs => "web timeout secs",
+            Self::WebFetchBytes => "web fetch bytes",
+            Self::LimitMaxToolCalls => "max tool calls per turn",
+            Self::LimitMaxTokens => "max tokens per turn",
+            Self::LimitMaxParallelTools => "max parallel tools",
             Self::PlanMaxSteps => "max steps",
             Self::PlanNudgeAfter => "nudge after",
             Self::MemoryLoadBudgetRatio => "load budget ratio",
@@ -407,6 +431,18 @@ impl ScalarSetting {
 
     pub(super) fn current(self, cfg: &Config) -> String {
         match self {
+            Self::BashTimeoutSecs => cfg.tools.bash.timeout_secs.to_string(),
+            Self::BashOutputBytes => cfg.tools.bash.output_bytes.to_string(),
+            Self::BashBackgroundJobs => cfg.tools.bash.background_jobs.to_string(),
+            Self::ReadWindow => cfg.tools.read.window.to_string(),
+            Self::ReadMaxFileBytes => cfg.tools.read.max_file_bytes.to_string(),
+            Self::OutlineMaxFileBytes => cfg.tools.outline.max_file_bytes.to_string(),
+            Self::WebResults => cfg.tools.web.results.to_string(),
+            Self::WebTimeoutSecs => cfg.tools.web.timeout_secs.to_string(),
+            Self::WebFetchBytes => cfg.tools.web.fetch_bytes.to_string(),
+            Self::LimitMaxToolCalls => cfg.limits.max_tool_calls_per_turn.to_string(),
+            Self::LimitMaxTokens => cfg.limits.max_tokens_per_turn.to_string(),
+            Self::LimitMaxParallelTools => cfg.limits.max_parallel_tools.to_string(),
             Self::PlanMaxSteps => cfg.plan.max_steps.to_string(),
             Self::PlanNudgeAfter => cfg.plan.nudge_after.to_string(),
             Self::MemoryLoadBudgetRatio => cfg.memory.load_budget_ratio.to_string(),
@@ -425,6 +461,78 @@ impl ScalarSetting {
         let label = self.label();
         let def = Config::default();
         match self {
+            Self::BashTimeoutSecs => apply_num(
+                label,
+                raw,
+                &mut cfg.tools.bash.timeout_secs,
+                def.tools.bash.timeout_secs,
+            ),
+            Self::BashOutputBytes => apply_num(
+                label,
+                raw,
+                &mut cfg.tools.bash.output_bytes,
+                def.tools.bash.output_bytes,
+            ),
+            Self::BashBackgroundJobs => apply_num(
+                label,
+                raw,
+                &mut cfg.tools.bash.background_jobs,
+                def.tools.bash.background_jobs,
+            ),
+            Self::ReadWindow => apply_num(
+                label,
+                raw,
+                &mut cfg.tools.read.window,
+                def.tools.read.window,
+            ),
+            Self::ReadMaxFileBytes => apply_num(
+                label,
+                raw,
+                &mut cfg.tools.read.max_file_bytes,
+                def.tools.read.max_file_bytes,
+            ),
+            Self::OutlineMaxFileBytes => apply_num(
+                label,
+                raw,
+                &mut cfg.tools.outline.max_file_bytes,
+                def.tools.outline.max_file_bytes,
+            ),
+            Self::WebResults => apply_num(
+                label,
+                raw,
+                &mut cfg.tools.web.results,
+                def.tools.web.results,
+            ),
+            Self::WebTimeoutSecs => apply_num(
+                label,
+                raw,
+                &mut cfg.tools.web.timeout_secs,
+                def.tools.web.timeout_secs,
+            ),
+            Self::WebFetchBytes => apply_num(
+                label,
+                raw,
+                &mut cfg.tools.web.fetch_bytes,
+                def.tools.web.fetch_bytes,
+            ),
+            Self::LimitMaxToolCalls => apply_num(
+                label,
+                raw,
+                &mut cfg.limits.max_tool_calls_per_turn,
+                def.limits.max_tool_calls_per_turn,
+            ),
+            Self::LimitMaxTokens => apply_num(
+                label,
+                raw,
+                &mut cfg.limits.max_tokens_per_turn,
+                def.limits.max_tokens_per_turn,
+            ),
+            Self::LimitMaxParallelTools => apply_num(
+                label,
+                raw,
+                &mut cfg.limits.max_parallel_tools,
+                def.limits.max_parallel_tools,
+            ),
             Self::PlanMaxSteps => {
                 apply_num(label, raw, &mut cfg.plan.max_steps, def.plan.max_steps)
             }
