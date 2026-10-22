@@ -91,6 +91,7 @@ impl App {
                     }
                 }
                 self.build_menu_rows();
+                self.sync_active_skills_to_session();
                 if keep_sel < self.menu_len() {
                     self.menu_sel = keep_sel;
                 }
@@ -106,6 +107,7 @@ impl App {
                     let count = self.active_skills.len();
                     self.active_skills.clear();
                     self.context_bootstrap_pending = true;
+                    self.sync_active_skills_to_session();
                     self.status(
                         &format!("cleared {count} pinned skill(s)"),
                         StatusKind::Ok,

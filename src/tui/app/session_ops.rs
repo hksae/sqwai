@@ -13,6 +13,74 @@ use crate::providers::{self, Message as PMessage, Role};
 use crate::session::Session;
 
 impl App {
+    /// Write the in-memory pinned skill names back to the session record.
+    pub(super) fn sync_active_skills_to_session(&mut self) {
+        self.session.active_skills = self
+            .active_skills
+            .iter()
+            .map(|skill| skill.name.clone())
+            .collect();
+    }
+
+    /// Rebuild pinned skills from the session's names after a load/switch.
+    /// Removed or renamed skills are dropped instead of carrying a stale body.
+    fn load_active_skills_from_session(&mut self) {
+        self.refresh_skills();
+        let names = self.session.active_skills.clone();
+        let mut loaded = Vec::new();
+        for name in &names {
+            if let Some(skill) = self
+                .discovered_skills
+                .iter()
+                .find(|s| s.name.eq_ignore_ascii_case(name))
+            {
+                loaded.push(skill.clone());
+            }
+        }
+        self.active_skills = loaded;
+        self.sync_active_skills_to_session();
+    }
+
+    /// Files the session read or changed, newest first, for skill glob hints.
+    pub(super) fn recent_touched_paths(&self) -> Vec<String> {
+        const MAX_PATHS: usize = 32;
+        let mut out = Vec::new();
+        for message in self.session.messages.iter().rev() {
+            for call in message.tool_calls.iter().rev() {
+                let mut candidates: Vec<&str> = Vec::new();
+                match call.name.as_str() {
+                    "read" => {
+                        if let Some(path) = call.args["file_path"].as_str() {
+                            candidates.push(path);
+                        }
+                        if let Some(paths) = call.args["paths"].as_array() {
+                            candidates.extend(paths.iter().filter_map(|p| p.as_str()));
+                        }
+                    }
+                    "write" | "edit" | "multi_edit" | "outline" => {
+                        if let Some(path) = call.args["file_path"]
+                            .as_str()
+                            .or_else(|| call.args["path"].as_str())
+                        {
+                            candidates.push(path);
+                        }
+                    }
+                    _ => {}
+                }
+                for path in candidates {
+                    let path = path.trim().replace('\\', "/");
+                    if !path.is_empty() && !out.contains(&path) {
+                        out.push(path);
+                        if out.len() >= MAX_PATHS {
+                            return out;
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
     pub(super) fn submit(&mut self) {
         crate::tui::event_log::log(
             "SUBMIT",
@@ -166,12 +234,18 @@ impl App {
                 self.context_bootstrap_pending = true;
             }
         }
+        self.sync_active_skills_to_session();
         if self.cfg.skills.auto_load {
             let discovered = self.cached_skills();
-            let active_names: Vec<String> = self.active_skills.iter().map(|s| s.name.clone()).collect();
-            if let Some(hint) =
-                crate::prompts::skills::match_hints(discovered, &active_names, &text, &[])
-                && let Some(last) = self.session.messages.last_mut()
+            let active_names: Vec<String> =
+                self.active_skills.iter().map(|s| s.name.clone()).collect();
+            let touched_paths = self.recent_touched_paths();
+            if let Some(hint) = crate::prompts::skills::match_hints(
+                discovered,
+                &active_names,
+                &text,
+                &touched_paths,
+            ) && let Some(last) = self.session.messages.last_mut()
             {
                 last.content.push('\n');
                 last.content.push_str(&hint);
@@ -227,6 +301,7 @@ impl App {
             pdf: self.model_cfg.pdf.unwrap_or(false),
             tools: self.cfg.tools.clone(),
             limits: self.cfg.limits.clone(),
+            active_skills: self.active_skills.iter().map(|s| s.name.clone()).collect(),
             enable_tools: true,
             background_baselines: true,
             read_only: self.read_only,
@@ -375,6 +450,7 @@ impl App {
             pdf: self.model_cfg.pdf.unwrap_or(false),
             tools: self.cfg.tools.clone(),
             limits: self.cfg.limits.clone(),
+            active_skills: self.active_skills.iter().map(|s| s.name.clone()).collect(),
             enable_tools: true,
             background_baselines: false,
             read_only: self.read_only,
@@ -423,6 +499,7 @@ impl App {
         }
         self.context_bootstrap_pending = true;
         self.session = s;
+        self.load_active_skills_from_session();
         self.resume_notice_armed = !self.session.messages.is_empty();
         crate::providers::set_conversation_id(&self.session.id.to_string());
         self.pending_queue.clear();
@@ -523,6 +600,7 @@ impl App {
         let ctx = self.session.context_limit;
         self.session = Session::new(self.cfg.last_model.clone(), ctx);
         self.session.project = Some(self.project_root.clone());
+        self.active_skills.clear();
         crate::providers::set_conversation_id(&self.session.id.to_string());
         self.pending_queue.clear();
         self.reset_image_draft();

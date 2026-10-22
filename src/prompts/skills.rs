@@ -8,7 +8,7 @@
 //! 1. [`catalog_prompt`] renders a compact `<available_skills>` index (`name`,
 //!    `scope`, `description`, `triggers`, `globs`) in the cached system prefix,
 //!    expanding full bodies only for skills marked `always: true`.
-//! 2. [`active_prompt`] / [`render_skill_detail`] renders full `SKILL.md`
+//! 2. [`prompt`] / [`render_skill_detail`] renders full `SKILL.md`
 //!    instructions and bundled file manifests on demand when activated via the
 //!    `skill` tool, `/skill <name>`, `/skills` TUI toggle, or `$skill-name`
 //!    mentions.
@@ -22,6 +22,8 @@ use crate::config::SkillsConfig;
 pub const MAX_SKILL_BYTES: usize = 64 * 1024;
 const MAX_TOTAL_BYTES: usize = 512 * 1024;
 const MAX_BUNDLED_FILES: usize = 64;
+const MAX_CATALOG_BYTES: usize = 32 * 1024;
+const MAX_CATALOG_DESCRIPTION_CHARS: usize = 240;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum SkillScope {
@@ -163,42 +165,76 @@ pub fn catalog_prompt(skills: &[Skill]) -> Option<String> {
          to load a skill's full instructions or bundled files when the task matches its \
          description, triggers, or file globs.\n",
     );
+    let closing = "</available_skills>";
+    let mut omitted = 0usize;
     for skill in skills {
-        out.push_str("<skill name=\"");
-        out.push_str(&escape_attr(&skill.name));
-        out.push_str("\" scope=\"");
-        out.push_str(skill.scope.as_str());
-        out.push('"');
-        if !skill.triggers.is_empty() {
-            out.push_str(" triggers=\"");
-            out.push_str(&escape_attr(&skill.triggers.join(", ")));
-            out.push('"');
+        let mut entry = catalog_entry(skill, true);
+        if out.len() + entry.len() + closing.len() > MAX_CATALOG_BYTES {
+            // Keep the metadata even when an `always` body does not fit; the
+            // model can still load it with the skill tool.
+            entry = catalog_entry(skill, false);
         }
-        if !skill.globs.is_empty() {
-            out.push_str(" globs=\"");
-            out.push_str(&escape_attr(&skill.globs.join(", ")));
-            out.push('"');
+        if out.len() + entry.len() + closing.len() > MAX_CATALOG_BYTES {
+            omitted += 1;
+            continue;
         }
-        if !skill.files.is_empty() {
-            out.push_str(&format!(" files=\"{}\"", skill.files.len()));
-        }
-        if skill.always {
-            out.push_str(" always=\"true\"");
-        }
-        out.push_str(">\n");
-        if let Some(desc) = &skill.description {
-            out.push_str("Description: ");
-            out.push_str(desc);
-            out.push('\n');
-        }
-        if skill.always {
-            out.push_str(&skill.body);
-            out.push('\n');
-        }
-        out.push_str("</skill>\n");
+        out.push_str(&entry);
     }
-    out.push_str("</available_skills>");
+    if omitted > 0 {
+        out.push_str(&format!(
+            "{} skill(s) omitted from this catalog to fit its budget; use `skill(name: \"list\")` to see all.\n",
+            omitted
+        ));
+    }
+    out.push_str(closing);
     Some(out)
+}
+
+fn catalog_entry(skill: &Skill, include_body: bool) -> String {
+    let mut out = String::new();
+    out.push_str("<skill name=\"");
+    out.push_str(&escape_attr(&skill.name));
+    out.push_str("\" scope=\"");
+    out.push_str(skill.scope.as_str());
+    out.push('"');
+    if !skill.triggers.is_empty() {
+        out.push_str(" triggers=\"");
+        out.push_str(&escape_attr(&skill.triggers.join(", ")));
+        out.push('"');
+    }
+    if !skill.globs.is_empty() {
+        out.push_str(" globs=\"");
+        out.push_str(&escape_attr(&skill.globs.join(", ")));
+        out.push('"');
+    }
+    if !skill.files.is_empty() {
+        out.push_str(&format!(" files=\"{}\"", skill.files.len()));
+    }
+    if skill.always {
+        out.push_str(" always=\"true\"");
+    }
+    out.push_str(">\n");
+    if let Some(desc) = &skill.description {
+        out.push_str("Description: ");
+        out.push_str(&truncate_desc(desc));
+        out.push('\n');
+    }
+    if include_body && skill.always {
+        out.push_str(&skill.body);
+        out.push('\n');
+    } else if skill.always {
+        out.push_str("Body omitted to fit the catalog budget; load it with the skill tool.\n");
+    }
+    out.push_str("</skill>\n");
+    out
+}
+
+fn truncate_desc(desc: &str) -> String {
+    let mut out: String = desc.chars().take(MAX_CATALOG_DESCRIPTION_CHARS).collect();
+    if desc.chars().count() > MAX_CATALOG_DESCRIPTION_CHARS {
+        out.push('…');
+    }
+    out
 }
 
 /// Render full skill bodies for active/pinned skills (`<skills>...</skills>`).
@@ -789,6 +825,30 @@ mod tests {
             &["src/tui/app/mod.rs".into()],
         );
         assert!(h3.is_none());
+    }
+
+    #[test]
+    fn catalog_budget_drops_excess_skills() {
+        let skills: Vec<Skill> = (0..200)
+            .map(|i| Skill {
+                name: format!("skill-{i}"),
+                description: Some("description".into()),
+                triggers: Vec::new(),
+                globs: Vec::new(),
+                always: true,
+                scope: SkillScope::Project,
+                body: "x".repeat(400),
+                path: PathBuf::from(format!("skill-{i}/SKILL.md")),
+                files: Vec::new(),
+            })
+            .collect();
+        let catalog = catalog_prompt(&skills).unwrap();
+        assert!(
+            catalog.len() <= MAX_CATALOG_BYTES + 256,
+            "catalog must respect its budget: {} bytes",
+            catalog.len()
+        );
+        assert!(catalog.contains("omitted from this catalog"));
     }
 
     #[test]

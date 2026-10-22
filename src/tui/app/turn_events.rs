@@ -357,6 +357,7 @@ impl App {
                             .cloned()
                         {
                             self.active_skills.push(sk);
+                            self.sync_active_skills_to_session();
                         }
                     }
                 }

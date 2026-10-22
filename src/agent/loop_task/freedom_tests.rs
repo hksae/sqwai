@@ -46,6 +46,7 @@ async fn a_mutation_runs_without_any_plan() {
         pdf: true,
         tools: Default::default(),
         limits: Default::default(),
+        active_skills: vec![],
         enable_tools: true,
         background_baselines: false,
         read_only: false,
@@ -132,6 +133,7 @@ fn limited_input(
         pdf: true,
         tools: Default::default(),
         limits,
+        active_skills: vec![],
         enable_tools: true,
         background_baselines: false,
         read_only: false,
@@ -204,6 +206,52 @@ async fn tool_call_limit_refuses_the_rest_of_the_batch() {
             .iter()
             .any(|m| { m.role == Role::Tool && m.content.contains("tool-call limit reached") }),
         "the refused call must carry a result: {messages:?}"
+    );
+    std::fs::remove_dir_all(&temp_dir).ok();
+}
+
+#[tokio::test]
+async fn active_skills_make_a_reload_return_a_pointer() {
+    let provider: SharedProvider = std::sync::Arc::new(MockTestProvider {
+        events: std::sync::Mutex::new(vec![
+            vec![Ok(crate::providers::StreamEvent::ToolCall(
+                crate::providers::ToolCallReq::new(
+                    "c1",
+                    "skill",
+                    serde_json::json!({"name": "tui-rules"}),
+                ),
+            ))],
+            vec![Ok(crate::providers::StreamEvent::Text("done".into()))],
+        ]),
+    });
+    let temp_dir = std::env::temp_dir().join(format!("sqwai-skill-seed-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    std::fs::create_dir_all(temp_dir.join(".sqwai/skills/tui-rules")).unwrap();
+    std::fs::write(
+        temp_dir.join(".sqwai/skills/tui-rules/SKILL.md"),
+        "---\nname: tui-rules\ndescription: TUI layout\n---\nKeep rows within width.\n",
+    )
+    .unwrap();
+    let mut input = limited_input(provider, temp_dir.clone(), Default::default());
+    input.active_skills = vec!["tui-rules".into()];
+    let mut handle = spawn_agent(input);
+    let mut summary = None;
+    while let Some(ev) = handle.rx.recv().await {
+        match ev {
+            AgentEvent::ToolNotice {
+                name, summary: s, ..
+            } if name == "skill" => {
+                summary = Some(s);
+            }
+            AgentEvent::Completed(Ok(_)) => break,
+            AgentEvent::Completed(Err(e)) => panic!("unexpected error: {e}"),
+            _ => {}
+        }
+    }
+    let summary = summary.expect("skill tool row");
+    assert!(
+        summary.contains("already loaded"),
+        "an active skill must answer with a pointer, got: {summary}"
     );
     std::fs::remove_dir_all(&temp_dir).ok();
 }

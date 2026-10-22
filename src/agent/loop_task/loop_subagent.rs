@@ -210,6 +210,7 @@ pub(crate) async fn run_subagent_batch(
     pdf: bool,
     tools: &crate::config::ToolsConfig,
     limits: &crate::config::LimitsConfig,
+    active_skills: &[String],
     effort: Option<EffortLevel>,
     effort_support: crate::config::EffortSupport,
     max_tokens: Option<u32>,
@@ -310,6 +311,7 @@ pub(crate) async fn run_subagent_batch(
                         pdf,
                         &tools,
                         &limits,
+                        active_skills,
                         effort,
                         effort_support,
                         max_tokens,
@@ -450,6 +452,7 @@ pub(crate) async fn run_subagent(
     pdf: bool,
     tools: &crate::config::ToolsConfig,
     limits: &crate::config::LimitsConfig,
+    active_skills: &[String],
     effort: Option<EffortLevel>,
     effort_support: crate::config::EffortSupport,
     max_tokens: Option<u32>,
@@ -514,6 +517,7 @@ pub(crate) async fn run_subagent(
                         pdf,
                         &tools,
                         &limits,
+                        active_skills,
                         effort,
                         effort_support,
                         max_tokens,
@@ -638,6 +642,11 @@ pub(crate) async fn run_subagent(
         pdf,
         tools: tools.clone(),
         limits: limits.clone(),
+        active_skills: if task.clean {
+            Vec::new()
+        } else {
+            active_skills.to_vec()
+        },
         enable_tools: true,
         // subagent baselines stay synchronous: short tasks, and progress
         // events would land on the parent's channel out of context

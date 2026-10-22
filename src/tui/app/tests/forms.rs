@@ -1793,6 +1793,50 @@ fn list_surface_scales_to_half_terminal_with_eight_minimum_and_stays_compact_for
 }
 
 #[test]
+fn pinned_skills_are_session_scoped_and_reload_by_name() {
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    let skill_dir = app.project_root.join(".sqwai/skills/tui-rules");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: tui-rules\ndescription: TUI layout invariants\n---\nKeep rows within width.\n",
+    )
+    .unwrap();
+    app.refresh_skills();
+    app.run_action(MenuAction::ToggleSkill("tui-rules".into()));
+    assert_eq!(app.session.active_skills, ["tui-rules"]);
+
+    app.startup = false;
+    assert!(app.start_new_session());
+    assert!(app.active_skills.is_empty());
+    assert!(app.session.active_skills.is_empty());
+
+    let mut saved = Session::new("m".into(), 1000);
+    saved.active_skills = vec!["tui-rules".into(), "gone".into()];
+    app.apply_session(saved);
+    assert_eq!(app.active_skills.len(), 1);
+    assert_eq!(app.active_skills[0].name, "tui-rules");
+    assert_eq!(app.session.active_skills, ["tui-rules"]);
+}
+
+#[test]
+fn recent_paths_feed_skill_glob_hints() {
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.session.messages.push(
+        crate::providers::Message::new(crate::providers::Role::Assistant, "")
+            .with_tool_calls(vec![crate::providers::ToolCallReq::new(
+                "c1",
+                "read",
+                serde_json::json!({"file_path": "src\\tui\\app\\mod.rs"}),
+            )]),
+    );
+    assert_eq!(
+        app.recent_touched_paths(),
+        vec!["src/tui/app/mod.rs".to_string()]
+    );
+}
+
+#[test]
 fn skills_menu_toggles_views_and_completes_level2() {
     use ratatui::buffer::Buffer;
     let mut app = test_app("http://127.0.0.1:9/v1".into());

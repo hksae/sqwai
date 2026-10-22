@@ -82,6 +82,7 @@ impl App {
             "/debug" => self.open_menu(Menu::Debug),
             "/skill" => {
                 let Some(query) = rest.split_whitespace().nth(1) else {
+                    self.refresh_skills();
                     self.open_menu(Menu::Skills);
                     return;
                 };
@@ -107,6 +108,7 @@ impl App {
                         }
                     }
                     self.context_bootstrap_pending = true;
+                    self.sync_active_skills_to_session();
                     self.status(
                         &format!("loaded skill(s): {}", names.join(", ")),
                         StatusKind::Ok,
@@ -121,6 +123,7 @@ impl App {
                 ) {
                     self.run_action(MenuAction::ClearPinnedSkills);
                 } else {
+                    self.refresh_skills();
                     self.open_menu(Menu::Skills);
                 }
             }

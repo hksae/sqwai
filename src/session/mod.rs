@@ -203,6 +203,11 @@ pub struct Session {
     /// `None` marks a legacy save: shown everywhere, never filtered out.
     #[serde(default)]
     pub project: Option<std::path::PathBuf>,
+    /// Names of skills pinned into this session. Bodies are re-resolved from
+    /// the current skill catalog on load; names that no longer exist are
+    /// dropped by the app.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub active_skills: Vec<String>,
 }
 
 impl Session {
@@ -236,6 +241,7 @@ impl Session {
             pending_undo_note: None,
             undo_layer2: None,
             project: None,
+            active_skills: Vec::new(),
         }
     }
 
@@ -786,6 +792,18 @@ mod tests {
         assert_eq!(documents[0].name, "report.pdf");
         assert_eq!(documents[0].pages, 3);
         assert_eq!(documents[0].range.as_deref(), Some("1-3"));
+    }
+
+    #[test]
+    fn pinned_skill_names_round_trip_with_the_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("skills-session.json");
+        let mut s = Session::new("m".into(), 1000);
+        s.push(Role::User, "use the skill");
+        s.active_skills = vec!["tui-rules".into(), "rust".into()];
+        s.save_to(&path).unwrap();
+        let back = Session::load_from(&path).unwrap();
+        assert_eq!(back.active_skills, ["tui-rules", "rust"]);
     }
 
     #[test]

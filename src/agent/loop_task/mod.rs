@@ -314,6 +314,9 @@ pub struct AgentInput {
     pub tools: crate::config::ToolsConfig,
     /// `[limits]` per-turn and concurrency guardrails.
     pub limits: crate::config::LimitsConfig,
+    /// Skill names already active in the session (their bodies are in the
+    /// system prompt); the `skill` tool answers a re-load with a pointer.
+    pub active_skills: Vec<String>,
     /// Whether this request may use agent tools.
     pub enable_tools: bool,
     /// Slow baseline capture runs in the background instead of blocking
@@ -729,6 +732,7 @@ async fn run_agent(
         pdf,
         tools: tool_caps,
         limits,
+        active_skills,
         enable_tools,
         background_baselines,
         read_only,
@@ -934,6 +938,8 @@ async fn run_agent(
         .with_pdf(pdf);
     ctx.tools = tool_caps.clone();
     ctx.limits = limits.clone();
+    ctx.activated_skills
+        .extend(active_skills.iter().cloned());
     crate::agent::tools::web::router::set_max_body_bytes(tool_caps.web.fetch_bytes.max(1024));
     // slow baseline capture defers to the background worker on interactive
     // turns; everywhere else the tool call captures synchronously
@@ -1503,6 +1509,7 @@ async fn run_agent(
                     pdf,
                     &tool_caps,
                     &limits,
+                    &active_skills,
                     effort,
                     effort_support,
                     max_tokens,
@@ -1734,6 +1741,7 @@ async fn run_agent(
                                 pdf,
                                 &tool_caps,
                                 &limits,
+                                &active_skills,
                                 effort,
                                 effort_support,
                                 max_tokens,
