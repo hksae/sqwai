@@ -974,6 +974,11 @@ pub struct UiConfig {
     /// Takes effect on the next launch.
     #[serde(default = "default_true")]
     pub mouse: bool,
+    /// show the approval-mode chip (ASK/AUTO/FULL) next to the ACT/PLAN
+    /// chip in the status bar. Hiding it changes nothing about the mode
+    /// itself — Shift+Tab still cycles it.
+    #[serde(default = "default_true")]
+    pub approval_chip: bool,
 }
 
 impl Default for UiConfig {
@@ -984,6 +989,7 @@ impl Default for UiConfig {
             experimental_test: false,
             open_attachments: true,
             mouse: true,
+            approval_chip: true,
         }
     }
 }

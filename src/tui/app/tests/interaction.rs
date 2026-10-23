@@ -1159,7 +1159,7 @@ fn approval_chip_matches_mode_when_settled() {
     let spans = app.status_bar_spans(120);
     assert_eq!(spans[0].content.as_ref(), " ACT ");
     assert_eq!(spans[0].style, crate::tui::theme::Theme::mode_chip_act());
-    assert_eq!(spans[1].content.as_ref(), " AUTO ");
+    assert_eq!(spans[1].content.as_ref(), "AUTO ");
     assert_eq!(spans[1].style, crate::tui::theme::Theme::mode_chip_auto());
     // ASK earns the amber, FULL the red (blend force-expired, no timing)
     let expire = |app: &mut App| {
@@ -1171,13 +1171,28 @@ fn approval_chip_matches_mode_when_settled() {
     app.set_approval_mode(ApprovalMode::Ask);
     expire(&mut app);
     let spans = app.status_bar_spans(120);
-    assert_eq!(spans[1].content.as_ref(), " ASK ");
+    assert_eq!(spans[1].content.as_ref(), "ASK ");
     assert_eq!(spans[1].style, crate::tui::theme::Theme::mode_chip_ask());
     app.set_approval_mode(ApprovalMode::Full);
     expire(&mut app);
     let spans = app.status_bar_spans(120);
-    assert_eq!(spans[1].content.as_ref(), " FULL ");
+    assert_eq!(spans[1].content.as_ref(), "FULL ");
     assert_eq!(spans[1].style, crate::tui::theme::Theme::mode_chip_full());
+}
+
+#[test]
+fn approval_chip_can_be_hidden_by_config() {
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.cfg.ui.approval_chip = false;
+    let spans = app.status_bar_spans(120);
+    assert_eq!(spans[0].content.as_ref(), " ACT ");
+    assert!(
+        spans.iter().all(|s| !s.content.contains("AUTO")),
+        "the approval chip is gone from the bar"
+    );
+    // the axis itself is untouched: cycling still works
+    app.cycle_approval_mode();
+    assert!(matches!(app.cur_menu(), Some(Menu::ConfirmFullAccess)));
 }
 
 #[test]

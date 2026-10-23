@@ -2244,7 +2244,6 @@ pub(super) fn working_line(thinking: bool, elapsed_s: Option<u64>, tick: usize) 
     if let Some(secs) = elapsed_s {
         spans.push(Span::styled(format!(" · {secs}s"), Theme::dim()));
     }
-    spans.push(Span::styled(" · esc to interrupt", Theme::dim()));
     Line::from(spans)
 }
 
