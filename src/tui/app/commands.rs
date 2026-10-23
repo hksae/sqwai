@@ -366,9 +366,8 @@ impl App {
     }
 
     /// Switch the approval axis (ask/auto/full) through the same funnel:
-    /// sweep from the displayed color, and a transcript line records the
-    /// change — the chip flashes once, the line is what still says the
-    /// mode ten minutes later.
+    /// sweep from the displayed color. The change is a notice, not history
+    /// — the chip is what still says the mode ten minutes later.
     pub(super) fn set_approval_mode(&mut self, mode: crate::config::ApprovalMode) {
         if mode == self.approval_mode {
             return;
@@ -381,16 +380,6 @@ impl App {
         );
         self.approval_mode = mode;
         self.approval_blend = Some((from, Instant::now()));
-        self.push_segment(Segment::Status {
-            text: what.clone(),
-            kind: if mode == crate::config::ApprovalMode::Full {
-                StatusKind::Warn
-            } else {
-                StatusKind::Ok
-            },
-            expanded: true,
-            transient: false,
-        });
         self.status(&what, StatusKind::Info);
         self.dirty = true;
     }

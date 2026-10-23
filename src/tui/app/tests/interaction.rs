@@ -1250,20 +1250,20 @@ fn approval_cycle_is_deliberately_inert_in_plan() {
 }
 
 #[test]
-fn approval_mode_change_leaves_a_transcript_line() {
+fn approval_mode_change_is_a_notice_not_a_history_row() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     let before = app.segments.len();
     app.set_approval_mode(ApprovalMode::Full);
-    // the chip flashes once; this row is what still says the mode later
-    assert!(matches!(
-        app.segments.get(before),
-        Some(Segment::Status {
-            text,
-            kind: StatusKind::Warn,
-            transient: false,
-            ..
-        }) if text == "approval: auto → full"
-    ));
+    // the chat stays clean; the 3s notice carries the change
+    assert_eq!(
+        app.segments.len(),
+        before,
+        "a mode switch must not write into the history"
+    );
+    assert!(app
+        .toast
+        .as_ref()
+        .is_some_and(|t| t.text == "approval: auto → full"));
 }
 
 /// the status bar shows the *effective* mapping. Selecting `max` on
