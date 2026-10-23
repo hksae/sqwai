@@ -150,8 +150,8 @@ impl App {
             let allowed = if let Some(rest) = text.strip_prefix('/') {
                 let mut parts = rest.split_whitespace();
                 match parts.next().unwrap_or("") {
-                    "settings" | "debug" | "theme" | "mcp" | "lsp" | "skill" | "skills"
-                    | "providers" | "models" | "sessions" | "exit" | "help" => true,
+                    "settings" | "debug" | "theme" | "mcp" | "skill" | "skills" | "providers"
+                    | "models" | "sessions" | "exit" | "help" => true,
                     "plan" => parts.next().is_none(),
                     _ => false,
                 }
@@ -306,7 +306,6 @@ impl App {
             background_baselines: true,
             read_only: self.read_only,
             mcp: self.cfg.mcp.clone(),
-            lsp: self.cfg.lsp.clone(),
             skills: self.cfg.skills.clone(),
             previous_response_id: if self.context_bootstrap_pending || !self.continuation_enabled()
             {
@@ -455,7 +454,6 @@ impl App {
             background_baselines: false,
             read_only: self.read_only,
             mcp: Default::default(),
-            lsp: Default::default(),
             skills: self.cfg.skills.clone(),
             previous_response_id: None,
             summary: self.session.summary.clone(),

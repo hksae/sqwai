@@ -884,25 +884,6 @@ pub struct McpConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LspServerDef {
-    pub name: String,
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-    pub language: String,
-    pub command: String,
-    #[serde(default)]
-    pub args: Vec<String>,
-    #[serde(default)]
-    pub root_markers: Vec<String>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct LspConfig {
-    #[serde(default)]
-    pub servers: Vec<LspServerDef>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillsConfig {
     #[serde(default)]
     pub dirs: Vec<PathBuf>,
@@ -1273,7 +1254,7 @@ impl Default for CompactionConfig {
 /// Project-level overrides (`.sqwai/config.toml`).
 ///
 /// A cloned repo must never be able to reconfigure trust: providers, models,
-/// keys, safety, plan gates, MCP/LSP servers, and skills-dirs are NOT
+/// keys, safety, plan gates, MCP servers, and skills-dirs are NOT
 /// allowlisted and are ignored with a warning. Only display- and
 /// budget-class keys are accepted; everything else in the file is reported
 /// back so a silently-ignored setting cannot confuse. The whole file is
@@ -1431,8 +1412,6 @@ pub struct Config {
     #[serde(default)]
     pub mcp: McpConfig,
     #[serde(default)]
-    pub lsp: LspConfig,
-    #[serde(default)]
     pub skills: SkillsConfig,
     #[serde(default)]
     pub memory: MemoryConfig,
@@ -1502,7 +1481,6 @@ impl Default for Config {
             tools: ToolsConfig::default(),
             limits: LimitsConfig::default(),
             mcp: McpConfig::default(),
-            lsp: LspConfig::default(),
             skills: SkillsConfig::default(),
             memory: MemoryConfig::default(),
             compaction: CompactionConfig::default(),

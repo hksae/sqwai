@@ -1205,14 +1205,13 @@ fn tool_specs_wire_weight() {
     );
 }
 
-/// #185: the diagnostics loop reads its targets from what a call reported
-/// touching, so the registry of mutating tools has to stay classified: either a
-/// tool reports a per-call path (the loop can lint it), or it is listed here as
-/// having none. A new mutating tool that lands in neither bucket fails this
-/// test on purpose — the bug being fixed was `patch` changing files while the
-/// gate knew only three names.
+/// A mutating tool has to report the files it touched as a `FileDiff` so the
+/// journal, replayed diffs, checkpoints and undo see the change; the few tools
+/// without a per-call source path are listed here. A new mutating tool that
+/// lands in neither bucket fails this test on purpose — the bug being fixed
+/// was `patch` changing files while the gate knew only three names.
 #[test]
-fn every_mutating_tool_is_classified_for_diagnostics() {
+fn every_mutating_tool_reports_its_paths() {
     const REPORTS_A_PATH: &[&str] = &["write", "edit", "multi_edit", "patch"];
     const NO_PER_CALL_PATH: &[&str] = &[
         "bash",       // targets unknown in advance; attributed via the shadow head (H4)
@@ -1229,8 +1228,8 @@ fn every_mutating_tool_is_classified_for_diagnostics() {
         classified += 1;
         assert!(
             REPORTS_A_PATH.contains(&name.as_str()) || NO_PER_CALL_PATH.contains(&name.as_str()),
-            "{name} mutates but is not classified for diagnostics: report a FileDiff from it, \
-             or add it to NO_PER_CALL_PATH with the reason it has no lintable path"
+            "{name} mutates but is not classified: report a FileDiff from it, \
+             or add it to NO_PER_CALL_PATH with the reason it has no source path"
         );
     }
     assert_eq!(

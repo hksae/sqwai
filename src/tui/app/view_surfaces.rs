@@ -1308,14 +1308,8 @@ impl App {
         self.md_click = None;
         self.ctx_click = None;
 
-        let lsp_label = if self.lsp_diagnostics > 0 {
-            format!("LSP:{} ", self.lsp_diagnostics)
-        } else {
-            String::new()
-        };
         let left_base_cols = cols(&format!(" {} ", self.mode.label()));
-        let fixed_len: usize =
-            cols(&ctx_label) + 1 + cols(&model_label) + 1 + cols(&ef_label) + cols(&lsp_label) + 1;
+        let fixed_len: usize = cols(&ctx_label) + 1 + cols(&model_label) + 1 + cols(&ef_label) + 1;
 
         let lw = left_base_cols as u16;
         let right_len = fixed_len;
@@ -1353,9 +1347,6 @@ impl App {
         };
         spans.push(Span::styled(ef_label.clone(), ef_style));
         self.ef_click = Some((ef_x0, ef_x0 + cols(&ef_label) as u16));
-        if !lsp_label.is_empty() {
-            spans.push(Span::styled(lsp_label, Theme::warn()));
-        }
         spans.push(Span::styled(" ".to_string(), Theme::base()));
         spans
     }

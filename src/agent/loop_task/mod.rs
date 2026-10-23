@@ -189,10 +189,6 @@ pub enum AgentEvent {
     },
     /// the agent revised the visible to-do list
     Todos(Vec<String>),
-    /// latest diagnostics count reported after a file mutation
-    Diagnostics {
-        count: usize,
-    },
     Retry {
         attempt: u32,
         delay_secs: u64,
@@ -333,8 +329,6 @@ pub struct AgentInput {
     pub summary: Option<String>,
     /// MCP servers available to this agent turn.
     pub mcp: crate::config::McpConfig,
-    /// LSP servers available to this agent turn.
-    pub lsp: crate::config::LspConfig,
     /// Skill discovery configuration (`[skills]`): the directories the `skill`
     /// tool searches. Without it the tool would only ever see the project
     /// skills and silently miss every configured global directory.
@@ -744,7 +738,6 @@ async fn run_agent(
         compaction,
         plan_limits,
         mcp,
-        lsp,
         skills,
         shadow_store,
         subagent_depth,
@@ -772,22 +765,6 @@ async fn run_agent(
             }
         }
     }
-
-    let mut lsp_manager = if enable_tools && !lsp.servers.is_empty() {
-        match crate::lsp::Manager::start(&lsp, &root).await {
-            Ok(manager) => Some(manager),
-            Err(e) => {
-                let _ = tx
-                    .send(AgentEvent::Completed(Err(format!(
-                        "LSP startup failed: {e:#}"
-                    ))))
-                    .await;
-                return;
-            }
-        }
-    } else {
-        None
-    };
 
     let mcp_registry = if enable_tools {
         match crate::mcp::Registry::from_config(&mcp).await {
@@ -1515,7 +1492,6 @@ async fn run_agent(
                     max_tokens,
                     &system,
                     &mcp,
-                    &lsp,
                     &skills,
                     read_only,
                     shadow_store,
@@ -1747,7 +1723,6 @@ async fn run_agent(
                                 max_tokens,
                                 system.clone(),
                                 mcp.clone(),
-                                lsp.clone(),
                                 skills.clone(),
                                 read_only,
                                 shadow_store,
@@ -1913,99 +1888,6 @@ async fn run_agent(
                     ctx.journal.push((sha, "bash (cancelled)".to_string()));
                 }
 
-                // #185: which files to re-lint is taken from what the call
-                // reported touching, not from a list of tool names. Every
-                // file-mutating tool hands back a `FileDiff` — `write`, `edit`,
-                // `multi_edit`, and `patch` for one or many files — so a tool
-                // added later cannot be forgotten here the way `patch` was.
-                // `bash`, `git_commit`, `git_stage` and `plan` have no per-call
-                // path (their effects are attributed through the shadow head, or
-                // they touch no source file); the specs test makes that split an
-                // explicit, reviewable decision.
-                if outcome.ok
-                    && crate::agent::tools::is_mutating_call(&call.name, &call.args)
-                    && let Some(manager) = lsp_manager.as_mut()
-                {
-                    let touched = lint_targets(&outcome, &root);
-                    if !touched.is_empty() {
-                        for path in &touched {
-                            if let Ok(text) = tokio::fs::read_to_string(path).await {
-                                let _ = manager.did_change(path, &text).await;
-                                let _ = manager.did_save(path).await;
-                            }
-                        }
-                        tokio::task::yield_now().await;
-                        let diagnostics = manager.collect_diagnostics().await.unwrap_or_default();
-                        let diagnostic_count = diagnostics
-                            .iter()
-                            .map(|item| item.diagnostics.len())
-                            .sum::<usize>();
-                        // LSP severity 1 is an error, 2 a warning; anything else
-                        // is information or a hint and is not an outcome.
-                        let severity = |item: &crate::lsp::PublishDiagnosticsParams, want: u8| {
-                            item.diagnostics
-                                .iter()
-                                .filter(|d| d.severity == Some(want))
-                                .count()
-                        };
-                        let errors: usize = diagnostics.iter().map(|i| severity(i, 1)).sum();
-                        let warnings: usize = diagnostics.iter().map(|i| severity(i, 2)).sum();
-                        let _ = tx
-                            .send(AgentEvent::Diagnostics {
-                                count: diagnostic_count,
-                            })
-                            .await;
-                        // defines this record and nothing was writing it,
-                        // which left "diagnostics with zero errors" route
-                        // to closing a verify step unreachable: the branch existed
-                        // on the read side only.
-                        if let Some(writer) = journal.as_mut() {
-                            let rel = |p: &std::path::Path| {
-                                p.strip_prefix(&root)
-                                    .unwrap_or(p)
-                                    .to_string_lossy()
-                                    .replace('\\', "/")
-                            };
-                            let _ = writer.append_evidence(
-                                "diagnostics",
-                                serde_json::json!({
-                                    // `path` stays the first linted file for the
-                                    // readers that were written against one file
-                                    // per record; `paths` carries all of them.
-                                    "path": rel(&touched[0]),
-                                    "paths": touched.iter().map(|p| rel(p)).collect::<Vec<_>>(),
-                                    "errors": errors,
-                                    "warnings": warnings,
-                                    "server": diagnostics
-                                        .iter()
-                                        .flat_map(|item| item.diagnostics.iter())
-                                        .find_map(|d| d.source.clone())
-                                        .unwrap_or_else(|| "lsp".to_string()),
-                                }),
-                            );
-                        }
-                        if !diagnostics.is_empty() {
-                            // any diagnostics are worth showing to the model, but
-                            // only real errors (severity 1) fail the tool result:
-                            // the file is already written, and a hint or
-                            // information entry must not make the model believe
-                            // the write failed and retry it.
-                            outcome.output.push_str("\nLSP diagnostics:\n");
-                            for item in diagnostics {
-                                for diagnostic in item.diagnostics {
-                                    outcome.output.push_str(&format!(
-                                        "- {}:{}: {}\n",
-                                        item.uri,
-                                        diagnostic.range.start.line + 1,
-                                        diagnostic.message
-                                    ));
-                                }
-                            }
-                            outcome.ok = outcome.ok && errors == 0;
-                        }
-                    }
-                }
-
                 let _ = tx
                     .send(AgentEvent::ToolNotice {
                         name: call.name.clone(),
@@ -2015,33 +1897,7 @@ async fn run_agent(
                         call_id: call.id.clone(),
                     })
                     .await;
-                // `plan_op` journals its own intent records ahead of every
-                // store; resync this long-lived handle past them before
-                // appending checkpoints or tool_result records.
-                if call.name == "plan"
-                    && let Some(writer) = journal.as_mut()
-                    && let Err(e) = writer.resync()
-                {
-                    crate::providers::log_http(&format!(
-                        "journal resync failed — sequence numbers may collide: {e:#}"
-                    ));
-                }
-                // report any checkpoints taken by the mutation
-                if ctx.journal.len() > journal_mark {
-                    if let Some(writer) = journal.as_mut() {
-                        for (sha, label) in ctx.journal[journal_mark..].iter() {
-                            let _ = writer.append("checkpoint", checkpoint_fields(sha, label));
-                        }
-                    }
-                    for (sha, label) in ctx.journal[journal_mark..].iter() {
-                        let _ = tx
-                            .send(AgentEvent::Checkpoint {
-                                sha: sha.clone(),
-                                label: label.clone(),
-                            })
-                            .await;
-                    }
-                }
+
                 if let Some(writer) = journal.as_mut() {
                     if call.name == "note" && outcome.ok {
                         let note_kind = call
@@ -2268,35 +2124,6 @@ async fn run_agent(
             plan_todos,
         })))
         .await;
-    if let Some(manager) = lsp_manager {
-        let _ = manager.shutdown().await;
-    }
-}
-
-/// The files a finished call reports having touched: `file_diff` for the
-/// single-file tools, `file_diffs` for a multi-file `patch`. Deduplicated, in
-/// the order the call reported them.
-///
-/// An empty list means the tool declares no per-call path — for `bash` that is
-/// the H4 attribution gap, not a claim that nothing changed. Callers must not
-/// read it as "the worktree is untouched".
-pub(crate) fn lint_targets(
-    outcome: &crate::agent::tools::Outcome,
-    root: &std::path::Path,
-) -> Vec<std::path::PathBuf> {
-    let mut reported: Vec<&str> = Vec::new();
-    if let Some(d) = &outcome.file_diff {
-        reported.push(&d.path);
-    }
-    reported.extend(outcome.file_diffs.iter().map(|d| d.path.as_str()));
-    let mut out: Vec<std::path::PathBuf> = Vec::new();
-    for rel in reported {
-        let p = root.join(rel.replace('\\', "/"));
-        if !out.contains(&p) {
-            out.push(p);
-        }
-    }
-    out
 }
 
 #[cfg(test)]

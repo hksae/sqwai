@@ -731,17 +731,6 @@ fn journal_body(r: &crate::agent::journal::Record) -> String {
             }
             parts.join(" ")
         }
-        "diagnostics" => match s("path") {
-            Some(path) => format!(
-                "{path} errors={} warnings={} {}",
-                n("errors").unwrap_or(0),
-                n("warnings").unwrap_or(0),
-                s("server").unwrap_or("")
-            )
-            .trim_end()
-            .to_string(),
-            None => String::new(),
-        },
         "note" => match (s("note"), s("text")) {
             (Some(kind), Some(text)) => format!("{kind}: {text}"),
             _ => s("text").unwrap_or_default().to_string(),

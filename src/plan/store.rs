@@ -214,10 +214,8 @@ pub fn replay(root: &Path) -> Result<ReplayReport> {
                     }
                     continue;
                 }
-                if matches!(
-                    record.kind.as_str(),
-                    "tool_result" | "file_diff" | "diagnostics"
-                ) && record.plan.as_deref() == Some(plan.id.as_str())
+                if matches!(record.kind.as_str(), "tool_result" | "file_diff")
+                    && record.plan.as_deref() == Some(plan.id.as_str())
                 {
                     let Some(step) = record
                         .step

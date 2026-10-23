@@ -1389,41 +1389,6 @@ fn the_read_guard_does_not_care_how_the_path_is_spelled() {
     fs::remove_dir_all(&dir).ok();
 }
 
-/// lets a step close on "diagnostics with zero errors". The
-/// record was defined and never written, so that branch was
-/// unreachable — this is the evidence path, now that it exists.
-#[test]
-fn clean_diagnostics_close_a_verify_step() {
-    let (mut ctx, dir) = proj();
-    let created = plan_op(
-        &mut ctx,
-        &json!({"op": "create", "goal": "diagnostics as evidence", "criteria": ["note"],
-                "steps": [{"title": "check", "kind": "verify"}]}),
-    );
-    assert!(created.ok, "{}", created.output);
-    let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
-    assert!(plan_op(&mut ctx, &json!({"op": "start", "id": "1"})).ok);
-
-    let mut journal = crate::agent::journal::Journal::open(&dir, &ctx.session_id).unwrap();
-    journal.set_attribution(Some("1".into()), Some(plan_id), "main");
-    journal
-        .append("plan", json!({"op": "start", "id": "1"}))
-        .unwrap();
-    journal
-        .append_evidence(
-            "diagnostics",
-            json!({"path": "src/main.rs", "errors": 0, "warnings": 2, "server": "rust-analyzer"}),
-        )
-        .unwrap();
-
-    let finished = plan_op(
-        &mut ctx,
-        &json!({"op": "finish", "id": "1", "summary": "no errors reported"}),
-    );
-    assert!(finished.ok, "{}", finished.output);
-    fs::remove_dir_all(&dir).ok();
-}
-
 /// `join` is host-only: the model cannot add sessions to a plan, not
 /// even its own — membership comes from `plan start` and child spawns.
 #[test]

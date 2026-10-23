@@ -354,8 +354,6 @@ pub struct App {
     /// user message index pushed for the active turn, if any
     turn_user_index: Option<usize>,
 
-    /// latest diagnostic count reported by the LSP manager
-    lsp_diagnostics: usize,
     follow: bool,
     /// absolute top line of the viewport when not following (None-equivalent: follow == true)
     view_top: usize,
@@ -768,7 +766,6 @@ impl App {
             retry_line: None,
             resume_notice_armed: false,
             turn_user_index: None,
-            lsp_diagnostics: 0,
             follow: true,
             view_top: 0,
             spinner_tick: 0,

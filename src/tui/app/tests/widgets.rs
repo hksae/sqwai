@@ -1843,7 +1843,6 @@ fn session_recovery_with_deleted_or_broken_plan_id() {
         tools: Default::default(),
         limits: Default::default(),
         mcp: Default::default(),
-        lsp: Default::default(),
         skills: Default::default(),
         memory: Default::default(),
         compaction: Default::default(),

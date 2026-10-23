@@ -401,19 +401,6 @@ impl App {
                 });
                 self.dirty = true;
             }
-            AgentEvent::Diagnostics { count } => {
-                self.lsp_diagnostics = count;
-                if count > 0 {
-                    self.status(
-                        &format!(
-                            "LSP: {count} diagnostic{}",
-                            if count == 1 { "" } else { "s" }
-                        ),
-                        StatusKind::Warn,
-                    );
-                }
-                self.dirty = true;
-            }
             AgentEvent::Retry {
                 attempt,
                 delay_secs,

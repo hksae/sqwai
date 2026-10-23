@@ -1,7 +1,6 @@
 mod agent;
 mod config;
 mod lock;
-mod lsp;
 mod mcp;
 mod media;
 mod pdf;

@@ -216,7 +216,6 @@ pub(crate) async fn run_subagent_batch(
     max_tokens: Option<u32>,
     system: &[SystemPart],
     mcp: &crate::config::McpConfig,
-    lsp: &crate::config::LspConfig,
     skills: &crate::config::SkillsConfig,
     read_only: bool,
     shadow_store: crate::config::ShadowStore,
@@ -286,7 +285,6 @@ pub(crate) async fn run_subagent_batch(
                 let web_allow_hosts = web_allow_hosts.to_vec();
                 let system = system.to_vec();
                 let mcp = mcp.clone();
-                let lsp = lsp.clone();
                 let skills = skills.clone();
                 let memory = memory.clone();
                 let compaction = compaction.clone();
@@ -317,7 +315,6 @@ pub(crate) async fn run_subagent_batch(
                         max_tokens,
                         system,
                         mcp,
-                        lsp,
                         skills,
                         read_only,
                         shadow_store,
@@ -458,7 +455,6 @@ pub(crate) async fn run_subagent(
     max_tokens: Option<u32>,
     system: Vec<SystemPart>,
     mcp: crate::config::McpConfig,
-    lsp: crate::config::LspConfig,
     skills: crate::config::SkillsConfig,
     read_only: bool,
     shadow_store: crate::config::ShadowStore,
@@ -493,7 +489,6 @@ pub(crate) async fn run_subagent(
                 });
                 let system = system.clone();
                 let mcp = mcp.clone();
-                let lsp = lsp.clone();
                 let skills = skills.clone();
                 let memory = memory.clone();
                 let compaction = compaction.clone();
@@ -523,7 +518,6 @@ pub(crate) async fn run_subagent(
                         max_tokens,
                         system,
                         mcp,
-                        lsp,
                         skills,
                         read_only,
                         shadow_store,
@@ -655,7 +649,6 @@ pub(crate) async fn run_subagent(
         previous_response_id: None,
         summary: None,
         mcp,
-        lsp,
         skills,
         compact_only: false, compact_focus: String::new(),
         memory,
