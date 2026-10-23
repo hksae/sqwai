@@ -397,7 +397,9 @@ impl App {
 
     /// Shift+Tab: cycle ask → auto → full → ask. Entering full access is
     /// gated behind the confirm dialog (a held key must not be able to
-    /// grant it); leaving it is always immediate. In PLAN the axis is moot
+    /// grant it) — once per app run: after the first enable the dialog
+    /// steps aside so cycling stays fluid, and only a restart brings it
+    /// back. Leaving full is always immediate. In PLAN the axis is moot
     /// — mutations are refused outright — so the key is a deliberate no-op
     /// there rather than arming a mode the user cannot see acting.
     pub(super) fn cycle_approval_mode(&mut self) {
@@ -405,6 +407,11 @@ impl App {
             return;
         }
         match self.approval_mode.cycle_next() {
+            crate::config::ApprovalMode::Full
+                if self.full_access_unlocked =>
+            {
+                self.set_approval_mode(crate::config::ApprovalMode::Full)
+            }
             crate::config::ApprovalMode::Full => self.open_menu(Menu::ConfirmFullAccess),
             next => self.set_approval_mode(next),
         }

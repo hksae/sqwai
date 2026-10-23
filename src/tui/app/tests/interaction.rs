@@ -1212,6 +1212,29 @@ fn approval_cycle_gates_full_behind_the_confirm_dialog() {
     app.cycle_approval_mode();
     assert_eq!(app.approval_mode, ApprovalMode::Auto);
     assert!(app.menu_stack.is_empty());
+    // one enable per run: the second entry cycles straight in, no dialog
+    app.cycle_approval_mode();
+    assert_eq!(app.approval_mode, ApprovalMode::Full);
+    assert!(
+        app.menu_stack.is_empty(),
+        "the dialog must not interrupt cycling after the first enable"
+    );
+}
+
+#[test]
+fn launching_in_full_mode_counts_as_already_enabled() {
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    // a run started with --approval full (or the config) already answered
+    // the question once: cycling back must not re-ask
+    app.approval_mode = ApprovalMode::Full;
+    app.full_access_unlocked = true;
+    app.cycle_approval_mode();
+    assert_eq!(app.approval_mode, ApprovalMode::Ask);
+    app.cycle_approval_mode();
+    assert_eq!(app.approval_mode, ApprovalMode::Auto);
+    app.cycle_approval_mode();
+    assert_eq!(app.approval_mode, ApprovalMode::Full);
+    assert!(app.menu_stack.is_empty(), "no dialog for a pre-enabled run");
 }
 
 #[test]

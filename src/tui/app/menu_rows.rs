@@ -1304,25 +1304,18 @@ impl App {
             )]),
             MenuAction::None,
         ));
-        self.menu_rows.push(row(
-            Line::from(vec![Span::styled(
-                "blocked patterns and host-owned paths stay protected; undo checkpoints stay on",
-                Theme::dim(),
-            )]),
-            MenuAction::None,
-        ));
         self.menu_rows.push(row(Line::default(), MenuAction::None));
         self.menu_rows.push(row(
             Line::from(vec![Span::styled(
                 "cancel".to_string(),
-                Theme::base(),
+                Theme::ERR(),
             )]),
             MenuAction::Back,
         ));
         self.menu_rows.push(row(
             Line::from(vec![Span::styled(
                 "enable full access".to_string(),
-                Theme::ERR(),
+                Theme::base(),
             )]),
             MenuAction::EnableFullAccess,
         ));

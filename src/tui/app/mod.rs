@@ -331,6 +331,11 @@ pub struct App {
     /// Shift+Tab in ACT. Session-local by design: never persisted, every
     /// launch starts from `[safety].approval_mode`.
     approval_mode: crate::config::ApprovalMode,
+    /// Full access was enabled once in this app run: the confirm dialog
+    /// steps aside for the rest of the run (Shift+Tab cycling must stay
+    /// fluid), but a restart asks again — the flag never leaves the
+    /// process.
+    full_access_unlocked: bool,
     /// "always allow this session" answers. `run_agent` is spawned per user
     /// submit; this is the box they survive in between turns.
     approval_grants: crate::agent::loop_task::SessionGrants,
@@ -778,6 +783,7 @@ impl App {
             thinking_idx: None,
             mode: Mode::Act,
             approval_mode,
+            full_access_unlocked: approval_mode == ApprovalMode::Full,
             approval_grants: Default::default(),
             startup,
             last_ctrl_c: None,

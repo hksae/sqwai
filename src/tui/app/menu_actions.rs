@@ -15,7 +15,9 @@ impl App {
             MenuAction::DecideApproval(decision) => self.approval_decide(decision),
             MenuAction::EnableFullAccess => {
                 // the dialog is the only road in, and its Esc/cancel path
-                // never reaches here — enabling is the deliberate Enter
+                // never reaches here — enabling is the deliberate Enter.
+                // One enable per run: later entries cycle straight in.
+                self.full_access_unlocked = true;
                 self.close_interaction();
                 self.set_approval_mode(crate::config::ApprovalMode::Full);
             }
