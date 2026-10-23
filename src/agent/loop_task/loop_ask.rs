@@ -13,6 +13,12 @@ use tokio::sync::mpsc;
 /// "always allow this session" answer still silences the repeats.
 const ASK_MODE_REASON: &str = "ask mode";
 
+/// Why a write beyond the project root asks. The workspace jail is a
+/// prompt, not a wall: full access lifts it like every other prompt, and
+/// host-owned state (`.sqwai/`) is root-relative — it can never appear on
+/// this branch.
+const OUTSIDE_ROOT_REASON: &str = "writes outside the project directory";
+
 pub(crate) async fn ask_user(
     call: &ToolCallReq,
     tx: &mpsc::Sender<AgentEvent>,
@@ -414,6 +420,18 @@ pub(crate) async fn bash_call(
         }
     }
 
+    // 1c. workspace boundary as a prompt: bash writing outside the project
+    // root asks, exactly like the file tools' jail. Subagent scopes
+    // already refuse out-of-scope writes on their own; full access runs
+    // it like every other prompt.
+    if mode != ApprovalMode::Full
+        && subagent_depth == 0
+        && needs_approval.is_none()
+        && tools::bash_writes_outside(ctx, &command)
+    {
+        needs_approval = Some(OUTSIDE_ROOT_REASON.to_string());
+    }
+
     // Ask mode: every command is confirmed, even one the classifier calls
     // safe. Grants still cover the repeats — that is what keeps Ask livable.
     if mode == ApprovalMode::Ask && needs_approval.is_none() {
@@ -515,55 +533,118 @@ pub(crate) async fn bash_call(
     outcome
 }
 
-/// Ask-mode confirmation for one mutating tool call (edit/write/patch/
-/// git_commit/…). `None` means approved — run the call; `Some` is the
-/// final outcome (denied). An AlwaysSession answer grants the whole tool
-/// for the session (`edit *`), which is coarser than a bash grant but
-/// honest: the next edit of the same file or a different one is exactly
-/// what the user said yes to.
-pub(crate) async fn tool_approval(
-    call: &ToolCallReq,
+/// The approval dialog itself: show the subject, await one answer.
+/// `None` means the channel died (tui closed or agent cancelled).
+async fn approval_dialog(
+    subject: String,
+    reason: &str,
+    grant: String,
     tx: &mpsc::Sender<AgentEvent>,
     ctl: &mut mpsc::Receiver<ControlMsg>,
     next_id: &mut u64,
-    tool_grants: &mut Vec<String>,
-) -> Option<tools::Outcome> {
-    let subject = match tools::call_summary(&call.name, &call.args) {
-        summary if summary.is_empty() => call.name.clone(),
-        summary => format!("{} {summary}", call.name),
-    };
+) -> Option<ApprovalDecision> {
     let id = *next_id;
     *next_id += 1;
-    if tx
-        .send(AgentEvent::Approval {
-            id,
-            subject,
-            reason: ASK_MODE_REASON.to_string(),
-            grant: format!("{} *", call.name),
-        })
-        .await
-        .is_err()
-    {
-        return Some(tools::Outcome::err("tui closed awaiting approval"));
-    }
-    let decision = loop {
+    tx.send(AgentEvent::Approval {
+        id,
+        subject,
+        reason: reason.to_string(),
+        grant,
+    })
+    .await
+    .ok()?;
+    loop {
         match ctl.recv().await {
-            Some(ControlMsg::ApprovalAnswer { id: aid, decision }) if aid == id => break decision,
+            Some(ControlMsg::ApprovalAnswer { id: aid, decision }) if aid == id => {
+                return Some(decision)
+            }
             Some(_) => continue,
-            None => return Some(tools::Outcome::err("agent cancelled awaiting approval")),
+            None => return None,
         }
-    };
-    match decision {
-        ApprovalDecision::Deny => Some(tools::Outcome::err(format!(
-            "{} call denied by user (ask mode)",
-            call.name
-        ))),
-        ApprovalDecision::AlwaysSession => {
-            tool_grants.push(call.name.clone());
-            None
-        }
-        ApprovalDecision::RunOnce => None,
     }
+}
+
+/// One gate for every mutating tool call — the workspace boundary and ask
+/// mode's blanket confirm together:
+///
+/// - a file tool writing outside the project root asks (full access and a
+///   session grant run it); a confirmed call carries a one-shot
+///   `outside_write_permit` that opens the jail for exactly that call
+/// - ask mode additionally confirms every other mutating call
+///
+/// `None` means run the call; `Some` is the final, refused outcome. An
+/// AlwaysSession answer grants the whole tool for the session (`edit *`),
+/// which is coarser than a bash grant but honest: the next edit of the
+/// same file or a different one is exactly what the user said yes to.
+pub(crate) async fn mutating_tool_gate(
+    call: &ToolCallReq,
+    ctx: &mut ToolCtx,
+    tx: &mpsc::Sender<AgentEvent>,
+    ctl: &mut mpsc::Receiver<ControlMsg>,
+    next_id: &mut u64,
+    mode: ApprovalMode,
+    tool_grants: &mut Vec<String>,
+) -> Option<tools::Outcome> {
+    let name = call.name.as_str();
+    let granted = tool_grants.iter().any(|t| t == name);
+    // the workspace boundary, asked as an approval rather than refused
+    if matches!(name, "write" | "edit" | "multi_edit")
+        && let Some(path) = tools::call_path(name, &call.args)
+        && ctx.write_escapes(&path)
+    {
+        if mode == ApprovalMode::Full || granted {
+            ctx.outside_write_permit = true;
+            return None;
+        }
+        let decision = approval_dialog(
+            format!("{name} {path}"),
+            OUTSIDE_ROOT_REASON,
+            format!("{name} *"),
+            tx,
+            ctl,
+            next_id,
+        )
+        .await;
+        match decision {
+            Some(ApprovalDecision::Deny) => {
+                return Some(tools::Outcome::err(format!(
+                    "{name} denied by user ({OUTSIDE_ROOT_REASON})"
+                )))
+            }
+            Some(ApprovalDecision::AlwaysSession) => tool_grants.push(name.to_string()),
+            Some(ApprovalDecision::RunOnce) => {}
+            None => return Some(tools::Outcome::err("tui closed awaiting approval")),
+        }
+        ctx.outside_write_permit = true;
+        // this exact call was just confirmed — ask mode has nothing to add
+        return None;
+    }
+    if mode == ApprovalMode::Ask && !granted {
+        let subject = match tools::call_summary(name, &call.args) {
+            summary if summary.is_empty() => name.to_string(),
+            summary => format!("{name} {summary}"),
+        };
+        let decision = approval_dialog(
+            subject,
+            ASK_MODE_REASON,
+            format!("{name} *"),
+            tx,
+            ctl,
+            next_id,
+        )
+        .await;
+        match decision {
+            Some(ApprovalDecision::Deny) => {
+                return Some(tools::Outcome::err(format!(
+                    "{name} call denied by user (ask mode)"
+                )))
+            }
+            Some(ApprovalDecision::AlwaysSession) => tool_grants.push(name.to_string()),
+            Some(ApprovalDecision::RunOnce) => {}
+            None => return Some(tools::Outcome::err("tui closed awaiting approval")),
+        }
+    }
+    None
 }
 
 /// Execute a tool handler on a dedicated blocking thread.

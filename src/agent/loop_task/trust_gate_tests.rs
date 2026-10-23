@@ -1,4 +1,4 @@
-use super::loop_ask::{Grant, bash_call};
+use super::loop_ask::{Grant, bash_call, mutating_tool_gate};
 use super::*;
 
 fn tainted_project(name: &str) -> (std::path::PathBuf, String) {
@@ -603,4 +603,178 @@ async fn full_mode_keeps_the_hard_gates() {
         outcome.output
     );
     std::fs::remove_dir_all(&dir).ok();
+}
+
+/// The workspace boundary asks, it does not refuse: a bash write beyond
+/// the project root opens the approval dialog with the outside reason.
+#[tokio::test]
+async fn outside_bash_write_asks_in_auto() {
+    let base = std::env::temp_dir().join(format!("sqwai-outside-ask-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let root = base.join("proj");
+    std::fs::create_dir_all(&root).unwrap();
+    let outside = base.join("out.txt");
+    let (tx_agent, mut rx_ui) = tokio::sync::mpsc::channel(8);
+    let (tx_ui, mut rx_agent) = tokio::sync::mpsc::channel(8);
+    let call = ToolCallReq::new(
+        "c1",
+        "bash",
+        serde_json::json!({"command": format!("echo hi > \"{}\"", outside.display())}),
+    );
+    let mut ctx = tools::ToolCtx::new(&root).in_session("outside-sess".to_string());
+    let mut always_allow = Vec::new();
+    let mut next_id = 0u64;
+    let mut no_journal: Option<crate::agent::journal::Journal> = None;
+    let future = bash_call(
+        &call,
+        &mut ctx,
+        &tx_agent,
+        &mut rx_agent,
+        &mut always_allow,
+        &[],
+        &mut next_id,
+        0,
+        crate::config::ApprovalMode::Auto,
+        &mut no_journal,
+    );
+    let asked = {
+        tokio::pin!(future);
+        let mut asked = false;
+        loop {
+            tokio::select! {
+                out = &mut future => {
+                    assert!(out.ok, "answered once, the write runs: {}", out.output);
+                    break;
+                }
+                ev = rx_ui.recv() => {
+                    if let Some(AgentEvent::Approval { id, reason, .. }) = ev {
+                        asked = true;
+                        assert_eq!(reason, "writes outside the project directory");
+                        tx_ui
+                            .send(ControlMsg::ApprovalAnswer {
+                                id,
+                                decision: ApprovalDecision::RunOnce,
+                            })
+                            .await
+                            .unwrap();
+                    }
+                }
+            }
+        }
+        asked
+    };
+    assert!(asked, "an outside write must ask, not refuse");
+    assert!(outside.exists(), "the approved write really landed");
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// Full access lifts the workspace prompt like every other prompt: the
+/// outside write runs with no dialog at all.
+#[tokio::test]
+async fn outside_bash_write_runs_silently_in_full() {
+    let base = std::env::temp_dir().join(format!("sqwai-outside-full-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let root = base.join("proj");
+    std::fs::create_dir_all(&root).unwrap();
+    let outside = base.join("out.txt");
+    let (tx_agent, mut rx_ui) = tokio::sync::mpsc::channel(8);
+    let (_tx_ui, mut rx_agent) = tokio::sync::mpsc::channel(8);
+    let call = ToolCallReq::new(
+        "c1",
+        "bash",
+        serde_json::json!({"command": format!("echo hi > \"{}\"", outside.display())}),
+    );
+    let mut ctx = tools::ToolCtx::new(&root).in_session("outside-full-sess".to_string());
+    let outcome = bash_call(
+        &call,
+        &mut ctx,
+        &tx_agent,
+        &mut rx_agent,
+        &mut Vec::new(),
+        &[],
+        &mut 0u64,
+        0,
+        crate::config::ApprovalMode::Full,
+        &mut None,
+    )
+    .await;
+    assert!(outcome.ok, "full access writes outside: {}", outcome.output);
+    assert!(outside.exists());
+    while let Ok(ev) = rx_ui.try_recv() {
+        assert!(!matches!(ev, AgentEvent::Approval { .. }), "no dialog in full");
+    }
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// The file-tool side of the same boundary: the gate asks, denial is a
+/// normal refused outcome, approval arms the one-shot jail permit — and
+/// full access arms it with no dialog.
+#[tokio::test]
+async fn outside_file_write_gate_denies_and_permits() {
+    let base = std::env::temp_dir().join(format!("sqwai-outside-gate-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let root = base.join("proj");
+    std::fs::create_dir_all(&root).unwrap();
+    let (tx_agent, mut rx_ui) = tokio::sync::mpsc::channel(8);
+    let (tx_ui, mut rx_agent) = tokio::sync::mpsc::channel(8);
+    let call = ToolCallReq::new(
+        "c1",
+        "write",
+        serde_json::json!({"file_path": "../out.txt", "content": "x"}),
+    );
+    // deny: the call is refused, the permit stays down
+    let ev_task = tokio::spawn(async move {
+        loop {
+            match rx_ui.recv().await {
+                Some(AgentEvent::Approval { id, subject, reason, .. }) => {
+                    assert!(subject.starts_with("write "), "{subject}");
+                    assert_eq!(reason, "writes outside the project directory");
+                    tx_ui
+                        .send(ControlMsg::ApprovalAnswer {
+                            id,
+                            decision: ApprovalDecision::Deny,
+                        })
+                        .await
+                        .unwrap();
+                }
+                Some(_) => continue,
+                None => break,
+            }
+        }
+    });
+    let mut ctx = tools::ToolCtx::new(&root).in_session("gate-sess".to_string());
+    let refused = mutating_tool_gate(
+        &call,
+        &mut ctx,
+        &tx_agent,
+        &mut rx_agent,
+        &mut 0u64,
+        crate::config::ApprovalMode::Auto,
+        &mut Vec::new(),
+    )
+    .await
+    .expect("denied");
+    assert!(!refused.ok);
+    assert!(refused.output.contains("denied by user"));
+    assert!(!ctx.outside_write_permit, "denial arms nothing");
+    ev_task.abort();
+
+    // full access: no dialog, the permit arms on its own
+    let (tx_agent2, rx_ui2) = tokio::sync::mpsc::channel(8);
+    let (_tx_ui2, mut rx_agent2) = tokio::sync::mpsc::channel(8);
+    std::mem::drop(rx_ui2);
+    let mut ctx2 = tools::ToolCtx::new(&root).in_session("gate-sess".to_string());
+    let gate = mutating_tool_gate(
+        &call,
+        &mut ctx2,
+        &tx_agent2,
+        &mut rx_agent2,
+        &mut 0u64,
+        crate::config::ApprovalMode::Full,
+        &mut Vec::new(),
+    )
+    .await;
+    assert!(gate.is_none(), "full access runs the outside write");
+    assert!(ctx2.outside_write_permit, "the jail opens for this call");
+    let _ = std::fs::remove_dir_all(&base);
 }

@@ -20,7 +20,7 @@ use crate::agent::checkpoints;
 use crate::agent::context;
 use crate::agent::tools::{self, ToolCtx};
 use crate::plan;
-use loop_ask::{ask_user, bash_call, run_tool_blocking, tool_approval};
+use loop_ask::{ask_user, bash_call, mutating_tool_gate, run_tool_blocking};
 use loop_compact::{
     CompactionPrefix, compact_history, effort_ignored_reason, plan_hint_for_summary,
     record_compaction, turn_shows_no_reasoning,
@@ -1705,24 +1705,35 @@ async fn run_agent(
                         "PLAN mode is read-only: '{}' is disabled. Switch to ACT to use it.",
                         call.name
                     ))
-                } else if approval_mode == ApprovalMode::Ask
-                    && subagent_depth == 0
+                } else if subagent_depth == 0
                     && call.name != "bash"
                     && call.name != "plan"
                     && tools::is_mutating_call(&call.name, &call.args)
-                    && !tool_grants.contains(&call.name)
                 {
-                    // Ask mode confirms every mutation, not only risky bash:
-                    // `bash` asks inside `bash_call` (Safe commands included),
-                    // everything mutating lands here. Subagents cannot prompt
-                    // and keep the run's existing gates instead.
-                    match tool_approval(call, &tx, &mut ctl, &mut next_id, &mut tool_grants).await
+                    // One gate for mutating calls: the workspace boundary
+                    // (an outside write asks in every mode but full) and
+                    // ask mode's blanket confirm. `bash` asks inside
+                    // `bash_call`, Safe commands included; subagents cannot
+                    // prompt and keep the run's existing gates instead.
+                    match mutating_tool_gate(
+                        call,
+                        &mut ctx,
+                        &tx,
+                        &mut ctl,
+                        &mut next_id,
+                        approval_mode,
+                        &mut tool_grants,
+                    )
+                    .await
                     {
                         Some(outcome) => outcome,
                         None => {
                             ctx.current_call_id = Some(call.id.clone());
                             let out = run_tool_blocking(&mut ctx, &call.name, &call.args).await;
                             ctx.current_call_id = None;
+                            // the outside-write permit covers exactly the
+                            // confirmed call, never the rest of the batch
+                            ctx.outside_write_permit = false;
                             out
                         }
                     }

@@ -17,6 +17,11 @@ pub struct ToolCtx {
     root_canon: PathBuf,
     /// secondary project instances can inspect but not mutate project state
     pub read_only: bool,
+    /// One confirmed leap outside the project root. The write jail is a
+    /// prompt, not a wall: an outside write the user approved (or full
+    /// access) sets this for exactly that call, and the jail below lets
+    /// the write through. Never set for reads; never carried across calls.
+    pub outside_write_permit: bool,
     /// Session this context belongs to. keys the shadow snapshot chain
     /// on it (`refs/sessions/<id>`), so two sessions in one project do not
     /// interleave their checkpoint history — and retention can truncate one
@@ -130,6 +135,7 @@ impl ToolCtx {
             root,
             root_canon,
             read_only,
+            outside_write_permit: false,
             session_id: "shared".into(),
             checkpoint_session: None,
             files_read: HashMap::new(),
@@ -288,30 +294,16 @@ impl ToolCtx {
             .map(|(_, rel)| rel.to_string_lossy().replace('\\', "/"))
     }
 
-    /// Shared walk behind [`resolve`](Self::resolve) and
-    /// [`resolve_scope_rel`](Self::resolve_scope_rel): returns the
-    /// display spelling (uncanonicalized join) and the canonical
-    /// project-relative path the security decisions run on.
-    fn resolve_parts(&self, p: &str, mutating: bool) -> Result<(PathBuf, PathBuf), String> {
-        let p_trimmed = p.trim().trim_start_matches("./").trim_start_matches(".\\");
-        let redirected;
-        let p = if !mutating
-            && p_trimmed.eq_ignore_ascii_case("MEMORY.md")
-            && !self.root.join(p_trimmed).exists()
-        {
-            redirected = ".sqwai/memory/MEMORY.md".to_string();
-            redirected.as_str()
-        } else {
-            p
-        };
+    /// Join `p` onto the root (absolutes pass through) and canonicalize the
+    /// deepest existing ancestor, so `..` and symlinks cannot smuggle a
+    /// path past the prefix check while files that do not exist yet still
+    /// resolve. Shared by the jail, the scope gates and the escape probes.
+    fn resolve_target(&self, p: &str) -> Result<(PathBuf, PathBuf), String> {
         let joined = if Path::new(p).is_absolute() {
             PathBuf::from(p)
         } else {
             self.root.join(p)
         };
-        // canonicalize the deepest existing ancestor to defeat `..` and
-        // symlinks, then re-append the part that does not exist yet, so the
-        // full target is known even when the file is about to be created
         let mut anc = joined.clone();
         let mut tail: Vec<std::ffi::OsString> = Vec::new();
         while !anc.exists() {
@@ -333,7 +325,55 @@ impl ToolCtx {
         for name in tail.iter().rev() {
             resolved.push(name);
         }
+        Ok((joined, resolved))
+    }
+
+    /// Does `p` land outside the project root? The question behind the
+    /// write jail: an outside write is an approval, not a refusal. An
+    /// unresolvable path is not an escape — the jail itself errors on it
+    /// if the call ever runs.
+    pub fn write_escapes(&self, p: &str) -> bool {
+        match self.resolve_target(p) {
+            Ok((_, resolved)) => resolved.strip_prefix(&self.root_canon).is_err(),
+            Err(_) => false,
+        }
+    }
+
+    /// The same question for a raw shell operand or redirect destination:
+    /// relative targets resolve against the working directory (the root),
+    /// surrounding quotes come off. Null sinks are the caller's filter.
+    pub fn shell_target_escapes(&self, target: &str) -> bool {
+        let t = target.trim();
+        let t = t.trim_matches(|c| c == '"' || c == '\'');
+        !t.is_empty() && self.write_escapes(t)
+    }
+
+    /// Shared walk behind [`resolve`](Self::resolve) and
+    /// [`resolve_scope_rel`](Self::resolve_scope_rel): returns the
+    /// display spelling (uncanonicalized join) and the canonical
+    /// project-relative path the security decisions run on.
+    fn resolve_parts(&self, p: &str, mutating: bool) -> Result<(PathBuf, PathBuf), String> {
+        let p_trimmed = p.trim().trim_start_matches("./").trim_start_matches(".\\");
+        let redirected;
+        let p = if !mutating
+            && p_trimmed.eq_ignore_ascii_case("MEMORY.md")
+            && !self.root.join(p_trimmed).exists()
+        {
+            redirected = ".sqwai/memory/MEMORY.md".to_string();
+            redirected.as_str()
+        } else {
+            p
+        };
+        let (joined, resolved) = self.resolve_target(p)?;
         let Ok(relative) = resolved.strip_prefix(&self.root_canon) else {
+            // the jail is a prompt, not a wall: a write the user confirmed
+            // (or full access) goes through for exactly this call. Reads
+            // never carry the permit, so outside reads stay refused, and
+            // host-owned state is root-relative — it cannot reach this
+            // branch.
+            if mutating && self.outside_write_permit {
+                return Ok((joined, resolved));
+            }
             return Err(format!(
                 "path '{}' escapes the project directory",
                 joined.display()
@@ -584,4 +624,39 @@ fn host_owned_denial(relative: &Path, mutating: bool) -> Option<String> {
          files under spill/ (read only) — nothing else.",
         relative.display()
     ))
+}
+
+#[cfg(test)]
+mod outside_jail_tests {
+    use super::*;
+
+    #[test]
+    fn write_escapes_spots_outside_and_inside() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("proj");
+        std::fs::create_dir_all(&root).unwrap();
+        let ctx = ToolCtx::new(&root);
+        // inside: plain relative, and a `..` walk that comes back in
+        assert!(!ctx.write_escapes("src/main.rs"));
+        let back_inside = format!("{}/proj/src/main.rs", dir.path().display());
+        assert!(!ctx.write_escapes(&back_inside));
+        // outside: sibling of the root, absolute or spelled relatively
+        assert!(ctx.write_escapes("../outside.txt"));
+        assert!(ctx.write_escapes(dir.path().join("outside.txt").to_string_lossy().as_ref()));
+    }
+
+    #[test]
+    fn a_permitted_outside_write_resolves_but_a_read_never_does() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("proj");
+        std::fs::create_dir_all(&root).unwrap();
+        let mut ctx = ToolCtx::new(&root);
+        // no permit: the classic refusal
+        assert!(ctx.resolve_writable("../out.txt").is_err());
+        // permit: the same write resolves (the jail is a prompt, not a wall)
+        ctx.outside_write_permit = true;
+        assert!(ctx.resolve_writable("../out.txt").is_ok());
+        // reads never carry the permit
+        assert!(ctx.resolve("../out.txt").is_err());
+    }
 }

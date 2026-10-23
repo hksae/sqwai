@@ -105,6 +105,17 @@ pub(crate) fn bash_scope_hit(ctx: &ToolCtx, scope: &[String], command: &str) -> 
     None
 }
 
+/// Does this command write outside the project root? The main agent's
+/// workspace boundary, asked as an approval rather than refused: the
+/// targets are the same tokens the subagent scope gate sees, null sinks
+/// filtered, resolution shared with the write jail.
+pub(crate) fn bash_writes_outside(ctx: &ToolCtx, command: &str) -> bool {
+    bash_write_targets(command)
+        .into_iter()
+        .filter(|t| !is_null_sink(t))
+        .any(|t| ctx.shell_target_escapes(&t))
+}
+
 /// Raw write-target tokens of a shell command: redirect destinations and
 /// mutating-shape operands. Quoted spans never contribute operators (an
 /// `echo "a > b"` is not a redirect), but stay available as quoted

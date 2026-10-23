@@ -1121,3 +1121,14 @@ fn a_true_carriage_return_still_overwrites() {
         .collect();
     assert_eq!(kept, "downloading 90%");
 }
+
+#[test]
+fn tmp_diag_python_keyword_colors() {
+    let hl = crate::tui::markdown::Highlighter::new();
+    let lines = hl.highlight_code("class Foo:\n    def bar(self):\n        pass\n", Some("python"));
+    for l in &lines {
+        for s in &l.spans {
+            println!("SPANCHUNK {:?} fg={:?}", s.content, s.style.fg);
+        }
+    }
+}
