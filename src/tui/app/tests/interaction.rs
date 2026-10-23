@@ -590,6 +590,7 @@ fn cancelled_tool_turn_does_not_backfill_prior_answer() {
         todos: Vec::new(),
         plan_todos: Vec::new(),
         journal: Vec::new(),
+        approval_grants: Default::default(),
     });
 
     assert!(!app.streaming);
@@ -652,6 +653,7 @@ fn cancelled_tool_turn_keeps_streamed_partial() {
         todos: Vec::new(),
         plan_todos: Vec::new(),
         journal: Vec::new(),
+        approval_grants: Default::default(),
     });
 
     let answers: Vec<&str> = app
@@ -695,6 +697,7 @@ fn finish_turn_ok_rebases_notes_after_compaction() {
         todos: Vec::new(),
         plan_todos: Vec::new(),
         journal: Vec::new(),
+        approval_grants: Default::default(),
     });
     let notes: Vec<usize> = app
         .session
@@ -1146,6 +1149,98 @@ fn mode_toggle_rearms_blend_instead_of_breaking() {
         app.mode_blend.is_some(),
         "second toggle re-arms, never drops"
     );
+}
+
+#[test]
+fn approval_chip_matches_mode_when_settled() {
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    // default AUTO: the quiet gray chip sits second, the mode chip keeps
+    // its place and its color
+    let spans = app.status_bar_spans(120);
+    assert_eq!(spans[0].content.as_ref(), " ACT ");
+    assert_eq!(spans[0].style, crate::tui::theme::Theme::mode_chip_act());
+    assert_eq!(spans[1].content.as_ref(), " AUTO ");
+    assert_eq!(spans[1].style, crate::tui::theme::Theme::mode_chip_auto());
+    // ASK earns the amber, FULL the red (blend force-expired, no timing)
+    let expire = |app: &mut App| {
+        app.approval_blend = Some((
+            super::super::MODE_PLAN_RGB,
+            std::time::Instant::now() - std::time::Duration::from_secs(5),
+        ));
+    };
+    app.set_approval_mode(ApprovalMode::Ask);
+    expire(&mut app);
+    let spans = app.status_bar_spans(120);
+    assert_eq!(spans[1].content.as_ref(), " ASK ");
+    assert_eq!(spans[1].style, crate::tui::theme::Theme::mode_chip_ask());
+    app.set_approval_mode(ApprovalMode::Full);
+    expire(&mut app);
+    let spans = app.status_bar_spans(120);
+    assert_eq!(spans[1].content.as_ref(), " FULL ");
+    assert_eq!(spans[1].style, crate::tui::theme::Theme::mode_chip_full());
+}
+
+#[test]
+fn approval_cycle_gates_full_behind_the_confirm_dialog() {
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    // auto -> full opens the red dialog; the mode itself must not move
+    app.cycle_approval_mode();
+    assert!(matches!(app.cur_menu(), Some(Menu::ConfirmFullAccess)));
+    assert_eq!(
+        app.approval_mode,
+        ApprovalMode::Auto,
+        "the dialog, not the key, grants full access"
+    );
+    // cancel is the preselected answer and leaves everything as it was
+    assert!(matches!(
+        app.menu_row_at(app.menu_sel).map(|(_, a)| a.clone()),
+        Some(MenuAction::Back)
+    ));
+    app.menu_back();
+    assert!(app.menu_stack.is_empty());
+    assert_eq!(app.approval_mode, ApprovalMode::Auto);
+    // enabling through the dialog's row is the only road in
+    app.cycle_approval_mode();
+    app.run_action(MenuAction::EnableFullAccess);
+    assert_eq!(app.approval_mode, ApprovalMode::Full);
+    assert!(app.menu_stack.is_empty());
+    // leaving full is immediate: full -> ask, no dialog on the way out
+    app.cycle_approval_mode();
+    assert_eq!(app.approval_mode, ApprovalMode::Ask);
+    assert!(app.menu_stack.is_empty());
+    // ask -> auto lands directly
+    app.cycle_approval_mode();
+    assert_eq!(app.approval_mode, ApprovalMode::Auto);
+    assert!(app.menu_stack.is_empty());
+}
+
+#[test]
+fn approval_cycle_is_deliberately_inert_in_plan() {
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.set_mode(Mode::Plan);
+    app.cycle_approval_mode();
+    assert_eq!(app.approval_mode, ApprovalMode::Auto);
+    assert!(
+        app.menu_stack.is_empty(),
+        "PLAN must not arm a hidden approval mode"
+    );
+}
+
+#[test]
+fn approval_mode_change_leaves_a_transcript_line() {
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    let before = app.segments.len();
+    app.set_approval_mode(ApprovalMode::Full);
+    // the chip flashes once; this row is what still says the mode later
+    assert!(matches!(
+        app.segments.get(before),
+        Some(Segment::Status {
+            text,
+            kind: StatusKind::Warn,
+            transient: false,
+            ..
+        }) if text == "approval: auto → full"
+    ));
 }
 
 /// the status bar shows the *effective* mapping. Selecting `max` on

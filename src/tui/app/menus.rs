@@ -267,12 +267,18 @@ pub(super) enum Menu {
         id: u64,
         questions: Vec<crate::agent::loop_task::AskQuestion>,
     },
-    /// a dangerous command needs explicit approval
+    /// a dangerous command or mutating tool call needs explicit approval
     Approval {
         id: u64,
-        command: String,
+        subject: String,
         reason: String,
+        grant: String,
     },
+    /// Shift+Tab landed on full access: the red confirmation. Cancel is
+    /// the preselected answer and Enter waits out the same grace period
+    /// as the approval dialog — a held key must not be able to grant
+    /// full access.
+    ConfirmFullAccess,
     /// free-text answer for an open ask_user — legacy
     #[allow(dead_code)]
     AskFree {
@@ -339,6 +345,7 @@ pub(super) enum MenuAction {
     #[allow(dead_code)]
     AskPrev,
     DecideApproval(crate::agent::loop_task::ApprovalDecision),
+    EnableFullAccess,
     #[allow(dead_code)]
     OpenControls,
     #[allow(dead_code)]
@@ -811,6 +818,7 @@ impl App {
                 | Some(Menu::EditSessionTitle { .. })
                 | Some(Menu::ConfirmDelete { .. })
                 | Some(Menu::Approval { .. })
+                | Some(Menu::ConfirmFullAccess)
                 | Some(Menu::Debug)
                 | Some(Menu::Plan)
                 | Some(Menu::Help)
@@ -912,6 +920,15 @@ impl App {
                 .menu_rows
                 .iter()
                 .position(|(_, a)| matches!(a, MenuAction::DecideApproval(ApprovalDecision::Deny)))
+                .unwrap_or(0);
+            self.approval_opened_at = Some(Instant::now());
+        }
+        if matches!(self.cur_menu(), Some(Menu::ConfirmFullAccess)) {
+            // cancel preselected: the safe answer is the one Enter lands on
+            self.menu_sel = self
+                .menu_rows
+                .iter()
+                .position(|(_, a)| matches!(a, MenuAction::Back))
                 .unwrap_or(0);
             self.approval_opened_at = Some(Instant::now());
         }
@@ -1398,6 +1415,15 @@ impl App {
             }
             return;
         }
+        if matches!(self.cur_menu(), Some(Menu::ConfirmFullAccess)) {
+            if let Some((_, action)) = self.menu_row_at(sel)
+                && matches!(action, MenuAction::Back | MenuAction::EnableFullAccess)
+            {
+                self.menu_sel = sel;
+                self.dirty = true;
+            }
+            return;
+        }
         self.menu_sel = sel;
         self.menu_activate();
     }
@@ -1440,15 +1466,17 @@ impl App {
             }
             return;
         }
-        if let Some(Menu::Approval { .. }) = self.cur_menu() {
+        if matches!(
+            self.cur_menu(),
+            Some(Menu::Approval { .. }) | Some(Menu::ConfirmFullAccess)
+        ) {
             if let Some(opened) = self.approval_opened_at
                 && opened.elapsed() < std::time::Duration::from_millis(500)
             {
                 return;
             }
-            if let Some((_, MenuAction::DecideApproval(decision))) = self.menu_row_at(self.menu_sel)
-            {
-                self.run_action(MenuAction::DecideApproval(*decision));
+            if let Some((_, action)) = self.menu_row_at(self.menu_sel) {
+                self.run_action(action.clone());
             }
             return;
         }
@@ -1541,6 +1569,7 @@ impl App {
             Some(Menu::EditScalar(setting)) => format!(" Config · {} ", setting.label()),
             Some(Menu::EditSessionTitle { .. }) => " Rename session ".into(),
             Some(Menu::ConfirmDelete { .. }) => " Confirm ".into(),
+            Some(Menu::ConfirmFullAccess) => " Full access ".into(),
             Some(Menu::Effort { model }) => match model {
                 Some(key) => format!(" Effort · {key} "),
                 None => " Effort ".into(),

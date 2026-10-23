@@ -1445,7 +1445,8 @@ impl App {
             | Some(Menu::Skills)
             | Some(Menu::SkillView { .. })
             | Some(Menu::ConfirmDelete { .. })
-            | Some(Menu::Approval { .. }) => {
+            | Some(Menu::Approval { .. })
+            | Some(Menu::ConfirmFullAccess) => {
                 let (head, win, _) = self.list_shape(area.height);
                 let body = self.menu_rows.len().saturating_sub(head);
                 let shown = body.min(win).max(1).max(self.list_hints().len());
@@ -1488,6 +1489,7 @@ impl App {
                 | Some(Menu::EditSessionTitle { .. })
                 | Some(Menu::ConfirmDelete { .. })
                 | Some(Menu::Approval { .. })
+                | Some(Menu::ConfirmFullAccess)
         );
         // the block joins the document either way; only a menu surface also
         // claims the composer's own rows
@@ -1785,7 +1787,8 @@ impl App {
                         | Some(Menu::SkillView { .. })
                         | Some(Menu::EditSessionTitle { .. })
                         | Some(Menu::ConfirmDelete { .. })
-                        | Some(Menu::Approval { .. }) => {
+                        | Some(Menu::Approval { .. })
+                        | Some(Menu::ConfirmFullAccess) => {
                             self.draw_list_surface(buf, rect, skip, surf_full)
                         }
                         Some(Menu::Effort { .. }) => {

@@ -977,3 +977,36 @@ mouse = false
     assert!(!cfg.ui.open_attachments);
     assert!(!cfg.ui.mouse);
 }
+
+#[test]
+fn approval_mode_parses_and_defaults() {
+    // default: auto (the behavior the app always had)
+    let cfg: Config = toml::from_str("").unwrap();
+    assert_eq!(cfg.safety.approval_mode, ApprovalMode::Auto);
+    // each documented spelling
+    for (text, want) in [
+        ("ask", ApprovalMode::Ask),
+        ("auto", ApprovalMode::Auto),
+        ("full", ApprovalMode::Full),
+    ] {
+        let cfg: Config = toml::from_str(&format!("[safety]
+approval_mode = \"{text}\"
+"))
+            .unwrap();
+        assert_eq!(cfg.safety.approval_mode, want, "approval_mode = {text}");
+    }
+    // unknown value refuses to load rather than silently downgrading
+    assert!(toml::from_str::<Config>("[safety]
+approval_mode = \"yolo\"
+").is_err());
+}
+
+#[test]
+fn approval_mode_cycle_is_the_escalation_ladder() {
+    assert_eq!(ApprovalMode::Ask.cycle_next(), ApprovalMode::Auto);
+    assert_eq!(ApprovalMode::Auto.cycle_next(), ApprovalMode::Full);
+    assert_eq!(ApprovalMode::Full.cycle_next(), ApprovalMode::Ask);
+    // the flag accepts the longer spelling humans type
+    assert_eq!(ApprovalMode::from_str("full_access"), Some(ApprovalMode::Full));
+    assert_eq!(ApprovalMode::from_str("nope"), None);
+}

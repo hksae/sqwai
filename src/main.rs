@@ -18,6 +18,7 @@ fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut resume_id: Option<String> = None;
     let mut force = false;
+    let mut approval: Option<config::ApprovalMode> = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -29,8 +30,17 @@ fn main() -> Result<()> {
                 return Ok(());
             }
             "--force" => force = true,
+            "--approval" => {
+                let value = it.next().context("--approval requires ask|auto|full")?;
+                approval = Some(config::ApprovalMode::from_str(value).with_context(|| {
+                    format!("--approval expects ask|auto|full, got {value}")
+                })?);
+            }
             other => {
-                anyhow::bail!("unknown argument: {other}\nusage: sqwai [--resume <id>] [--force]")
+                anyhow::bail!(
+                    "unknown argument: {other}\nusage: sqwai [--resume <id>] [--force] \
+                     [--approval ask|auto|full]"
+                )
             }
         }
     }
@@ -53,6 +63,11 @@ fn main() -> Result<()> {
         }
         Err(e) => return Err(e.into()),
     };
+    // the launch flag wins over [safety].approval_mode for this run only —
+    // it is a per-invocation override, never written back to the config
+    if let Some(mode) = approval {
+        cfg.safety.approval_mode = mode;
+    }
     for note in cfg.apply_project_overrides(&project_root) {
         eprintln!("warning: {note}");
     }

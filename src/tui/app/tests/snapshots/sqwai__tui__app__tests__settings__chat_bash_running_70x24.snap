@@ -1,6 +1,6 @@
 ---
 source: src/tui/app/tests/settings.rs
-assertion_line: 754
+assertion_line: 755
 expression: s
 ---
 
@@ -25,4 +25,4 @@ expression: s
 
 
 ›
- ACT                                                     0% (0) m off
+ ACT  AUTO                                               0% (0) m off

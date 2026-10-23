@@ -4,8 +4,14 @@ use super::{
 };
 use crate::agent::tools::{self, ToolCtx};
 use crate::agent::{checkpoints, safety};
+use crate::config::ApprovalMode;
 use crate::providers::ToolCallReq;
 use tokio::sync::mpsc;
+
+/// Reason shown for commands and calls that only ask because the session
+/// runs in Ask mode. Grants earned under it cover the same reason, so one
+/// "always allow this session" answer still silences the repeats.
+const ASK_MODE_REASON: &str = "ask mode";
 
 pub(crate) async fn ask_user(
     call: &ToolCallReq,
@@ -324,6 +330,7 @@ pub(crate) async fn bash_call(
     blocked: &[(String, regex::Regex)],
     next_id: &mut u64,
     subagent_depth: u8,
+    approval: ApprovalMode,
     journal: &mut Option<crate::agent::journal::Journal>,
 ) -> tools::Outcome {
     let command = call.args["command"].as_str().unwrap_or("").to_string();
@@ -371,6 +378,15 @@ pub(crate) async fn bash_call(
             safety::Verdict::NeedsApproval(reason) => Some(reason.to_string()),
         };
 
+    // Subagents cannot prompt, so Ask mode would deny them every command
+    // outright. The classifier's judgment (Auto) is the floor for
+    // non-interactive runs; Full still lifts the prompt entirely.
+    let mode = if subagent_depth > 0 && approval == ApprovalMode::Ask {
+        ApprovalMode::Auto
+    } else {
+        approval
+    };
+
     // 1b. trust gate: external taint + an egress-shaped command
     // needs the same approval with a trust reason; headless contexts deny
     // instead. Runs after the safety verdict so a Blocked command never
@@ -398,51 +414,62 @@ pub(crate) async fn bash_call(
         }
     }
 
-    if let Some(reason) = &needs_approval {
-        if !grants_cover_command(always_allow, &command, reason) {
-            if subagent_depth > 0 {
-                return tools::Outcome::err(format!(
-                    "dangerous command requires user approval, but subagents cannot prompt for approval ({reason})"
-                ));
+    // Ask mode: every command is confirmed, even one the classifier calls
+    // safe. Grants still cover the repeats — that is what keeps Ask livable.
+    if mode == ApprovalMode::Ask && needs_approval.is_none() {
+        needs_approval = Some(ASK_MODE_REASON.to_string());
+    }
+
+    // Full mode runs everything the hard gates let through without a
+    // dialog; `needs_approval` stays set so the pre-run checkpoint still
+    // insures the dangerous ones.
+    if let Some(reason) = &needs_approval
+        && mode != ApprovalMode::Full
+        && !grants_cover_command(always_allow, &command, reason)
+    {
+        if subagent_depth > 0 {
+            return tools::Outcome::err(format!(
+                "dangerous command requires user approval, but subagents cannot prompt for approval ({reason})"
+            ));
+        }
+        let id = *next_id;
+        *next_id += 1;
+        if tx
+            .send(AgentEvent::Approval {
+                id,
+                subject: command.clone(),
+                reason: reason.to_string(),
+                grant: safety::session_grant_preview(&command),
+            })
+            .await
+            .is_err()
+        {
+            return tools::Outcome::err("tui closed awaiting approval");
+        }
+        let decision = loop {
+            match ctl.recv().await {
+                Some(ControlMsg::ApprovalAnswer { id: aid, decision }) if aid == id => {
+                    break decision;
+                }
+                Some(_) => continue,
+                None => return tools::Outcome::err("agent cancelled awaiting approval"),
             }
-            let id = *next_id;
-            *next_id += 1;
-            if tx
-                .send(AgentEvent::Approval {
-                    id,
-                    command: command.clone(),
-                    reason: reason.to_string(),
-                })
-                .await
-                .is_err()
-            {
-                return tools::Outcome::err("tui closed awaiting approval");
+        };
+        match decision {
+            ApprovalDecision::Deny => {
+                return tools::Outcome::err(format!("command denied by user ({reason})"));
             }
-            let decision = loop {
-                match ctl.recv().await {
-                    Some(ControlMsg::ApprovalAnswer { id: aid, decision }) if aid == id => {
-                        break decision;
-                    }
-                    Some(_) => continue,
-                    None => return tools::Outcome::err("agent cancelled awaiting approval"),
+            // The user looked at this egress shape and said yes: journal
+            // it so the same kind passes for the rest of the session.
+            ApprovalDecision::AlwaysSession => {
+                if let (Some(kind), Some(writer)) = (taint_kind, journal.as_mut()) {
+                    crate::agent::trust::ack_egress(writer, kind);
                 }
-            };
-            match decision {
-                ApprovalDecision::Deny => {
-                    return tools::Outcome::err(format!("command denied by user ({reason})"));
-                }
-                // The user looked at this egress shape and said yes: journal
-                // it so the same kind passes for the rest of the session.
-                ApprovalDecision::AlwaysSession => {
-                    if let (Some(kind), Some(writer)) = (taint_kind, journal.as_mut()) {
-                        crate::agent::trust::ack_egress(writer, kind);
-                    }
-                    always_allow.push(Grant::from_command(&command, reason));
-                }
-                ApprovalDecision::RunOnce => {
-                    if let (Some(kind), Some(writer)) = (taint_kind, journal.as_mut()) {
-                        crate::agent::trust::ack_egress(writer, kind);
-                    }
+                always_allow.push(Grant::from_command(&command, reason));
+            }
+            ApprovalDecision::RunOnce => {
+                if let (Some(kind), Some(writer)) = (taint_kind, journal.as_mut()) {
+                    crate::agent::trust::ack_egress(writer, kind);
                 }
             }
         }
@@ -486,6 +513,57 @@ pub(crate) async fn bash_call(
         }
     }
     outcome
+}
+
+/// Ask-mode confirmation for one mutating tool call (edit/write/patch/
+/// git_commit/…). `None` means approved — run the call; `Some` is the
+/// final outcome (denied). An AlwaysSession answer grants the whole tool
+/// for the session (`edit *`), which is coarser than a bash grant but
+/// honest: the next edit of the same file or a different one is exactly
+/// what the user said yes to.
+pub(crate) async fn tool_approval(
+    call: &ToolCallReq,
+    tx: &mpsc::Sender<AgentEvent>,
+    ctl: &mut mpsc::Receiver<ControlMsg>,
+    next_id: &mut u64,
+    tool_grants: &mut Vec<String>,
+) -> Option<tools::Outcome> {
+    let subject = match tools::call_summary(&call.name, &call.args) {
+        summary if summary.is_empty() => call.name.clone(),
+        summary => format!("{} {summary}", call.name),
+    };
+    let id = *next_id;
+    *next_id += 1;
+    if tx
+        .send(AgentEvent::Approval {
+            id,
+            subject,
+            reason: ASK_MODE_REASON.to_string(),
+            grant: format!("{} *", call.name),
+        })
+        .await
+        .is_err()
+    {
+        return Some(tools::Outcome::err("tui closed awaiting approval"));
+    }
+    let decision = loop {
+        match ctl.recv().await {
+            Some(ControlMsg::ApprovalAnswer { id: aid, decision }) if aid == id => break decision,
+            Some(_) => continue,
+            None => return Some(tools::Outcome::err("agent cancelled awaiting approval")),
+        }
+    };
+    match decision {
+        ApprovalDecision::Deny => Some(tools::Outcome::err(format!(
+            "{} call denied by user (ask mode)",
+            call.name
+        ))),
+        ApprovalDecision::AlwaysSession => {
+            tool_grants.push(call.name.clone());
+            None
+        }
+        ApprovalDecision::RunOnce => None,
+    }
 }
 
 /// Execute a tool handler on a dedicated blocking thread.

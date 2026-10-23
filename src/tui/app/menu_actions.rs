@@ -13,6 +13,12 @@ impl App {
             MenuAction::None => {}
             MenuAction::Back => self.menu_back(),
             MenuAction::DecideApproval(decision) => self.approval_decide(decision),
+            MenuAction::EnableFullAccess => {
+                // the dialog is the only road in, and its Esc/cancel path
+                // never reaches here — enabling is the deliberate Enter
+                self.close_interaction();
+                self.set_approval_mode(crate::config::ApprovalMode::Full);
+            }
             MenuAction::OpenModelEffort(model) => self.open_menu(Menu::Effort { model }),
             MenuAction::OpenModelField(field) => {
                 if let Some(Menu::EditModel { provider, key }) = self.cur_menu().cloned() {

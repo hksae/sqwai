@@ -58,8 +58,12 @@ impl App {
             Menu::ContextView => self.build_context_view_rows(),
             Menu::AskUser { questions, .. } => self.build_ask_user_rows(&questions),
             Menu::Approval {
-                command, reason, ..
-            } => self.build_approval_rows(command, &reason),
+                subject,
+                reason,
+                grant,
+                ..
+            } => self.build_approval_rows(subject, &reason, &grant),
+            Menu::ConfirmFullAccess => self.build_confirm_full_access_rows(),
             Menu::AskFree { .. } => {}
             Menu::Plan => self.build_plan_rows(),
             Menu::Skills => self.build_skills_rows(),
@@ -1228,20 +1232,19 @@ impl App {
             Some("enter: confirm · click: select · tab: next question · esc: skip".into());
     }
 
-    fn build_approval_rows(&mut self, command: String, reason: &str) {
-        let preview = crate::agent::safety::session_grant_preview(&command);
-        let single_line = !command.contains('\n') && command.chars().count() <= 68;
+    fn build_approval_rows(&mut self, subject: String, reason: &str, grant: &str) {
+        let single_line = !subject.contains('\n') && subject.chars().count() <= 68;
         if single_line {
             self.menu_rows.push(row(
                 Line::from(vec![
-                    Span::styled(command, Theme::WARN()),
+                    Span::styled(subject, Theme::WARN()),
                     Span::styled(format!(" ({reason})"), Theme::dim()),
                 ]),
                 MenuAction::None,
             ));
         } else {
             let mut wrapped: Vec<String> = Vec::new();
-            for raw_line in command.lines() {
+            for raw_line in subject.lines() {
                 if raw_line.is_empty() {
                     continue;
                 }
@@ -1283,14 +1286,47 @@ impl App {
             "always allow this session".to_string(),
             Theme::base(),
         )];
-        if !preview.is_empty() {
-            always_spans.push(Span::styled(format!(" ({preview})"), Theme::dim()));
+        if !grant.is_empty() {
+            always_spans.push(Span::styled(format!(" ({grant})"), Theme::dim()));
         }
         self.menu_rows.push(row(
             Line::from(always_spans),
             MenuAction::DecideApproval(ApprovalDecision::AlwaysSession),
         ));
         self.menu_footer_text = Some("enter: confirm · esc: deny".into());
+    }
+
+    fn build_confirm_full_access_rows(&mut self) {
+        self.menu_rows.push(row(
+            Line::from(vec![Span::styled(
+                "the agent will run every command and edit without asking",
+                Theme::dim(),
+            )]),
+            MenuAction::None,
+        ));
+        self.menu_rows.push(row(
+            Line::from(vec![Span::styled(
+                "blocked patterns and host-owned paths stay protected; undo checkpoints stay on",
+                Theme::dim(),
+            )]),
+            MenuAction::None,
+        ));
+        self.menu_rows.push(row(Line::default(), MenuAction::None));
+        self.menu_rows.push(row(
+            Line::from(vec![Span::styled(
+                "cancel".to_string(),
+                Theme::base(),
+            )]),
+            MenuAction::Back,
+        ));
+        self.menu_rows.push(row(
+            Line::from(vec![Span::styled(
+                "enable full access".to_string(),
+                Theme::ERR(),
+            )]),
+            MenuAction::EnableFullAccess,
+        ));
+        self.menu_footer_text = Some("enter: confirm · esc: cancel".into());
     }
 
     fn build_plan_rows(&mut self) {

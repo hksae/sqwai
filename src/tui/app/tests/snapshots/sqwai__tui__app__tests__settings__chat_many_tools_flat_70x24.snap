@@ -1,6 +1,6 @@
 ---
 source: src/tui/app/tests/settings.rs
-assertion_line: 827
+assertion_line: 828
 expression: s
 ---
    [CWD]
@@ -25,4 +25,4 @@ expression: s
  Completed with one error.
 
 ›
- ACT                                                     0% (0) m off
+ ACT  AUTO                                               0% (0) m off

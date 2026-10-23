@@ -141,7 +141,9 @@ impl App {
                     // repeated Press, and only the Release tells a hold
                     // apart from real presses. No Tab arm below ever sees
                     // a Release, so their matching is unchanged.
-                    if matches!(k.code, KeyCode::Tab) && k.kind == KeyEventKind::Release {
+                    if matches!(k.code, KeyCode::Tab | KeyCode::BackTab)
+                        && k.kind == KeyEventKind::Release
+                    {
                         self.tab_held = false;
                         continue;
                     }
@@ -611,7 +613,9 @@ impl App {
                         }
                         // plan/act is switched by the user only.
                         KeyCode::Tab
-                            if self.menu_stack.is_empty() && self.active_ask_seg().is_none() =>
+                            if !shift
+                                && self.menu_stack.is_empty()
+                                && self.active_ask_seg().is_none() =>
                         {
                             // first Press after a Release toggles instantly —
                             // no debounce window, no delay. Repeats while
@@ -621,6 +625,27 @@ impl App {
                                 let next = self.mode.toggle();
                                 self.set_mode(next);
                             }
+                        }
+                        // Shift+Tab cycles the approval axis (ask → auto →
+                        // full → ask) while nothing else owns the key. Both
+                        // encodings are matched: most terminals send
+                        // BackTab, some report Tab with a SHIFT modifier.
+                        // Held repeats are suppressed like Tab's.
+                        KeyCode::BackTab
+                        | KeyCode::Tab
+                            if shift
+                                && self.menu_stack.is_empty()
+                                && self.active_ask_seg().is_none() =>
+                        {
+                            if !self.tab_held {
+                                self.tab_held = true;
+                                self.cycle_approval_mode();
+                            }
+                        }
+                        // BackTab mirrors Shift+Tab inside menus and the
+                        // inline ask, where Tab+SHIFT is already handled.
+                        KeyCode::BackTab if !self.menu_stack.is_empty() => {
+                            self.menu_nav(-1)
                         }
                         KeyCode::Tab if matches!(self.cur_menu(), Some(Menu::AskUser { .. })) => {
                             if let Some(Menu::AskUser { questions, .. }) = self.cur_menu() {

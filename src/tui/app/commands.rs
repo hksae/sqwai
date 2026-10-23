@@ -67,9 +67,12 @@ impl App {
                 } else if rest.split_whitespace().nth(1) == Some("approval") {
                     self.open_menu(Menu::Approval {
                         id: 0,
-                        command: "git reset --hard HEAD~1".into(),
+                        subject: "git reset --hard HEAD~1".into(),
                         reason: "destructive git command".into(),
+                        grant: "git reset *".into(),
                     });
+                } else if rest.split_whitespace().nth(1) == Some("full_access") {
+                    self.open_menu(Menu::ConfirmFullAccess);
                 } else if rest.split_whitespace().nth(1) == Some("churn") {
                     self.start_test_churn();
                 } else {
@@ -360,6 +363,51 @@ impl App {
         self.mode = mode;
         self.mode_blend = Some((from, Instant::now()));
         self.dirty = true;
+    }
+
+    /// Switch the approval axis (ask/auto/full) through the same funnel:
+    /// sweep from the displayed color, and a transcript line records the
+    /// change — the chip flashes once, the line is what still says the
+    /// mode ten minutes later.
+    pub(super) fn set_approval_mode(&mut self, mode: crate::config::ApprovalMode) {
+        if mode == self.approval_mode {
+            return;
+        }
+        let from = self.approval_chip_rgb(Instant::now());
+        let what = format!(
+            "approval: {} → {}",
+            self.approval_mode.as_str(),
+            mode.as_str()
+        );
+        self.approval_mode = mode;
+        self.approval_blend = Some((from, Instant::now()));
+        self.push_segment(Segment::Status {
+            text: what.clone(),
+            kind: if mode == crate::config::ApprovalMode::Full {
+                StatusKind::Warn
+            } else {
+                StatusKind::Ok
+            },
+            expanded: true,
+            transient: false,
+        });
+        self.status(&what, StatusKind::Info);
+        self.dirty = true;
+    }
+
+    /// Shift+Tab: cycle ask → auto → full → ask. Entering full access is
+    /// gated behind the confirm dialog (a held key must not be able to
+    /// grant it); leaving it is always immediate. In PLAN the axis is moot
+    /// — mutations are refused outright — so the key is a deliberate no-op
+    /// there rather than arming a mode the user cannot see acting.
+    pub(super) fn cycle_approval_mode(&mut self) {
+        if self.mode != Mode::Act {
+            return;
+        }
+        match self.approval_mode.cycle_next() {
+            crate::config::ApprovalMode::Full => self.open_menu(Menu::ConfirmFullAccess),
+            next => self.set_approval_mode(next),
+        }
     }
 
     fn sample_test_plan() -> plan::Plan {

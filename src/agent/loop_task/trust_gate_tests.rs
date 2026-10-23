@@ -54,6 +54,7 @@ async fn trust_gate_denies_egress_for_subagents_under_taint() {
         &[],
         &mut next_id,
         1,
+        crate::config::ApprovalMode::Auto,
         &mut None,
     )
     .await;
@@ -91,6 +92,7 @@ async fn trust_gate_inherits_parent_taint_for_a_fresh_child_session() {
         &[],
         &mut next_id,
         1,
+        crate::config::ApprovalMode::Auto,
         &mut None,
     )
     .await;
@@ -164,6 +166,7 @@ async fn safe_mutating_bash_on_clean_tree_skips_snapshot_but_stays_revertible() 
         &[],
         &mut next_id,
         0,
+        crate::config::ApprovalMode::Auto,
         &mut None,
     )
     .await;
@@ -216,6 +219,7 @@ async fn trust_gate_stays_quiet_without_taint() {
         &[],
         &mut next_id,
         0,
+        crate::config::ApprovalMode::Auto,
         &mut None,
     )
     .await;
@@ -250,6 +254,7 @@ async fn trust_gate_prompts_with_reason_and_honors_deny() {
         &[],
         &mut next_id,
         0,
+        crate::config::ApprovalMode::Auto,
         &mut no_journal,
     );
     tokio::pin!(future);
@@ -306,6 +311,7 @@ async fn an_approved_egress_kind_does_not_ask_again() {
             &[],
             &mut next_id,
             0,
+            crate::config::ApprovalMode::Auto,
             &mut journal,
         );
         let mut asked = false;
@@ -351,6 +357,7 @@ async fn an_approved_egress_kind_does_not_ask_again() {
             &[],
             &mut next_id,
             0,
+            crate::config::ApprovalMode::Auto,
             &mut journal,
         );
         let mut asked_again = false;
@@ -427,4 +434,173 @@ fn a_grant_follows_the_shape_of_the_risk() {
         !sudo_grant.covers("sudo rm /etc/passwd", "privilege/system control"),
         "sudo grant must never wildcard inner arguments"
     );
+}
+
+/// Ask mode confirms every command, even one the classifier calls safe.
+#[tokio::test]
+async fn ask_mode_prompts_even_for_a_safe_command() {
+    let dir = std::env::temp_dir().join(format!("sqwai-ask-mode-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let session = "ask-sess".to_string();
+    let (tx_agent, mut rx_ui) = tokio::sync::mpsc::channel(8);
+    let (tx_ui, mut rx_agent) = tokio::sync::mpsc::channel(8);
+    let call = ToolCallReq::new("c1", "bash", serde_json::json!({"command": "echo hi"}));
+    let mut ctx = tools::ToolCtx::new(&dir).in_session(session.clone());
+    let mut always_allow = Vec::new();
+    let mut next_id = 0u64;
+    let mut no_journal: Option<crate::agent::journal::Journal> = None;
+    let future = bash_call(
+        &call,
+        &mut ctx,
+        &tx_agent,
+        &mut rx_agent,
+        &mut always_allow,
+        &[],
+        &mut next_id,
+        0,
+        crate::config::ApprovalMode::Ask,
+        &mut no_journal,
+    );
+    // the block scope drops the pinned future (and its borrows) before
+    // the assertions look at `always_allow`
+    let asked = {
+        tokio::pin!(future);
+        let mut asked = false;
+        loop {
+            tokio::select! {
+                out = &mut future => {
+                    assert!(out.ok, "echo hi must run once answered: {}", out.output);
+                    break;
+                }
+                ev = rx_ui.recv() => {
+                    if let Some(AgentEvent::Approval { id, subject, .. }) = ev {
+                        asked = true;
+                        assert_eq!(subject, "echo hi");
+                        tx_ui
+                            .send(ControlMsg::ApprovalAnswer {
+                                id,
+                                decision: ApprovalDecision::RunOnce,
+                            })
+                            .await
+                            .unwrap();
+                    }
+                }
+            }
+        }
+        asked
+    };
+    assert!(asked, "a safe command still asks in ask mode");
+    assert!(always_allow.is_empty(), "run once earns no grant");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Full access runs a classifier-flagged command with no dialog at all —
+/// and the checkpoint insurance stays armed (the snapshot is what the
+/// dangerous ones lose when the prompt goes).
+#[tokio::test]
+async fn full_mode_runs_the_dangerous_command_without_asking() {
+    let dir = std::env::temp_dir().join(format!("sqwai-full-mode-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("victim")).unwrap();
+    std::fs::write(dir.join("victim/f.txt"), "x").unwrap();
+    let session = "full-sess".to_string();
+    let (tx_agent, mut rx_ui) = tokio::sync::mpsc::channel(8);
+    let (_tx_ui, mut rx_agent) = tokio::sync::mpsc::channel(8);
+    let call = ToolCallReq::new(
+        "c1",
+        "bash",
+        serde_json::json!({"command": format!("rm -rf \"{}\"", dir.join("victim").display())}),
+    );
+    let mut ctx = tools::ToolCtx::new(&dir).in_session(session);
+    let mut always_allow = Vec::new();
+    let mut next_id = 0u64;
+    let mut no_journal: Option<crate::agent::journal::Journal> = None;
+    let outcome = bash_call(
+        &call,
+        &mut ctx,
+        &tx_agent,
+        &mut rx_agent,
+        &mut always_allow,
+        &[],
+        &mut next_id,
+        0,
+        crate::config::ApprovalMode::Full,
+        &mut no_journal,
+    )
+    .await;
+    assert!(outcome.ok, "full mode runs it: {}", outcome.output);
+    assert!(
+        !dir.join("victim").exists(),
+        "the command really executed"
+    );
+    while let Ok(ev) = rx_ui.try_recv() {
+        assert!(
+            !matches!(ev, AgentEvent::Approval { .. }),
+            "full mode must not ask"
+        );
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Full access lifts prompts only: the deny-side gates — blocked patterns
+/// and host-owned paths — keep refusing exactly as before.
+#[tokio::test]
+async fn full_mode_keeps_the_hard_gates() {
+    let dir = std::env::temp_dir().join(format!("sqwai-full-gate-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let session = "full-gate-sess".to_string();
+    let (tx_agent, _rx_ui) = tokio::sync::mpsc::channel(8);
+    let (_tx_ui, mut rx_agent) = tokio::sync::mpsc::channel(8);
+    let call = ToolCallReq::new(
+        "c1",
+        "bash",
+        serde_json::json!({"command": "rm -rf .sqwai"}),
+    );
+    let mut ctx = tools::ToolCtx::new(&dir).in_session(session);
+    let blocked = vec![("no-forever".to_string(), regex::Regex::new("forever").unwrap())];
+    // blocked pattern wins even in full
+    let mut next_id = 0u64;
+    let mut no_journal: Option<crate::agent::journal::Journal> = None;
+    let call_hit = ToolCallReq::new(
+        "c0",
+        "bash",
+        serde_json::json!({"command": "echo forever"}),
+    );
+    let outcome = bash_call(
+        &call_hit,
+        &mut ctx,
+        &tx_agent,
+        &mut rx_agent,
+        &mut Vec::new(),
+        &blocked,
+        &mut next_id,
+        0,
+        crate::config::ApprovalMode::Full,
+        &mut no_journal,
+    )
+    .await;
+    assert!(!outcome.ok, "blocked_patterns hold in full mode");
+    assert!(outcome.output.contains("no-forever"));
+    // host-owned path wins even in full
+    let outcome = bash_call(
+        &call,
+        &mut ctx,
+        &tx_agent,
+        &mut rx_agent,
+        &mut Vec::new(),
+        &[],
+        &mut next_id,
+        0,
+        crate::config::ApprovalMode::Full,
+        &mut no_journal,
+    )
+    .await;
+    assert!(
+        !outcome.ok && outcome.output.contains("protected"),
+        "the .sqwai/ paths stay protected in full mode: {}",
+        outcome.output
+    );
+    std::fs::remove_dir_all(&dir).ok();
 }

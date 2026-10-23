@@ -78,6 +78,7 @@ impl App {
                 | Some(Menu::EditSessionTitle { .. })
                 | Some(Menu::ConfirmDelete { .. })
                 | Some(Menu::Approval { .. })
+                | Some(Menu::ConfirmFullAccess)
                 | Some(Menu::Skills)
                 | Some(Menu::SkillView { .. })
         ) {
@@ -751,6 +752,7 @@ impl App {
             Some(Menu::Sessions) => (1, dyn_win, "sessions"),
             Some(Menu::Skills) => (1, dyn_win, "skills"),
             Some(Menu::ConfirmDelete { .. }) => (2, 2, ""),
+            Some(Menu::ConfirmFullAccess) => (self.menu_rows.len().saturating_sub(2), 2, ""),
             Some(Menu::Approval { .. }) => (self.menu_rows.len().saturating_sub(3), 3, ""),
             Some(
                 Menu::EditModelField { .. }
@@ -826,6 +828,10 @@ impl App {
                 ("esc", "back".to_string()),
             ],
             Some(Menu::ConfirmDelete { .. }) => vec![
+                ("enter", "confirm".to_string()),
+                ("esc", "cancel".to_string()),
+            ],
+            Some(Menu::ConfirmFullAccess) => vec![
                 ("enter", "confirm".to_string()),
                 ("esc", "cancel".to_string()),
             ],
@@ -1086,11 +1092,11 @@ impl App {
                 let mut spans: Vec<Span> = if i == 0
                     && head == 2
                     && let Some(Menu::Approval {
-                        command, reason, ..
+                        subject, reason, ..
                     }) = slf.cur_menu()
                 {
                     let mut s =
-                        crate::tui::shimmer::shimmer_warn_spans(command, slf.spinner_tick);
+                        crate::tui::shimmer::shimmer_warn_spans(subject, slf.spinner_tick);
                     s.push(Span::styled(format!(" ({reason})"), Theme::dim()));
                     s
                 } else if i < head.saturating_sub(2)
@@ -1308,7 +1314,13 @@ impl App {
         self.md_click = None;
         self.ctx_click = None;
 
-        let left_base_cols = cols(&format!(" {} ", self.mode.label()));
+        // Two chips, no separator glyph: the padding inside each is the
+        // gap. The mode chip answers "read-only or full", the approval
+        // chip "who approves" — separate axes, separate keys (Tab,
+        // Shift+Tab), so both are always visible even in PLAN.
+        let mode_chip = format!(" {} ", self.mode.label());
+        let approval_chip = format!(" {} ", self.approval_mode.label());
+        let left_base_cols = cols(&mode_chip) + cols(&approval_chip);
         let fixed_len: usize = cols(&ctx_label) + 1 + cols(&model_label) + 1 + cols(&ef_label) + 1;
 
         let lw = left_base_cols as u16;
@@ -1327,7 +1339,25 @@ impl App {
             }
             _ => chip_settled,
         };
-        let mut spans = vec![Span::styled(format!(" {} ", self.mode.label()), chip_style)];
+        let approval_settled = match self.approval_mode {
+            ApprovalMode::Ask => Theme::mode_chip_ask(),
+            ApprovalMode::Auto => Theme::mode_chip_auto(),
+            ApprovalMode::Full => Theme::mode_chip_full(),
+        };
+        let approval_style = match self.approval_blend {
+            Some((_, t0))
+                if t0.elapsed().as_millis() < MODE_BLEND_MS as u128
+                    && crate::tui::shimmer::has_truecolor() =>
+            {
+                let (r, g, b) = self.approval_chip_rgb(std::time::Instant::now());
+                Style::new().fg(Color::Rgb(r, g, b))
+            }
+            _ => approval_settled,
+        };
+        let mut spans = vec![
+            Span::styled(mode_chip, chip_style),
+            Span::styled(approval_chip, approval_style),
+        ];
         let pad = (w as usize).saturating_sub(lw as usize + right_len);
         let ctx_cols = cols(&ctx_label) as u16;
         let model_x0 = lw + pad as u16 + ctx_cols + 1;

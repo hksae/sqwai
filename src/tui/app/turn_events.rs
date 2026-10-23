@@ -391,13 +391,15 @@ impl App {
             }
             AgentEvent::Approval {
                 id,
-                command,
+                subject,
                 reason,
+                grant,
             } => {
                 self.open_menu(Menu::Approval {
                     id,
-                    command,
+                    subject,
                     reason,
+                    grant,
                 });
                 self.dirty = true;
             }
@@ -755,6 +757,9 @@ impl App {
     }
 
     pub(super) fn finish_turn_ok(&mut self, outcome: AgentOutcome) {
+        // Grants earned this turn belong to the session, not the run: keep
+        // them for the next submit ("always allow this session").
+        self.approval_grants = outcome.approval_grants;
         if outcome.messages.len() < self.session.messages.len() {
             self.session
                 .rebase_turn_attachments(self.session.messages.len() - outcome.messages.len());
@@ -815,7 +820,12 @@ impl App {
         let gallery = brand
             || matches!(
                 self.cur_menu(),
-                Some(Menu::TestAnim | Menu::Approval { .. } | Menu::ConfirmDelete { .. })
+                Some(
+                    Menu::TestAnim
+                        | Menu::Approval { .. }
+                        | Menu::ConfirmDelete { .. }
+                        | Menu::ConfirmFullAccess,
+                )
             );
         let mode = self
             .mode_blend

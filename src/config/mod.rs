@@ -109,6 +109,56 @@ impl EffortLevel {
     }
 }
 
+/// When the agent asks the user before acting. Orthogonal to the TUI's
+/// PLAN/ACT axis (PLAN refuses mutations outright, whatever this says);
+/// this axis answers "when does a tool call need a confirmation dialog".
+/// It governs prompts only: the hard gates — `[safety].blocked_patterns`,
+/// host-owned paths, the path jail, the SSRF allowlist — hold in every
+/// mode, full access included.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ApprovalMode {
+    /// Every bash command and every mutating tool call is confirmed by
+    /// the user; read-only tools run freely. Subagents cannot prompt and
+    /// keep the classifier's judgment instead of blocking on every call.
+    Ask,
+    /// The safety classifier decides: risky bash asks, everything else
+    /// runs. This is the behavior the app has always had.
+    #[default]
+    Auto,
+    /// Nothing asks. Dangerous commands run without a dialog — the undo
+    /// checkpoints still insure them, and the deny-side gates still block.
+    Full,
+}
+
+impl ApprovalMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Ask => "ask",
+            Self::Auto => "auto",
+            Self::Full => "full",
+        }
+    }
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "ask" => Some(Self::Ask),
+            "auto" => Some(Self::Auto),
+            "full" | "full_access" => Some(Self::Full),
+            _ => None,
+        }
+    }
+    /// Shift+Tab cycle order: the escalation ladder ask → auto → full.
+    /// Entering full is the UI's business (it confirms first); the order
+    /// itself is the mode's semantics, so it lives here.
+    pub fn cycle_next(self) -> Self {
+        match self {
+            Self::Ask => Self::Auto,
+            Self::Auto => Self::Full,
+            Self::Full => Self::Ask,
+        }
+    }
+}
+
 fn is_false(b: &bool) -> bool {
     !*b
 }
@@ -829,6 +879,11 @@ fn write_meta(today: &str, now_ts: u64, etag: Option<String>) {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SafetyConfig {
+    /// When tool calls need a confirmation dialog (`ask`, `auto`, `full`).
+    /// Not project-overridable: a cloned repository must not be able to
+    /// widen the host's own approval policy.
+    #[serde(default)]
+    pub approval_mode: ApprovalMode,
     #[serde(default)]
     #[allow(dead_code)]
     pub blocked_patterns: Vec<String>,

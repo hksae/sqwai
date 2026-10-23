@@ -1,5 +1,6 @@
 ---
 source: src/tui/app/tests/settings.rs
+assertion_line: 723
 expression: s
 ---
  › Do many things.
@@ -31,4 +32,4 @@ expression: s
  All done!
 
 ›
- ACT                                                                                   0% (0) m off
+ ACT  AUTO                                                                             0% (0) m off

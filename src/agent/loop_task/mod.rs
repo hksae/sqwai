@@ -11,7 +11,7 @@ use std::time::Instant;
 use sha2::Digest;
 use tokio::sync::mpsc;
 
-use crate::config::EffortLevel;
+use crate::config::{ApprovalMode, EffortLevel};
 use crate::providers::{
     ChatRequest, Message, RequestBreakdown, Role, SharedProvider, SystemPart, ToolCallReq, Usage,
 };
@@ -20,7 +20,7 @@ use crate::agent::checkpoints;
 use crate::agent::context;
 use crate::agent::tools::{self, ToolCtx};
 use crate::plan;
-use loop_ask::{ask_user, bash_call, run_tool_blocking};
+use loop_ask::{ask_user, bash_call, run_tool_blocking, tool_approval};
 use loop_compact::{
     CompactionPrefix, compact_history, effort_ignored_reason, plan_hint_for_summary,
     record_compaction, turn_shows_no_reasoning,
@@ -68,6 +68,22 @@ pub enum ApprovalDecision {
     Deny,
 }
 
+/// "Always allow this session" answers, kept for the life of the session.
+///
+/// `run_agent` is spawned per user submit, so the grants cannot live inside
+/// it: the TUI stores this value between runs (in with [`AgentInput`], out
+/// with [`AgentOutcome`]) — that is what makes "this session" true. Opaque
+/// on purpose: the TUI never inspects the matching rules, it only holds the
+/// box. Subagents run with an empty set; they cannot answer a prompt, so
+/// they cannot earn grants.
+#[derive(Debug, Clone, Default)]
+pub struct SessionGrants {
+    /// bash grants: structured command shapes (`git push *`, `rm -rf target`)
+    pub(crate) bash: Vec<loop_ask::Grant>,
+    /// mutating tools approved wholesale for the session (`edit`)
+    pub(crate) tools: Vec<String>,
+}
+
 /// what a finished agent hands back to the TUI
 #[derive(Debug)]
 pub struct AgentOutcome {
@@ -81,6 +97,9 @@ pub struct AgentOutcome {
     pub plan_todos: Vec<String>,
     /// (sha, label) checkpoints created by this run's mutations
     pub journal: Vec<(String, String)>,
+    /// approval grants earned during this run, so "always allow this
+    /// session" survives the turn that earned it
+    pub approval_grants: SessionGrants,
 }
 
 #[derive(Debug)]
@@ -169,11 +188,15 @@ pub enum AgentEvent {
     StepCurrent {
         step: Option<String>,
     },
-    /// a dangerous command needs approval; decide via ControlMsg
+    /// a command or mutating tool call needs approval; decide via
+    /// ControlMsg. `subject` is what the user reads (the shell command
+    /// line, or `tool + arguments` for a mutating tool), `grant` is the
+    /// short preview of what an AlwaysSession answer would cover.
     Approval {
         id: u64,
-        command: String,
+        subject: String,
         reason: String,
+        grant: String,
     },
     /// a shadow git or layer-1 checkpoint was taken before a mutation
     Checkpoint {
@@ -298,6 +321,12 @@ pub struct AgentInput {
     pub session_id: String,
     /// hard-blocked command patterns from [safety].blocked_patterns
     pub blocked_patterns: Vec<String>,
+    /// when tool calls need a confirmation dialog ([safety].approval_mode);
+    /// governs prompts only, the deny-side gates hold in every mode
+    pub approval_mode: crate::config::ApprovalMode,
+    /// "always allow this session" answers from earlier turns of this
+    /// session; the TUI carries them across per-turn `run_agent` spawns
+    pub approval_grants: SessionGrants,
     /// PLAN mode: read-only tools only, mutations are refused
     pub plan_mode: bool,
     /// model context limit used to enforce the plan size budget
@@ -719,6 +748,8 @@ async fn run_agent(
         root,
         session_id,
         blocked_patterns,
+        approval_mode,
+        approval_grants,
         web_allow_hosts,
         plan_mode,
         mut context_limit,
@@ -901,6 +932,9 @@ async fn run_agent(
                 todos: Vec::new(),
                 plan_todos: Vec::new(),
                 journal: Vec::new(),
+                // compaction runs no tool calls, so the grants pass
+                // through exactly as they arrived
+                approval_grants,
             })))
             .await;
         return;
@@ -1004,7 +1038,11 @@ async fn run_agent(
                 .collect()
         })
         .unwrap_or_default();
-    let mut always_allow: Vec<loop_ask::Grant> = Vec::new();
+    // Grants live in the TUI between turns (see `SessionGrants`); this run
+    // starts from whatever earlier turns earned and hands the grown set back
+    // in `AgentOutcome`.
+    let mut always_allow: Vec<loop_ask::Grant> = approval_grants.bash;
+    let mut tool_grants: Vec<String> = approval_grants.tools;
     let mut memory_writes_this_turn: u8;
     let mut next_id: u64 = 0;
     // prompt size of the last request, as reported by the provider
@@ -1481,6 +1519,7 @@ async fn run_agent(
                     &blocked_patterns,
                     &web_allow_hosts,
                     plan_mode,
+                    approval_mode,
                     context_limit,
                     vision,
                     pdf,
@@ -1666,6 +1705,27 @@ async fn run_agent(
                         "PLAN mode is read-only: '{}' is disabled. Switch to ACT to use it.",
                         call.name
                     ))
+                } else if approval_mode == ApprovalMode::Ask
+                    && subagent_depth == 0
+                    && call.name != "bash"
+                    && call.name != "plan"
+                    && tools::is_mutating_call(&call.name, &call.args)
+                    && !tool_grants.contains(&call.name)
+                {
+                    // Ask mode confirms every mutation, not only risky bash:
+                    // `bash` asks inside `bash_call` (Safe commands included),
+                    // everything mutating lands here. Subagents cannot prompt
+                    // and keep the run's existing gates instead.
+                    match tool_approval(call, &tx, &mut ctl, &mut next_id, &mut tool_grants).await
+                    {
+                        Some(outcome) => outcome,
+                        None => {
+                            ctx.current_call_id = Some(call.id.clone());
+                            let out = run_tool_blocking(&mut ctx, &call.name, &call.args).await;
+                            ctx.current_call_id = None;
+                            out
+                        }
+                    }
                 } else {
                     match call.name.as_str() {
                         "ask_user" if subagent_depth > 0 => tools::Outcome::err(
@@ -1682,6 +1742,7 @@ async fn run_agent(
                                 &blocked,
                                 &mut next_id,
                                 subagent_depth,
+                                approval_mode,
                                 &mut journal,
                             )
                             .await
@@ -1712,6 +1773,7 @@ async fn run_agent(
                                 &blocked_patterns,
                                 &web_allow_hosts,
                                 plan_mode,
+                                approval_mode,
                                 context_limit,
                                 vision,
                                 pdf,
@@ -2122,6 +2184,10 @@ async fn run_agent(
             todos,
             journal: ctx.journal,
             plan_todos,
+            approval_grants: SessionGrants {
+                bash: always_allow,
+                tools: tool_grants,
+            },
         })))
         .await;
 }

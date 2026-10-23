@@ -445,8 +445,9 @@ fn session_switch_back_to_empty_session_marks_fresh() {
 fn open_test_approval(app: &mut App) {
     app.open_menu(Menu::Approval {
         id: 7,
-        command: "rm -rf x".into(),
+        subject: "rm -rf x".into(),
         reason: "test".into(),
+        grant: "rm -rf x".into(),
     });
 }
 

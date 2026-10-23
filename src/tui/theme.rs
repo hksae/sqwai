@@ -252,6 +252,20 @@ impl Theme {
     pub fn mode_chip_plan() -> Style {
         Style::new().fg(Self::effort_color(EffortLevel::High))
     }
+    /// Approval-axis chips, the second chip in the status bar. Color shows
+    /// deviation from the norm: the default (Auto) is quiet META gray, Ask
+    /// earns the house amber (attention — the same WARN the approval
+    /// dialog paints the command with), Full earns the one red. Never bold;
+    /// in a bar this calm the hue alone carries the mode.
+    pub fn mode_chip_ask() -> Style {
+        Style::new().fg(Self::WARN())
+    }
+    pub fn mode_chip_auto() -> Style {
+        Style::new().fg(Self::META())
+    }
+    pub fn mode_chip_full() -> Style {
+        Style::new().fg(Self::ERR())
+    }
     /// Tool call head rows: calm white, so calls scan as one list. State
     /// lives in the marker shape (✓/✗/spinner) and the finish wave —
     /// not in the row color.
@@ -309,6 +323,9 @@ impl Theme {
             ("MARKER", Self::marker()),
             ("MODE_ACT", Self::mode_chip_act()),
             ("MODE_PLAN", Self::mode_chip_plan()),
+            ("MODE_ASK", Self::mode_chip_ask()),
+            ("MODE_AUTO", Self::mode_chip_auto()),
+            ("MODE_FULL", Self::mode_chip_full()),
             ("TOOL_HEAD", Self::tool_head()),
             ("SPINNER", Self::spinner()),
             ("FIELD_FOCUSED", Self::field_label_focused()),

@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use tui_textarea::TextArea;
 
 use crate::agent::loop_task::{AgentEvent, AgentHandle, ApprovalDecision, ControlMsg};
-use crate::config::{Config, EffortLevel, ModelConfig, ModelStatus};
+use crate::config::{ApprovalMode, Config, EffortLevel, ModelConfig, ModelStatus};
 use crate::plan;
 use crate::providers::{self, Role, SharedProvider};
 use crate::session::{ActivitySummary, Session, SessionHeader, TurnNote};
@@ -185,10 +185,32 @@ impl Mode {
 /// Mode-chip color sweep length: a quick flash, not a lingering animation.
 const MODE_BLEND_MS: u64 = 250;
 /// Sweep endpoints: the effort Low/High hues, so the settle frame does
-/// not pop (see `Theme::mode_chip_act/plan`) — which is why they name the
-/// theme's numbers instead of carrying their own copy.
+/// not pop (see `Theme::mode_chip_act/plan`) — which is why they name
+/// the theme's numbers instead of carrying their own copy.
 const MODE_ACT_RGB: (u8, u8, u8) = crate::tui::theme::Theme::OK_RGB;
 const MODE_PLAN_RGB: (u8, u8, u8) = (110, 165, 255);
+
+/// Approval chip (the second chip in the status bar). Sweep endpoints name
+/// the theme's verdicts so the settle frame does not pop; the AUTO gray
+/// has no house RGB — META is ANSI Gray — so the sweep uses the effort
+/// scale's Off stop (128,128,128), the palette's existing "quiet" number,
+/// and settles back onto `Theme::mode_chip_auto`.
+impl crate::config::ApprovalMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Ask => "ASK",
+            Self::Auto => "AUTO",
+            Self::Full => "FULL",
+        }
+    }
+    fn chip_rgb(self) -> (u8, u8, u8) {
+        match self {
+            Self::Ask => crate::tui::theme::Theme::WARN_RGB,
+            Self::Auto => (128, 128, 128),
+            Self::Full => crate::tui::theme::Theme::ERR_RGB,
+        }
+    }
+}
 
 const WORKING_SPINNER: [char; 6] = ['◜', '◠', '◝', '◞', '◡', '◟'];
 
@@ -305,6 +327,13 @@ pub struct App {
     /// loop emits a row every few seconds; Esc stops it.
     test_churn: Option<TestChurn>,
     mode: Mode,
+    /// Approval axis (ask/auto/full) — the second status chip, cycled with
+    /// Shift+Tab in ACT. Session-local by design: never persisted, every
+    /// launch starts from `[safety].approval_mode`.
+    approval_mode: crate::config::ApprovalMode,
+    /// "always allow this session" answers. `run_agent` is spawned per user
+    /// submit; this is the box they survive in between turns.
+    approval_grants: crate::agent::loop_task::SessionGrants,
     /// true while the current session has no user turns yet: a fresh,
     /// unsaved scratch session (never persisted until the first message)
     startup: bool,
@@ -608,6 +637,8 @@ pub struct App {
     /// re-anchors from the displayed color — rapid toggles redirect the
     /// blend instead of breaking it. Retired (→ None) past the sweep.
     mode_blend: Option<((u8, u8, u8), Instant)>,
+    /// Same sweep for the approval chip, with the same re-anchor rule.
+    approval_blend: Option<((u8, u8, u8), Instant)>,
     status_y: u16,
 
     // mouse selection
@@ -657,6 +688,7 @@ impl App {
     }
 
     pub fn new(cfg: Config, session: Session, startup: bool, read_only: bool) -> Result<Self> {
+        let approval_mode = cfg.safety.approval_mode;
         let (image_jobs_tx, image_jobs_rx) = std::sync::mpsc::channel();
         let model_key = session.model_key.clone();
         let model_cfg = cfg
@@ -745,6 +777,8 @@ impl App {
             thinking_open: false,
             thinking_idx: None,
             mode: Mode::Act,
+            approval_mode,
+            approval_grants: Default::default(),
             startup,
             last_ctrl_c: None,
             tab_held: false,
@@ -858,6 +892,7 @@ impl App {
             maintain_rx: None,
             effort_observed_ignored: None,
             mode_blend: None,
+            approval_blend: None,
             status_y: 0,
             press: None,
             press_menu_depth: None,
@@ -997,11 +1032,14 @@ impl App {
             consider(dl);
         }
 
-        // 4. Short 250ms color sweeps (mode chip / effort slider): step at
+        // 4. Short 250ms color sweeps (mode chips / effort slider): step at
         //    ~60 FPS (16ms) for smooth gradient interpolation.
         let smooth_blend = self
             .mode_blend
             .is_some_and(|(_, t0)| t0.elapsed().as_millis() < MODE_BLEND_MS as u128)
+            || self
+                .approval_blend
+                .is_some_and(|(_, t0)| t0.elapsed().as_millis() < MODE_BLEND_MS as u128)
             || self
                 .effort_blend
                 .is_some_and(|(_, t0)| t0.elapsed().as_millis() < MODE_BLEND_MS as u128);
@@ -1215,6 +1253,13 @@ impl App {
                 .is_some_and(|(_, t0)| t0.elapsed().as_millis() >= MODE_BLEND_MS as u128)
             {
                 self.mode_blend = None;
+                self.dirty = true;
+            }
+            if self
+                .approval_blend
+                .is_some_and(|(_, t0)| t0.elapsed().as_millis() >= MODE_BLEND_MS as u128)
+            {
+                self.approval_blend = None;
                 self.dirty = true;
             }
             // Retire the finished slider sweep too. Its endpoint is the
