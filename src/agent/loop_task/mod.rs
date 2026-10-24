@@ -1073,6 +1073,8 @@ async fn run_agent(
     let mut memory_writes_this_turn: u8;
     // present-tense plan nudge, at most one per model request
     let mut plan_nudged = false;
+    // "no plan at all" nudge, once per run: one reminder per user submit
+    let mut no_plan_nudged = false;
     let mut next_id: u64 = 0;
     // prompt size of the last request, as reported by the provider
     let mut prompt_size: u64 = 0;
@@ -2246,6 +2248,28 @@ async fn run_agent(
                          settled\") — before any other tool or reply.]",
                         step.id, step.id
                     ));
+                }
+                // The mirror case: mutating work running with NO plan at
+                // all. Every plan reminder presupposes an existing plan, so
+                // a session that skipped `create` (one failed first call is
+                // enough to send a model into improvise mode) never hears
+                // about plans again. Once per run, phrased as an option —
+                // quick tasks must not be bullied into planning.
+                if outcome.ok
+                    && !no_plan_nudged
+                    && subagent_depth == 0
+                    && call.name != "plan"
+                    && tools::is_mutating_call(&call.name, &call.args)
+                    && plan::open_active_for_session(&root, Some(&session_id))
+                        .map(|p| p.is_none())
+                        .unwrap_or(false)
+                {
+                    no_plan_nudged = true;
+                    outcome.output.push_str(
+                        "\n[host: this is multi-step work running without a plan. If it has \
+                         more steps ahead, track it: plan(op=\"create\", goal=\"...\", \
+                         steps=[{\"title\": \"...\"}, ...]). Skip this for a quick task.]",
+                    );
                 }
                 // Repeat handling: the first identical re-run is
                 // reported with a note, the next one loses its bytes — the note
