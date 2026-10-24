@@ -169,15 +169,35 @@ pub fn plan_block(root: &std::path::Path, session_id: Option<&str>) -> Option<St
 /// session obeyed it into a five-iteration loop: with every step already done
 /// there was nothing to continue, so "continue it" came out as "verifying,
 /// committing, and closing". Commands belong in system.md, where they are stated
-/// once as rules; a block that rides every request describes state.
+/// once as rules; a block that rides every request describes state. The one
+/// exception is the in-progress line below: it is conditional ("when its
+/// work is done") and exists only while a step is actually open, so it
+/// cannot be obeyed into busywork. The recency data is why it is worth
+/// that risk: an open step naming its own closing call at the end of the
+/// context is the strongest anti-forgetting position available.
 /// (Kept out of `render_status`, which also paints the user-facing `/plan` panel.)
 pub fn plan_status_block(root: &std::path::Path, session_id: Option<&str>) -> Option<String> {
     let plan = crate::plan::open_active_for_session(root, session_id)
         .ok()
         .flatten()?;
+    let action = plan
+        .steps
+        .iter()
+        .find(|s| s.status == crate::plan::StepStatus::InProgress)
+        .map(|step| {
+            format!(
+                "\n[step {} is in_progress. When its work is done, close it now with one plan \
+                 call — plan(op=\"finish\", id=\"{}\", summary=\"...\") — before any other tool \
+                 or reply.]",
+                step.id, step.id
+            )
+        })
+        .unwrap_or_default();
     Some(format!(
-        "<plan_status>\n{}\nThe state above is current as of this request, and the step ids are listed here.\n</plan_status>",
-        crate::plan::render_status(&plan)
+        "<plan_status>\n{}\nThe state above is current as of this request, and the step ids are listed here.{}\
+         \n</plan_status>",
+        crate::plan::render_status(&plan),
+        action
     ))
 }
 

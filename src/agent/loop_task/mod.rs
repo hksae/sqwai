@@ -1060,6 +1060,8 @@ async fn run_agent(
     let mut always_allow: Vec<loop_ask::Grant> = approval_grants.bash;
     let mut tool_grants: Vec<String> = approval_grants.tools;
     let mut memory_writes_this_turn: u8;
+    // present-tense plan nudge, at most one per model request
+    let mut plan_nudged = false;
     let mut next_id: u64 = 0;
     // prompt size of the last request, as reported by the provider
     let mut prompt_size: u64 = 0;
@@ -1123,6 +1125,9 @@ async fn run_agent(
         // The write limit applies to one model request/turn, not the whole
         // session. A new request gets a fresh allowance.
         memory_writes_this_turn = 0;
+        // the plan nudge rides at most one mutating result per model
+        // request: every result carrying it waters the next one down
+        plan_nudged = false;
         // Compaction gate. History only: the provider's full request size
         // is observed here, but the gate must use
         // what compaction can actually remove — otherwise a big fixed
@@ -2188,22 +2193,8 @@ async fn run_agent(
                     )
                 {
                     edited_since_green_bash = true;
-                    if subagent_depth == 0
-                        && let Ok(Some(active)) =
-                            plan::open_active_for_session(&root, Some(&session_id))
-                        && let Some(step) = active
-                            .steps
-                            .iter()
-                            .find(|s| s.status == plan::StepStatus::InProgress)
-                    {
-                        let total = active.steps.len();
-                        let title_short: String = step.title.chars().take(48).collect();
-                        outcome.output.push_str(&format!(
-                            "\n[active plan step {}/{total}: \"{title_short}\" — call plan(op=\"finish\", id=\"{}\", summary=\"...\") as soon as this step's work is done]",
-                            step.id, step.id
-                        ));
-                    }
-                } else if call.name == "bash" {
+                }
+                if call.name == "bash" {
                     if outcome.ok {
                         consecutive_edit_bash_failures = 0;
                         edited_since_green_bash = false;
@@ -2214,6 +2205,34 @@ async fn run_agent(
                             outcome.output.push_str(nudge);
                         }
                     }
+                }
+                // Plan nudge: present tense, ready-made call, at most one
+                // per model request. It rides any mutating result — work on
+                // a step moves through bash just as much as through edits,
+                // and the old edit-only, future-tense hint ("as soon as
+                // this step's work is done") was read as "not yet" and
+                // ignored through a whole session.
+                if outcome.ok
+                    && !plan_nudged
+                    && subagent_depth == 0
+                    && call.name != "plan"
+                    && tools::is_mutating_call(&call.name, &call.args)
+                    && let Ok(Some(active)) =
+                        plan::open_active_for_session(&root, Some(&session_id))
+                    && let Some(step) = active
+                        .steps
+                        .iter()
+                        .find(|s| s.status == plan::StepStatus::InProgress)
+                {
+                    plan_nudged = true;
+                    let total = active.steps.len();
+                    let title_short: String = step.title.chars().take(48).collect();
+                    outcome.output.push_str(&format!(
+                        "\n[plan: step {}/{total} \"{title_short}\" — if this call did the step's \
+                         work, close it now: plan(op=\"finish\", id=\"{}\", summary=\"what this \
+                         settled\") — before any other tool or reply.]",
+                        step.id, step.id
+                    ));
                 }
                 // Repeat handling: the first identical re-run is
                 // reported with a note, the next one loses its bytes — the note
