@@ -387,9 +387,12 @@ pub(crate) async fn run_turn_with_prefetch(
         }
 
         if got_delta {
-            // partial answer already streamed; a retry would duplicate it
+            // partial answer already streamed; a retry would duplicate it.
+            // Say so plainly: the upstream text often ends in its own
+            // "retry the request" advice, and the old suffix turned the
+            // line into that advice contradicting itself.
             return Err(TurnFailure::new(
-                format!("{err} — partial answer kept, not retried"),
+                format!("{err} — partial answer kept (a retry would duplicate it); ask to continue"),
                 class,
                 attempt,
             )
