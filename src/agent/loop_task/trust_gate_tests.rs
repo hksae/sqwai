@@ -768,6 +768,7 @@ async fn outside_file_write_gate_denies_and_permits() {
         &mut 0u64,
         crate::config::ApprovalMode::Auto,
         &mut Vec::new(),
+        &mut None,
     )
     .await
     .expect("denied");
@@ -793,6 +794,7 @@ async fn outside_file_write_gate_denies_and_permits() {
         &mut 0u64,
         crate::config::ApprovalMode::Full,
         &mut Vec::new(),
+        &mut None,
     )
     .await;
     assert!(gate.is_none(), "full access runs the outside write");

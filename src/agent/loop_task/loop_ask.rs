@@ -455,28 +455,18 @@ pub(crate) async fn bash_call(
                 "dangerous command requires user approval, but subagents cannot prompt for approval ({reason})"
             ));
         }
-        let id = *next_id;
-        *next_id += 1;
-        if tx
-            .send(AgentEvent::Approval {
-                id,
-                subject: command.clone(),
-                reason: reason.to_string(),
-                grant: safety::session_grant_preview(&command),
-            })
-            .await
-            .is_err()
-        {
+        let Some(decision) = approval_dialog(
+            command.clone(),
+            reason,
+            safety::session_grant_preview(&command),
+            tx,
+            ctl,
+            next_id,
+            journal,
+        )
+        .await
+        else {
             return tools::Outcome::err("tui closed awaiting approval");
-        }
-        let decision = loop {
-            match ctl.recv().await {
-                Some(ControlMsg::ApprovalAnswer { id: aid, decision }) if aid == id => {
-                    break decision;
-                }
-                Some(_) => continue,
-                None => return tools::Outcome::err("agent cancelled awaiting approval"),
-            }
         };
         match decision {
             ApprovalDecision::Deny => {
@@ -544,8 +534,11 @@ pub(crate) async fn bash_call(
     outcome
 }
 
-/// The approval dialog itself: show the subject, await one answer.
-/// `None` means the channel died (tui closed or agent cancelled).
+/// The approval dialog itself: show the subject, await one answer, and
+/// journal the decision — a live session's approvals were invisible in
+/// the journal, which made "why was the agent allowed to do that"
+/// unanswerable after the fact. `None` means the channel died (tui
+/// closed or agent cancelled).
 pub(crate) async fn approval_dialog(
     subject: String,
     reason: &str,
@@ -553,26 +546,38 @@ pub(crate) async fn approval_dialog(
     tx: &mpsc::Sender<AgentEvent>,
     ctl: &mut mpsc::Receiver<ControlMsg>,
     next_id: &mut u64,
+    journal: &mut Option<crate::agent::journal::Journal>,
 ) -> Option<ApprovalDecision> {
     let id = *next_id;
     *next_id += 1;
     tx.send(AgentEvent::Approval {
         id,
-        subject,
+        subject: subject.clone(),
         reason: reason.to_string(),
         grant,
     })
     .await
     .ok()?;
-    loop {
+    let decision = loop {
         match ctl.recv().await {
             Some(ControlMsg::ApprovalAnswer { id: aid, decision }) if aid == id => {
-                return Some(decision)
+                break decision
             }
             Some(_) => continue,
             None => return None,
         }
+    };
+    if let Some(writer) = journal.as_mut() {
+        let _ = writer.append(
+            "approval",
+            serde_json::json!({
+                "subject": subject.chars().take(200).collect::<String>(),
+                "reason": reason,
+                "decision": decision.as_str(),
+            }),
+        );
     }
+    Some(decision)
 }
 
 /// One gate for every mutating tool call — the workspace boundary and ask
@@ -595,6 +600,7 @@ pub(crate) async fn mutating_tool_gate(
     next_id: &mut u64,
     mode: ApprovalMode,
     tool_grants: &mut Vec<String>,
+    journal: &mut Option<crate::agent::journal::Journal>,
 ) -> Option<tools::Outcome> {
     let name = call.name.as_str();
     let granted = tool_grants.iter().any(|t| t == name);
@@ -620,6 +626,7 @@ pub(crate) async fn mutating_tool_gate(
             tx,
             ctl,
             next_id,
+            journal,
         )
         .await;
         match decision {
@@ -656,6 +663,7 @@ pub(crate) async fn mutating_tool_gate(
             tx,
             ctl,
             next_id,
+            journal,
         )
         .await;
         match decision {

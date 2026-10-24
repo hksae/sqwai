@@ -254,9 +254,21 @@ pub(crate) async fn run_turn_with_prefetch(
                         if prefetch_open
                             && let Some((base_ctx, allow_hosts)) = prefetch_env
                         {
+                            // An outside read that still needs its boundary
+                            // approval must NOT execute here: the prefetch
+                            // runs the call outright, and the sequential
+                            // gate (the only place that asks) skips calls
+                            // already sitting in `parallel_outcomes`. A live
+                            // session's first `ls` outside the root was
+                            // refused exactly this way — prefetched past
+                            // the gate. Hand it back to the dispatcher.
+                            let needs_outside_ask = !base_ctx.outside_all
+                                && super::loop_ask::read_call_path(&calls[idx].name, &calls[idx].args)
+                                    .is_some_and(|p| base_ctx.outside_uncovered(&p));
                             if !base_ctx
                                 .cancel
                                 .load(std::sync::atomic::Ordering::Relaxed)
+                                && !needs_outside_ask
                                 && super::parallel_read_only_batch_end(
                                     &calls,
                                     0,

@@ -128,13 +128,29 @@ impl App {
         // mutations, leaving the model two plans — one live, one stale.
         let root = self.project_root.clone();
         // The model is never told its mode elsewhere: without this line it
-        // learns Plan vs Act from the first refusal, burning a turn.
+        // learns Plan vs Act from the first refusal, burning a turn. The
+        // approval axis rides the same line — a live session's model hit
+        // one outside-root refusal, concluded file tools cannot leave the
+        // project, and wrote everything through bash heredocs for the rest
+        // of the session, never learning the user had switched to full
+        // access where `write` resolves anywhere.
+        let approval_line = match self.approval_mode {
+            ApprovalMode::Full => "approval: full — file tools resolve any path, nothing asks; \
+                                   prefer write/edit/read over shell workarounds",
+            ApprovalMode::Ask => "approval: ask — every shell command and every mutating call \
+                                  asks the user first",
+            ApprovalMode::Auto => {
+                "approval: auto — risky shell commands and writes outside the project root ask \
+                 first; everything else runs"
+            }
+        };
         parts.push(SystemPart::volatile(format!(
-            "Mode: {}",
+            "Mode: {} ({})",
             match self.mode {
                 Mode::Plan => "plan",
                 Mode::Act => "act",
-            }
+            },
+            approval_line
         )));
         if self.mode == Mode::Plan {
             parts.push(SystemPart::volatile(PLAN_MODE_PROMPT));

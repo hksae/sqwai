@@ -68,6 +68,17 @@ pub enum ApprovalDecision {
     Deny,
 }
 
+impl ApprovalDecision {
+    /// Journal spelling of the answer.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::RunOnce => "run_once",
+            Self::AlwaysSession => "always_session",
+            Self::Deny => "deny",
+        }
+    }
+}
+
 /// "Always allow this session" answers, kept for the life of the session.
 ///
 /// `run_agent` is spawned per user submit, so the grants cannot live inside
@@ -1637,6 +1648,7 @@ async fn run_agent(
                                 &tx,
                                 &mut ctl,
                                 &mut next_id,
+                                &mut journal,
                             )
                             .await;
                             match decision {
@@ -1812,6 +1824,7 @@ async fn run_agent(
                         &mut next_id,
                         approval_mode,
                         &mut tool_grants,
+                        &mut journal,
                     )
                     .await
                     {
