@@ -2234,20 +2234,49 @@ async fn run_agent(
                     && tools::is_mutating_call(&call.name, &call.args)
                     && let Ok(Some(active)) =
                         plan::open_active_for_session(&root, Some(&session_id))
-                    && let Some(step) = active
+                {
+                    let open: Vec<&plan::Step> = active
                         .steps
                         .iter()
-                        .find(|s| s.status == plan::StepStatus::InProgress)
-                {
-                    plan_nudged = true;
-                    let total = active.steps.len();
-                    let title_short: String = step.title.chars().take(48).collect();
-                    outcome.output.push_str(&format!(
-                        "\n[plan: step {}/{total} \"{title_short}\" — if this call did the step's \
-                         work, close it now: plan(op=\"finish\", id=\"{}\", summary=\"what this \
-                         settled\") — before any other tool or reply.]",
-                        step.id, step.id
-                    ));
+                        .filter(|s| s.status == plan::StepStatus::InProgress)
+                        .collect();
+                    match open.as_slice() {
+                        [step] => {
+                            plan_nudged = true;
+                            let total = active.steps.len();
+                            let title_short: String = step.title.chars().take(48).collect();
+                            outcome.output.push_str(&format!(
+                                "\n[plan: step {}/{total} \"{title_short}\" — if this call did \
+                                 the step's work, close it now: plan(op=\"finish\", id=\"{}\", \
+                                 summary=\"what this settled\") — before any other tool or \
+                                 reply.]",
+                                step.id, step.id
+                            ));
+                        }
+                        [first, rest @ ..] => {
+                            // file-shaped work often spans several content
+                            // steps at once; naming only the first open step
+                            // taught the model the others could wait
+                            plan_nudged = true;
+                            let mut ids = String::new();
+                            for (i, step) in rest.iter().enumerate() {
+                                if i > 0 {
+                                    ids.push_str(", ");
+                                }
+                                ids.push_str(&step.id);
+                            }
+                            let title_short: String = first.title.chars().take(48).collect();
+                            outcome.output.push_str(&format!(
+                                "\n[plan: steps {} and {} of {} are open (\"{title_short}\" is \
+                                 the first) — if this call did any of their work, close those \
+                                 now, each with its own call: plan(op=\"finish\", \
+                                 id=\"<step>\", summary=\"what it settled\") — do not save them \
+                                 up for the end.]",
+                                first.id, ids, active.steps.len()
+                            ));
+                        }
+                        [] => {}
+                    }
                 }
                 // The mirror case: mutating work running with NO plan at
                 // all. Every plan reminder presupposes an existing plan, so

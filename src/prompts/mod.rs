@@ -180,19 +180,32 @@ pub fn plan_status_block(root: &std::path::Path, session_id: Option<&str>) -> Op
     let plan = crate::plan::open_active_for_session(root, session_id)
         .ok()
         .flatten()?;
-    let action = plan
-        .steps
-        .iter()
-        .find(|s| s.status == crate::plan::StepStatus::InProgress)
-        .map(|step| {
-            format!(
+    let action = {
+        let open: Vec<_> = plan
+            .steps
+            .iter()
+            .filter(|s| s.status == crate::plan::StepStatus::InProgress)
+            .collect();
+        match open.as_slice() {
+            [one] => format!(
                 "\n[step {} is in_progress. When its work is done, close it now with one plan \
                  call — plan(op=\"finish\", id=\"{}\", summary=\"...\") — before any other tool \
                  or reply.]",
-                step.id, step.id
-            )
-        })
-        .unwrap_or_default();
+                one.id, one.id
+            ),
+            [] => String::new(),
+            many => {
+                let ids: Vec<&str> = many.iter().map(|s| s.id.as_str()).collect();
+                format!(
+                    "\n[steps {} are in_progress. When a step's work is done, close it now with \
+                     one plan call — plan(op=\"finish\", id=\"<step>\", summary=\"...\") — \
+                     before any other tool or reply; close each as soon as ITS work lands, do \
+                     not save them up.]",
+                    ids.join(", ")
+                )
+            }
+        }
+    };
     Some(format!(
         "<plan_status>\n{}\nThe state above is current as of this request, and the step ids are listed here.{}\
          \n</plan_status>",
