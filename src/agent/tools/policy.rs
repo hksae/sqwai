@@ -105,15 +105,19 @@ pub(crate) fn bash_scope_hit(ctx: &ToolCtx, scope: &[String], command: &str) -> 
     None
 }
 
-/// Does this command write outside the project root? The main agent's
-/// workspace boundary, asked as an approval rather than refused: the
-/// targets are the same tokens the subagent scope gate sees, null sinks
-/// filtered, resolution shared with the write jail.
-pub(crate) fn bash_writes_outside(ctx: &ToolCtx, command: &str) -> bool {
+/// The first write target of this command that lands outside the project
+/// root AND outside every approved directory — the main agent's workspace
+/// boundary, asked as an approval rather than refused. Targets are the
+/// same tokens the subagent scope gate sees, null sinks filtered,
+/// resolution shared with the write jail.
+pub(crate) fn first_outside_target(ctx: &ToolCtx, command: &str) -> Option<String> {
     bash_write_targets(command)
         .into_iter()
         .filter(|t| !is_null_sink(t))
-        .any(|t| ctx.shell_target_escapes(&t))
+        .find(|t| {
+            let bare = t.trim().trim_matches(|c| c == '"' || c == '\'');
+            !bare.is_empty() && ctx.outside_uncovered(bare)
+        })
 }
 
 /// Raw write-target tokens of a shell command: redirect destinations and

@@ -82,6 +82,9 @@ pub struct SessionGrants {
     pub(crate) bash: Vec<loop_ask::Grant>,
     /// mutating tools approved wholesale for the session (`edit`)
     pub(crate) tools: Vec<String>,
+    /// directories outside the root opened for the session ("always"),
+    /// canonical prefixes
+    pub(crate) dirs: Vec<PathBuf>,
 }
 
 /// what a finished agent hands back to the TUI
@@ -947,6 +950,12 @@ async fn run_agent(
         .with_cancel(cancel_tool)
         .with_vision(vision)
         .with_pdf(pdf);
+    // session-wide approval state rides the context: full access resolves
+    // every path, approved directories (from this session's grants) open
+    // for reads and writes under them
+    ctx.outside_all = approval_mode == ApprovalMode::Full;
+    ctx.outside_roots = approval_grants.dirs.clone();
+    ctx.outside_granted = approval_grants.dirs.clone();
     ctx.tools = tool_caps.clone();
     ctx.limits = limits.clone();
     ctx.activated_skills
@@ -1010,6 +1019,7 @@ async fn run_agent(
             let _ = writer.session_start(
                 &model_id,
                 if plan_mode { "plan" } else { "act" },
+                approval_mode.as_str(),
                 None,
                 "unknown",
                 resumed_from,
@@ -1019,10 +1029,16 @@ async fn run_agent(
             }
         }
         if let Some(user_message) = messages.iter().rev().find(|m| m.role == Role::User) {
+            // per-turn attribution: the journal once credited this session
+            // to a model it was not running on, because session_start names
+            // only the first run's model. The turn record names the one
+            // that actually answers, plus the approval axis it ran under.
             let _ = writer.append("user_msg", serde_json::json!({
                 "hash": format!("{:x}", sha2::Sha256::digest(user_message.content.as_bytes())),
                 "chars": user_message.content.chars().count(),
                 "goal_like": user_message.content.starts_with("goal:") || user_message.content.starts_with("/goal"),
+                "model": model_id,
+                "approval": approval_mode.as_str(),
             }));
         }
     }
@@ -1589,6 +1605,74 @@ async fn run_agent(
                         call_index,
                         limits.max_parallel_tools.clamp(1, 64),
                     );
+                    // Outside reads earn the same boundary as writes: one
+                    // approval opens the directory (run-only or session),
+                    // full access never asks (`outside_all`). A denied read
+                    // is precomputed into the batch outcomes so execution
+                    // skips it cleanly.
+                    if subagent_depth == 0 && approval_mode != ApprovalMode::Full {
+                        for idx in call_index..batch_end.max(call_index + 1) {
+                            let peer = &turn.calls[idx];
+                            let Some(path) = loop_ask::read_call_path(&peer.name, &peer.args)
+                            else {
+                                continue;
+                            };
+                            if !ctx.outside_uncovered(&path) {
+                                continue;
+                            }
+                            let grant_dir = ctx.outside_grant_dir(&path);
+                            let preview = grant_dir
+                                .as_ref()
+                                .map(|d| format!("{}/**", d.display()))
+                                .unwrap_or_default();
+                            let decision = loop_ask::approval_dialog(
+                                format!("{} {path}", peer.name),
+                                loop_ask::OUTSIDE_READ_REASON,
+                                preview,
+                                &tx,
+                                &mut ctl,
+                                &mut next_id,
+                            )
+                            .await;
+                            match decision {
+                                Some(ApprovalDecision::Deny) => {
+                                    parallel_outcomes.insert(
+                                        idx,
+                                        (
+                                            0,
+                                            tools::Outcome::err(format!(
+                                                "{} denied by user ({})",
+                                                peer.name,
+                                                loop_ask::OUTSIDE_READ_REASON
+                                            )),
+                                            None,
+                                        ),
+                                    );
+                                }
+                                Some(ApprovalDecision::AlwaysSession) => {
+                                    if let Some(d) = grant_dir {
+                                        ctx.outside_roots.push(d.clone());
+                                        ctx.outside_granted.push(d);
+                                    }
+                                }
+                                Some(ApprovalDecision::RunOnce) => {
+                                    if let Some(d) = grant_dir {
+                                        ctx.outside_roots.push(d);
+                                    }
+                                }
+                                None => {
+                                    parallel_outcomes.insert(
+                                        idx,
+                                        (
+                                            0,
+                                            tools::Outcome::err("tui closed awaiting approval"),
+                                            None,
+                                        ),
+                                    );
+                                }
+                            }
+                        }
+                    }
                     if batch_end - call_index > 1 {
                         if turn.calls[call_index..batch_end]
                             .iter()
@@ -1731,9 +1815,6 @@ async fn run_agent(
                             ctx.current_call_id = Some(call.id.clone());
                             let out = run_tool_blocking(&mut ctx, &call.name, &call.args).await;
                             ctx.current_call_id = None;
-                            // the outside-write permit covers exactly the
-                            // confirmed call, never the rest of the batch
-                            ctx.outside_write_permit = false;
                             out
                         }
                     }
@@ -1755,6 +1836,7 @@ async fn run_agent(
                                 subagent_depth,
                                 approval_mode,
                                 &mut journal,
+                                &mut None,
                             )
                             .await
                         }
@@ -2198,6 +2280,7 @@ async fn run_agent(
             approval_grants: SessionGrants {
                 bash: always_allow,
                 tools: tool_grants,
+                dirs: std::mem::take(&mut ctx.outside_granted),
             },
         })))
         .await;

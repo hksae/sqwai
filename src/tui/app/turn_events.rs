@@ -760,6 +760,9 @@ impl App {
         // Grants earned this turn belong to the session, not the run: keep
         // them for the next submit ("always allow this session").
         self.approval_grants = outcome.approval_grants;
+        // the turn's last activity is now, not the last user message —
+        // stale timestamps used to sort this session hours down the list
+        self.session.last_message_at = Some(chrono::Utc::now());
         if outcome.messages.len() < self.session.messages.len() {
             self.session
                 .rebase_turn_attachments(self.session.messages.len() - outcome.messages.len());
@@ -1019,6 +1022,7 @@ impl App {
     }
 
     pub(super) fn finish_turn_inner(&mut self, res: Result<(), String>, advanced: bool) {
+        self.session.last_message_at = Some(chrono::Utc::now());
         crate::tui::event_log::log(
             "TURN",
             format!(

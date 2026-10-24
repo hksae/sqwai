@@ -17,11 +17,18 @@ pub struct ToolCtx {
     root_canon: PathBuf,
     /// secondary project instances can inspect but not mutate project state
     pub read_only: bool,
-    /// One confirmed leap outside the project root. The write jail is a
-    /// prompt, not a wall: an outside write the user approved (or full
-    /// access) sets this for exactly that call, and the jail below lets
-    /// the write through. Never set for reads; never carried across calls.
-    pub outside_write_permit: bool,
+    /// Full access: every path resolves, inside or out (session-level;
+    /// set once per run from the approval mode).
+    pub outside_all: bool,
+    /// Approved leaps outside the project root, as canonical directory
+    /// prefixes. The jail is a prompt, not a wall: a confirmed directory
+    /// opens reads AND writes under it. Seeded from the session's grants,
+    /// extended live by approvals ("run once" for this run, "always" also
+    /// into `outside_granted` for persistence).
+    pub outside_roots: Vec<PathBuf>,
+    /// The subset of `outside_roots` earned with an "always this session"
+    /// answer — harvested back into the session grants at turn end.
+    pub outside_granted: Vec<PathBuf>,
     /// Session this context belongs to. keys the shadow snapshot chain
     /// on it (`refs/sessions/<id>`), so two sessions in one project do not
     /// interleave their checkpoint history — and retention can truncate one
@@ -135,7 +142,9 @@ impl ToolCtx {
             root,
             root_canon,
             read_only,
-            outside_write_permit: false,
+            outside_all: false,
+            outside_roots: Vec::new(),
+            outside_granted: Vec::new(),
             session_id: "shared".into(),
             checkpoint_session: None,
             files_read: HashMap::new(),
@@ -301,6 +310,19 @@ impl ToolCtx {
     fn resolve_target(&self, p: &str) -> Result<(PathBuf, PathBuf), String> {
         let joined = if Path::new(p).is_absolute() {
             PathBuf::from(p)
+        } else if let Some(win) = unix_drive_path(p) {
+            // `/c/Users/...` is how shells on Windows spell `C:\Users\...`.
+            // Joining it onto the root instead once built a phantom
+            // `C:\c\Users\...` tree that a live session wrote 13 files
+            // into while the real target stayed empty — so this normalizes
+            // instead of guessing.
+            win
+        } else if p.starts_with('/') || p.starts_with('\\') {
+            // rooted but no drive: joining would silently replace the root's
+            // tail (`/tmp/x` -> `C:\tmp\x`). Refuse and say the spelling.
+            return Err(format!(
+                "path '{p}' is rooted but has no drive — spell it as an                  absolute Windows path (C:\\...) or relative to the project"
+            ));
         } else {
             self.root.join(p)
         };
@@ -348,6 +370,29 @@ impl ToolCtx {
         !t.is_empty() && self.write_escapes(t)
     }
 
+    /// Is `p` outside the root AND outside every approved directory?
+    pub fn outside_uncovered(&self, p: &str) -> bool {
+        match self.resolve_target(p.trim()) {
+            Ok((_, resolved)) => {
+                resolved.strip_prefix(&self.root_canon).is_err()
+                    && !self.outside_roots.iter().any(|r| resolved.starts_with(r))
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// The directory an approval of `p` should open: the path itself when
+    /// it is an existing directory, its parent for a file target. `None`
+    /// when the path does not resolve.
+    pub fn outside_grant_dir(&self, p: &str) -> Option<PathBuf> {
+        let (_, resolved) = self.resolve_target(p.trim()).ok()?;
+        if resolved.is_dir() {
+            Some(resolved)
+        } else {
+            resolved.parent().map(|par| par.to_path_buf())
+        }
+    }
+
     /// Shared walk behind [`resolve`](Self::resolve) and
     /// [`resolve_scope_rel`](Self::resolve_scope_rel): returns the
     /// display spelling (uncanonicalized join) and the canonical
@@ -366,12 +411,11 @@ impl ToolCtx {
         };
         let (joined, resolved) = self.resolve_target(p)?;
         let Ok(relative) = resolved.strip_prefix(&self.root_canon) else {
-            // the jail is a prompt, not a wall: a write the user confirmed
-            // (or full access) goes through for exactly this call. Reads
-            // never carry the permit, so outside reads stay refused, and
-            // host-owned state is root-relative — it cannot reach this
-            // branch.
-            if mutating && self.outside_write_permit {
+            // the jail is a prompt, not a wall: full access resolves every
+            // path, and a confirmed directory opens reads AND writes under
+            // it (the read-guard refills for outside files too). Host-owned
+            // state is root-relative — it cannot reach this branch.
+            if self.outside_all || self.outside_roots.iter().any(|r| resolved.starts_with(r)) {
                 return Ok((joined, resolved));
             }
             return Err(format!(
@@ -626,6 +670,36 @@ fn host_owned_denial(relative: &Path, mutating: bool) -> Option<String> {
     ))
 }
 
+/// `/c/...` (and `/cygdrive/c/...`) spelled as a Windows drive path.
+/// Only reached where `is_absolute()` is false — on Unix, `/c/...` is
+/// already absolute and never lands here.
+fn unix_drive_path(p: &str) -> Option<PathBuf> {
+    let rest = p.strip_prefix('/')?;
+    let mut parts = rest.splitn(2, '/');
+    let first = parts.next()?;
+    let tail = parts.next().unwrap_or("");
+    let drive = if first.eq_ignore_ascii_case("cygdrive") {
+        tail.split('/').next()?.chars().next()?
+    } else {
+        first.chars().next()?
+    };
+    let tail = if first.eq_ignore_ascii_case("cygdrive") {
+        tail.split_once('/').map(|(_, t)| t).unwrap_or("")
+    } else {
+        tail
+    };
+    // a drive segment is exactly one letter (`/c/...`); anything longer
+    // (`/tmp/...`, `/usr/...`) is a Unix absolute path, not a drive
+    if first.chars().count() != 1 || !drive.is_ascii_alphabetic() {
+        return None;
+    }
+    Some(PathBuf::from(format!(
+        "{}:/{}",
+        drive.to_ascii_uppercase(),
+        tail
+    )))
+}
+
 #[cfg(test)]
 mod outside_jail_tests {
     use super::*;
@@ -646,17 +720,53 @@ mod outside_jail_tests {
     }
 
     #[test]
-    fn a_permitted_outside_write_resolves_but_a_read_never_does() {
+    fn git_bash_drive_paths_resolve_to_the_real_drive() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("proj");
         std::fs::create_dir_all(&root).unwrap();
+        let ctx = ToolCtx::new(&root);
+        // `/c/...` normalizes instead of building the phantom `C:\c\...`
+        let (joined, resolved) = ctx.resolve_target("/c/Users/x/a.txt").unwrap();
+        assert!(joined.to_string_lossy().starts_with("C:/Users/x/"), "{joined:?}");
+        assert!(resolved.to_string_lossy().contains("Users"), "{resolved:?}");
+        // ...including when the target is the project itself
+        let root_unix = format!(
+            "/{}",
+            root.to_string_lossy().replace('\\', "/").replace(':', "/")
+        );
+        let proj_unix = format!("{root_unix}/src/main.rs");
+        assert!(!ctx.write_escapes(&proj_unix), "{proj_unix}");
+    }
+
+    #[test]
+    fn rooted_paths_without_a_drive_refuse_instead_of_phantom_joining() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ToolCtx::new(dir.path().join("proj"));
+        let err = ctx.resolve_writable("/tmp/notes.txt").unwrap_err();
+        assert!(err.contains("no drive"), "{err}");
+    }
+
+    #[test]
+    fn an_approved_directory_opens_reads_and_writes_under_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("proj");
+        std::fs::create_dir_all(&root).unwrap();
+        let outside = dir.path().join("other");
+        std::fs::create_dir_all(&outside).unwrap();
         let mut ctx = ToolCtx::new(&root);
-        // no permit: the classic refusal
-        assert!(ctx.resolve_writable("../out.txt").is_err());
-        // permit: the same write resolves (the jail is a prompt, not a wall)
-        ctx.outside_write_permit = true;
-        assert!(ctx.resolve_writable("../out.txt").is_ok());
-        // reads never carry the permit
-        assert!(ctx.resolve("../out.txt").is_err());
+        // nothing approved: both directions refuse
+        assert!(ctx.resolve_writable("../other/a.txt").is_err());
+        assert!(ctx.resolve("../other/a.txt").is_err());
+        // full access resolves everything
+        ctx.outside_all = true;
+        assert!(ctx.resolve_writable("../other/a.txt").is_ok());
+        assert!(ctx.resolve("../other/a.txt").is_ok());
+        // an approved directory opens exactly its subtree; the grant is
+        // stored canonicalized, the same shape resolve_target produces
+        ctx.outside_all = false;
+        ctx.outside_roots.push(outside.canonicalize().unwrap());
+        assert!(ctx.resolve_writable("../other/a.txt").is_ok());
+        assert!(ctx.resolve("../other/a.txt").is_ok());
+        assert!(ctx.resolve("../third/b.txt").is_err());
     }
 }

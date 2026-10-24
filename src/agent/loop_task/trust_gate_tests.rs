@@ -56,6 +56,7 @@ async fn trust_gate_denies_egress_for_subagents_under_taint() {
         1,
         crate::config::ApprovalMode::Auto,
         &mut None,
+        &mut None,
     )
     .await;
     assert!(!outcome.ok, "must refuse");
@@ -93,6 +94,7 @@ async fn trust_gate_inherits_parent_taint_for_a_fresh_child_session() {
         &mut next_id,
         1,
         crate::config::ApprovalMode::Auto,
+        &mut None,
         &mut None,
     )
     .await;
@@ -168,6 +170,7 @@ async fn safe_mutating_bash_on_clean_tree_skips_snapshot_but_stays_revertible() 
         0,
         crate::config::ApprovalMode::Auto,
         &mut None,
+        &mut None,
     )
     .await;
     assert!(outcome.ok, "{}", outcome.output);
@@ -221,6 +224,7 @@ async fn trust_gate_stays_quiet_without_taint() {
         0,
         crate::config::ApprovalMode::Auto,
         &mut None,
+        &mut None,
     )
     .await;
     assert!(
@@ -245,6 +249,7 @@ async fn trust_gate_prompts_with_reason_and_honors_deny() {
     let mut always_allow = Vec::new();
     let mut next_id = 0u64;
     let mut no_journal: Option<crate::agent::journal::Journal> = None;
+    let mut no_target: Option<std::path::PathBuf> = None;
     let future = bash_call(
         &call,
         &mut ctx,
@@ -256,6 +261,7 @@ async fn trust_gate_prompts_with_reason_and_honors_deny() {
         0,
         crate::config::ApprovalMode::Auto,
         &mut no_journal,
+        &mut no_target,
     );
     tokio::pin!(future);
     let outcome = loop {
@@ -296,6 +302,7 @@ async fn an_approved_egress_kind_does_not_ask_again() {
     let (call, mut ctx, tx_agent, mut rx_ui, tx_ui, mut rx_agent) = bash_call_parts(&dir, &session);
     let mut journal =
         Some(crate::agent::journal::Journal::open(&dir, &session).expect("journal opens"));
+    let mut no_target: Option<std::path::PathBuf> = None;
     let mut always_allow = Vec::new();
     let mut next_id = 0u64;
     // first push: the dialog runs and the user answers once. Each run is
@@ -303,17 +310,18 @@ async fn an_approved_egress_kind_does_not_ask_again() {
     // same parts.
     let asked = {
         let future = bash_call(
-            &call,
-            &mut ctx,
-            &tx_agent,
-            &mut rx_agent,
-            &mut always_allow,
-            &[],
-            &mut next_id,
-            0,
-            crate::config::ApprovalMode::Auto,
-            &mut journal,
-        );
+        &call,
+        &mut ctx,
+        &tx_agent,
+        &mut rx_agent,
+        &mut always_allow,
+        &[],
+        &mut next_id,
+        0,
+        crate::config::ApprovalMode::Auto,
+        &mut journal,
+        &mut no_target,
+    );
         let mut asked = false;
         tokio::pin!(future);
         let _ = loop {
@@ -349,17 +357,18 @@ async fn an_approved_egress_kind_does_not_ask_again() {
     );
     let asked_again = {
         let future = bash_call(
-            &second,
-            &mut ctx,
-            &tx_agent,
-            &mut rx_agent,
-            &mut always_allow,
-            &[],
-            &mut next_id,
-            0,
-            crate::config::ApprovalMode::Auto,
-            &mut journal,
-        );
+        &second,
+        &mut ctx,
+        &tx_agent,
+        &mut rx_agent,
+        &mut always_allow,
+        &[],
+        &mut next_id,
+        0,
+        crate::config::ApprovalMode::Auto,
+        &mut journal,
+        &mut no_target,
+    );
         let mut asked_again = false;
         tokio::pin!(future);
         let _ = loop {
@@ -450,6 +459,7 @@ async fn ask_mode_prompts_even_for_a_safe_command() {
     let mut always_allow = Vec::new();
     let mut next_id = 0u64;
     let mut no_journal: Option<crate::agent::journal::Journal> = None;
+    let mut no_target: Option<std::path::PathBuf> = None;
     let future = bash_call(
         &call,
         &mut ctx,
@@ -461,6 +471,7 @@ async fn ask_mode_prompts_even_for_a_safe_command() {
         0,
         crate::config::ApprovalMode::Ask,
         &mut no_journal,
+        &mut no_target,
     );
     // the block scope drops the pinned future (and its borrows) before
     // the assertions look at `always_allow`
@@ -527,6 +538,7 @@ async fn full_mode_runs_the_dangerous_command_without_asking() {
         0,
         crate::config::ApprovalMode::Full,
         &mut no_journal,
+        &mut None,
     )
     .await;
     assert!(outcome.ok, "full mode runs it: {}", outcome.output);
@@ -579,6 +591,7 @@ async fn full_mode_keeps_the_hard_gates() {
         0,
         crate::config::ApprovalMode::Full,
         &mut no_journal,
+        &mut None,
     )
     .await;
     assert!(!outcome.ok, "blocked_patterns hold in full mode");
@@ -595,6 +608,7 @@ async fn full_mode_keeps_the_hard_gates() {
         0,
         crate::config::ApprovalMode::Full,
         &mut no_journal,
+        &mut None,
     )
     .await;
     assert!(
@@ -625,6 +639,7 @@ async fn outside_bash_write_asks_in_auto() {
     let mut always_allow = Vec::new();
     let mut next_id = 0u64;
     let mut no_journal: Option<crate::agent::journal::Journal> = None;
+    let mut no_target: Option<std::path::PathBuf> = None;
     let future = bash_call(
         &call,
         &mut ctx,
@@ -636,6 +651,7 @@ async fn outside_bash_write_asks_in_auto() {
         0,
         crate::config::ApprovalMode::Auto,
         &mut no_journal,
+        &mut no_target,
     );
     let asked = {
         tokio::pin!(future);
@@ -695,6 +711,7 @@ async fn outside_bash_write_runs_silently_in_full() {
         &mut 0u64,
         0,
         crate::config::ApprovalMode::Full,
+        &mut None,
         &mut None,
     )
     .await;
@@ -756,14 +773,18 @@ async fn outside_file_write_gate_denies_and_permits() {
     .expect("denied");
     assert!(!refused.ok);
     assert!(refused.output.contains("denied by user"));
-    assert!(!ctx.outside_write_permit, "denial arms nothing");
+    assert!(
+        ctx.outside_roots.is_empty(),
+        "denial opens no directory"
+    );
     ev_task.abort();
 
-    // full access: no dialog, the permit arms on its own
+    // full access: no dialog, the call resolves on its own
     let (tx_agent2, rx_ui2) = tokio::sync::mpsc::channel(8);
     let (_tx_ui2, mut rx_agent2) = tokio::sync::mpsc::channel(8);
     std::mem::drop(rx_ui2);
     let mut ctx2 = tools::ToolCtx::new(&root).in_session("gate-sess".to_string());
+    ctx2.outside_all = true;
     let gate = mutating_tool_gate(
         &call,
         &mut ctx2,
@@ -775,6 +796,5 @@ async fn outside_file_write_gate_denies_and_permits() {
     )
     .await;
     assert!(gate.is_none(), "full access runs the outside write");
-    assert!(ctx2.outside_write_permit, "the jail opens for this call");
     let _ = std::fs::remove_dir_all(&base);
 }

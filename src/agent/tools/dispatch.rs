@@ -999,7 +999,15 @@ pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                 ),
                 _ => " — the current plan with its valid ops is in your context above".to_string(),
             };
-            return Outcome::err(format!("plan op rejected: {e}{hint}"));
+            // schema rejections teach the fix in place: a small model that
+            // once sent `finish` without `summary` abandoned the plan for
+            // the rest of the session instead of resending the one field
+            let example = if e.to_string().contains("missing field") {
+                " — resend as plan(op=\"finish\", id=\"<step>\", summary=\"one sentence:                  what this step settled\")"
+            } else {
+                ""
+            };
+            return Outcome::err(format!("plan op rejected: {e}{hint}{example}"));
         }
     };
     if matches!(op, plan::Op::Join { .. }) {

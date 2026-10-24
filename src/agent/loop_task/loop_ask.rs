@@ -13,11 +13,12 @@ use tokio::sync::mpsc;
 /// "always allow this session" answer still silences the repeats.
 const ASK_MODE_REASON: &str = "ask mode";
 
-/// Why a write beyond the project root asks. The workspace jail is a
-/// prompt, not a wall: full access lifts it like every other prompt, and
-/// host-owned state (`.sqwai/`) is root-relative — it can never appear on
-/// this branch.
-const OUTSIDE_ROOT_REASON: &str = "writes outside the project directory";
+/// Why a leap beyond the project root asks. The workspace jail is a
+/// prompt, not a wall: full access never asks (every path resolves), and
+/// an approval opens the target directory for reads AND writes. Host-owned
+/// state (`.sqwai/`) is root-relative — it can never appear on this branch.
+pub(crate) const OUTSIDE_WRITE_REASON: &str = "writes outside the project directory";
+pub(crate) const OUTSIDE_READ_REASON: &str = "reads outside the project directory";
 
 pub(crate) async fn ask_user(
     call: &ToolCallReq,
@@ -338,6 +339,7 @@ pub(crate) async fn bash_call(
     subagent_depth: u8,
     approval: ApprovalMode,
     journal: &mut Option<crate::agent::journal::Journal>,
+    outside_target: &mut Option<std::path::PathBuf>,
 ) -> tools::Outcome {
     let command = call.args["command"].as_str().unwrap_or("").to_string();
     let lower = command.to_lowercase();
@@ -427,9 +429,12 @@ pub(crate) async fn bash_call(
     if mode != ApprovalMode::Full
         && subagent_depth == 0
         && needs_approval.is_none()
-        && tools::bash_writes_outside(ctx, &command)
+        && let Some(target) = tools::first_outside_target(ctx, &command)
     {
-        needs_approval = Some(OUTSIDE_ROOT_REASON.to_string());
+        // remembered for the AlwaysSession answer below: the directory the
+        // offending target lives in
+        *outside_target = ctx.outside_grant_dir(&target);
+        needs_approval = Some(OUTSIDE_WRITE_REASON.to_string());
     }
 
     // Ask mode: every command is confirmed, even one the classifier calls
@@ -484,6 +489,12 @@ pub(crate) async fn bash_call(
                     crate::agent::trust::ack_egress(writer, kind);
                 }
                 always_allow.push(Grant::from_command(&command, reason));
+                // an approved outside write opens its directory too, so the
+                // follow-up file operations there stop asking
+                if let Some(dir) = outside_target.take() {
+                    ctx.outside_roots.push(dir.clone());
+                    ctx.outside_granted.push(dir);
+                }
             }
             ApprovalDecision::RunOnce => {
                 if let (Some(kind), Some(writer)) = (taint_kind, journal.as_mut()) {
@@ -535,7 +546,7 @@ pub(crate) async fn bash_call(
 
 /// The approval dialog itself: show the subject, await one answer.
 /// `None` means the channel died (tui closed or agent cancelled).
-async fn approval_dialog(
+pub(crate) async fn approval_dialog(
     subject: String,
     reason: &str,
     grant: String,
@@ -587,19 +598,25 @@ pub(crate) async fn mutating_tool_gate(
 ) -> Option<tools::Outcome> {
     let name = call.name.as_str();
     let granted = tool_grants.iter().any(|t| t == name);
-    // the workspace boundary, asked as an approval rather than refused
+    // the workspace boundary, asked as an approval rather than refused:
+    // one yes opens the target directory for the run (or the session)
     if matches!(name, "write" | "edit" | "multi_edit")
         && let Some(path) = tools::call_path(name, &call.args)
-        && ctx.write_escapes(&path)
+        && ctx.outside_uncovered(&path)
     {
-        if mode == ApprovalMode::Full || granted {
-            ctx.outside_write_permit = true;
+        // full access and already-granted directories resolve on their own
+        // (outside_all / outside_roots); there is nothing to ask
+        if mode == ApprovalMode::Full {
             return None;
         }
+        let dir = ctx
+            .outside_grant_dir(&path)
+            .map(|d| d.to_string_lossy().to_string())
+            .unwrap_or_default();
         let decision = approval_dialog(
             format!("{name} {path}"),
-            OUTSIDE_ROOT_REASON,
-            format!("{name} *"),
+            OUTSIDE_WRITE_REASON,
+            format!("{dir}/**"),
             tx,
             ctl,
             next_id,
@@ -608,14 +625,22 @@ pub(crate) async fn mutating_tool_gate(
         match decision {
             Some(ApprovalDecision::Deny) => {
                 return Some(tools::Outcome::err(format!(
-                    "{name} denied by user ({OUTSIDE_ROOT_REASON})"
+                    "{name} denied by user ({OUTSIDE_WRITE_REASON})"
                 )))
             }
-            Some(ApprovalDecision::AlwaysSession) => tool_grants.push(name.to_string()),
-            Some(ApprovalDecision::RunOnce) => {}
+            Some(ApprovalDecision::AlwaysSession) => {
+                if let Some(d) = ctx.outside_grant_dir(&path) {
+                    ctx.outside_roots.push(d.clone());
+                    ctx.outside_granted.push(d);
+                }
+            }
+            Some(ApprovalDecision::RunOnce) => {
+                if let Some(d) = ctx.outside_grant_dir(&path) {
+                    ctx.outside_roots.push(d);
+                }
+            }
             None => return Some(tools::Outcome::err("tui closed awaiting approval")),
         }
-        ctx.outside_write_permit = true;
         // this exact call was just confirmed — ask mode has nothing to add
         return None;
     }
@@ -645,6 +670,20 @@ pub(crate) async fn mutating_tool_gate(
         }
     }
     None
+}
+
+/// The path a read-only tool points at, when it has one: `read`/`ls`/
+/// `outline` via `call_path`, `grep` by its own `path` argument. `glob`
+/// patterns are not paths and stay out.
+pub(crate) fn read_call_path(name: &str, args: &serde_json::Value) -> Option<String> {
+    if name == "grep" {
+        return args
+            .get("path")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+    }
+    tools::call_path(name, args)
 }
 
 /// Execute a tool handler on a dedicated blocking thread.

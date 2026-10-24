@@ -1120,6 +1120,7 @@ impl Journal {
         &mut self,
         model: &str,
         mode: &str,
+        approval: &str,
         head: Option<&str>,
         cwd_hash: &str,
         resumed_from: Option<&str>,
@@ -1129,6 +1130,7 @@ impl Journal {
             json!({
                 "model": model,
                 "mode": mode,
+                "approval": approval,
                 "head": head,
                 "cwd_hash": cwd_hash,
                 "resumed_from": resumed_from,
