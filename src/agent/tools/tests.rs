@@ -611,6 +611,48 @@ fn plan_ops_resolve_the_shapes_the_model_writes() {
     fs::remove_dir_all(&dir).ok();
 }
 
+#[test]
+fn plan_create_accepts_string_shapes_and_strips_tags() {
+    let (mut ctx, dir) = proj();
+    let created = plan_op(
+        &mut ctx,
+        &json!({
+            "goal": "string shapes",
+            "criteria": "note</criteria>",
+            "constraints": "keep < 100 ms",
+            "steps": ["one", {"title": "two", "check": "run it"}]
+        }),
+    );
+    assert!(created.ok, "{}", created.output);
+    let plan = plan::open_active(&dir).unwrap().unwrap();
+    assert_eq!(plan.criteria, ["note"]);
+    assert_eq!(plan.constraints, ["keep < 100 ms"]);
+    assert_eq!(plan.steps[0].title, "one");
+    assert_eq!(plan.steps[0].check, None);
+    assert_eq!(plan.steps[1].check.as_deref(), Some("run it"));
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn plan_create_rejects_criteria_that_are_only_tags() {
+    let (mut ctx, dir) = proj();
+    let refused = plan_op(
+        &mut ctx,
+        &json!({
+            "goal": "empty after stripping",
+            "criteria": "</criteria>",
+            "steps": ["one", "two"]
+        }),
+    );
+    assert!(!refused.ok, "{}", refused.output);
+    assert!(
+        refused.output.contains("empty_criteria"),
+        "{}",
+        refused.output
+    );
+    fs::remove_dir_all(&dir).ok();
+}
+
 /// The result must say where the change landed. Without an address the
 /// model re-reads the window to find its own place, and on a 5400-line file
 /// that re-read is the loop: 70 reads and 24 edits in one measured session.

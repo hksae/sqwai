@@ -528,17 +528,19 @@ updates or deletes an entry in place.",
             name: "plan",
             kind: Kind::Mutating,
             description: "Manage the host plan for multi-step work. `create` sets goal, \
-constraints, criteria and 3–6 steps (step 1 starts); criteria are your done-notes and each step \
-should carry a `check` — what proves it done. The host runs nothing and enforces nothing. `finish` \
-closes the current step and advances; `add` inserts scope; `cancel` skips a step; `abandon` \
-retires a plan whose direction changed. Use the live step ids; never re-read the plan through \
-tools.",
+constraints, criteria and 3–6 steps (step 1 starts); `op` may be omitted for create when goal and \
+steps are supplied. Criteria/constraints accept a string or an array; a step may be a title \
+string or {title, check}; XML-like tags in criteria/constraints are stripped. Criteria are your \
+done-notes and each step should carry a `check` — what proves it done. The host runs nothing and \
+enforces nothing. `finish` closes the current step and advances; `add` inserts scope; `cancel` \
+skips a step; `abandon` retires a plan whose direction changed. Use the live step ids; never \
+re-read the plan through tools.",
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "op": {"type": "string", "enum": [
                         "create", "finish", "add", "cancel", "abandon"
-                    ]},
+                    ], "description": "create (default when goal and steps are supplied), finish, add, cancel, abandon"},
                     "id": {"type": "string", "description": "finish / cancel: step number ('1', '2', '3', ...), NEVER the plan ULID. Optional for finish (defaults to the current in_progress step)"},
                     "ids": {
                         "type": "array",
@@ -546,22 +548,35 @@ tools.",
                         "description": "finish: optional list of step numbers (e.g. ['1', '2']) when multiple steps were completed together"
                     },
                     "goal": {"type": "string", "description": "create: overall goal"},
-                    "constraints": {"type": "array", "items": {"type": "string"}, "description": "create: optional constraints"},
+                    "constraints": {
+                        "oneOf": [
+                            {"type": "string"},
+                            {"type": "array", "items": {"type": "string"}}
+                        ],
+                        "description": "create: optional constraints; a string is accepted as one constraint"
+                    },
                     "criteria": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "create: plain-text done-notes of what must be true when finished"
+                        "oneOf": [
+                            {"type": "string"},
+                            {"type": "array", "items": {"type": "string"}}
+                        ],
+                        "description": "create: plain-text done-notes of what must be true when finished; a string is accepted as one note; XML-like tags are stripped"
                     },
                     "steps": {
                         "type": "array",
-                        "description": "create: initial high-level steps (3-6); each {title, check}",
+                        "description": "create: initial high-level steps (3-6); each is a title string or {title, check}",
                         "items": {
-                            "type": "object",
-                            "properties": {
-                                "title": {"type": "string"},
-                                "check": {"type": "string", "description": "what proves this step done (runnable or observable); expected, not required"}
-                            },
-                            "required": ["title"]
+                            "oneOf": [
+                                {"type": "string"},
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "title": {"type": "string"},
+                                        "check": {"type": "string", "description": "what proves this step done (runnable or observable); expected, not required"}
+                                    },
+                                    "required": ["title"]
+                                }
+                            ]
                         }
                     },
                     "after": {"type": "string", "description": "add: insert after this step id"},
@@ -570,7 +585,10 @@ tools.",
                     "summary": {"type": "string", "description": "finish: what was done, where, whether its check passed, and any remaining limitations"},
                     "reason": {"type": "string", "description": "cancel / abandon: why the step is skipped or why the plan is abandoned"}
                 },
-                "required": ["op"]
+                "oneOf": [
+                    {"required": ["op"]},
+                    {"required": ["goal", "steps"]}
+                ]
             }),
         },
         ToolDef {
@@ -1124,16 +1142,44 @@ fn plan_tool_description_describes_criteria_as_notes() {
         "plan description must mention step checks: {}",
         &plan.description[..plan.description.len().min(200)]
     );
-    let steps = &plan.parameters["properties"]["steps"];
+    let params = &plan.parameters;
     assert!(
-        steps["items"]["properties"]["check"]["type"] == "string",
+        params["oneOf"]
+            .as_array()
+            .is_some_and(|branches| branches.len() == 2),
+        "create may omit op when goal and steps are supplied: {params}"
+    );
+    for key in ["criteria", "constraints"] {
+        assert!(
+            params["properties"][key]["oneOf"]
+                .as_array()
+                .is_some_and(|branches| branches.len() == 2),
+            "{key} must accept a string or an array: {params}"
+        );
+    }
+    let steps = &params["properties"]["steps"];
+    assert!(
+        steps["items"]["oneOf"]
+            .as_array()
+            .is_some_and(|branches| branches.len() == 2),
+        "a step must accept a title string or an object: {steps}"
+    );
+    assert!(
+        steps["items"]["oneOf"][1]["properties"]["check"]["type"] == "string",
         "step schema must accept a check: {steps}"
     );
     assert!(
-        !steps["items"]["required"]
+        !steps["items"]["oneOf"][1]["required"]
             .as_array()
             .is_some_and(|required| required.iter().any(|v| v == "check")),
         "check is prompt-expected, not schema-required: {steps}"
+    );
+    assert!(
+        plan.description.contains("string or an array")
+            && plan.description.contains("title string")
+            && plan.description.contains("tags"),
+        "plan description must document the accepted shapes: {}",
+        &plan.description[..plan.description.len().min(240)]
     );
 }
 

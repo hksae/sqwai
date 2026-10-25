@@ -49,6 +49,16 @@ fn normalize_check(check: Option<String>) -> Option<String> {
         .filter(|check| !check.is_empty())
 }
 
+/// Plan notes are plain text. The model sometimes emits XML-ish wrappers
+/// (`note</criteria>`); strip tag-shaped runs but leave comparisons such as
+/// `latency < 100 ms` intact.
+pub(crate) fn strip_tags(text: &str) -> String {
+    static TAGS: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"</?[A-Za-z][^<>]*>").expect("plan tag pattern")
+    });
+    TAGS.replace_all(text, "").trim().to_string()
+}
+
 /// One operation per call. `Serialize` is for the journal intent
 /// record: every accepted op is journaled with its full args before the
 /// plan file is stored, so a crash between the two heals by replay.
@@ -227,7 +237,17 @@ pub fn create(
             "state what must be true when the work is done",
         ));
     }
-    if criteria.iter().all(|c| c.trim().is_empty()) {
+    let constraints: Vec<String> = constraints
+        .into_iter()
+        .map(|text| strip_tags(&text))
+        .filter(|text| !text.is_empty())
+        .collect();
+    let criteria: Vec<String> = criteria
+        .into_iter()
+        .map(|text| strip_tags(&text))
+        .filter(|text| !text.is_empty())
+        .collect();
+    if criteria.is_empty() {
         return Err(Rejection::new(
             "empty_criteria",
             "a plan needs at least one done-criterion",
@@ -264,13 +284,11 @@ pub fn create(
     let ts = now();
     let mut dedup_criteria: Vec<String> = Vec::new();
     for text in criteria {
-        let trimmed = text.trim().to_string();
-        if !trimmed.is_empty()
-            && !dedup_criteria
-                .iter()
-                .any(|c| c.eq_ignore_ascii_case(&trimmed))
+        if !dedup_criteria
+            .iter()
+            .any(|c| c.eq_ignore_ascii_case(&text))
         {
-            dedup_criteria.push(trimmed);
+            dedup_criteria.push(text);
         }
     }
     let plan = Plan {
@@ -285,11 +303,7 @@ pub fn create(
             source: "user".to_string(),
             created: ts.clone(),
         },
-        constraints: constraints
-            .into_iter()
-            .map(|c| c.trim().to_string())
-            .filter(|c| !c.is_empty())
-            .collect(),
+        constraints,
         criteria: dedup_criteria,
         steps: steps
             .into_iter()

@@ -359,7 +359,16 @@ fn restore_create_criteria(plan: &mut Plan, fields: &serde_json::Map<String, ser
         criteria = list("acceptance");
     }
     criteria.extend(list("checklist"));
-    plan.criteria = criteria;
+    plan.criteria = criteria
+        .into_iter()
+        .map(|text| super::ops::strip_tags(&text))
+        .filter(|text| !text.is_empty())
+        .fold(Vec::new(), |mut kept, text| {
+            if !kept.iter().any(|old| old.eq_ignore_ascii_case(&text)) {
+                kept.push(text);
+            }
+            kept
+        });
 }
 
 fn rebuild_created(
