@@ -8,6 +8,8 @@ use serde_json::Value;
 #[derive(Debug, Clone, Serialize)]
 pub struct NewStep {
     pub title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub check: Option<String>,
 }
 
 impl<'de> Deserialize<'de> for NewStep {
@@ -19,6 +21,7 @@ impl<'de> Deserialize<'de> for NewStep {
         if let Some(s) = val.as_str() {
             return Ok(NewStep {
                 title: s.to_string(),
+                check: None,
             });
         }
         if let Some(obj) = val.as_object() {
@@ -26,6 +29,10 @@ impl<'de> Deserialize<'de> for NewStep {
                 if let Some(s) = obj.get(key).and_then(Value::as_str) {
                     return Ok(NewStep {
                         title: s.to_string(),
+                        check: obj
+                            .get("check")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
                     });
                 }
             }
@@ -34,6 +41,12 @@ impl<'de> Deserialize<'de> for NewStep {
             "expected a step string or an object with a `title` field",
         ))
     }
+}
+
+fn normalize_check(check: Option<String>) -> Option<String> {
+    check
+        .map(|check| check.trim().to_string())
+        .filter(|check| !check.is_empty())
 }
 
 /// One operation per call. `Serialize` is for the journal intent
@@ -65,6 +78,8 @@ pub enum Op {
         #[serde(default)]
         after: Option<String>,
         title: String,
+        #[serde(default)]
+        check: Option<String>,
     },
     Cancel {
         #[serde(default)]
@@ -282,6 +297,7 @@ pub fn create(
             .map(|(i, s)| Step {
                 id: (i + 1).to_string(),
                 title: s.title.trim().to_string(),
+                check: normalize_check(s.check),
                 status: if i == 0 {
                     StepStatus::InProgress
                 } else {
@@ -332,7 +348,11 @@ pub fn apply(plan: &mut Plan, op: Op, limits: &Limits) -> Result<Applied, Reject
             abandon(plan);
             accept(plan, format!("plan {} abandoned: {quoted}", plan.id))
         }
-        Op::Add { after, title } => add(plan, after.as_deref(), title, limits),
+        Op::Add {
+            after,
+            title,
+            check,
+        } => add(plan, after.as_deref(), title, check, limits),
         Op::Join { session } => join(plan, &session),
     }
 }
@@ -558,6 +578,7 @@ fn add(
     plan: &mut Plan,
     after: Option<&str>,
     title: String,
+    check: Option<String>,
     limits: &Limits,
 ) -> Result<Applied, Rejection> {
     if title.trim().is_empty() {
@@ -600,6 +621,7 @@ fn add(
     let step = Step {
         id: id.clone(),
         title: title.trim().to_string(),
+        check: normalize_check(check),
         status: StepStatus::Pending,
         started: None,
         finished: None,

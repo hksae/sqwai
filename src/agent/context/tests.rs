@@ -43,6 +43,7 @@ fn anchor_keeps_journal_facts_not_plan_state() {
         vec!["cmd: cargo test".into()],
         vec![crate::plan::NewStep {
             title: "implement anchor".into(),
+            check: None,
         }],
         &crate::plan::Limits::default(),
     )
@@ -178,6 +179,7 @@ fn anchor_carries_no_plan_goals_for_any_session() {
         vec!["note".to_string()],
         vec![crate::plan::NewStep {
             title: "step A".into(),
+            check: None,
         }],
         &limits,
     )
@@ -192,6 +194,7 @@ fn anchor_carries_no_plan_goals_for_any_session() {
         vec!["note".to_string()],
         vec![crate::plan::NewStep {
             title: "step B".into(),
+            check: None,
         }],
         &limits,
     )
@@ -222,6 +225,7 @@ fn resume_notice_reports_unfinished_plan_step() {
         vec!["note".to_string()],
         vec![crate::plan::NewStep {
             title: "unfinished change".into(),
+            check: None,
         }],
         &crate::plan::Limits::default(),
     )

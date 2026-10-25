@@ -456,6 +456,7 @@ fn undo_step_reports_a_step_with_no_recorded_writes() {
         vec!["note".into()],
         vec![crate::plan::NewStep {
             title: "the only step".into(),
+            check: None,
         }],
         &crate::plan::Limits::default(),
     )
@@ -1924,6 +1925,7 @@ fn undo_and_redo_round_trip_restores_files_and_recompletes_plan_step() {
         vec!["constraint".into()],
         vec![crate::plan::NewStep {
             title: "edit a.rs".into(),
+            check: None,
         }],
         &crate::plan::Limits::default(),
     )

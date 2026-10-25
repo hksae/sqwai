@@ -42,14 +42,77 @@ fn new_plan() -> Plan {
         vec![
             NewStep {
                 title: "add the model".to_string(),
+                check: None,
             },
             NewStep {
                 title: "add the validator".to_string(),
+                check: None,
             },
         ],
         &Limits::default(),
     )
     .expect("plan creates")
+}
+
+#[test]
+fn a_step_check_is_optional_and_rendered() {
+    let plan = create(
+        "do the work".to_string(),
+        Vec::new(),
+        vec!["cargo test passes".to_string()],
+        vec![
+            NewStep {
+                title: "write it".to_string(),
+                check: Some("cargo test passes".to_string()),
+            },
+            NewStep {
+                title: "ship it".to_string(),
+                check: None,
+            },
+        ],
+        &Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(plan.steps[0].check.as_deref(), Some("cargo test passes"));
+    assert_eq!(plan.steps[1].check, None);
+    let text = render_status(&plan);
+    assert!(text.contains("check: cargo test passes"), "{text}");
+
+    let dir = std::env::temp_dir().join(format!("sqwai-plan-check-{}", new_id()));
+    store(&dir, &plan).unwrap();
+    let back = open(&dir, &plan.id).unwrap();
+    assert_eq!(back.steps[0].check.as_deref(), Some("cargo test passes"));
+    assert_eq!(back.steps[1].check, None);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn new_step_reads_check_from_the_object_form() {
+    let step: NewStep =
+        serde_json::from_value(serde_json::json!({"title": "x", "check": "y"})).unwrap();
+    assert_eq!(step.title, "x");
+    assert_eq!(step.check.as_deref(), Some("y"));
+    let plain: NewStep = serde_json::from_value(serde_json::json!("z")).unwrap();
+    assert_eq!(plain.check, None);
+}
+
+#[test]
+fn add_keeps_a_step_check() {
+    let mut plan = new_plan();
+    apply(
+        &mut plan,
+        Op::Add {
+            after: None,
+            title: "extra".to_string(),
+            check: Some("run it".to_string()),
+        },
+        &Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        plan.steps.last().and_then(|step| step.check.as_deref()),
+        Some("run it")
+    );
 }
 
 #[test]
@@ -318,6 +381,7 @@ fn add_respects_the_limit() {
         Op::Add {
             after: Some("1".into()),
             title: "extra".into(),
+            check: None,
         },
         &limits,
     )
@@ -328,6 +392,7 @@ fn add_respects_the_limit() {
         Op::Add {
             after: None,
             title: "one too many".into(),
+            check: None,
         },
         &limits,
     )
@@ -890,6 +955,7 @@ fn add_refuses_non_numeric_step_ids_instead_of_colliding() {
         Op::Add {
             after: None,
             title: "another".to_string(),
+            check: None,
         },
         &Limits::default(),
     )

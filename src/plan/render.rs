@@ -44,6 +44,9 @@ pub fn render_status(plan: &Plan) -> String {
             StepStatus::Pending | StepStatus::Reopened => "[ ]",
         };
         out.push_str(&format!("  {} {} {}\n", marker, s.id, s.title));
+        if let Some(check) = &s.check {
+            out.push_str(&format!("      check: {check}\n"));
+        }
         if let Some(reason) = &s.reason {
             out.push_str(&format!("      reason: {reason}\n"));
         }

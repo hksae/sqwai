@@ -2327,7 +2327,8 @@ async fn run_agent(
                         "\n[host: this call changed {what}. If more state changes follow, \
                          plan them: 3–6 steps, each ending in a check — \
                          plan(op=\"create\", goal=\"...\", criteria=[\"...\"], \
-                         steps=[{{\"title\": \"...\"}}]). Skip for a one-step change.]"
+                         steps=[{{\"title\": \"...\", \"check\": \"...\"}}]). \
+                         Skip for a one-step change.]"
                     ));
                 }
                 // Repeat handling: the first identical re-run is

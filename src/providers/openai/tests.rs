@@ -910,9 +910,11 @@ mod live_cache {
             vec![
                 NewStep {
                     title: "write it".into(),
+                    check: None,
                 },
                 NewStep {
                     title: "test it".into(),
+                    check: None,
                 },
             ],
             &plan::Limits::default(),

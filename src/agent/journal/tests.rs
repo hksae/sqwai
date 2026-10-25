@@ -138,6 +138,45 @@ fn secrets_are_screened_out_of_summaries_and_notes() {
 /// and is still a session fact. Dropping it emptied the diary host block
 /// and the compaction anchor for every session without an active plan.
 #[test]
+fn plan_evidence_skips_shell_baselines_and_zero_changes() {
+    let root = root();
+    let mut journal = Journal::open(&root, "plan-evidence").unwrap();
+    journal.set_attribution(Some("1".into()), Some("plan-a".into()), "main");
+    journal
+        .append(
+            "file_diff",
+            json!({"path": "dirty.rs", "mode": "bash", "added": 5, "removed": 0}),
+        )
+        .unwrap();
+    journal
+        .append(
+            "file_diff",
+            json!({"path": "zero.rs", "mode": "edit", "added": 0, "removed": 0}),
+        )
+        .unwrap();
+    journal
+        .append(
+            "file_diff",
+            json!({"path": "real.rs", "mode": "edit", "added": 2, "removed": 1}),
+        )
+        .unwrap();
+
+    let paths = Journal::step_changed_paths(&root, Some("plan-a"), "1").unwrap();
+    assert_eq!(paths, vec!["real.rs".to_string()]);
+
+    let mut fields = serde_json::Map::new();
+    fields.insert("mode".into(), json!("bash"));
+    fields.insert("added".into(), json!(5));
+    assert!(!file_diff_is_plan_evidence(&fields));
+    fields.insert("mode".into(), json!("edit"));
+    fields.insert("added".into(), json!(0));
+    assert!(!file_diff_is_plan_evidence(&fields));
+    fields.insert("added".into(), json!(1));
+    assert!(file_diff_is_plan_evidence(&fields));
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
 fn unattributed_results_are_recorded_as_session_facts() {
     let root = root();
     let mut journal = Journal::open(&root, "session").unwrap();
@@ -601,6 +640,7 @@ fn nudges_after_unaccounted_step_actions() {
         vec!["note".to_string()],
         vec![crate::plan::NewStep {
             title: "step".into(),
+            check: None,
         }],
         &crate::plan::Limits::default(),
     )

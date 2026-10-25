@@ -79,6 +79,18 @@ pub struct StepRevert {
     pub written_since: Vec<String>,
 }
 
+/// Whether a journal `file_diff` record is a real plan-visible change.
+/// A bash checkpoint records the worktree it found (often someone else's
+/// uncommitted files) and a zero-change record is not a change at all.
+pub fn file_diff_is_plan_evidence(fields: &serde_json::Map<String, Value>) -> bool {
+    if fields.get("mode").and_then(Value::as_str) == Some("bash") {
+        return false;
+    }
+    let added = fields.get("added").and_then(Value::as_u64).unwrap_or(0);
+    let removed = fields.get("removed").and_then(Value::as_u64).unwrap_or(0);
+    added > 0 || removed > 0
+}
+
 /// What one file looked like before an undone window touched it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PreImage {
@@ -739,6 +751,40 @@ impl Journal {
             }
         }
         active
+    }
+
+    /// Files a step actually changed, for the plan's evidence and blast
+    /// radius. Shell checkpoints are baselines (they record whatever was
+    /// already dirty) and zero-change records are not changes, so neither
+    /// counts here; the raw journal keeps both for undo and forensics.
+    pub fn step_changed_paths(
+        root: &Path,
+        plan: Option<&str>,
+        step: &str,
+    ) -> Result<Vec<String>> {
+        let all_records = Self::records(root)?;
+        let records = Self::active_file_diffs(&all_records);
+        let in_scope = |record: &Record| {
+            plan.is_none_or(|wanted| {
+                record.plan.as_deref() == Some(wanted) || record.plan.is_none()
+            })
+        };
+        let mut paths = Vec::new();
+        for record in records {
+            if record.kind != "file_diff"
+                || !in_scope(record)
+                || record.step.as_deref() != Some(step)
+                || !file_diff_is_plan_evidence(&record.fields)
+            {
+                continue;
+            }
+            if let Some(path) = record.fields.get("path").and_then(Value::as_str) {
+                paths.push(path.to_string());
+            }
+        }
+        paths.sort();
+        paths.dedup();
+        Ok(paths)
     }
 
     pub fn step_pre_images_in(root: &Path, plan: Option<&str>, step: &str) -> Result<StepRevert> {

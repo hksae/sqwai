@@ -378,6 +378,7 @@ async fn startup_empty_enter_ignores_foreign_global_plan() {
         vec!["note".to_string()],
         vec![NewStep {
             title: "foreign step".into(),
+            check: None,
         }],
         &limits,
     )

@@ -528,10 +528,11 @@ updates or deletes an entry in place.",
             name: "plan",
             kind: Kind::Mutating,
             description: "Manage the host plan for multi-step work. `create` sets goal, \
-constraints, criteria and 3–6 steps (step 1 starts); criteria are your done-notes and the host \
-runs nothing. `finish` closes the current step and advances; `add` inserts scope; `cancel` skips \
-a step; `abandon` retires a plan whose direction changed. Use the live step ids; never re-read \
-the plan through tools.",
+constraints, criteria and 3–6 steps (step 1 starts); criteria are your done-notes and each step \
+should carry a `check` — what proves it done. The host runs nothing and enforces nothing. `finish` \
+closes the current step and advances; `add` inserts scope; `cancel` skips a step; `abandon` \
+retires a plan whose direction changed. Use the live step ids; never re-read the plan through \
+tools.",
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -553,18 +554,20 @@ the plan through tools.",
                     },
                     "steps": {
                         "type": "array",
-                        "description": "create: initial high-level steps (3-6)",
+                        "description": "create: initial high-level steps (3-6); each {title, check}",
                         "items": {
                             "type": "object",
                             "properties": {
-                                "title": {"type": "string"}
+                                "title": {"type": "string"},
+                                "check": {"type": "string", "description": "what proves this step done (runnable or observable); expected, not required"}
                             },
                             "required": ["title"]
                         }
                     },
                     "after": {"type": "string", "description": "add: insert after this step id"},
                     "title": {"type": "string", "description": "add: new step title"},
-                    "summary": {"type": "string", "description": "finish: what was done, where, and any remaining limitations"},
+                    "check": {"type": "string", "description": "create/add step: what proves it done; expected, not required"},
+                    "summary": {"type": "string", "description": "finish: what was done, where, whether its check passed, and any remaining limitations"},
                     "reason": {"type": "string", "description": "cancel / abandon: why the step is skipped or why the plan is abandoned"}
                 },
                 "required": ["op"]
@@ -1115,6 +1118,22 @@ fn plan_tool_description_describes_criteria_as_notes() {
         plan.description.contains("host runs nothing"),
         "plan description must rule out host verification: {}",
         &plan.description[..plan.description.len().min(200)]
+    );
+    assert!(
+        plan.description.contains("check"),
+        "plan description must mention step checks: {}",
+        &plan.description[..plan.description.len().min(200)]
+    );
+    let steps = &plan.parameters["properties"]["steps"];
+    assert!(
+        steps["items"]["properties"]["check"]["type"] == "string",
+        "step schema must accept a check: {steps}"
+    );
+    assert!(
+        !steps["items"]["required"]
+            .as_array()
+            .is_some_and(|required| required.iter().any(|v| v == "check")),
+        "check is prompt-expected, not schema-required: {steps}"
     );
 }
 

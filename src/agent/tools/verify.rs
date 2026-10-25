@@ -12,10 +12,11 @@ use super::ctx::ToolCtx;
 use crate::plan;
 use serde_json::json;
 
-/// One-line blast radius on `finish`: the files this step wrote, from the
-/// journal's `file_diff` chain (all sessions — subagent writes count).
-/// Silent when the step wrote nothing (research steps). Informational,
-/// never a refusal: scope made visible.
+/// One-line blast radius on `finish`: the files this step actually changed,
+/// from the journal's plan-visible `file_diff` chain (all sessions — subagent
+/// writes count). Shell baselines and zero-change records are not plan
+/// evidence. Silent when the step wrote nothing (research steps).
+/// Informational, never a refusal: scope made visible.
 pub(crate) fn with_blast_radius(
     ctx: &ToolCtx,
     finished_step: Option<&str>,
@@ -25,17 +26,12 @@ pub(crate) fn with_blast_radius(
     let Some(step) = finished_step else {
         return message;
     };
-    let revert =
-        crate::agent::journal::Journal::step_pre_images_in(&ctx.root, Some(&active.id), step)
-            .unwrap_or_default();
-    let mut paths: Vec<String> = revert
-        .files
-        .iter()
-        .map(|file| file.path.clone())
-        .chain(revert.written_since.iter().cloned())
-        .collect();
-    paths.sort();
-    paths.dedup();
+    let paths = crate::agent::journal::Journal::step_changed_paths(
+        &ctx.root,
+        Some(&active.id),
+        step,
+    )
+    .unwrap_or_default();
     if paths.is_empty() {
         return message;
     }

@@ -29,6 +29,7 @@ fn plan_delete_user_command_flow() {
         vec!["note".to_string()],
         vec![plan::NewStep {
             title: "step 1".into(),
+            check: None,
         }],
         &limits,
     )
@@ -84,6 +85,7 @@ fn plan_confirm_and_waive_are_retired() {
         vec!["eyeball it".into()],
         vec![plan::NewStep {
             title: "step 1".into(),
+            check: None,
         }],
         &limits,
     )
@@ -127,6 +129,7 @@ fn plan_delete_prefers_session_plan_over_most_recent() {
             vec!["note".to_string()],
             vec![plan::NewStep {
                 title: "step 1".into(),
+                check: None,
             }],
             &limits,
         )
@@ -175,6 +178,7 @@ fn completed_linked_plan_refuses_tui_mutations() {
         vec!["manual: eyeball it".into()],
         vec![plan::NewStep {
             title: "step 1".into(),
+            check: None,
         }],
         &limits,
     )
@@ -225,6 +229,7 @@ fn plan_delete_then_session_has_no_plan() {
             vec!["note".to_string()],
             vec![plan::NewStep {
                 title: "step 1".into(),
+                check: None,
             }],
             &limits,
         )
@@ -315,6 +320,7 @@ fn tui_commands_operate_on_session_plan_not_newest_global() {
             vec!["manual: eyeball it".into()],
             vec![plan::NewStep {
                 title: "step 1".into(),
+                check: None,
             }],
             &limits,
         )

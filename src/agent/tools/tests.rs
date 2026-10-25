@@ -2570,8 +2570,23 @@ fn plan_replay_reattaches_evidence_behind_the_cursor() {
     // tool evidence lands in the journal (live path attaches it too)
     let mut journal = crate::agent::journal::Journal::open(&dir, &ctx.session_id).unwrap();
     journal.set_attribution(Some("1".into()), Some(plan_id.clone()), "main");
+    let bash_seq = journal
+        .append(
+            "file_diff",
+            json!({"path": "src/dirty.rs", "mode": "bash", "added": 2, "removed": 0}),
+        )
+        .unwrap();
+    let zero_seq = journal
+        .append(
+            "file_diff",
+            json!({"path": "src/zero.rs", "mode": "edit", "added": 0, "removed": 0}),
+        )
+        .unwrap();
     let evidence_seq = journal
-        .append("file_diff", json!({"path": "src/x.rs", "ok": true}))
+        .append(
+            "file_diff",
+            json!({"path": "src/x.rs", "mode": "edit", "added": 1, "removed": 0}),
+        )
         .unwrap();
     // crash: journal has it, the plan file does not
     let mut plan = plan::open(&dir, &plan_id).unwrap();
@@ -2591,6 +2606,13 @@ fn plan_replay_reattaches_evidence_behind_the_cursor() {
             .iter()
             .any(|reference| reference.seq == evidence_seq),
         "replay must re-attach evidence seq {evidence_seq} (report: {report:?})"
+    );
+    assert!(
+        !step.evidence
+            .iter()
+            .any(|reference| reference.seq == bash_seq || reference.seq == zero_seq),
+        "shell baselines and zero-change records are not plan evidence: {:?}",
+        step.evidence
     );
     fs::remove_dir_all(&dir).ok();
 }
@@ -2662,12 +2684,18 @@ fn plan_finish_reports_blast_radius() {
     let mut journal = crate::agent::journal::Journal::open(&dir, &ctx.session_id).unwrap();
     journal.set_attribution(Some("1".into()), Some(plan_id.clone()), "main");
     journal
-        .append("file_diff", json!({"path": "src/a.rs"}))
+        .append(
+            "file_diff",
+            json!({"path": "src/a.rs", "mode": "edit", "added": 1, "removed": 0}),
+        )
         .unwrap();
     let mut sub = crate::agent::journal::Journal::open(&dir, "sub-1").unwrap();
     sub.set_attribution(Some("1".into()), Some(plan_id.clone()), "main");
-    sub.append("file_diff", json!({"path": "src/b.rs"}))
-        .unwrap();
+    sub.append(
+        "file_diff",
+        json!({"path": "src/b.rs", "mode": "edit", "added": 1, "removed": 0}),
+    )
+    .unwrap();
     let finished = plan_op(
         &mut ctx,
         &json!({"op": "finish", "id": "1", "summary": "done"}),

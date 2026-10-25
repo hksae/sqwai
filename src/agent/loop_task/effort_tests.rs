@@ -1623,6 +1623,7 @@ async fn subagent_joins_its_parent_plan() {
         vec!["note".to_string()],
         vec![plan::NewStep {
             title: "step".into(),
+            check: None,
         }],
         &plan::Limits::default(),
     )
@@ -1706,6 +1707,7 @@ fn adopt_follows_the_plans_in_progress_step() {
         vec!["note".to_string()],
         vec![plan::NewStep {
             title: "step".into(),
+            check: None,
         }],
         &plan::Limits::default(),
     )
@@ -1734,6 +1736,7 @@ async fn subagent_ignores_a_foreign_active_plan() {
         vec!["note".to_string()],
         vec![plan::NewStep {
             title: "step".into(),
+            check: None,
         }],
         &plan::Limits::default(),
     )

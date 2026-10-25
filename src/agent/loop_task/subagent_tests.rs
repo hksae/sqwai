@@ -119,6 +119,7 @@ fn subagent_contract_parent_context_and_receipt_salvage() {
         vec!["cargo test passes".into()],
         vec![crate::plan::NewStep {
             title: "Extract lexer tokens".into(),
+            check: None,
         }],
         &crate::plan::Limits::default(),
     )

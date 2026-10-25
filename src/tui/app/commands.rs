@@ -420,18 +420,23 @@ impl App {
             vec![
                 plan::NewStep {
                     title: "Convert Models and Providers to searchable surfaces".into(),
+                    check: None,
                 },
                 plan::NewStep {
                     title: "Convert Sessions and /config to two-column surfaces".into(),
+                    check: None,
                 },
                 plan::NewStep {
                     title: "Migrate /plan overview to the bottom surface".into(),
+                    check: None,
                 },
                 plan::NewStep {
                     title: "Verify legacy modal code is retired".into(),
+                    check: None,
                 },
                 plan::NewStep {
                     title: "Keep old floating todo popup".into(),
+                    check: None,
                 },
             ],
             &plan::Limits::default(),

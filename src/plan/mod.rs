@@ -134,6 +134,10 @@ pub struct Goal {
 pub struct Step {
     pub id: String,
     pub title: String,
+    /// What proves this step done: a check the agent can run or observe.
+    /// Expected by the prompt, optional in the schema and never graded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check: Option<String>,
     pub status: StepStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started: Option<String>,
