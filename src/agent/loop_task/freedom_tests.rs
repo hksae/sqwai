@@ -1,33 +1,13 @@
 use super::effort_tests::MockTestProvider;
 use super::*;
 
-/// The campaign's central behavioral claim: the plan-first gate is gone,
-/// so a file mutation in a session with no plan at all just runs. Nothing
-/// asks for a plan, nothing nudges about one, and the refusal codes that
-/// used to guard this (`plan_required`, missing acceptance) have no path
-/// left to fire from.
-#[tokio::test]
-async fn a_mutation_runs_without_any_plan() {
-    let provider: SharedProvider = std::sync::Arc::new(MockTestProvider {
-        events: std::sync::Mutex::new(vec![
-            vec![Ok(crate::providers::StreamEvent::ToolCall(
-                crate::providers::ToolCallReq::new(
-                    "c1",
-                    "write",
-                    serde_json::json!({
-                        "file_path": "feature.rs",
-                        "content": "pub fn hello() {}"
-                    }),
-                ),
-            ))],
-            vec![Ok(crate::providers::StreamEvent::Text("done".into()))],
-        ]),
-    });
-
-    let temp_dir = std::env::temp_dir().join(format!("sqwai-noplan-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&temp_dir);
-    std::fs::create_dir_all(&temp_dir).unwrap();
-    let input = AgentInput {
+fn plain_input(
+    provider: SharedProvider,
+    root: std::path::PathBuf,
+    session_id: &str,
+    user: &str,
+) -> AgentInput {
+    AgentInput {
         provider,
         model_id: "m".into(),
         model_key: "primary".into(),
@@ -35,9 +15,9 @@ async fn a_mutation_runs_without_any_plan() {
         effort_support: crate::config::EffortSupport::default(),
         max_tokens: None,
         system: vec![],
-        messages: vec![Message::new(Role::User, "add a small helper module")],
-        root: temp_dir.clone(),
-        session_id: "no-plan-sess".into(),
+        messages: vec![Message::new(Role::User, user)],
+        root,
+        session_id: session_id.into(),
         blocked_patterns: vec![],
         approval_mode: Default::default(),
         approval_grants: Default::default(),
@@ -67,10 +47,43 @@ async fn a_mutation_runs_without_any_plan() {
         parent_step: None,
         parent_session: None,
         fallback_chain: vec![],
-    };
+    }
+}
+
+/// The campaign's central behavioral claim: the plan-first gate is gone,
+/// so a file mutation in a session with no plan at all just runs. The host
+/// may offer a plan after the change, but never refuses or invents one.
+#[tokio::test]
+async fn a_mutation_runs_without_any_plan() {
+    let provider: SharedProvider = std::sync::Arc::new(MockTestProvider {
+        events: std::sync::Mutex::new(vec![
+            vec![Ok(crate::providers::StreamEvent::ToolCall(
+                crate::providers::ToolCallReq::new(
+                    "c1",
+                    "write",
+                    serde_json::json!({
+                        "file_path": "feature.rs",
+                        "content": "pub fn hello() {}"
+                    }),
+                ),
+            ))],
+            vec![Ok(crate::providers::StreamEvent::Text("done".into()))],
+        ]),
+    });
+
+    let temp_dir = std::env::temp_dir().join(format!("sqwai-noplan-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let input = plain_input(
+        provider,
+        temp_dir.clone(),
+        "no-plan-sess",
+        "add a small helper module",
+    );
 
     let mut handle = spawn_agent(input);
     let mut saw_write = false;
+    let mut done = None;
     while let Some(ev) = handle.rx.recv().await {
         match ev {
             AgentEvent::ToolNotice { name, ok, .. } => {
@@ -78,12 +91,27 @@ async fn a_mutation_runs_without_any_plan() {
                 assert!(ok, "no plan is required to write");
                 saw_write = true;
             }
-            AgentEvent::Completed(Ok(_)) => break,
+            AgentEvent::Completed(Ok(outcome)) => {
+                done = Some(outcome);
+                break;
+            }
             AgentEvent::Completed(Err(e)) => panic!("unexpected error: {e}"),
             _ => {}
         }
     }
     assert!(saw_write, "the write must have run");
+    let done = done.expect("turn must complete");
+    let result = done
+        .messages
+        .iter()
+        .find(|m| m.role == Role::Tool && m.content.contains("feature.rs"))
+        .expect("write result");
+    assert!(
+        result.content.contains("this call changed")
+            && result.content.contains("Skip for a one-step change"),
+        "the host offers a plan after a real change: {}",
+        result.content
+    );
     assert!(
         temp_dir.join("feature.rs").exists(),
         "the mutation must land on disk"
@@ -107,6 +135,62 @@ async fn a_mutation_runs_without_any_plan() {
     assert!(
         crate::plan::open_active(&temp_dir).unwrap().is_none(),
         "no plan was invented to justify the write"
+    );
+    std::fs::remove_dir_all(&temp_dir).ok();
+}
+
+#[tokio::test]
+async fn read_only_bash_does_not_nudge_for_a_plan() {
+    let provider: SharedProvider = std::sync::Arc::new(MockTestProvider {
+        events: std::sync::Mutex::new(vec![
+            vec![Ok(crate::providers::StreamEvent::ToolCall(
+                crate::providers::ToolCallReq::new(
+                    "c1",
+                    "bash",
+                    serde_json::json!({"command": "echo hello"}),
+                ),
+            ))],
+            vec![Ok(crate::providers::StreamEvent::Text("done".into()))],
+        ]),
+    });
+
+    let temp_dir = std::env::temp_dir().join(format!("sqwai-readonly-bash-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let input = plain_input(
+        provider,
+        temp_dir.clone(),
+        "readonly-bash-sess",
+        "say hello",
+    );
+
+    let mut handle = spawn_agent(input);
+    let mut done = None;
+    while let Some(ev) = handle.rx.recv().await {
+        match ev {
+            AgentEvent::Completed(Ok(outcome)) => {
+                done = Some(outcome);
+                break;
+            }
+            AgentEvent::Completed(Err(e)) => panic!("unexpected error: {e}"),
+            _ => {}
+        }
+    }
+    let done = done.expect("turn must complete");
+    let result = done
+        .messages
+        .iter()
+        .find(|m| m.role == Role::Tool && m.content.contains("hello"))
+        .expect("bash result");
+    assert!(
+        !result.content.contains("this call changed"),
+        "read-only bash is recon, not a plan-worthy change: {}",
+        result.content
+    );
+    assert!(
+        !result.content.contains("without a plan"),
+        "read-only bash must not get the old generic nudge: {}",
+        result.content
     );
     std::fs::remove_dir_all(&temp_dir).ok();
 }

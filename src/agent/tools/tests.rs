@@ -6,6 +6,25 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 #[test]
+fn changed_any_file_requires_actual_lines() {
+    let diff = |added, removed| FileDiff {
+        path: "a.rs".into(),
+        added,
+        removed,
+        hash_before: None,
+        hash_after: "sha256:x".into(),
+        mode: "bash".into(),
+        checkpoint: None,
+        blob_before: None,
+        blob_after: None,
+    };
+    assert!(!Outcome::ok("ok").changed_any_file());
+    assert!(!Outcome::ok("ok").with_file_diff(diff(0, 0)).changed_any_file());
+    assert!(Outcome::ok("ok").with_file_diff(diff(1, 0)).changed_any_file());
+    assert!(Outcome::ok("ok").with_file_diff(diff(0, 1)).changed_any_file());
+}
+
+#[test]
 fn call_path_extracts_file_targets() {
     let args = |pairs: &[(&str, &str)]| {
         let mut m = serde_json::Map::new();

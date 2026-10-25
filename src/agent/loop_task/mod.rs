@@ -2285,27 +2285,50 @@ async fn run_agent(
                         [] => {}
                     }
                 }
-                // The mirror case: mutating work running with NO plan at
-                // all. Every plan reminder presupposes an existing plan, so
-                // a session that skipped `create` (one failed first call is
-                // enough to send a model into improvise mode) never hears
-                // about plans again. Once per run, phrased as an option —
-                // quick tasks must not be bullied into planning.
+                // The mirror case: an actual file change with NO plan at all.
+                // Read-only bash, queries and failed calls are recon, not
+                // "work without a plan" — nudging there was ignored 11/11 in a
+                // live diagnostic session. Once per run, phrased as an option:
+                // a one-step change can skip it.
                 if outcome.ok
                     && !no_plan_nudged
                     && subagent_depth == 0
                     && call.name != "plan"
-                    && tools::is_mutating_call(&call.name, &call.args)
+                    && outcome.changed_any_file()
                     && plan::open_active_for_session(&root, Some(&session_id))
                         .map(|p| p.is_none())
                         .unwrap_or(false)
                 {
                     no_plan_nudged = true;
-                    outcome.output.push_str(
-                        "\n[host: this is multi-step work running without a plan. If it has \
-                         more steps ahead, track it: plan(op=\"create\", goal=\"...\", \
-                         steps=[{\"title\": \"...\"}, ...]). Skip this for a quick task.]",
-                    );
+                    let mut changed: Vec<&tools::FileDiff> = outcome
+                        .file_diffs
+                        .iter()
+                        .filter(|d| d.added > 0 || d.removed > 0)
+                        .collect();
+                    if changed.is_empty() {
+                        changed.extend(
+                            outcome
+                                .file_diff
+                                .iter()
+                                .filter(|d| d.added > 0 || d.removed > 0),
+                        );
+                    }
+                    let what = match changed.as_slice() {
+                        [] => tools::call_summary(&call.name, &call.args),
+                        [one] => one.path.clone(),
+                        many => format!("{} files", many.len()),
+                    };
+                    let what = if what.chars().count() > 72 {
+                        format!("{}…", what.chars().take(72).collect::<String>())
+                    } else {
+                        what
+                    };
+                    outcome.output.push_str(&format!(
+                        "\n[host: this call changed {what}. If more state changes follow, \
+                         plan them: 3–6 steps, each ending in a check — \
+                         plan(op=\"create\", goal=\"...\", criteria=[\"...\"], \
+                         steps=[{{\"title\": \"...\"}}]). Skip for a one-step change.]"
+                    ));
                 }
                 // Repeat handling: the first identical re-run is
                 // reported with a note, the next one loses its bytes — the note

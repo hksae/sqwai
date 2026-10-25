@@ -134,6 +134,16 @@ impl Outcome {
         self.file_diffs.extend(file_diffs);
         self
     }
+
+    /// True when the call actually changed file bytes. A bash checkpoint or
+    /// a zero-change baseline is deliberately not a mutation here: plan
+    /// suggestions belong after real work, not after recon.
+    pub fn changed_any_file(&self) -> bool {
+        self.file_diffs
+            .iter()
+            .chain(self.file_diff.iter())
+            .any(|diff| diff.added > 0 || diff.removed > 0)
+    }
 }
 
 /// (id, owning session, command) of background jobs whose processes are
