@@ -114,6 +114,8 @@ pub struct AgentOutcome {
     /// approval grants earned during this run, so "always allow this
     /// session" survives the turn that earned it
     pub approval_grants: SessionGrants,
+    /// delta-read state, updated by this run's reads and edits
+    pub read_ledger: crate::agent::tools::ReadLedger,
 }
 
 #[derive(Debug)]
@@ -356,6 +358,8 @@ pub struct AgentInput {
     /// Skill names already active in the session (their bodies are in the
     /// system prompt); the `skill` tool answers a re-load with a pointer.
     pub active_skills: Vec<String>,
+    /// Session-persisted delta-read state carried across per-turn runs.
+    pub read_ledger: crate::agent::tools::ReadLedger,
     /// Whether this request may use agent tools.
     pub enable_tools: bool,
     /// Slow baseline capture runs in the background instead of blocking
@@ -772,6 +776,7 @@ async fn run_agent(
         tools: tool_caps,
         limits,
         active_skills,
+        read_ledger,
         enable_tools,
         background_baselines,
         read_only,
@@ -946,9 +951,10 @@ async fn run_agent(
                 todos: Vec::new(),
                 plan_todos: Vec::new(),
                 journal: Vec::new(),
-                // compaction runs no tool calls, so the grants pass
-                // through exactly as they arrived
+                // compaction runs no tool calls, so the grants and read
+                // ledger pass through exactly as they arrived
                 approval_grants,
+                read_ledger,
             })))
             .await;
         return;
@@ -971,6 +977,7 @@ async fn run_agent(
     ctx.limits = limits.clone();
     ctx.activated_skills
         .extend(active_skills.iter().cloned());
+    ctx.read_ledger = read_ledger;
     crate::agent::tools::web::router::set_max_body_bytes(tool_caps.web.fetch_bytes.max(1024));
     // slow baseline capture defers to the background worker on interactive
     // turns; everywhere else the tool call captures synchronously
@@ -2367,6 +2374,7 @@ async fn run_agent(
                 tools: tool_grants,
                 dirs: std::mem::take(&mut ctx.outside_granted),
             },
+            read_ledger: ctx.read_ledger,
         })))
         .await;
 }

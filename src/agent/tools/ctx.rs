@@ -3,7 +3,8 @@
 //! Moved byte-for-byte from `tools/mod.rs`; behavior unchanged.
 //!
 use crate::plan;
-use std::collections::HashMap;
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 #[derive(Clone)]
@@ -40,20 +41,32 @@ pub struct ToolCtx {
     /// chain. Job isolation, read-guard and journal identity all stay on
     /// `session_id` — only the shadow chain is shared.
     pub checkpoint_session: Option<String>,
-    /// Files read this session and the content hash they had at the time,
+    /// Files read in this run and the content hash they had at the time,
     /// keyed by canonical path. calls for the guard to be hash-tracked: a
     /// file changed by `bash` since the last read has to be read again, and
     /// with paths alone the model could edit it blind. The canonical key also
     /// stops `read("src/x.rs")` followed by `edit("./src/x.rs")` from being
     /// refused as unread.
     pub files_read: HashMap<PathBuf, String>,
-    /// Served read windows this session, per canonical path. A request whose
+    /// Served read windows in this run, per canonical path. A request whose
     /// lines are already covered is answered with a pointer back at the earlier
     /// output instead of the bytes again: a live session spent 23 of its 45
     /// reads on one 5300-line file, five of them inside lines 846–926. Keyed by
     /// content hash, so an edit or a `bash` write puts the file back on the
     /// fresh path.
     pub read_windows: HashMap<PathBuf, Served>,
+    /// What each file looked like when the model last saw it whole, plus its
+    /// own edits since. This lives in the session, not the run: a live GTA
+    /// session's two full re-reads of `main.js` both happened on the first
+    /// request of a new user turn, where a run-local map is always empty.
+    /// A full read can then be answered with the base plus the edit list, and
+    /// a bash/external change (any hash break) still falls back to the file.
+    pub read_ledger: ReadLedger,
+    /// Tool-result ids still visible on the wire. `None` means visibility is
+    /// not tracked (unit tests, headless paths): the ledger then trusts its
+    /// call ids. The loop sets it before each request, so a pointer never
+    /// claims an edit diff is "above" after that result was cleared.
+    pub visible_calls: Option<HashSet<String>>,
     /// journal of checkpoints created by this session's mutations
     pub journal: Vec<(String, String)>,
     /// Host limits on the plan, and the model context they are derived from.
@@ -149,6 +162,8 @@ impl ToolCtx {
             checkpoint_session: None,
             files_read: HashMap::new(),
             read_windows: HashMap::new(),
+            read_ledger: ReadLedger::default(),
+            visible_calls: None,
             journal: Vec::new(),
             plan_limits: crate::config::PlanConfig::default(),
             context_limit: 0,
@@ -513,10 +528,8 @@ impl ToolCtx {
     /// Evict read windows whose `tool_result` is no longer visible on the wire
     /// (either cleared by `tool_output::trim_for_wire` or dropped by compaction),
     /// so `fs::read` never claims "see above" for output the model cannot see.
-    pub(crate) fn retain_visible_read_windows(
-        &mut self,
-        visible_call_ids: &std::collections::HashSet<String>,
-    ) {
+    pub(crate) fn retain_visible_read_windows(&mut self, visible_call_ids: &HashSet<String>) {
+        self.visible_calls = Some(visible_call_ids.clone());
         for served in self.read_windows.values_mut() {
             let before = served.windows.len();
             served
@@ -559,6 +572,7 @@ impl ToolCtx {
                 slot.rebuild_ranges();
             }
         }
+        self.read_ledger.merge(child.read_ledger);
         self.activated_skills.extend(child.activated_skills);
     }
 }
@@ -599,10 +613,255 @@ impl Served {
         self.ranges = merged;
     }
 }
+
+/// Session-persisted read state for delta answers. One entry per canonical
+/// path: the content the model last saw whole (a full read or its own write)
+/// and the edits it made since. Stored on the session, not on `ToolCtx`, so
+/// it survives the per-user-turn agent run.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ReadLedger {
+    files: BTreeMap<String, FileLedger>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct FileLedger {
+    base: Option<ReadBase>,
+    edits: Vec<OwnEdit>,
+    /// A pointer was already served; the next full request for unchanged
+    /// content serves the real file so the model can never be trapped.
+    #[serde(default)]
+    stubbed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct ReadBase {
+    kind: BaseKind,
+    hash: String,
+    at: String,
+    call_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum BaseKind {
+    Read,
+    Write,
+}
+
+impl BaseKind {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Read => "full read",
+            Self::Write => "write",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct OwnEdit {
+    tool: String,
+    added: usize,
+    removed: usize,
+    at: String,
+    call_id: Option<String>,
+    hash_after: String,
+}
+
+impl ReadLedger {
+    /// The record to answer a whole-file read with, when the current bytes
+    /// still hash to the end of a chain that started at a full read or write
+    /// and contains only the model's own edits. `visible` is the wire's
+    /// current tool-result set; an edit whose result was cleared makes the
+    /// answer a lie, so it falls back to the file.
+    pub(crate) fn delta_for(
+        &self,
+        p: &Path,
+        current_hash: &str,
+        visible: Option<&HashSet<String>>,
+    ) -> Option<&FileLedger> {
+        let entry = self.files.get(&ledger_key(p))?;
+        if entry.stubbed {
+            return None;
+        }
+        let base = entry.base.as_ref()?;
+        let last = entry
+            .edits
+            .last()
+            .map(|edit| edit.hash_after.as_str())
+            .unwrap_or(base.hash.as_str());
+        if last != current_hash {
+            return None;
+        }
+        if let Some(visible) = visible {
+            let shown = |id: &Option<String>| id.as_ref().is_some_and(|id| visible.contains(id));
+            if !shown(&base.call_id) || !entry.edits.iter().all(|edit| shown(&edit.call_id)) {
+                return None;
+            }
+        }
+        Some(entry)
+    }
+
+    /// A real whole-file read landed: replace the base and drop the edit log.
+    pub(crate) fn note_full_read(&mut self, p: &Path, hash: &str, call_id: Option<String>) {
+        self.files.insert(
+            ledger_key(p),
+            FileLedger {
+                base: Some(ReadBase {
+                    kind: BaseKind::Read,
+                    hash: hash.to_string(),
+                    at: now_hms(),
+                    call_id,
+                }),
+                edits: Vec::new(),
+                stubbed: false,
+            },
+        );
+    }
+
+    /// The model authored the whole file. The write result is the base; any
+    /// earlier chain is irrelevant because this content replaced it.
+    pub(crate) fn note_write(&mut self, p: &Path, hash: &str, call_id: Option<String>) {
+        self.files.insert(
+            ledger_key(p),
+            FileLedger {
+                base: Some(ReadBase {
+                    kind: BaseKind::Write,
+                    hash: hash.to_string(),
+                    at: now_hms(),
+                    call_id,
+                }),
+                edits: Vec::new(),
+                stubbed: false,
+            },
+        );
+    }
+
+    /// Record one successful own edit. A hash that does not continue the
+    /// chain means something outside the file tools changed the file in
+    /// between; the ledger gives up and the next read serves the real file.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn note_edit(
+        &mut self,
+        p: &Path,
+        tool: &str,
+        added: usize,
+        removed: usize,
+        hash_before: &str,
+        hash_after: &str,
+        call_id: Option<String>,
+    ) {
+        let key = ledger_key(p);
+        let Some(entry) = self.files.get_mut(&key) else {
+            return;
+        };
+        let expected = entry
+            .edits
+            .last()
+            .map(|edit| edit.hash_after.as_str())
+            .or_else(|| entry.base.as_ref().map(|base| base.hash.as_str()));
+        if expected != Some(hash_before) {
+            self.files.remove(&key);
+            return;
+        }
+        if entry.edits.len() >= EDITS_LOG_CAP {
+            // too many blind edits: the list would cost more than the file
+            self.files.remove(&key);
+            return;
+        }
+        entry.edits.push(OwnEdit {
+            tool: tool.to_string(),
+            added,
+            removed,
+            at: now_hms(),
+            call_id,
+            hash_after: hash_after.to_string(),
+        });
+        entry.stubbed = false;
+    }
+
+    /// The pointer was served; allow one later full request to bypass it.
+    pub(crate) fn note_pointer(&mut self, p: &Path) {
+        if let Some(entry) = self.files.get_mut(&ledger_key(p)) {
+            entry.stubbed = true;
+        }
+    }
+
+    /// Parallel read-only workers may have established a fresh base or
+    /// served a pointer; their state is a superset of this context's.
+    pub(crate) fn merge(&mut self, other: Self) {
+        for (path, entry) in other.files {
+            self.files.insert(path, entry);
+        }
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.files.is_empty()
+    }
+}
+
+impl FileLedger {
+    pub(crate) fn base(&self) -> &ReadBase {
+        self.base
+            .as_ref()
+            .expect("delta_for only returns entries with a base")
+    }
+
+    pub(crate) fn edits(&self) -> &[OwnEdit] {
+        &self.edits
+    }
+}
+
+impl ReadBase {
+    pub(crate) fn kind(&self) -> BaseKind {
+        self.kind
+    }
+
+    pub(crate) fn is_write(&self) -> bool {
+        matches!(self.kind, BaseKind::Write)
+    }
+
+    pub(crate) fn at(&self) -> &str {
+        &self.at
+    }
+}
+
+impl OwnEdit {
+    pub(crate) fn tool(&self) -> &str {
+        &self.tool
+    }
+
+    pub(crate) fn added(&self) -> usize {
+        self.added
+    }
+
+    pub(crate) fn removed(&self) -> usize {
+        self.removed
+    }
+
+    pub(crate) fn at(&self) -> &str {
+        &self.at
+    }
+}
+
+/// Log entries beyond this cap void the record: too many blind edits
+/// means a full read is the honest answer.
+const EDITS_LOG_CAP: usize = 12;
+
+fn ledger_key(p: &Path) -> String {
+    p.canonicalize()
+        .unwrap_or_else(|_| p.to_path_buf())
+        .to_string_lossy()
+        .to_string()
+}
+
+fn now_hms() -> String {
+    chrono::Utc::now().format("%H:%M:%S").to_string()
+}
+
 /// What the read guard knows about a file the model wants to edit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReadState {
-    /// never read in this session
+    /// never read since this run started
     Unread,
     /// read, and unchanged since
     Current,

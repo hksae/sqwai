@@ -78,7 +78,7 @@ fn require_read(ctx: &ToolCtx, p: &Path) -> Result<(), String> {
     match ctx.read_state(p) {
         super::ReadState::Current => Ok(()),
         super::ReadState::Unread => err(format!(
-            "edit denied: {} was not read in this session — call read first",
+            "edit denied: {} was not read in this turn — call read first",
             p.display()
         )),
         super::ReadState::Stale => err(format!(
@@ -374,6 +374,71 @@ fn read_single(ctx: &mut ToolCtx, raw: &str, args: &serde_json::Value) -> Outcom
             rel_label(&ctx.root, &p),
         ));
     }
+    // Delta read: a whole-file re-read whose only changes since the model
+    // last saw it whole are its own edits. The base result and every edit
+    // diff are still on the wire (checked via `visible_calls`), so the file
+    // itself would only repeat bytes. A ranged read below still serves real
+    // lines; a bash/external change breaks the ledger's hash chain and falls
+    // through to the file.
+    // Only a bare whole-file request gets the pointer. An explicit
+    // offset/limit is the model asking for exact lines — even when the range
+    // happens to cover the file — and is always served from the file.
+    let explicit_range = args.get("offset").is_some() || args.get("limit").is_some();
+    let mut pointer = None;
+    if !explicit_range
+        && wanted_from <= 1
+        && wanted_to >= total_lines
+        && let Some(entry) = ctx
+            .read_ledger
+            .delta_for(&p, &window_hash, ctx.visible_calls.as_ref())
+    {
+        let base = entry.base();
+        let mut out = format!(
+            "…({} — {} lines, {} B. No full re-read: since your {} at {} ",
+            rel_label(&ctx.root, &p),
+            total_lines,
+            bytes.len(),
+            base.kind().label(),
+            base.at(),
+        );
+        if entry.edits().is_empty() {
+            if base.is_write() {
+                out.push_str(
+                    "the file is unchanged; the content is exactly what you sent to \
+                     `write`. Use offset/limit if you need exact lines.)",
+                );
+            } else {
+                out.push_str(
+                    "the file is unchanged; that read result already has the full \
+                     content. Use offset/limit if you need exact lines.)",
+                );
+            }
+        } else {
+            out.push_str("it changed only by your own edits:\n");
+            for edit in entry.edits() {
+                out.push_str(&format!(
+                    "  - {} {} +{}/-{}\n",
+                    edit.at(),
+                    edit.tool(),
+                    edit.added(),
+                    edit.removed(),
+                ));
+            }
+            out.push_str(
+                "Those changes are in your own edit calls above (the old/new strings \
+                 you sent); each result names where it landed. Use offset/limit if you \
+                 need exact current lines.)",
+            );
+        }
+        pointer = Some(out);
+    }
+    if let Some(out) = pointer {
+        // The pointer is a read for the edit guard, but it is not a served
+        // line window: a later ranged read must still get real lines.
+        ctx.mark_read(&p);
+        ctx.read_ledger.note_pointer(&p);
+        return Outcome::ok(out);
+    }
     let mut out = String::new();
     let first_no = offset;
     let mut last_no = offset.saturating_sub(1);
@@ -420,7 +485,14 @@ fn read_single(ctx: &mut ToolCtx, raw: &str, args: &serde_json::Value) -> Outcom
         ));
     }
     ctx.mark_read(&p);
-    ctx.note_read_window(&p, first_no, last_no, window_hash);
+    ctx.note_read_window(&p, first_no, last_no, window_hash.clone());
+    // A real full read re-establishes the model's complete picture: that
+    // result becomes the base for the next delta. Partial windows keep the
+    // old base — they do not replace it.
+    if !truncated && wanted_from <= 1 && wanted_to >= total_lines {
+        ctx.read_ledger
+            .note_full_read(&p, &window_hash, ctx.current_call_id.clone());
+    }
     Outcome::ok(out)
 }
 
@@ -528,6 +600,13 @@ pub(super) fn write_file(ctx: &mut ToolCtx, raw: &str, content: &str) -> Outcome
         return Outcome::err(format!("write failed: {e}"));
     }
     ctx.mark_read(&p);
+    // the model authored the whole file: its own words are the new base, so
+    // a re-read is answerable with a pointer to this write
+    ctx.read_ledger.note_write(
+        &p,
+        &content_hash(body.as_bytes()),
+        ctx.current_call_id.clone(),
+    );
     let label = rel_label(&ctx.root, &p);
     let diff = match prev.as_deref() {
         // compared without the marker on either side, or every write to a BOM'd
@@ -1192,6 +1271,7 @@ pub(super) fn edit(
     };
     let updated = restore_bom(edited, had_bom);
     let checkpoint_id = Some(checkpoint(ctx, &p, "edit"));
+    let hash_before = content_hash(original.as_bytes());
     if let Err(e) = fs::write(&p, &updated) {
         return Outcome::err(format!("write failed: {e}"));
     }
@@ -1199,6 +1279,15 @@ pub(super) fn edit(
     let (shown, _) = split_bom(&updated);
     let diff = make_diff(content, shown);
     let (add, rem) = diff_counts(&diff);
+    ctx.read_ledger.note_edit(
+        &p,
+        "edit",
+        add,
+        rem,
+        &hash_before,
+        &content_hash(updated.as_bytes()),
+        ctx.current_call_id.clone(),
+    );
     let metadata = file_diff(
         &p,
         &ctx.root,
@@ -1254,6 +1343,7 @@ pub(super) fn multi_edit(
     }
     let checkpoint_id = Some(checkpoint(ctx, &p, "multi_edit"));
     let updated = restore_bom(staged, had_bom);
+    let hash_before = content_hash(original.as_bytes());
     if let Err(e) = fs::write(&p, &updated) {
         return Outcome::err(format!("write failed: {e}"));
     }
@@ -1261,6 +1351,15 @@ pub(super) fn multi_edit(
     let (shown, _) = split_bom(&updated);
     let diff = make_diff(body, shown);
     let (add, rem) = diff_counts(&diff);
+    ctx.read_ledger.note_edit(
+        &p,
+        "multi_edit",
+        add,
+        rem,
+        &hash_before,
+        &content_hash(updated.as_bytes()),
+        ctx.current_call_id.clone(),
+    );
     let metadata = file_diff(
         &p,
         &ctx.root,
@@ -1702,7 +1801,7 @@ mod tests {
     #[test]
     fn repeat_read_of_unchanged_window_collapses_to_stub() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("a.txt"), "one\ntwo\nthree\n").unwrap();
+        std::fs::write(dir.path().join("a.txt"), "one\ntwo\nthree\nfour\nfive\n").unwrap();
         let mut ctx = ToolCtx::new(dir.path());
         let args = serde_json::json!({});
         let first = read(&mut ctx, "a.txt", &args);
@@ -1716,17 +1815,139 @@ mod tests {
             "{}",
             second.output
         );
-        // after an edit the window serves fresh again
+        // after an edit a whole-file read is the delta pointer, not the bytes
         let edited = edit(&mut ctx, "a.txt", "two", "TWO", false);
         assert!(edited.ok, "{}", edited.output);
         let third = read(&mut ctx, "a.txt", &args);
         assert!(third.ok);
-        assert!(third.output.contains("TWO"), "{}", third.output);
+        assert!(third.output.contains("No full re-read"), "{}", third.output);
+        assert!(third.output.contains("edit +1/-1"), "{}", third.output);
+        assert!(!third.output.contains("TWO"), "{}", third.output);
+        // exact lines are still real, and a second whole request escapes the
+        // pointer so the model can never be trapped by it
+        let ranged = read(&mut ctx, "a.txt", &json!({"offset": 1, "limit": 3}));
+        assert!(ranged.ok);
+        assert!(ranged.output.contains("TWO"), "{}", ranged.output);
+        let fourth = read(&mut ctx, "a.txt", &args);
+        assert!(fourth.ok);
+        assert!(fourth.output.contains("five"), "{}", fourth.output);
+    }
+
+    #[test]
+    fn whole_file_delta_survives_a_new_user_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut first = ToolCtx::new(dir.path());
+        first.current_call_id = Some("w1".into());
+        let written = write_file(&mut first, "main.js", "one\ntwo\nthree\nfour\nfive\n");
+        assert!(written.ok, "{}", written.output);
+
+        // a write alone is already a full base
+        let mut after_write = ToolCtx::new(dir.path());
+        after_write.read_ledger = first.read_ledger.clone();
+        let write_pointer = read(&mut after_write, "main.js", &json!({}));
+        assert!(write_pointer.ok);
         assert!(
-            !third.output.contains("unchanged since your last read"),
+            write_pointer.output.contains("No full re-read")
+                && write_pointer.output.contains("your write at")
+                && write_pointer
+                    .output
+                    .contains("exactly what you sent to `write`"),
             "{}",
-            third.output
+            write_pointer.output
         );
+
+        first.current_call_id = Some("e1".into());
+        let edited = edit(&mut first, "main.js", "two", "TWO", false);
+        assert!(edited.ok, "{}", edited.output);
+
+        // the next user submit gets a fresh ToolCtx; only the session ledger
+        // crosses the run boundary
+        let mut next = ToolCtx::new(dir.path());
+        next.read_ledger = first.read_ledger.clone();
+        next.current_call_id = Some("r1".into());
+        let full = read(&mut next, "main.js", &json!({}));
+        assert!(full.ok);
+        assert!(full.output.contains("No full re-read"), "{}", full.output);
+        assert!(full.output.contains("your write at"), "{}", full.output);
+        assert!(full.output.contains("edit +1/-1"), "{}", full.output);
+        assert!(!full.output.contains("TWO"), "{}", full.output);
+
+        // an explicit offset/limit is the model asking for lines, even when it
+        // covers the small file: no pointer
+        let explicit_full = read(&mut next, "main.js", &json!({"offset": 1, "limit": 10}));
+        assert!(explicit_full.ok);
+        assert!(explicit_full.output.contains("TWO"), "{}", explicit_full.output);
+        assert!(
+            !explicit_full.output.contains("No full re-read"),
+            "{}",
+            explicit_full.output
+        );
+
+        // the pointer satisfies the edit guard and continues the chain
+        let again = edit(&mut next, "main.js", "three", "THREE", false);
+        assert!(again.ok, "{}", again.output);
+
+        // explicit lines are real, not a pointer
+        let ranged = read(&mut next, "main.js", &json!({"offset": 1, "limit": 3}));
+        assert!(ranged.ok);
+        assert!(ranged.output.contains("THREE"), "{}", ranged.output);
+    }
+
+    #[test]
+    fn external_change_breaks_the_delta_chain() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = ToolCtx::new(dir.path());
+        ctx.current_call_id = Some("w1".into());
+        let written = write_file(&mut ctx, "a.txt", "one\ntwo\n");
+        assert!(written.ok, "{}", written.output);
+        ctx.current_call_id = Some("e1".into());
+        let edited = edit(&mut ctx, "a.txt", "two", "TWO", false);
+        assert!(edited.ok, "{}", edited.output);
+
+        // a bash/editor write: not in the ledger's hash chain
+        std::fs::write(dir.path().join("a.txt"), "one\nTWO\nexternal\n").unwrap();
+        let mut next = ToolCtx::new(dir.path());
+        next.read_ledger = ctx.read_ledger.clone();
+        let full = read(&mut next, "a.txt", &json!({}));
+        assert!(full.ok);
+        assert!(!full.output.contains("No full re-read"), "{}", full.output);
+        assert!(full.output.contains("external"), "{}", full.output);
+    }
+
+    #[test]
+    fn delta_pointer_requires_visible_base_and_edit_results() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = ToolCtx::new(dir.path());
+        ctx.current_call_id = Some("w1".into());
+        let written = write_file(&mut ctx, "a.txt", "one\ntwo\n");
+        assert!(written.ok, "{}", written.output);
+        ctx.current_call_id = Some("e1".into());
+        let edited = edit(&mut ctx, "a.txt", "two", "TWO", false);
+        assert!(edited.ok, "{}", edited.output);
+
+        let mut next = ToolCtx::new(dir.path());
+        next.read_ledger = ctx.read_ledger.clone();
+        // the write result is still visible, the edit result was cleared
+        next.visible_calls = Some(std::collections::HashSet::from(["w1".to_string()]));
+        let full = read(&mut next, "a.txt", &json!({}));
+        assert!(full.ok);
+        assert!(!full.output.contains("No full re-read"), "{}", full.output);
+        assert!(full.output.contains("TWO"), "{}", full.output);
+    }
+
+    #[test]
+    fn partial_read_does_not_create_a_delta_base() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "one\ntwo\nthree\n").unwrap();
+        let mut ctx = ToolCtx::new(dir.path());
+        let partial = read(&mut ctx, "a.txt", &json!({"offset": 1, "limit": 2}));
+        assert!(partial.ok);
+        let edited = edit(&mut ctx, "a.txt", "two", "TWO", false);
+        assert!(edited.ok, "{}", edited.output);
+        let full = read(&mut ctx, "a.txt", &json!({}));
+        assert!(full.ok);
+        assert!(!full.output.contains("No full re-read"), "{}", full.output);
+        assert!(full.output.contains("TWO"), "{}", full.output);
     }
 
     /// Coverage, not equality: the live session's five looks at one region were

@@ -17,6 +17,7 @@ mod view_image;
 mod view_document;
 pub(crate) mod web;
 
+pub use ctx::ReadLedger;
 pub(crate) use ctx::{ReadState, ToolCtx};
 pub(crate) use dispatch::{FileDiff, Outcome, bg_running_commands, execute, kill_remaining_jobs};
 pub(crate) use git::porcelain_paths;

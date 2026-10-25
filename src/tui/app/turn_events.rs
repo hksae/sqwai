@@ -760,6 +760,7 @@ impl App {
         // Grants earned this turn belong to the session, not the run: keep
         // them for the next submit ("always allow this session").
         self.approval_grants = outcome.approval_grants;
+        self.session.read_ledger = outcome.read_ledger;
         // the turn's last activity is now, not the last user message —
         // stale timestamps used to sort this session hours down the list
         self.session.last_message_at = Some(chrono::Utc::now());

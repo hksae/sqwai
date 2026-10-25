@@ -208,6 +208,14 @@ pub struct Session {
     /// dropped by the app.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub active_skills: Vec<String>,
+    /// What each file looked like when the model last saw it whole, plus its
+    /// own edits since. `run_agent` is spawned per user submit, so this state
+    /// must live on the session or every turn starts with an empty ledger.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::agent::tools::ReadLedger::is_empty"
+    )]
+    pub read_ledger: crate::agent::tools::ReadLedger,
 }
 
 impl Session {
@@ -242,6 +250,7 @@ impl Session {
             undo_layer2: None,
             project: None,
             active_skills: Vec::new(),
+            read_ledger: Default::default(),
         }
     }
 
@@ -804,6 +813,23 @@ mod tests {
         s.save_to(&path).unwrap();
         let back = Session::load_from(&path).unwrap();
         assert_eq!(back.active_skills, ["tui-rules", "rust"]);
+    }
+
+    #[test]
+    fn read_ledger_round_trips_with_the_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ledger-session.json");
+        let mut s = Session::new("m".into(), 1000);
+        s.push(Role::User, "work");
+        s.read_ledger.note_write(
+            std::path::Path::new("C:/work/main.js"),
+            "sha256:abc",
+            Some("call-1".into()),
+        );
+        s.save_to(&path).unwrap();
+        let back = Session::load_from(&path).unwrap();
+        assert!(!back.read_ledger.is_empty());
+        assert_eq!(back.read_ledger, s.read_ledger);
     }
 
     #[test]

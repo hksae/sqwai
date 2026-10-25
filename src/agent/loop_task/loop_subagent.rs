@@ -647,6 +647,7 @@ pub(crate) async fn run_subagent(
         } else {
             active_skills.to_vec()
         },
+        read_ledger: Default::default(),
         enable_tools: true,
         // subagent baselines stay synchronous: short tasks, and progress
         // events would land on the parent's channel out of context
