@@ -222,8 +222,8 @@ pub(crate) fn auto_advance(plan: &mut Plan) -> Option<String> {
 }
 
 /// Build a new plan and immediately start step 1 (`InProgress`). Rejects an
-/// empty goal, empty criteria, zero steps, empty step titles, and over-long
-/// plans.
+/// empty goal, zero steps, empty step titles, and over-long plans. Criteria
+/// are optional notes: an empty list is a plan without them, not an error.
 pub fn create(
     goal: String,
     constraints: Vec<String>,
@@ -248,14 +248,6 @@ pub fn create(
         .map(|text| strip_tags(&text))
         .filter(|text| !text.is_empty())
         .collect();
-    if criteria.is_empty() {
-        return Err(Rejection::new(
-            "empty_criteria",
-            "a plan needs at least one done-criterion",
-            "add `criteria`: plain notes on what must be true when the work is done \
-             (e.g. the command that proves it, or the behaviour to check by hand)",
-        ));
-    }
     if steps.is_empty() {
         return Err(Rejection::new(
             "no_steps",

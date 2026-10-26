@@ -558,6 +558,42 @@ fn strip_host_repeat_marks(output: &str) -> &str {
     }
 }
 
+/// A refused reach into host-owned state (`file tools` jail, or `bash`
+/// protected path). Repeated refusals mean the model is guessing `.sqwai`
+/// paths instead of looking at the project root, so the second one carries
+/// the real inventory.
+fn is_host_state_denial(output: &str) -> bool {
+    output.contains("host-owned state") || output.contains("protected_path")
+}
+
+fn root_entries_note(root: &std::path::Path) -> String {
+    let mut rows: Vec<(bool, String)> = match std::fs::read_dir(root) {
+        Ok(rd) => rd
+            .flatten()
+            .map(|entry| {
+                let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                let name = entry.file_name().to_string_lossy().into_owned();
+                let label = if is_dir { format!("{name}/") } else { name };
+                (is_dir, label)
+            })
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    rows.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    let total = rows.len();
+    let shown: Vec<String> = rows.into_iter().take(40).map(|(_, name)| name).collect();
+    let mut list = shown.join(", ");
+    if total > 40 {
+        list.push_str(&format!(", … (+{} more)", total - 40));
+    }
+    format!(
+        "[host: repeated attempt to open host-owned state under .sqwai/ — that directory holds \
+         bookkeeping (events, checkpoints, plans, spilled output), never project inputs. Project \
+         root '{}' contains: {list}. Use exactly these names; run ls \".\" for the current view.]",
+        root.display()
+    )
+}
+
 /// One event record per snapshot commit, named for what actually took it.
 ///
 /// Every entry here is a shadow-git snapshot (`snapshot_session` for mutations,
@@ -1076,6 +1112,9 @@ async fn run_agent(
                 .collect()
         })
         .unwrap_or_default();
+    // Host-state denials since the last successful call: two in a row mean the
+    // model is guessing paths, and the next denial carries the real root list.
+    let mut host_state_denials = 0u32;
     // Grants live in the TUI between turns (see `SessionGrants`); this run
     // starts from whatever earlier turns earned and hands the grown set back
     // in `AgentOutcome`.
@@ -2253,6 +2292,15 @@ async fn run_agent(
                          steps=[{{\"title\": \"...\", \"check\": \"...\"}}]). \
                          Skip for a one-step change.]"
                     ));
+                }
+                if !outcome.ok && is_host_state_denial(&outcome.output) {
+                    host_state_denials += 1;
+                    if host_state_denials >= 2 {
+                        outcome.output.push('\n');
+                        outcome.output.push_str(&root_entries_note(&root));
+                    }
+                } else if outcome.ok {
+                    host_state_denials = 0;
                 }
                 // Repeat handling: the first identical re-run is
                 // reported with a note, the next one loses its bytes — the note

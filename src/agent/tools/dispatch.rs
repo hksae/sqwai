@@ -623,15 +623,27 @@ pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                         .collect::<Vec<_>>()
                         .join(" · ")
                 ),
+                Ok(None) => " — there is no active plan; start one with plan(op=\"create\", goal=\"...\", steps=[\"...\", \"...\"])".to_string(),
                 _ => " — the current plan with its valid ops is in your context above".to_string(),
             };
             // schema rejections teach the fix in place: a small model that
             // once sent `finish` without `summary` abandoned the plan for
             // the rest of the session instead of resending the one field
-            let example = if e.to_string().contains("missing field") {
-                " — resend as plan(op=\"finish\", id=\"<step>\", summary=\"one sentence:                  what this step settled\")"
-            } else {
+            let err = e.to_string();
+            let example = if !err.contains("missing field") {
                 ""
+            } else {
+                match raw_op {
+                    "finish" => {
+                        " — resend as plan(op=\"finish\", id=\"<step>\", summary=\"one sentence: what this step settled\")"
+                    }
+                    "add" => " — resend as plan(op=\"add\", title=\"...\")",
+                    "cancel" => " — resend as plan(op=\"cancel\", id=\"<step>\", reason=\"...\")",
+                    "abandon" => " — resend as plan(op=\"abandon\", reason=\"...\")",
+                    _ => {
+                        " — resend as plan(op=\"create\", goal=\"one sentence\", steps=[\"...\", \"...\"])"
+                    }
+                }
             };
             return Outcome::err(format!("plan op rejected: {e}{hint}{example}"));
         }

@@ -651,9 +651,9 @@ fn plan_create_accepts_string_shapes_and_strips_tags() {
 }
 
 #[test]
-fn plan_create_rejects_criteria_that_are_only_tags() {
+fn plan_create_accepts_criteria_that_are_only_tags() {
     let (mut ctx, dir) = proj();
-    let refused = plan_op(
+    let created = plan_op(
         &mut ctx,
         &json!({
             "goal": "empty after stripping",
@@ -661,12 +661,9 @@ fn plan_create_rejects_criteria_that_are_only_tags() {
             "steps": ["one", "two"]
         }),
     );
-    assert!(!refused.ok, "{}", refused.output);
-    assert!(
-        refused.output.contains("empty_criteria"),
-        "{}",
-        refused.output
-    );
+    assert!(created.ok, "{}", created.output);
+    let plan = plan::open_active(&dir).unwrap().unwrap();
+    assert!(plan.criteria.is_empty());
     fs::remove_dir_all(&dir).ok();
 }
 
@@ -1757,12 +1754,11 @@ fn bash_output_summary_shows_wait_params() {
     );
 }
 
-/// The one create-time check: a plan must carry at least one done-note.
-/// Free text is fine (no typing gate); only emptiness is refused.
+/// Criteria are optional notes: a plan without them is still a plan.
 #[test]
-fn create_refuses_empty_criteria() {
+fn create_accepts_empty_criteria() {
     let (mut ctx, dir) = proj();
-    let rejected = plan_op(
+    let created = plan_op(
         &mut ctx,
         &json!({
             "op": "create",
@@ -1771,14 +1767,21 @@ fn create_refuses_empty_criteria() {
             "steps": [{"title": "verify"}]
         }),
     );
-    assert!(!rejected.ok, "{}", rejected.output);
-    assert!(
-        rejected.output.contains("empty_criteria"),
-        "{}",
-        rejected.output
-    );
-    // and nothing was stored
-    assert!(plan::open_active(&dir).unwrap().is_none());
+    assert!(created.ok, "{}", created.output);
+    let plan = plan::open_active(&dir).unwrap().unwrap();
+    assert!(plan.criteria.is_empty());
+    fs::remove_dir_all(&dir).ok();
+}
+
+/// `plan {}` used to be answered with a `finish` example even when no plan
+/// existed; a create template is the fix the model can act on.
+#[test]
+fn empty_plan_call_teaches_create() {
+    let (mut ctx, dir) = proj();
+    let out = plan_op(&mut ctx, &json!({}));
+    assert!(!out.ok);
+    assert!(out.output.contains("op=\"create\""), "{}", out.output);
+    assert!(!out.output.contains("op=\"finish\""), "{}", out.output);
     fs::remove_dir_all(&dir).ok();
 }
 

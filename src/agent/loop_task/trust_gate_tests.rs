@@ -801,3 +801,22 @@ async fn outside_file_write_gate_denies_and_permits() {
     assert!(gate.is_none(), "full access runs the outside write");
     let _ = std::fs::remove_dir_all(&base);
 }
+
+/// A repeated host-state refusal must carry the real root inventory: a small
+/// model invented `.sqwai/<video>.mp4` and kept knocking on `.sqwai`.
+#[test]
+fn a_repeated_host_state_denial_names_the_real_root() {
+    let dir = std::env::temp_dir().join(format!("sqwai-host-note-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join(".sqwai")).unwrap();
+    std::fs::write(dir.join("trailer.mp4"), b"x").unwrap();
+    let note = root_entries_note(&dir);
+    assert!(note.contains("trailer.mp4"), "{note}");
+    assert!(note.contains(".sqwai/"), "{note}");
+    assert!(is_host_state_denial(
+        "path '.sqwai/x' is host-owned state: the plan is host-owned"
+    ));
+    assert!(is_host_state_denial("error: protected_path"));
+    assert!(!is_host_state_denial("permission denied"));
+    let _ = std::fs::remove_dir_all(&dir);
+}

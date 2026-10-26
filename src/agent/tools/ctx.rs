@@ -893,7 +893,9 @@ fn host_owned_denial(relative: &Path, mutating: bool) -> Option<String> {
     let allowed = match components.next() {
         Some(Component::Normal(second)) if second == "skills" || second == "config.toml" => true,
         // `.sqwai/spill/<file>`: read-only access is allowed so the model can
-        // inspect spilled output, while mutations stay blocked.
+        // inspect spilled output, while mutations stay blocked. The directory
+        // itself stays unlistable: the model only follows pointers the host
+        // handed out, never browses the spill area.
         Some(Component::Normal(second)) if second == "spill" && !mutating => {
             matches!(components.next(), Some(Component::Normal(_)))
         }
@@ -906,7 +908,8 @@ fn host_owned_denial(relative: &Path, mutating: bool) -> Option<String> {
     Some(format!(
         "path '{}' is host-owned state: the plan and checkpoints are reachable only through \
          their own tools (plan). Inside {STATE_DIR}/ the file tools may use skills/, \
-         config.toml and files under spill/ (read only) — nothing else.",
+         config.toml and spilled-output files named in truncation pointers (read only) — \
+         nothing else.",
         relative.display()
     ))
 }

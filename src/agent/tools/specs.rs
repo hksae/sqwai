@@ -478,14 +478,14 @@ stub. Optional `query` or `offset`/`limit` for part of a large result.",
         ToolDef {
             name: "plan",
             kind: Kind::Mutating,
-            description: "Manage the host plan for multi-step work. `create` sets goal, \
-constraints, criteria and 3–6 steps (step 1 starts); `op` may be omitted for create when goal and \
-steps are supplied. Criteria/constraints accept a string or an array; a step may be a title \
-string or {title, check}; XML-like tags in criteria/constraints are stripped. Criteria are your \
-done-notes and each step should carry a `check` — what proves it done. The host runs nothing and \
-enforces nothing. `finish` closes the current step and advances; `add` inserts scope; `cancel` \
-skips a step; `abandon` retires a plan whose direction changed. Use the live step ids; never \
-re-read the plan through tools.",
+            description: "Manage the host plan for multi-step work. `create` sets goal and \
+3–6 steps (step 1 starts); constraints and criteria are optional notes. `op` may be omitted for \
+create when goal and steps are supplied. Criteria/constraints accept a string or an array; a step \
+may be a title string or {title, check}; XML-like tags in criteria/constraints are stripped. \
+Criteria are your done-notes and each step should carry a `check` — what proves it done. The host \
+runs nothing and enforces nothing. `finish` closes the current step and advances; `add` inserts \
+scope; `cancel` skips a step; `abandon` retires a plan whose direction changed. Use the live step \
+ids; never re-read the plan through tools.",
             parameters: json!({
                 "type": "object",
                 "properties": {
