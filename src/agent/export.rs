@@ -155,7 +155,7 @@ mod tests {
         let mut events = crate::agent::events::EventLog::open(&dir, "sess").expect("events opens");
         events
             .append(
-                "tool_result",
+                "observation",
                 serde_json::json!({"tool": "bash", "ok": true}),
             )
             .unwrap();

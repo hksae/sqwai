@@ -214,9 +214,11 @@ pub fn replay(root: &Path) -> Result<ReplayReport> {
                     }
                     continue;
                 }
-                if matches!(record.kind.as_str(), "tool_result" | "file_diff")
-                    && (record.kind != "file_diff"
-                        || crate::agent::events::file_diff_is_plan_evidence(&record.fields))
+                if matches!(
+                    record.kind.as_str(),
+                    "observation" | "tool_result" | "file_diff"
+                ) && (record.kind != "file_diff"
+                    || crate::agent::events::file_diff_is_plan_evidence(&record.fields))
                     && record.plan.as_deref() == Some(plan.id.as_str())
                 {
                     let Some(step) = record

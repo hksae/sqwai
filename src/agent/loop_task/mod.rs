@@ -1771,16 +1771,6 @@ async fn run_agent(
                         })
                     };
                     writer.set_attribution(step, plan_id, &events_agent);
-                    let _ = writer.append(
-                        "tool_call",
-                        serde_json::json!({
-                            "tool": call.name,
-                            "call_id": call.id,
-                            "args_digest": tools::call_summary(&call.name, &call.args),
-                            "args": tools::call_args_for_event(&call.args),
-                            "path": tools::call_path(&call.name, &call.args),
-                        }),
-                    );
                 }
                 // live row first: the TUI shows the tool name and its arguments
                 // with a spinner while it runs
@@ -2036,7 +2026,7 @@ async fn run_agent(
                     let result_seq = if call.name == "plan" {
                         writer
                         .append(
-                            "tool_result",
+                            "observation",
                             serde_json::json!({
                                 "tool": call.name,
                                 "call_id": call.id,
@@ -2044,6 +2034,9 @@ async fn run_agent(
                                 "duration_ms": duration_ms,
                                 "summary": outcome.output.chars().take(200).collect::<String>(),
                                 "trust": "high",
+                                "path": tools::call_path(&call.name, &call.args),
+                                "paths": call.args.get("paths").cloned().unwrap_or(serde_json::Value::Null),
+                                "args_digest": tools::call_summary(&call.name, &call.args),
                                 "code": if outcome.cancelled { Some("cancelled") } else { None },
                             }),
                         )
@@ -2060,7 +2053,7 @@ async fn run_agent(
                         );
                         writer
                         .append_evidence(
-                            "tool_result",
+                            "observation",
                             serde_json::json!({
                                 "tool": call.name,
                                 "call_id": call.id,
@@ -2073,6 +2066,9 @@ async fn run_agent(
                                     Some(crate::agent::trust::TaintClass::Local) => "local",
                                     None => "none",
                                 },
+                                "path": tools::call_path(&call.name, &call.args),
+                                "paths": call.args.get("paths").cloned().unwrap_or(serde_json::Value::Null),
+                                "args_digest": tools::call_summary(&call.name, &call.args),
                                 // distinct from an ordinary failure, so the
                                 // events can say the user stopped this rather
                                 // than that it went wrong on its own

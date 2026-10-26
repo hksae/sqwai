@@ -635,28 +635,6 @@ pub fn call_path(name: &str, args: &Value) -> Option<String> {
         .map(|s| s.to_string())
 }
 
-/// full call arguments for the event log (forensics): same object the model
-/// sent, with long strings cut to a head so a `write` body cannot bloat
-/// the event log. `args_digest` stays the human skim; this is the audit trail
-/// (e.g. whether a `read` used offset/limit windows or re-read the file).
-pub fn call_args_for_event(args: &Value) -> Value {
-    const MAX_STR: usize = 500;
-    fn cut(value: &Value) -> Value {
-        match value {
-            Value::String(s) if s.chars().count() > MAX_STR => {
-                let head: String = s.chars().take(MAX_STR).collect();
-                Value::String(format!("{head}…({} chars total)", s.chars().count()))
-            }
-            Value::Array(items) => Value::Array(items.iter().map(cut).collect()),
-            Value::Object(map) => {
-                Value::Object(map.iter().map(|(k, v)| (k.clone(), cut(v))).collect())
-            }
-            other => other.clone(),
-        }
-    }
-    cut(args)
-}
-
 /// one-line description of a call's arguments for the live TUI row
 pub fn call_summary(name: &str, args: &Value) -> String {
     let raw = call_summary_raw(name, args);
@@ -1128,21 +1106,6 @@ fn decode_child_output_handles_console_codepage() {
     mixed.extend_from_slice(&[0x8E, 0xE8, 0xA8, 0xA1, 0xAA, 0xA0]); // "Ошибка" in cp866
     assert_eq!(decode_child_output(&mixed), "done\nОшибка");
     assert_eq!(decode_child_output(&[0xB3]), "│");
-}
-
-#[test]
-fn call_args_for_event_cuts_long_strings() {
-    let args = serde_json::json!({
-        "file_path": "a.txt",
-        "content": "x".repeat(600),
-        "offset": 3,
-    });
-    let kept = call_args_for_event(&args);
-    assert_eq!(kept["file_path"], serde_json::json!("a.txt"));
-    assert_eq!(kept["offset"], serde_json::json!(3));
-    let body = kept["content"].as_str().unwrap();
-    assert!(body.contains("chars total"), "{body}");
-    assert!(body.len() < 600);
 }
 
 /// The schema is what the model is told; the loop's guard reads the same

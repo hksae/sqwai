@@ -9,7 +9,7 @@ fn tainted_project(name: &str) -> (std::path::PathBuf, String) {
     let mut events = crate::agent::events::EventLog::open(&dir, &session).expect("events opens");
     events
         .append(
-            "tool_result",
+            "observation",
             serde_json::json!({"tool": "webfetch", "ok": true, "taint": "external"}),
         )
         .unwrap();

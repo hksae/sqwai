@@ -60,7 +60,7 @@ fn anchor_keeps_event_facts_not_plan_state() {
         .unwrap();
     events
         .append(
-            "tool_result",
+            "observation",
             serde_json::json!({"tool": "bash", "ok": true}),
         )
         .unwrap();
@@ -146,13 +146,13 @@ fn anchor_surfaces_decisions_and_recent_failures() {
         .unwrap();
     events
         .append(
-            "tool_result",
+            "observation",
             serde_json::json!({"tool": "bash", "ok": false, "summary": "boom: segfault"}),
         )
         .unwrap();
     events
         .append(
-            "tool_result",
+            "observation",
             serde_json::json!({"tool": "bash", "ok": false, "code": "cancelled"}),
         )
         .unwrap();
@@ -238,13 +238,13 @@ fn resume_notice_reports_unfinished_plan_step() {
         .unwrap();
     events
         .append(
-            "tool_result",
+            "observation",
             serde_json::json!({"tool": "read", "ok": true}),
         )
         .unwrap();
     let notice = resume_notice(&root, "resume-session").unwrap();
     assert!(notice.contains("Step 1 was in progress"));
-    assert!(notice.contains("j#2 tool_result"));
+    assert!(notice.contains("j#2 observation"));
     std::fs::remove_dir_all(root).ok();
 }
 
@@ -309,7 +309,7 @@ fn anchor_states_facts_and_issues_no_commands() {
         .unwrap();
     events
         .append(
-            "tool_result",
+            "observation",
             serde_json::json!({"tool": "bash", "ok": true}),
         )
         .unwrap();
@@ -782,10 +782,10 @@ fn anchor_restores_files_on_redo_and_lists_recent_reads_and_blockers() {
         .unwrap();
     events
         .append(
-            "tool_call",
+            "observation",
             serde_json::json!({
                 "tool": "read",
-                "args": {"file_path": "src/lib.rs"},
+                "path": "src/lib.rs",
                 "args_digest": "src/lib.rs"
             }),
         )
@@ -821,10 +821,10 @@ fn anchor_tracks_fused_paths_hard_trim_deducts_summary_head_and_local_summary_sk
     let mut events = crate::agent::events::EventLog::open(&root, "s").unwrap();
     events
         .append(
-            "tool_call",
+            "observation",
             serde_json::json!({
                 "tool": "read",
-                "args": {"paths": ["src/one.rs", "src/two.rs"]},
+                "paths": ["src/one.rs", "src/two.rs"],
                 "args_digest": "2 files"
             }),
         )

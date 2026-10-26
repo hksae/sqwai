@@ -120,7 +120,7 @@ async fn a_mutation_runs_without_any_plan() {
         crate::agent::events::EventLog::records_for(&temp_dir, "no-plan-sess")
             .unwrap_or_default()
             .iter()
-            .filter(|r| r.kind == "tool_result")
+            .filter(|r| r.kind == "observation")
             .filter(|r| r.fields.get("ok") == Some(&serde_json::Value::Bool(false)))
             .map(|r| {
                 r.fields

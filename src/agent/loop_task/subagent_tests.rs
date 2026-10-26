@@ -129,7 +129,7 @@ fn subagent_contract_parent_context_and_receipt_salvage() {
 
     let mut j = crate::agent::events::EventLog::open(root, "parent-s1").unwrap();
     j.append(
-        "tool_call",
+        "observation",
         serde_json::json!({"tool": "read", "path": "src/parser.rs"}),
     )
     .unwrap();

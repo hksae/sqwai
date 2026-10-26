@@ -1658,7 +1658,7 @@ fn plan_ops_round_trip_through_the_dispatcher() {
     let mut evidence_events = crate::agent::events::EventLog::open(&dir, &ctx.session_id).unwrap();
     evidence_events.set_attribution(Some("1".into()), Some(plan_id.clone()), "main");
     evidence_events
-        .append_evidence("tool_result", json!({"tool": "read", "ok": true}))
+        .append_evidence("observation", json!({"tool": "read", "ok": true}))
         .unwrap();
     let finish = plan_op(
         &mut ctx,

@@ -27,8 +27,8 @@ pub(crate) use policy::{
     bash_scope_hit, first_outside_target, register_subagent_scope, take_subagent_scope,
 };
 pub(crate) use specs::{
-    Kind, call_args_for_event, call_path, call_summary, decode_child_output, is_mutating_call,
-    merge_specs, tool_names, tool_specs, trim_middle,
+    Kind, call_path, call_summary, decode_child_output, is_mutating_call, merge_specs, tool_names,
+    tool_specs, trim_middle,
 };
 
 #[cfg(test)]

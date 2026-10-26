@@ -187,7 +187,7 @@ impl EventLog {
         let (Some(step_id), Some(plan_id)) = (self.step.clone(), self.plan.clone()) else {
             return Ok(seq);
         };
-        if !matches!(kind, "tool_result" | "file_diff") {
+        if !matches!(kind, "observation" | "tool_result" | "file_diff") {
             return Ok(seq);
         }
         let root = self
@@ -315,7 +315,7 @@ impl EventLog {
                 && after_seq.is_none_or(|start| r.seq > start)
                 && r.plan.as_deref() == Some(plan)
                 && step.is_none_or(|expected| r.step.as_deref() == Some(expected))
-                && matches!(r.kind.as_str(), "tool_result" | "file_diff")
+                && matches!(r.kind.as_str(), "observation" | "tool_result" | "file_diff")
         }))
     }
 
@@ -787,7 +787,10 @@ impl EventLog {
             if record.kind == "plan" {
                 break;
             }
-            if matches!(record.kind.as_str(), "file_diff" | "tool_result") {
+            if matches!(
+                record.kind.as_str(),
+                "file_diff" | "observation" | "tool_result"
+            ) {
                 actions += 1;
             }
         }

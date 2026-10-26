@@ -40,11 +40,13 @@ fn appends_monotonic_records_with_host_fields() {
     let mut events = EventLog::open(&root, "session").unwrap();
     events.set_attribution(Some("2".into()), Some("plan".into()), "main");
     assert_eq!(
-        events.append("tool_call", json!({"tool": "read"})).unwrap(),
+        events
+            .append("observation", json!({"tool": "read"}))
+            .unwrap(),
         1
     );
     assert_eq!(
-        events.append("tool_result", json!({"ok": true})).unwrap(),
+        events.append("observation", json!({"ok": true})).unwrap(),
         2
     );
     let text = fs::read_to_string(events.path()).unwrap();
@@ -54,7 +56,7 @@ fn appends_monotonic_records_with_host_fields() {
         .collect();
     assert_eq!(records.len(), 2);
     assert_eq!(records[0].seq, 1);
-    assert_eq!(records[1].kind, "tool_result");
+    assert_eq!(records[1].kind, "observation");
     assert_eq!(records[0].step.as_deref(), Some("2"));
     fs::remove_dir_all(root).ok();
 }
@@ -66,14 +68,14 @@ fn appends_monotonic_records_with_host_fields() {
 fn interleaved_handles_stay_monotonic() {
     let root = root();
     let mut main = EventLog::open(&root, "session").unwrap();
-    assert_eq!(main.append("tool_call", json!({})).unwrap(), 1);
+    assert_eq!(main.append("observation", json!({})).unwrap(), 1);
     // another handle advances the file twice behind main's back
     // (e.g. receipt append + plan commit during verify)
     let mut other = EventLog::open(&root, "session").unwrap();
     assert_eq!(other.append("note", json!({})).unwrap(), 2);
     assert_eq!(other.append("plan", json!({})).unwrap(), 3);
     // main's counter is stale (2) — the append must heal, not reuse
-    assert_eq!(main.append("tool_result", json!({})).unwrap(), 4);
+    assert_eq!(main.append("observation", json!({})).unwrap(), 4);
     let text = fs::read_to_string(main.path()).unwrap();
     let seqs: Vec<u64> = text
         .lines()
@@ -96,7 +98,7 @@ fn secrets_are_screened_out_of_summaries_and_text() {
     let mut events = EventLog::open(&root, "session").unwrap();
     events
         .append(
-            "tool_result",
+            "observation",
             json!({
                 "tool": "bash",
                 "ok": true,
@@ -114,7 +116,7 @@ fn secrets_are_screened_out_of_summaries_and_text() {
     // able to say what happened
     events
         .append(
-            "tool_result",
+            "observation",
             json!({"tool": "write", "ok": true, "summary": "wrote .sqwai/plans/01M1V0GK22W0PFVYBM0501N1FJ.json (+31/-31)"}),
         )
         .unwrap();
@@ -185,7 +187,7 @@ fn unattributed_results_are_recorded_as_session_facts() {
     // no set_attribution: no active plan, nothing in progress
     assert_eq!(
         events
-            .append_evidence("tool_result", json!({"tool": "bash", "ok": true}))
+            .append_evidence("observation", json!({"tool": "bash", "ok": true}))
             .unwrap(),
         1
     );
@@ -198,7 +200,7 @@ fn unattributed_results_are_recorded_as_session_facts() {
 
     let records = EventLog::records_for(&root, "session").unwrap();
     assert_eq!(records.len(), 2, "records must reach the event log");
-    assert_eq!(records[0].kind, "tool_result");
+    assert_eq!(records[0].kind, "observation");
     assert_eq!(records[1].kind, "file_diff");
     for record in &records {
         assert!(
@@ -660,7 +662,7 @@ fn nudges_after_unaccounted_step_actions() {
     events.set_attribution(Some("1".into()), Some(plan.id.clone()), "main");
     for _ in 0..3 {
         events
-            .append("tool_result", json!({"tool": "read", "ok": true}))
+            .append("observation", json!({"tool": "read", "ok": true}))
             .unwrap();
     }
     // Session "nudge" joins at create time in the live loop (created.sessions

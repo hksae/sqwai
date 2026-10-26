@@ -67,7 +67,7 @@ pub fn anchor(root: &std::path::Path, session_id: &str) -> String {
                 changed.push(bounded(file, 160));
             }
         }
-        if record.kind == "tool_call"
+        if matches!(record.kind.as_str(), "observation" | "tool_call")
             && record
                 .fields
                 .get("tool")
@@ -75,7 +75,17 @@ pub fn anchor(root: &std::path::Path, session_id: &str) -> String {
                 .is_some_and(|t| matches!(t, "read" | "outline"))
         {
             let mut read_paths: Vec<&str> = Vec::new();
-            if let Some(args) = record.fields.get("args") {
+            if let Some(single) = record.fields.get("path").and_then(|v| v.as_str()) {
+                read_paths.push(single);
+            }
+            if let Some(paths) = record.fields.get("paths").and_then(|v| v.as_array()) {
+                for item in paths.iter().filter_map(|v| v.as_str()) {
+                    read_paths.push(item);
+                }
+            }
+            if read_paths.is_empty()
+                && let Some(args) = record.fields.get("args")
+            {
                 if let Some(arr) = args.get("paths").and_then(|v| v.as_array()) {
                     for item in arr.iter().filter_map(|v| v.as_str()) {
                         read_paths.push(item);
@@ -107,7 +117,7 @@ pub fn anchor(root: &std::path::Path, session_id: &str) -> String {
                 }
             }
         }
-        if record.kind == "tool_result"
+        if matches!(record.kind.as_str(), "observation" | "tool_result")
             && record
                 .fields
                 .get("tool")
@@ -183,7 +193,7 @@ pub fn anchor(root: &std::path::Path, session_id: &str) -> String {
         if failures.len() >= 2 {
             break;
         }
-        if record.kind != "tool_result" {
+        if !matches!(record.kind.as_str(), "observation" | "tool_result") {
             continue;
         }
         if record.fields.get("ok").and_then(|value| value.as_bool()) != Some(false) {

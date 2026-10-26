@@ -77,7 +77,7 @@ pub fn taint_level(root: &Path, session: &str) -> TaintLevel {
     let mut level = TaintLevel::clean();
     let records = crate::agent::events::EventLog::records_for(root, session).unwrap_or_default();
     for record in &records {
-        if record.kind != "tool_result"
+        if !matches!(record.kind.as_str(), "observation" | "tool_result")
             || record.fields.get("ok").and_then(|v| v.as_bool()) != Some(true)
         {
             continue;
@@ -239,20 +239,20 @@ mod tests {
         let mut events = crate::agent::events::EventLog::open(&dir, "sess").expect("events opens");
         events
             .append(
-                "tool_result",
+                "observation",
                 serde_json::json!({"tool": "read", "ok": true, "taint": "local"}),
             )
             .unwrap();
         events
             .append(
-                "tool_result",
+                "observation",
                 serde_json::json!({"tool": "read", "ok": true, "taint": "local"}),
             )
             .unwrap();
         // failed fetches showed nothing: not counted
         events
             .append(
-                "tool_result",
+                "observation",
                 serde_json::json!({"tool": "webfetch", "ok": false, "taint": "external"}),
             )
             .unwrap();
@@ -261,7 +261,7 @@ mod tests {
         assert_eq!(mid.local, 2);
         events
             .append(
-                "tool_result",
+                "observation",
                 serde_json::json!({"tool": "webfetch", "ok": true, "taint": "external"}),
             )
             .unwrap();

@@ -256,16 +256,6 @@ pub(crate) async fn run_subagent_batch(
                 })
             });
             writer.set_attribution(step, plan_id, "main");
-            let _ = writer.append(
-                "tool_call",
-                serde_json::json!({
-                    "tool": call.name,
-                    "call_id": call.id,
-                    "args_digest": tools::call_summary(&call.name, &call.args),
-                    "args": tools::call_args_for_event(&call.args),
-                    "path": tools::call_path(&call.name, &call.args),
-                }),
-            );
         }
         let _ = tx
             .send(AgentEvent::ToolStart {
@@ -351,7 +341,7 @@ pub(crate) async fn run_subagent_batch(
         if let Some(writer) = events.as_mut() {
             let _ = writer
                 .append_evidence(
-                    "tool_result",
+                    "observation",
                     serde_json::json!({
                         "tool": call.name,
                         "call_id": call.id,
@@ -359,6 +349,9 @@ pub(crate) async fn run_subagent_batch(
                         "duration_ms": tool_started.elapsed().as_millis(),
                         "summary": outcome.output.chars().take(200).collect::<String>(),
                         "trust": "high",
+                        "path": tools::call_path(&call.name, &call.args),
+                        "paths": call.args.get("paths").cloned().unwrap_or(serde_json::Value::Null),
+                        "args_digest": tools::call_summary(&call.name, &call.args),
                         "code": if outcome.cancelled { Some("cancelled") } else { None },
                     }),
                 )
@@ -390,7 +383,7 @@ pub(crate) async fn run_subagent_batch(
         if let Some(writer) = events.as_mut() {
             let _ = writer
                 .append_evidence(
-                    "tool_result",
+                    "observation",
                     serde_json::json!({
                         "tool": call.name,
                         "call_id": call.id,
@@ -398,6 +391,9 @@ pub(crate) async fn run_subagent_batch(
                         "duration_ms": 0,
                         "summary": outcome.output.chars().take(200).collect::<String>(),
                         "trust": "high",
+                        "path": tools::call_path(&call.name, &call.args),
+                        "paths": call.args.get("paths").cloned().unwrap_or(serde_json::Value::Null),
+                        "args_digest": tools::call_summary(&call.name, &call.args),
                         "code": Some("cancelled"),
                     }),
                 )
@@ -1091,7 +1087,7 @@ pub(crate) fn build_parent_context_brief(root: &Path, parent_session: &str) -> O
                         modified.push(p.to_string());
                     }
                 }
-                "tool_call" => {
+                "observation" => {
                     let tool = rec
                         .fields
                         .get("tool")
