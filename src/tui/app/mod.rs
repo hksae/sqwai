@@ -633,10 +633,6 @@ pub struct App {
     /// take seconds with many sessions, so `/new` must not block on it.
     maintain_rx:
         Option<std::sync::mpsc::Receiver<anyhow::Result<crate::agent::checkpoints::Maintenance>>>,
-    /// What the provider told us about the effort level, as opposed to what
-    /// the config claims: (model id, level, reason). Cleared when either the
-    /// model or the level changes, since the observation was about that pair.
-    effort_observed_ignored: Option<(String, EffortLevel, String)>,
     /// Mode-chip color sweep: RGB the sweep started from + start time. The
     /// target is always the current mode's color, so a toggle mid-sweep
     /// re-anchors from the displayed color — rapid toggles redirect the
@@ -908,7 +904,6 @@ impl App {
             builtin_update_rx: None,
             last_builtin_check: Instant::now(),
             maintain_rx: None,
-            effort_observed_ignored: None,
             mode_blend: None,
             approval_blend: None,
             status_y: 0,
@@ -2093,39 +2088,8 @@ impl App {
         self.effort_support()
     }
 
-    /// The plan for the level in force, with anything the *provider* told us
-    /// taking precedence over what the config claims. A declaration is a
-    /// claim; a zero reasoning-token count is evidence.
     pub(super) fn effort_plan(&self) -> crate::providers::effort::Plan {
-        let mut plan = self.effort_plan_for(self.model_cfg.effort);
-        if let Some((model, level, why)) = &self.effort_observed_ignored
-            && *model == self.model_cfg.id
-            && *level == self.model_cfg.effort
-        {
-            plan.status = crate::providers::effort::Status::Ignored {
-                why: match why.as_str() {
-                    "the provider rejected the effort parameter" => {
-                        "the provider rejected the effort parameter"
-                    }
-                    _ => "the provider reported zero reasoning tokens",
-                },
-            };
-        }
-        plan
-    }
-
-    /// Drop an observed "ignored" notice once reasoning visibly streams: the
-    /// zero-token run it was built from is contradicted. A refused parameter
-    /// stays — that verdict is the provider's word, and thoughts arriving
-    /// anyway are the model's own, not the level the user asked for.
-    fn note_effort_honoured(&mut self) {
-        let rejected = self
-            .effort_observed_ignored
-            .as_ref()
-            .is_some_and(|(_, _, why)| why == "the provider rejected the effort parameter");
-        if !rejected && self.effort_observed_ignored.take().is_some() {
-            self.dirty = true;
-        }
+        self.effort_plan_for(self.model_cfg.effort)
     }
 
     fn rebuild_provider(&mut self) {

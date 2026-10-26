@@ -62,16 +62,6 @@ impl App {
                     self.session.context_peak_tokens.max(u.prompt_tokens);
                 self.dirty = true;
             }
-            AgentEvent::EffortIgnored { level, why } => {
-                self.status(
-                    &format!("effort: {level} (ignored by model — {why})"),
-                    StatusKind::Warn,
-                );
-                self.effort_observed_ignored =
-                    Some((self.model_cfg.id.clone(), self.model_cfg.effort, why));
-                self.dirty = true;
-            }
-            AgentEvent::EffortHonoured => self.note_effort_honoured(),
             AgentEvent::ResponseId(id) => {
                 self.session.last_response_id = Some(id);
                 self.session.last_response_model = Some(self.session.model_key.clone());

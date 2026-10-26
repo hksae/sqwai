@@ -1,4 +1,4 @@
-use super::effort_tests::MockTestProvider;
+use super::loop_tests::MockTestProvider;
 use super::*;
 
 fn plain_input(

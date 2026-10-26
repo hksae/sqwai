@@ -1,4 +1,4 @@
-use super::loop_compact::{TurnFailure, rejects_continuation, rejects_effort_parameter};
+use super::loop_compact::{TurnFailure, rejects_continuation};
 use super::{AgentEvent, ControlMsg};
 use crate::providers::{
     ChatRequest, ContextTransport, Message, Role, SharedProvider, StreamEvent, ToolCallReq,
@@ -102,13 +102,6 @@ pub(crate) struct TurnOutcome {
     pub(crate) retries: u32,
     /// provider-reported counters for this successful request
     pub(crate) usage: Option<crate::providers::Usage>,
-    /// reasoning tokens the provider reported for this turn, when it counts
-    /// them at all. `Some(0)` is evidence that a requested effort level was
-    /// not acted on; `None` says nothing either way.
-    pub(crate) reasoning_tokens: Option<u64>,
-    /// reasoning content was streamed in this turn, which contradicts a zero
-    /// count whatever the usage block says
-    pub(crate) saw_reasoning: bool,
     /// the reasoning text of this turn, for display only: the session stores
     /// it so a reloaded transcript can rebuild its thought rows
     pub(crate) reasoning_text: String,
@@ -116,37 +109,11 @@ pub(crate) struct TurnOutcome {
     /// here because the provider cannot report it afterwards, and stored on
     /// the message so the `thought · 6s` label survives a restart.
     pub(crate) reasoning_ms: u64,
-    /// the provider rejected the effort parameter outright, so the turn was
-    /// retried without it and the session must stop sending it
-    pub(crate) effort_rejected: bool,
     /// provider-owned opaque state attached to this turn (reasoning items, phase)
     pub(crate) provider_state: Option<serde_json::Value>,
     /// read-only tool calls already spawned in the background mid-stream while
     /// the LLM was still generating subsequent tool calls
     pub(crate) prefetched: std::collections::HashMap<usize, PrefetchedToolHandle>,
-}
-
-#[cfg(test)]
-pub(crate) async fn run_turn(
-    provider: &SharedProvider,
-    req: &ChatRequest,
-    tx: &mpsc::Sender<AgentEvent>,
-    ctl: &mut mpsc::Receiver<ControlMsg>,
-    response_id: &mut Option<String>,
-    prompt_size: &mut u64,
-    has_fallback: bool,
-) -> Result<TurnOutcome, TurnFailure> {
-    run_turn_with_prefetch(
-        provider,
-        req,
-        tx,
-        ctl,
-        response_id,
-        prompt_size,
-        has_fallback,
-        None,
-    )
-    .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -166,18 +133,10 @@ pub(crate) async fn run_turn_with_prefetch(
     let mut deadline: Option<Instant> = None;
     // The request can lose its effort parameter mid-flight (see below), so the
     // loop works on its own copy rather than on the caller's.
-    let mut req = req.clone();
-    // what the user asked for, kept separately: the parameter can be stripped
-    // mid-flight, and a turn that only succeeded without it is exactly the
-    // turn worth reporting
-    let requested_effort = req.effort;
-    let mut effort_rejected = false;
+    let req = req.clone();
 
     loop {
-        let mut reasoning_tokens: Option<u64> = None;
         let mut usage: Option<crate::providers::Usage> = None;
-        // reasoning content actually arrived in this turn
-        let mut saw_reasoning = false;
         let mut got_delta = false;
         let mut failed: Option<anyhow::Error> = None;
         let mut text = String::new();
@@ -215,7 +174,6 @@ pub(crate) async fn run_turn_with_prefetch(
                 Ok(StreamEvent::Reasoning(t)) => {
                     if !t.is_empty() {
                         got_delta = true;
-                        saw_reasoning = true;
                         reasoning_open.get_or_insert_with(Instant::now);
                         reasoning_text.push_str(&t);
                         if tx.send(AgentEvent::ThinkingDelta(t)).await.is_err() {
@@ -227,9 +185,6 @@ pub(crate) async fn run_turn_with_prefetch(
                     usage = Some(u);
                     if u.prompt_tokens > 0 {
                         *prompt_size = u.prompt_tokens;
-                    }
-                    if let Some(n) = u.reasoning_tokens {
-                        reasoning_tokens = Some(reasoning_tokens.unwrap_or(0).max(n));
                     }
                     crate::providers::log_http(&format!(
                         "usage event: prompt={} completion={} cached={:?} written={:?} reasoning={:?}",
@@ -307,32 +262,11 @@ pub(crate) async fn run_turn_with_prefetch(
         }
 
         let Some(error) = failed else {
-            if let Some(level) = requested_effort {
-                let sent = match req.effort {
-                    Some(still) => format!(
-                        "{:?}",
-                        crate::providers::effort::plan(still, req.effort_support).wire
-                    ),
-                    None => "nothing (parameter refused by the provider)".to_string(),
-                };
-                crate::providers::log_http(&format!(
-                    "turn: effort requested={} sent={} reasoning_tokens={}",
-                    level.as_str(),
-                    sent,
-                    match reasoning_tokens {
-                        Some(n) => n.to_string(),
-                        None => "not reported".into(),
-                    }
-                ));
-            }
             return Ok(TurnOutcome {
                 text,
                 calls,
-                reasoning_tokens,
-                saw_reasoning,
                 reasoning_text,
                 reasoning_ms,
-                effort_rejected,
                 retries: attempt,
                 usage,
                 provider_state,
@@ -354,22 +288,6 @@ pub(crate) async fn run_turn_with_prefetch(
                 "provider refused the continuation reference: {err}"
             ));
             return Err(TurnFailure::continuation_rejected(err, attempt));
-        }
-
-        // A gateway that refuses the reasoning parameter is telling us the
-        // model's declared support is wrong. Retrying the same body cannot
-        // help, but retrying without the parameter can — and the caller then
-        // stops sending it for the rest of the session. This is checked before
-        // the class, because the rejection arrives as an ordinary 400 that
-        // would otherwise end the turn.
-        if req.effort.is_some() && rejects_effort_parameter(&err) {
-            crate::providers::log_http(&format!(
-                "provider rejected the effort parameter, retrying without it: {err}"
-            ));
-            req.effort = None;
-            effort_rejected = true;
-            attempt += 1;
-            continue;
         }
 
         // Decide from the class, not from the prose. Retrying an expired key

@@ -535,7 +535,6 @@ impl App {
         self.stashed_main_scroll = None;
         self.todos.clear();
         self.turn_user_index = None;
-        self.effort_observed_ignored = None;
         self.retry_line = None;
         self.last_checkpoint = None;
         self.prev_turn_ok = false;
@@ -626,7 +625,6 @@ impl App {
         self.stashed_main_scroll = None;
         self.todos.clear();
         self.turn_user_index = None;
-        self.effort_observed_ignored = None;
         self.retry_line = None;
         self.last_checkpoint = None;
         self.prev_turn_ok = false;

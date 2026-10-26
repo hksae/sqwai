@@ -1,4 +1,3 @@
-use super::TurnOutcome;
 use crate::agent::context;
 use crate::providers::{
     ChatRequest, ContextTransport, Message, Role, SharedProvider, StreamEvent, SystemPart,
@@ -341,54 +340,6 @@ impl TurnFailure {
 
 /// stream one request, retrying failures that waiting can fix, with backoff,
 /// until it succeeds or the retry window elapses
-/// A provider refusing the reasoning parameter, in the several shapes the
-/// gateways phrase it. This is prose matching, which is unreliable by nature —
-/// but the alternative is dropping the effort level for the whole session on
-/// any 400, which is worse. When it misses, the turn fails as before.
-/// Evidence that a requested effort level was not acted on, or `None` when
-/// there is none. The distinction that matters: `reasoning_tokens: None` means
-/// the provider said nothing about reasoning, which is not the same as saying
-/// it did none — only an explicit zero is evidence.
-/// How many consecutive zero-reasoning turns it takes before the host says
-/// anything. One is not enough: a reasoning model may legitimately spend
-/// nothing on a trivial question, and a gateway may stub its usage details.
-pub(crate) const MIN_ZERO_TURNS_BEFORE_REPORTING: u32 = 2;
-
-/// True when this turn asked for effort and came back with no reasoning at all.
-pub(crate) fn turn_shows_no_reasoning(turn: &TurnOutcome) -> bool {
-    // Streamed reasoning content contradicts a zero count whatever the usage
-    // block says, so it clears the turn outright.
-    turn.reasoning_tokens == Some(0) && !turn.saw_reasoning
-}
-
-/// What the host can honestly say about a level that did not land, or `None`
-/// when the evidence is not there yet.
-///
-/// The two sources are not equally strong and are no longer worded as if they
-/// were. A refused parameter is proof: the provider said so. A zero counter is
-/// an observation that can also mean "the model chose not to think here" or
-/// "this gateway stubs the details block" — field data from a third-party
-/// OpenAI-compatible gateway showed both `cached` and `reasoning` pinned at
-/// zero on a 10k-token prompt, alongside a 24-second turn that produced six
-/// output tokens. So it is reported only after several turns, and phrased as
-/// what was measured rather than as a verdict about the model.
-pub(crate) fn effort_ignored_reason(
-    turn: &TurnOutcome,
-    consecutive_zero_turns: u32,
-) -> Option<String> {
-    if turn.effort_rejected {
-        return Some("the provider rejected the effort parameter".to_string());
-    }
-    // The run has to include this turn: a turn that produced reasoning ends
-    // the run, and the caller resets the count for exactly that reason.
-    if turn_shows_no_reasoning(turn) && consecutive_zero_turns >= MIN_ZERO_TURNS_BEFORE_REPORTING {
-        return Some(format!(
-            "no reasoning reported on {consecutive_zero_turns} turns in a row"
-        ));
-    }
-    None
-}
-
 /// A provider rejecting the continuation reference, in the shapes seen so far.
 /// The first is what a relay says when it accepted `previous_response_id` and
 /// kept nothing behind it: the tool outputs arrive with no calls to match.
@@ -399,16 +350,3 @@ pub(crate) fn rejects_continuation(err: &str) -> bool {
         || lower.contains("previous response not found")
 }
 
-pub(crate) fn rejects_effort_parameter(err: &str) -> bool {
-    let lower = err.to_ascii_lowercase();
-    (lower.contains("reasoning_effort")
-        || lower.contains("reasoning.effort")
-        || lower.contains("thinking")
-        || lower.contains("budget_tokens"))
-        && (lower.contains("not supported")
-            || lower.contains("unsupported")
-            || lower.contains("unrecognized")
-            || lower.contains("unknown")
-            || lower.contains("not allowed")
-            || lower.contains("invalid"))
-}

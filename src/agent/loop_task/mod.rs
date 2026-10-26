@@ -22,13 +22,11 @@ use crate::agent::tools::{self, ToolCtx};
 use crate::plan;
 use loop_ask::{ask_user, bash_call, mutating_tool_gate, run_tool_blocking};
 use loop_compact::{
-    CompactionPrefix, compact_history, effort_ignored_reason, plan_hint_for_summary,
-    record_compaction, turn_shows_no_reasoning,
+    CompactionPrefix, compact_history, plan_hint_for_summary, record_compaction,
 };
 use loop_subagent::{
     SUBAGENT_TIMEOUT_SECS, adopt_in_progress_step, run_subagent, run_subagent_batch,
 };
-pub(crate) use loop_turn::TurnOutcome;
 use loop_turn::{request_messages_with_limit, run_turn_with_prefetch, turn_transport};
 
 mod loop_ask;
@@ -123,19 +121,6 @@ pub enum AgentEvent {
     TextDelta(String),
     ThinkingDelta(String),
     Usage(Usage),
-    /// The model did not act on the selected effort level, as a fact rather
-    /// than a guess: either the provider counted zero reasoning tokens, or it
-    /// rejected the parameter outright. The UI must stop implying the work.
-    EffortIgnored {
-        level: String,
-        why: String,
-    },
-    /// A turn streamed reasoning after an observed zero-reasoning run stamped
-    /// the level as ignored: the observation is contradicted, so the notice
-    /// must go. A rejected parameter is never cleared this way — that verdict
-    /// came from the provider, and reasoning that arrives anyway is the
-    /// model's own, not the level the user asked for.
-    EffortHonoured,
     ResponseId(String),
     RequestBreakdown(RequestBreakdown),
     /// a delegated child agent was created
@@ -793,7 +778,7 @@ async fn run_agent(
         mut provider,
         mut model_id,
         model_key,
-        mut effort,
+        effort,
         mut effort_support,
         max_tokens,
         mut system,
@@ -1131,13 +1116,6 @@ async fn run_agent(
     // gets through: without the guard a request that stays too large would
     // compact in a loop.
     let mut compacted_for_overflow = false;
-    // one record and one status line per session, not per turn
-    let mut effort_ignored_reported = false;
-    // the reported verdict was an observation (zero reasoning), not a refused
-    // parameter: only an observation can be contradicted by a later turn
-    let mut effort_ignored_observed = false;
-    // consecutive turns that asked for effort and came back with no reasoning
-    let mut zero_reasoning_turns: u32 = 0;
 
     let refresh_anchor_in_system =
         |sys: &mut Vec<SystemPart>, root: &std::path::Path, session_id: &str| {
@@ -1296,58 +1274,6 @@ async fn run_agent(
         .await
         {
             Ok(turn) => {
-                // asks the UI to say "(ignored by model)" when a level
-                // does not land. Everything the config can tell us is a claim;
-                // these two are evidence, so they are recorded like any other
-                // fact the host observed and reported once.
-                if turn_shows_no_reasoning(&turn) {
-                    zero_reasoning_turns += 1;
-                } else {
-                    zero_reasoning_turns = 0;
-                    // streamed reasoning contradicts an observed verdict: the
-                    // chrome must stop saying "ignored" while thoughts are
-                    // visibly arriving
-                    if effort_ignored_observed {
-                        effort_ignored_observed = false;
-                        let _ = tx.send(AgentEvent::EffortHonoured).await;
-                    }
-                }
-                if let Some(level) = effort
-                    && !effort_ignored_reported
-                    && let Some(why) = effort_ignored_reason(&turn, zero_reasoning_turns)
-                {
-                    effort_ignored_reported = true;
-                    effort_ignored_observed = !turn.effort_rejected;
-                    if let Some(writer) = events.as_mut() {
-                        let _ = writer.append(
-                            "effort_ignored",
-                            serde_json::json!({
-                                "level": level.as_str(),
-                                "model": model_id,
-                                "source": if turn.effort_rejected {
-                                    "rejected"
-                                } else {
-                                    "observed"
-                                },
-                                "reasoning_tokens": turn.reasoning_tokens,
-                                "zero_reasoning_turns": zero_reasoning_turns,
-                                "by": "host",
-                            }),
-                        );
-                    }
-                    let _ = tx
-                        .send(AgentEvent::EffortIgnored {
-                            level: level.as_str().to_string(),
-                            why: why.clone(),
-                        })
-                        .await;
-                    // A rejected parameter must not be sent again: the next
-                    // turn would spend a failed request to learn the same
-                    // thing.
-                    if turn.effort_rejected {
-                        effort = None;
-                    }
-                }
                 if turn.retries > 0
                     && let Some(writer) = events.as_mut()
                 {
@@ -2378,7 +2304,7 @@ mod subagent_tests;
 mod transport_tests;
 
 #[cfg(test)]
-mod effort_tests;
+mod loop_tests;
 
 /// The gates the simplification pass removed: what must now simply work.
 #[cfg(test)]
