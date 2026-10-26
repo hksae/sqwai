@@ -1,4 +1,6 @@
-use super::{Goal, MAX_STEPS_DEFAULT, PLAN_VERSION, Plan, PlanStatus, Step, StepStatus, new_id, now};
+use super::{
+    Goal, MAX_STEPS_DEFAULT, PLAN_VERSION, Plan, PlanStatus, Step, StepStatus, new_id, now,
+};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -29,10 +31,7 @@ impl<'de> Deserialize<'de> for NewStep {
                 if let Some(s) = obj.get(key).and_then(Value::as_str) {
                     return Ok(NewStep {
                         title: s.to_string(),
-                        check: obj
-                            .get("check")
-                            .and_then(Value::as_str)
-                            .map(str::to_string),
+                        check: obj.get("check").and_then(Value::as_str).map(str::to_string),
                     });
                 }
             }
@@ -59,8 +58,8 @@ pub(crate) fn strip_tags(text: &str) -> String {
     TAGS.replace_all(text, "").trim().to_string()
 }
 
-/// One operation per call. `Serialize` is for the journal intent
-/// record: every accepted op is journaled with its full args before the
+/// One operation per call. `Serialize` is for the event log intent
+/// record: every accepted op is recorded with its full args before the
 /// plan file is stored, so a crash between the two heals by replay.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
@@ -108,10 +107,8 @@ pub enum Op {
     },
     /// Host-only: a child session joins its parent's plan so its evidence
     /// attaches under session-strict resolution. Never exposed to the model
-    /// (the `plan` tool refuses it); recorded journal-first like every op.
-    Join {
-        session: String,
-    },
+    /// (the `plan` tool refuses it); recorded events-first like every op.
+    Join { session: String },
 }
 
 #[derive(Debug, Clone)]
@@ -141,7 +138,7 @@ pub enum Applied {
     Completed { message: String },
 }
 
-/// Host-only: retire the active plan. The reason travels in the journal; the
+/// Host-only: retire the active plan. The reason travels in the event log; the
 /// file keeps no history of why it was abandoned (history is never rewritten).
 pub fn abandon(plan: &mut Plan) {
     plan.status = PlanStatus::Abandoned;
@@ -203,7 +200,11 @@ pub(crate) fn next_id(plan: &Plan) -> Result<String, Rejection> {
 /// Promote the first `Pending` or `Reopened` step to `InProgress` whenever no
 /// step is currently running. Returns the ID of the newly started step, if any.
 pub(crate) fn auto_advance(plan: &mut Plan) -> Option<String> {
-    if plan.steps.iter().any(|s| s.status == StepStatus::InProgress) {
+    if plan
+        .steps
+        .iter()
+        .any(|s| s.status == StepStatus::InProgress)
+    {
         return None;
     }
     if let Some(next) = plan
@@ -284,10 +285,7 @@ pub fn create(
     let ts = now();
     let mut dedup_criteria: Vec<String> = Vec::new();
     for text in criteria {
-        if !dedup_criteria
-            .iter()
-            .any(|c| c.eq_ignore_ascii_case(&text))
-        {
+        if !dedup_criteria.iter().any(|c| c.eq_ignore_ascii_case(&text)) {
             dedup_criteria.push(text);
         }
     }
@@ -409,9 +407,18 @@ fn unknown_step(plan: &mut Plan, id: &str) -> Result<Applied, Rejection> {
     )
 }
 
-fn finish(plan: &mut Plan, id: &str, ids: &[String], summary: String) -> Result<Applied, Rejection> {
+fn finish(
+    plan: &mut Plan,
+    id: &str,
+    ids: &[String],
+    summary: String,
+) -> Result<Applied, Rejection> {
     if summary.trim().is_empty() {
-        let label = if !id.trim().is_empty() { id.trim() } else { "current" };
+        let label = if !id.trim().is_empty() {
+            id.trim()
+        } else {
+            "current"
+        };
         return reject(
             plan,
             "empty_summary",
@@ -468,7 +475,10 @@ fn finish(plan: &mut Plan, id: &str, ids: &[String], summary: String) -> Result<
                         "step {target_id} is pending while step {} is in progress",
                         active.id
                     ),
-                    format!("finish or cancel step {} first (or pass ids: [\"{}\", \"{target_id}\"] if both are done)", active.id, active.id),
+                    format!(
+                        "finish or cancel step {} first (or pass ids: [\"{}\", \"{target_id}\"] if both are done)",
+                        active.id, active.id
+                    ),
                 );
             }
         }
@@ -511,8 +521,8 @@ fn finish(plan: &mut Plan, id: &str, ids: &[String], summary: String) -> Result<
     accept(
         plan,
         format!(
-            "step {closed_label} done{next_hint} — a decision this step settled, an approach it rejected or a \
-             lesson it learned belongs in `note`; the transcript gets compacted, the journal does not"
+            "step {closed_label} done{next_hint} — the transcript gets compacted; the plan and its \
+             evidence do not"
         ),
     )
 }

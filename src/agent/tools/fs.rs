@@ -212,7 +212,10 @@ pub(super) fn read(ctx: &mut ToolCtx, raw: &str, args: &serde_json::Value) -> Ou
                     any_ok = true;
                     combined.push(format!("=== {p_str} ===\n{}", res.output.trim_end()));
                 } else {
-                    combined.push(format!("=== {p_str} [ERROR] ===\n{}", res.output.trim_end()));
+                    combined.push(format!(
+                        "=== {p_str} [ERROR] ===\n{}",
+                        res.output.trim_end()
+                    ));
                 }
             }
             let body = combined.join("\n\n");
@@ -254,28 +257,13 @@ fn extract_requested_symbols(args: &serde_json::Value) -> Vec<String> {
 }
 
 fn read_single(ctx: &mut ToolCtx, raw: &str, args: &serde_json::Value) -> Outcome {
-    let raw_trimmed = raw.trim().trim_start_matches("./").trim_start_matches(".\\");
-    if raw_trimmed.eq_ignore_ascii_case("USER.md") && !ctx.root.join(raw_trimmed).exists() {
-        return match crate::agent::memory::user_path() {
-            Ok(user_mem) if user_mem.exists() => match fs::read_to_string(&user_mem) {
-                Ok(text) if !text.trim().is_empty() => Outcome::ok(text),
-                Ok(_) => Outcome::ok("(user memory USER.md is empty)"),
-                Err(e) => Outcome::err(format!("read failed: {e}")),
-            },
-            _ => Outcome::ok("(user memory USER.md is empty)"),
-        };
-    }
+    let raw_trimmed = raw
+        .trim()
+        .trim_start_matches("./")
+        .trim_start_matches(".\\");
     let p = match existing(ctx, raw) {
         Ok(p) => p,
-        Err(e) => {
-            let norm = raw_trimmed.replace('\\', "/");
-            if norm.eq_ignore_ascii_case("MEMORY.md")
-                || norm.eq_ignore_ascii_case(".sqwai/memory/MEMORY.md")
-            {
-                return Outcome::ok("(project memory .sqwai/memory/MEMORY.md is empty)");
-            }
-            return Outcome::err(e);
-        }
+        Err(e) => return Outcome::err(e),
     };
     let bytes = match fs::metadata(&p) {
         Ok(meta)
@@ -660,11 +648,7 @@ pub(crate) fn normalize_typographic(s: &str) -> String {
             '\u{201C}' | '\u{201D}' | '\u{201E}' | '\u{201F}' => '"',
             '\u{2010}' | '\u{2011}' | '\u{2012}' | '\u{2013}' | '\u{2014}' | '\u{2015}'
             | '\u{2212}' => '-',
-            '\u{00A0}'
-            | '\u{2002}'..='\u{200A}'
-            | '\u{202F}'
-            | '\u{205F}'
-            | '\u{3000}' => ' ',
+            '\u{00A0}' | '\u{2002}'..='\u{200A}' | '\u{202F}' | '\u{205F}' | '\u{3000}' => ' ',
             other => other,
         })
         .collect()
@@ -704,7 +688,11 @@ fn splice_line_range(
     end: usize,
     replacement_lines: &[String],
 ) -> String {
-    let eol = if content.contains("\r\n") { "\r\n" } else { "\n" };
+    let eol = if content.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
     let trailing_nl = content.ends_with('\n');
     let mut out_lines: Vec<&str> = Vec::with_capacity(
         content_lines.len().saturating_sub(end - start) + replacement_lines.len(),
@@ -827,8 +815,7 @@ fn try_whitespace_or_indent_lines(
     let mut typo_hits: Vec<usize> = Vec::new();
     for i in 0..=(content_lines.len() - window) {
         let ok = (0..window).all(|k| {
-            normalize_typographic(content_lines[i + k].trim_end_matches([' ', '\t']))
-                == norm_old[k]
+            normalize_typographic(content_lines[i + k].trim_end_matches([' ', '\t'])) == norm_old[k]
         });
         if ok {
             typo_hits.push(i);
@@ -1075,7 +1062,7 @@ fn find_similar_window(content: &str, old: &str) -> Option<String> {
         let slice = &content_lines[i..i + window];
         let score = old_trimmed
             .iter()
-            .filter(|&&needle| slice.iter().any(|& cand| cand.trim() == needle))
+            .filter(|&&needle| slice.iter().any(|&cand| cand.trim() == needle))
             .count();
         if score > best_score {
             best_score = score;
@@ -1094,12 +1081,10 @@ fn find_similar_window(content: &str, old: &str) -> Option<String> {
         return None;
     }
     let from = best_start.saturating_sub(2);
-    let to = (best_start + window + 2).min(content_lines.len()).min(from + 12);
-    let mut snippet = format!(
-        "\nClosest lines in file (lines {}–{}):\n",
-        from + 1,
-        to
-    );
+    let to = (best_start + window + 2)
+        .min(content_lines.len())
+        .min(from + 12);
+    let mut snippet = format!("\nClosest lines in file (lines {}–{}):\n", from + 1, to);
     for (idx, line) in content_lines.iter().enumerate().take(to).skip(from) {
         snippet.push_str(&format!("{:>6}\t{}\n", idx + 1, line));
     }
@@ -1148,8 +1133,7 @@ pub(super) fn apply_one(
 
     let count = content.matches(target_old.as_ref()).count();
     if count == 0 {
-        if !replace_all
-            && let Some(replaced) = try_whitespace_or_indent_replace(content, old, new)?
+        if !replace_all && let Some(replaced) = try_whitespace_or_indent_replace(content, old, new)?
         {
             return Ok(replaced);
         }
@@ -1482,7 +1466,8 @@ pub(super) fn glob(ctx: &mut ToolCtx, pattern: &str, base: Option<&str>) -> Outc
             }
             Err(e) => return Outcome::err(format!("bad glob pattern: {e}")),
         }
-        if !pat.contains('/') && !pat.contains('\\')
+        if !pat.contains('/')
+            && !pat.contains('\\')
             && let Ok(bg) = GlobBuilder::new(pat).build()
         {
             basename_builder.add(bg);
@@ -1515,7 +1500,10 @@ pub(super) fn glob(ctx: &mut ToolCtx, pattern: &str, base: Option<&str>) -> Outc
         } else {
             path.strip_prefix(&base_dir).unwrap_or(path)
         };
-        if rel.components().any(|c| c.as_os_str() == ".git" || c.as_os_str() == ".sqwai") {
+        if rel
+            .components()
+            .any(|c| c.as_os_str() == ".git" || c.as_os_str() == ".sqwai")
+        {
             continue;
         }
         let matched = glob.is_match(rel)
@@ -1665,7 +1653,9 @@ pub(super) fn grep(
         // "no matches" for a pattern sitting on its third line (#214 M18).
         // An unreadable file is skipped, not fatal: one locked path must not
         // end the search.
-        let Ok(raw) = fs::read(file_path) else { continue };
+        let Ok(raw) = fs::read(file_path) else {
+            continue;
+        };
         if raw.contains(&0) {
             continue; // binary-ish
         }
@@ -1760,7 +1750,7 @@ fn checkpoint(ctx: &mut ToolCtx, p: &Path, what: &str) -> String {
         ctx.checkpoint_chain(),
         &label,
     );
-    ctx.journal.push((id.clone(), label));
+    ctx.checkpoints.push((id.clone(), label));
     id
 }
 
@@ -1876,7 +1866,11 @@ mod tests {
         // covers the small file: no pointer
         let explicit_full = read(&mut next, "main.js", &json!({"offset": 1, "limit": 10}));
         assert!(explicit_full.ok);
-        assert!(explicit_full.output.contains("TWO"), "{}", explicit_full.output);
+        assert!(
+            explicit_full.output.contains("TWO"),
+            "{}",
+            explicit_full.output
+        );
         assert!(
             !explicit_full.output.contains("No full re-read"),
             "{}",
@@ -2277,7 +2271,10 @@ mod tests {
             false,
         )
         .unwrap_err();
-        assert!(err_msg.contains("old_string not found in file"), "{err_msg}");
+        assert!(
+            err_msg.contains("old_string not found in file"),
+            "{err_msg}"
+        );
         assert!(
             err_msg.contains("new_string is already present"),
             "{err_msg}"
@@ -2336,16 +2333,14 @@ mod tests {
         // Dot-config `.github/workflows/ci.yml` is visible to glob and grep
         let g_ci = glob(&mut ctx, "ci.yml", None);
         assert!(g_ci.ok);
-        assert!(g_ci.output.contains(".github/workflows/ci.yml"), "{}", g_ci.output);
+        assert!(
+            g_ci.output.contains(".github/workflows/ci.yml"),
+            "{}",
+            g_ci.output
+        );
 
         // Path-based include in grep matches relative path
-        let gr = grep(
-            &mut ctx,
-            "CI_MARKER",
-            None,
-            Some(".github/**/*.yml"),
-            0,
-        );
+        let gr = grep(&mut ctx, "CI_MARKER", None, Some(".github/**/*.yml"), 0);
         assert!(gr.ok);
         assert!(gr.output.contains("CI_MARKER"), "{}", gr.output);
     }
@@ -2367,18 +2362,18 @@ mod tests {
             &json!({"file_path": "a.rs", "symbols": ["beta"]}),
         );
         assert!(sym_out.ok, "{}", sym_out.output);
-        assert!(sym_out.output.contains("// Symbol: pub fn beta(x: i32) -> i32"));
+        assert!(
+            sym_out
+                .output
+                .contains("// Symbol: pub fn beta(x: i32) -> i32")
+        );
         assert!(sym_out.output.contains("Doc for beta"));
         assert!(sym_out.output.contains("x + 20"));
         assert!(!sym_out.output.contains("pub fn alpha"));
 
         // 2. Fused multi-file read (`paths: ["a.rs", "b.rs"]`) reads both files and marks them read.
         let mut ctx2 = ToolCtx::new(dir.path());
-        let multi_out = read(
-            &mut ctx2,
-            "",
-            &json!({"paths": ["a.rs", "b.rs"]}),
-        );
+        let multi_out = read(&mut ctx2, "", &json!({"paths": ["a.rs", "b.rs"]}));
         assert!(multi_out.ok, "{}", multi_out.output);
         assert!(multi_out.output.contains("=== a.rs ==="));
         assert!(multi_out.output.contains("=== b.rs ==="));
@@ -2421,10 +2416,19 @@ mod tests {
         assert!(tsx_out.output.contains("const useAuth"));
 
         // 5. `outline` reports both outgoing `Imports:` and incoming `Imported by:`.
-        let out_res = crate::agent::tools::outline::outline(&mut ctx2, &json!({"path": "comp.tsx"}));
+        let out_res =
+            crate::agent::tools::outline::outline(&mut ctx2, &json!({"path": "comp.tsx"}));
         assert!(out_res.ok, "{}", out_res.output);
-        assert!(out_res.output.contains("Imports: './types'"), "{}", out_res.output);
-        assert!(out_res.output.contains("Imported by (1): app.tsx:1"), "{}", out_res.output);
+        assert!(
+            out_res.output.contains("Imports: './types'"),
+            "{}",
+            out_res.output
+        );
+        assert!(
+            out_res.output.contains("Imported by (1): app.tsx:1"),
+            "{}",
+            out_res.output
+        );
     }
 
     #[test]
@@ -2452,7 +2456,10 @@ mod tests {
             false,
         )
         .unwrap();
-        assert_eq!(res_blank, "fn a() {}\nfn b() {\n    call_new();\n}\nfn c() {}\n");
+        assert_eq!(
+            res_blank,
+            "fn a() {}\nfn b() {\n    call_new();\n}\nfn c() {}\n"
+        );
 
         // 4. Tab-indented file matched when model sends 4-space indentation
         let tabbed = "class A {\n\tfn run() {\n\t\tstep();\n\t}\n}\n";
@@ -2463,7 +2470,10 @@ mod tests {
             false,
         )
         .unwrap();
-        assert_eq!(res_tabs, "class A {\n\tfn run() {\n\t\tstep_two();\n\t}\n}\n");
+        assert_eq!(
+            res_tabs,
+            "class A {\n\tfn run() {\n\t\tstep_two();\n\t}\n}\n"
+        );
     }
 
     #[test]
@@ -2483,7 +2493,11 @@ mod tests {
             0,
         );
         assert!(outcome.ok, "{}", outcome.output);
-        assert!(outcome.output.contains("first 200 shown (261 total)"), "{}", outcome.output);
+        assert!(
+            outcome.output.contains("first 200 shown (261 total)"),
+            "{}",
+            outcome.output
+        );
 
         // And the spill file actually contains match #255 (not just the first 200!)
         let spill_dir = dir.path().join(".sqwai").join("spill");

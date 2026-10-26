@@ -820,7 +820,11 @@ pub async fn check_and_update_builtins(force: bool) -> Result<Option<BuiltinCata
     if res.status() == reqwest::StatusCode::NOT_MODIFIED {
         // Edge: 304 with no usable cache on disk falls through to the
         // embedded fallback below via Ok(None) — same as "up to date".
-        write_meta(&today, now_ts, meta_now.as_ref().and_then(|m| m.etag.clone()));
+        write_meta(
+            &today,
+            now_ts,
+            meta_now.as_ref().and_then(|m| m.etag.clone()),
+        );
         return Ok(None);
     }
     if !res.status().is_success() {
@@ -1147,36 +1151,13 @@ fn default_true() -> bool {
     true
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MemoryConfig {
-    #[serde(default = "default_memory_load_budget_ratio")]
-    pub load_budget_ratio: f64,
-    #[serde(default = "default_memory_max_tokens")]
-    pub max_tokens: u32,
-    #[serde(
-        default = "default_memory_max_proposals",
-        alias = "max_proposals_per_turn"
-    )]
-    pub max_writes_per_turn: u8,
-}
-
-impl Default for MemoryConfig {
-    fn default() -> Self {
-        Self {
-            load_budget_ratio: default_memory_load_budget_ratio(),
-            max_tokens: default_memory_max_tokens(),
-            max_writes_per_turn: default_memory_max_proposals(),
-        }
-    }
-}
-
 /// `[undo]` — retention and storage for the two checkpoint layers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UndoConfig {
     /// commits of a session's shadow chain to keep
     #[serde(default = "default_undo_keep_per_session")]
     pub keep_per_session: u32,
-    /// how long a layer-1 blob outlives the journal that references it
+    /// how long a layer-1 blob outlives the event log that references it
     #[serde(default = "default_undo_blob_grace_secs")]
     pub blob_grace_secs: u64,
     /// where the shadow repository lives; `off` disables layer 2 and leaves
@@ -1332,8 +1313,6 @@ struct ProjectOverrides {
     plan: PlanOverride,
     #[serde(default)]
     verify: VerifyOverride,
-    #[serde(default)]
-    memory: MemoryOverride,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -1371,14 +1350,6 @@ struct VerifyOverride {
     commands: Option<std::collections::BTreeMap<String, String>>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
-struct MemoryOverride {
-    load_budget_ratio: Option<f64>,
-    max_tokens: Option<u32>,
-    #[serde(alias = "max_proposals_per_turn")]
-    max_writes_per_turn: Option<u8>,
-}
-
 /// (table, keys) accepted from a project file. Anything else present is
 /// ignored and reported. Keep in sync with the `*Override` structs above.
 const PROJECT_ALLOWLIST: &[(&str, &[&str])] = &[
@@ -1404,15 +1375,6 @@ const PROJECT_ALLOWLIST: &[(&str, &[&str])] = &[
     ),
     ("plan", &["max_steps", "nudge_after"]),
     ("verify", &["commands"]),
-    (
-        "memory",
-        &[
-            "load_budget_ratio",
-            "max_tokens",
-            "max_writes_per_turn",
-            "max_proposals_per_turn",
-        ],
-    ),
 ];
 
 impl ShadowStore {
@@ -1426,15 +1388,6 @@ impl ShadowStore {
     }
 }
 
-fn default_memory_load_budget_ratio() -> f64 {
-    0.06
-}
-fn default_memory_max_tokens() -> u32 {
-    3000
-}
-fn default_memory_max_proposals() -> u8 {
-    2
-}
 fn default_compaction_threshold() -> f64 {
     0.80
 }
@@ -1474,8 +1427,6 @@ pub struct Config {
     pub mcp: McpConfig,
     #[serde(default)]
     pub skills: SkillsConfig,
-    #[serde(default)]
-    pub memory: MemoryConfig,
     #[serde(default)]
     pub compaction: CompactionConfig,
     #[serde(default)]
@@ -1543,7 +1494,6 @@ impl Default for Config {
             limits: LimitsConfig::default(),
             mcp: McpConfig::default(),
             skills: SkillsConfig::default(),
-            memory: MemoryConfig::default(),
             compaction: CompactionConfig::default(),
             plan: PlanConfig::default(),
             verify: VerifyConfig::default(),
@@ -1825,18 +1775,6 @@ impl Config {
         if let Some(v) = o.commands.clone() {
             verify.commands.extend(v);
         }
-        let memory = &mut self.memory;
-
-        let o = &overrides.memory;
-        if let Some(v) = o.load_budget_ratio {
-            memory.load_budget_ratio = v;
-        }
-        if let Some(v) = o.max_tokens {
-            memory.max_tokens = v;
-        }
-        if let Some(v) = o.max_writes_per_turn {
-            memory.max_writes_per_turn = v;
-        }
         notes
     }
 
@@ -1857,8 +1795,9 @@ impl Config {
 
     /// Detect check commands for `/init` seeding. Deterministic repo
     /// probing first (a file that exists beats a guess), then `verify:`
-    /// lines from the project MEMORY.md (curated truth wins name clashes).
-    /// Returns (name, command, source) for reporting; pure except reads.
+    /// lines from the project AGENTS.md and SQWAI.md (curated truth wins name
+    /// clashes, SQWAI.md last). Returns (name, command, source) for reporting;
+    /// pure except reads.
     pub fn detect_verify_commands(root: &Path) -> Vec<(String, String, &'static str)> {
         let mut found: Vec<(String, String, &'static str)> = Vec::new();
         let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
@@ -1912,11 +1851,12 @@ impl Config {
         if root.join("go.mod").is_file() {
             offer("test", "go test ./...".to_string(), "go.mod");
         }
-        // curated project memory overrides probing on name clashes
-        if let Ok(memory) =
-            std::fs::read_to_string(root.join(".sqwai").join("memory").join("MEMORY.md"))
-        {
-            for line in memory.lines() {
+        // curated project instructions override probing on name clashes
+        for source in ["AGENTS.md", "SQWAI.md"] {
+            let Ok(text) = std::fs::read_to_string(root.join(source)) else {
+                continue;
+            };
+            for line in text.lines() {
                 let t = line.trim();
                 let Some(rest) = t.strip_prefix("verify:") else {
                     continue;
@@ -1930,10 +1870,10 @@ impl Config {
                 }
                 if let Some(slot) = found.iter_mut().find(|(n, _, _)| n == name) {
                     slot.1 = cmd.to_string();
-                    slot.2 = "MEMORY.md";
+                    slot.2 = source;
                 } else {
                     seen.insert(name.to_string());
-                    found.push((name.to_string(), cmd.to_string(), "MEMORY.md"));
+                    found.push((name.to_string(), cmd.to_string(), source));
                 }
             }
         }

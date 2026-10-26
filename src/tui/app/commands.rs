@@ -89,13 +89,15 @@ impl App {
                     self.open_menu(Menu::Skills);
                     return;
                 };
-                if matches!(query.to_ascii_lowercase().as_str(), "clear" | "off" | "reset") {
+                if matches!(
+                    query.to_ascii_lowercase().as_str(),
+                    "clear" | "off" | "reset"
+                ) {
                     self.run_action(MenuAction::ClearPinnedSkills);
                     return;
                 }
                 self.refresh_skills();
-                let loaded =
-                    crate::prompts::skills::filter_by_query(self.cached_skills(), query);
+                let loaded = crate::prompts::skills::filter_by_query(self.cached_skills(), query);
                 if loaded.is_empty() {
                     self.status("skill not found", StatusKind::Warn);
                 } else {
@@ -121,7 +123,10 @@ impl App {
 
             "/skills" => {
                 if matches!(
-                    rest.split_whitespace().nth(1).map(|s| s.to_ascii_lowercase()).as_deref(),
+                    rest.split_whitespace()
+                        .nth(1)
+                        .map(|s| s.to_ascii_lowercase())
+                        .as_deref(),
                     Some("clear" | "off" | "reset")
                 ) {
                     self.run_action(MenuAction::ClearPinnedSkills);
@@ -161,7 +166,7 @@ impl App {
                         Err(e) => self.status(&format!("init: {e}"), StatusKind::Err),
                     }
                 }
-                // seed named verify commands (repo probing + MEMORY.md) so
+                // seed named verify commands (repo probing + SQWAI.md/AGENTS.md) so
                 // `cmd: $name` in plans resolves; hand-written names win.
                 let root = self.project_root.clone();
                 let (added, already) = crate::config::Config::seed_verify_commands(&root);
@@ -396,9 +401,7 @@ impl App {
             return;
         }
         match self.approval_mode.cycle_next() {
-            crate::config::ApprovalMode::Full
-                if self.full_access_unlocked =>
-            {
+            crate::config::ApprovalMode::Full if self.full_access_unlocked => {
                 self.set_approval_mode(crate::config::ApprovalMode::Full)
             }
             crate::config::ApprovalMode::Full => self.open_menu(Menu::ConfirmFullAccess),

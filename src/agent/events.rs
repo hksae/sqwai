@@ -1,4 +1,4 @@
-//! Host-owned append-only session journal.
+//! Host-owned append-only session events.
 
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 /// Process-global per-file append locks. Several handles append to one
-/// journal file (loop writer, plan commits, receipts, undo), each with its
+/// events file (loop writer, plan commits, receipts, undo), each with its
 /// own counter — without serialization two handles read the same tail and
 /// write the same seq twice. The tail check inside `append` is not enough;
 /// the check AND the write must hold this lock.
@@ -33,9 +33,9 @@ fn lock_for(path: &Path) -> Arc<Mutex<()>> {
 pub struct Record {
     pub seq: u64,
     pub ts: String,
-    /// Owning session journal (the file stem). Never serialized: the file
+    /// Owning session events (the file stem). Never serialized: the file
     /// already is the namespace, persisting it would duplicate that. Filled
-    /// on read by [`Journal::records`] / [`Journal::records_for`], because
+    /// on read by [`EventLog::records`] / [`EventLog::records_for`], because
     /// `seq` is only ordered *within* one file — comparing raw seqs across
     /// merged sessions mixes unrelated counters (undo's `written_since`
     /// did exactly that). Empty for hand-built records.
@@ -43,7 +43,7 @@ pub struct Record {
     /// The serde name is deliberately NOT `session`: record *fields* may
     /// carry their own `session` key (the join intent's new member), and a
     /// same-named struct field would swallow it out of the flattened map.
-    #[serde(rename = "journal_session", default, skip_serializing)]
+    #[serde(rename = "events_session", default, skip_serializing)]
     pub session: String,
     pub step: Option<String>,
     pub plan: Option<String>,
@@ -59,7 +59,7 @@ pub struct Record {
     pub fields: serde_json::Map<String, Value>,
 }
 
-pub struct Journal {
+pub struct EventLog {
     path: PathBuf,
     file: File,
     next_seq: u64,
@@ -79,7 +79,7 @@ pub struct StepRevert {
     pub written_since: Vec<String>,
 }
 
-/// Whether a journal `file_diff` record is a real plan-visible change.
+/// Whether an event log `file_diff` record is a real plan-visible change.
 /// A bash checkpoint records the worktree it found (often someone else's
 /// uncommitted files) and a zero-change record is not a change at all.
 pub fn file_diff_is_plan_evidence(fields: &serde_json::Map<String, Value>) -> bool {
@@ -107,168 +107,36 @@ pub struct PreImage {
     pub agent_hash: Option<String>,
 }
 
-/// One session inside a [`Journal::recap`].
-#[derive(Debug, Clone, Default)]
-pub struct Recap {
-    pub session: String,
-    /// calendar day of the session's first record in the window
-    pub day: String,
-    pub from: String,
-    pub to: String,
-    /// what the session was working on: the goal of the first plan it touched
-    pub ask: Option<String>,
-    pub plans: Vec<RecapPlan>,
-    /// path, lines added, lines removed — summed over the window
-    pub files: Vec<(String, u64, u64)>,
-    pub calls: usize,
-    pub failures: usize,
-    pub notes: usize,
-}
-
-/// A plan as the recap sees it: identity, verdict, and what is still open.
-#[derive(Debug, Clone)]
-pub struct RecapPlan {
-    pub id: String,
-    pub goal: String,
-    pub status: String,
-    pub closed: usize,
-    pub total: usize,
-    pub unfinished: Vec<String>,
-}
-
-fn clock(ts: &str) -> (String, String) {
-    match chrono::DateTime::parse_from_rfc3339(ts) {
-        Ok(t) => (
-            t.format("%Y-%m-%d").to_string(),
-            t.format("%H:%M").to_string(),
-        ),
-        Err(_) => (String::new(), String::new()),
-    }
-}
-
-impl Recap {
-    fn from_records(
-        session: String,
-        records: &[Record],
-        plans: &[crate::plan::Plan],
-    ) -> Result<Self> {
-        let (day, from) = clock(&records[0].ts);
-        let (_, to) = clock(&records[records.len() - 1].ts);
-        let mut out = Recap {
-            session,
-            day,
-            from,
-            to,
-            ..Default::default()
-        };
-        let mut seen_plans: Vec<String> = Vec::new();
-        for r in records {
-            match r.kind.as_str() {
-                "tool_call" => out.calls += 1,
-                "tool_result" => {
-                    if r.fields.get("ok").and_then(Value::as_bool) == Some(false) {
-                        out.failures += 1;
-                    }
-                }
-                "note" => out.notes += 1,
-                "file_diff" => {
-                    let Some(path) = r.fields.get("path").and_then(Value::as_str) else {
-                        continue;
-                    };
-                    let added = r.fields.get("added").and_then(Value::as_u64).unwrap_or(0);
-                    let removed = r.fields.get("removed").and_then(Value::as_u64).unwrap_or(0);
-                    match out.files.iter_mut().find(|(p, _, _)| p == path) {
-                        Some((_, a, b)) => {
-                            *a += added;
-                            *b += removed;
-                        }
-                        None => out.files.push((path.to_string(), added, removed)),
-                    }
-                }
-                _ => {}
-            }
-            if let Some(id) = &r.plan
-                && !seen_plans.iter().any(|seen| seen == id)
-            {
-                seen_plans.push(id.clone());
-            }
-        }
-        for id in seen_plans {
-            let Some(plan) = plans.iter().find(|p| p.id == id) else {
-                continue;
-            };
-            let closed = plan
-                .steps
-                .iter()
-                .filter(|s| {
-                    matches!(
-                        s.status,
-                        crate::plan::StepStatus::Done | crate::plan::StepStatus::Cancelled
-                    )
-                })
-                .count();
-            let unfinished = plan
-                .steps
-                .iter()
-                .filter(|s| {
-                    !matches!(
-                        s.status,
-                        crate::plan::StepStatus::Done | crate::plan::StepStatus::Cancelled
-                    )
-                })
-                .map(|s| {
-                    let title: String = s.title.chars().take(60).collect();
-                    format!("{id} {title}", id = s.id)
-                })
-                .collect();
-            let goal: String = plan.goal.text.chars().take(90).collect();
-            if out.ask.is_none() {
-                out.ask = Some(goal.clone());
-            }
-            out.plans.push(RecapPlan {
-                id: id.clone(),
-                goal,
-                status: match plan.status {
-                    crate::plan::PlanStatus::Active => "active",
-                    crate::plan::PlanStatus::Completed => "completed",
-                    crate::plan::PlanStatus::Abandoned => "abandoned",
-                }
-                .to_string(),
-                closed,
-                total: plan.steps.len(),
-                unfinished,
-            });
-        }
-        Ok(out)
-    }
-}
-
-impl Journal {
-    /// Open or create `journal/<session-id>.jsonl`, repairing a partial tail.
+impl EventLog {
+    /// Open or create `events/<session-id>.jsonl`, repairing a partial tail.
     pub fn open(root: &Path, session_id: &str) -> Result<Self> {
-        let dir = root.join(".sqwai").join("journal");
-        fs::create_dir_all(&dir).context("creating journal directory")?;
+        let dir = root.join(".sqwai").join("events");
+        fs::create_dir_all(&dir).context("creating events directory")?;
         let path = dir.join(format!("{session_id}.jsonl"));
         // Repair and seq-scan under the same per-file lock append holds:
         // an unlocked repair_tail can truncate a line another handle is
         // mid-write (bytes written, '\n' not yet), losing the record and
         // handing its seq to a later append. The guard must drop before
-        // the journal_repair append below — the mutex is not reentrant.
+        // the event_repair append below — the mutex is not reentrant.
         let (repaired, next_seq) = {
             let file_lock = lock_for(&path);
             let _guard = file_lock
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             let repaired = repair_tail(&path)?;
-            let next_seq = last_seq(&path)?.saturating_add(1);
+            let legacy = legacy_events_path(root, session_id);
+            let next_seq = last_seq(&path)?
+                .max(last_seq(&legacy).unwrap_or(0))
+                .max(session_event_seq(root, session_id))
+                .saturating_add(1);
             (repaired, next_seq)
         };
         let file = OpenOptions::new()
             .create(true)
             .append(true)
             .open(&path)
-            .with_context(|| format!("opening journal {}", path.display()))?;
-        let mut journal = Self {
+            .with_context(|| format!("opening events {}", path.display()))?;
+        let mut events = Self {
             path,
             file,
             next_seq,
@@ -278,12 +146,12 @@ impl Journal {
             epoch: None,
         };
         if repaired > 0 {
-            journal.append(
-                "journal_repair",
+            events.append(
+                "event_repair",
                 json!({"truncated_bytes": repaired, "by": "host"}),
             )?;
         }
-        Ok(journal)
+        Ok(events)
     }
 
     #[allow(dead_code)]
@@ -327,7 +195,7 @@ impl Journal {
             .parent()
             .and_then(Path::parent)
             .and_then(Path::parent)
-            .context("journal path has no project root")?;
+            .context("events path has no project root")?;
         let session = self
             .path
             .file_stem()
@@ -368,168 +236,64 @@ impl Journal {
     ///
     /// #189: failures are returned, never swallowed — a silent stale
     /// counter reuses sequence numbers and corrupts evidence refs.
+    #[cfg(test)]
     pub fn resync(&mut self) -> Result<()> {
         let last = last_seq(&self.path)?;
         self.next_seq = last.saturating_add(1);
         Ok(())
     }
 
-    /// Read records from every journal belonging to this project.
+    /// Read records from every session belonging to this project. Persisted
+    /// sessions are the source; a live events file is only the unmerged tail.
     pub fn records(root: &Path) -> Result<Vec<Record>> {
-        let dir = root.join(".sqwai").join("journal");
-        let mut records = Vec::new();
-        let Ok(entries) = fs::read_dir(dir) else {
-            return Ok(records);
-        };
-        for entry in entries.flatten() {
-            if entry.path().extension().and_then(|s| s.to_str()) != Some("jsonl") {
-                continue;
-            }
-            let session = entry
-                .path()
-                .file_stem()
-                .and_then(|name| name.to_str())
-                .unwrap_or_default()
-                .to_string();
-            let file = File::open(entry.path()).context("opening journal for evidence")?;
-            for line in BufReader::new(file).lines() {
-                let line = line.context("reading journal for evidence")?;
-                if line.trim().is_empty() {
-                    continue;
+        #[allow(unused_mut)]
+        let mut ids = events_session_ids(root);
+        #[cfg(not(test))]
+        {
+            if let Ok(sessions) = crate::session::Session::list() {
+                for session in sessions {
+                    if (session.project.is_none() || session.project.as_deref() == Some(root))
+                        && !session.events.is_empty()
+                        && !ids.contains(&session.id.to_string())
+                    {
+                        ids.push(session.id.to_string());
+                    }
                 }
-                // Degrade, don't refuse (audit H18): one malformed line —
-                // a crash mid-write, a disk error, a hand edit — used to
-                // fail this whole read, and every consumer (undo, blob
-                // purge, evidence validation) died with it. Unreadable
-                // lines are skipped; the readable history survives.
-                let Ok(mut record) = serde_json::from_str::<Record>(&line) else {
-                    continue;
-                };
-                record.session = session.clone();
-                records.push(record);
             }
+        }
+        let mut records = Vec::new();
+        for id in ids {
+            records.extend(Self::records_for(root, &id)?);
+        }
+        records.sort_by(|a, b| a.ts.cmp(&b.ts).then(a.seq.cmp(&b.seq)));
+        Ok(records)
+    }
+
+    /// Read records from one session: its persisted events plus any live
+    /// events tail. The tail is deleted once a turn merges it.
+    pub fn records_for(root: &Path, session_id: &str) -> Result<Vec<Record>> {
+        let mut records = session_events(root, session_id);
+        records.extend(read_event_tail(root, session_id)?);
+        records.sort_by_key(|record| record.seq);
+        records.dedup_by_key(|record| record.seq);
+        for record in &mut records {
+            record.session = session_id.to_string();
         }
         Ok(records)
     }
 
-    /// Resolve a session identifier or unique prefix (such as the 8-char prefix
-    /// shown by `journal op=recap`) to the full session stem on disk.
-    pub fn resolve_session_id(root: &Path, query: &str) -> Option<String> {
-        let dir = root.join(".sqwai").join("journal");
-        if dir.join(format!("{query}.jsonl")).exists() {
-            return Some(query.to_string());
-        }
-        if query.len() < 4 {
-            return None;
-        }
-        let entries = fs::read_dir(&dir).ok()?;
-        let q_lower = query.to_ascii_lowercase();
-        let mut matches: Vec<(std::time::SystemTime, String)> = Vec::new();
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
-                continue;
-            }
-            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
-                continue;
-            };
-            if stem.to_ascii_lowercase().starts_with(&q_lower) {
-                let mtime = entry
-                    .metadata()
-                    .and_then(|m| m.modified())
-                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-                matches.push((mtime, stem.to_string()));
+    /// Read and delete this session's live events tail, returning the records
+    /// for the caller to merge into the saved session.
+    pub fn take(root: &Path, session_id: &str) -> Result<Vec<Record>> {
+        let path = events_path(root, session_id);
+        let legacy = legacy_events_path(root, session_id);
+        let records = read_event_tail(root, session_id)?;
+        for path in [path, legacy] {
+            if path.exists() {
+                fs::remove_file(&path).context("removing merged events tail")?;
             }
         }
-        matches.sort_by(|a, b| b.0.cmp(&a.0));
-        matches.into_iter().next().map(|(_, stem)| stem)
-    }
-
-    /// Read records from one session journal only (supports exact session ID or
-    /// 4+ char prefix from `op=recap`).
-    pub fn records_for(root: &Path, session_id: &str) -> Result<Vec<Record>> {
-        let resolved =
-            Self::resolve_session_id(root, session_id).unwrap_or_else(|| session_id.to_string());
-        let path = root
-            .join(".sqwai")
-            .join("journal")
-            .join(format!("{resolved}.jsonl"));
-        let Ok(file) = File::open(path) else {
-            return Ok(Vec::new());
-        };
-        BufReader::new(file)
-            .lines()
-            .filter_map(|line| match line {
-                Ok(line) if !line.trim().is_empty() => {
-                    // same degrade-don't-refuse rule as `records` (audit
-                    // H18): a corrupt line is skipped, not fatal. An
-                    // evidence ref pointing at it simply finds no record
-                    // and is rejected — fail-closed where it matters.
-                    serde_json::from_str::<Record>(&line)
-                        .ok()
-                        .map(|mut record| {
-                            record.session = resolved.clone();
-                            Ok(record)
-                        })
-                }
-                Ok(_) => None,
-                Err(error) => Some(Err(error.into())),
-            })
-            .collect()
-    }
-
-    /// What happened in this project over the last `days` days, per session
-    ///. Every number comes from a record the host wrote and every plan
-    /// line from the plan file itself: there is no model prose in a recap, so
-    /// it cannot report an outcome it never saw — which is exactly how the
-    /// diary it replaces differed.
-    pub fn recap(root: &Path, days: i64) -> Result<Vec<Recap>> {
-        let dir = root.join(".sqwai").join("journal");
-        let Ok(entries) = fs::read_dir(&dir) else {
-            return Ok(Vec::new());
-        };
-        let now = chrono::Local::now();
-        let first_day = (now - chrono::Duration::days(days.clamp(1, 7) - 1))
-            .naive_local()
-            .date();
-        // A file's mtime is its last write, so a journal whose newest byte is
-        // older than the window holds no record inside it. With thousands of
-        // session files in one project this stat is the difference between a
-        // millisecond and a rescan of all of them.
-        let cutoff_secs = first_day
-            .and_hms_opt(0, 0, 0)
-            .and_then(|t| t.and_local_timezone(chrono::Local).latest())
-            .map(|t| t.timestamp());
-        let plans = crate::plan::list(root);
-        let mut out: Vec<Recap> = Vec::new();
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
-                continue;
-            }
-            if let (Some(cutoff), Ok(meta)) = (cutoff_secs, entry.metadata())
-                && let Ok(modified) = meta.modified()
-                && chrono::DateTime::<chrono::Utc>::from(modified).timestamp() < cutoff
-            {
-                continue;
-            }
-            let Some(session) = path.file_stem().and_then(|s| s.to_str()) else {
-                continue;
-            };
-            let mut records = Self::records_for(root, session)?;
-            records.retain(|r| {
-                chrono::DateTime::parse_from_rfc3339(&r.ts)
-                    .map(|t| t.date_naive() >= first_day)
-                    .unwrap_or(false)
-            });
-            if records.is_empty() {
-                continue;
-            }
-            records.sort_by_key(|record| record.seq);
-            out.push(Recap::from_records(session.to_string(), &records, &plans)?);
-        }
-        out.sort_by(|a, b| a.day.cmp(&b.day).then(a.from.cmp(&b.from)));
-        Ok(out)
+        Ok(records)
     }
 
     /// Check that a sequence belongs to this plan and is useful evidence.
@@ -558,7 +322,7 @@ impl Journal {
     /// Paths the host recorded as its own writes for the given checkpoints,
     /// each with the hash the agent left the file at.
     ///
-    /// This is what scopes `/undo`: the file tools journal a `file_diff` per
+    /// This is what scopes `/undo`: the file tools events a `file_diff` per
     /// mutation carrying the checkpoint it belongs to and `hash_after`, so undo
     /// can put back exactly those files and leave everything else — including
     /// whatever the user edited meanwhile — alone.
@@ -659,7 +423,7 @@ impl Journal {
     ///
     /// reverting a single step needs layer 1 only — *"restore
     /// `hash_before` from the blob store if the file has not been touched by
-    /// any other steps since (verified via the journal's `file_diff` chain)"*.
+    /// any other steps since (verified via the event log's `file_diff` chain)"*.
     /// That proviso is the whole difficulty: a file the step wrote and a later
     /// step then rewrote cannot be reverted in isolation, because putting the
     /// old bytes back would silently undo the later step as well. So the result
@@ -756,12 +520,8 @@ impl Journal {
     /// Files a step actually changed, for the plan's evidence and blast
     /// radius. Shell checkpoints are baselines (they record whatever was
     /// already dirty) and zero-change records are not changes, so neither
-    /// counts here; the raw journal keeps both for undo and forensics.
-    pub fn step_changed_paths(
-        root: &Path,
-        plan: Option<&str>,
-        step: &str,
-    ) -> Result<Vec<String>> {
+    /// counts here; the raw events keeps both for undo and forensics.
+    pub fn step_changed_paths(root: &Path, plan: Option<&str>, step: &str) -> Result<Vec<String>> {
         let all_records = Self::records(root)?;
         let records = Self::active_file_diffs(&all_records);
         let in_scope = |record: &Record| {
@@ -920,9 +680,9 @@ impl Journal {
         )
     }
 
-    /// Every layer-1 blob any journal in this project still names.
+    /// Every layer-1 blob any events in this project still names.
     ///
-    /// Retention reads this rather than the current session's journal alone:
+    /// Retention reads this rather than the current session's events alone:
     /// a resumed session, or a plan whose evidence points at an older
     /// session's records, must not have its pre-images collected out from
     /// under it.
@@ -946,24 +706,25 @@ impl Journal {
         Ok(ids)
     }
 
-    /// Session ids that still have a journal on disk. A chain whose journal is
-    /// gone has nothing left that could reference its checkpoints, which is
-    /// what means by blobs being *"purged together with the session
-    /// journal"*.
+    /// Session ids whose compact events still exist: persisted sessions for
+    /// this project plus any live events tail.
     pub fn sessions_on_disk(root: &Path) -> Vec<String> {
-        let dir = root.join(".sqwai").join("journal");
-        let Ok(entries) = fs::read_dir(dir) else {
-            return Vec::new();
-        };
-        entries
-            .flatten()
-            .filter_map(|entry| {
-                let path = entry.path();
-                (path.extension().and_then(|s| s.to_str()) == Some("jsonl"))
-                    .then(|| path.file_stem()?.to_str().map(str::to_string))
-                    .flatten()
-            })
-            .collect()
+        #[allow(unused_mut)]
+        let mut ids = events_session_ids(root);
+        #[cfg(not(test))]
+        {
+            if let Ok(sessions) = crate::session::Session::list() {
+                for session in sessions {
+                    if (session.project.is_none() || session.project.as_deref() == Some(root))
+                        && !session.events.is_empty()
+                        && !ids.contains(&session.id.to_string())
+                    {
+                        ids.push(session.id.to_string());
+                    }
+                }
+            }
+        }
+        ids
     }
 
     /// Which of `checkpoints` have at least one recorded write.
@@ -1049,7 +810,7 @@ impl Journal {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if !fields.is_object() {
-            bail!("journal fields must be a JSON object");
+            bail!("events fields must be a JSON object");
         }
         let mut fields = fields.as_object().cloned().unwrap_or_default();
         // "no secrets (the same screening as applies to
@@ -1097,14 +858,14 @@ impl Journal {
             kind: kind.to_string(),
             fields,
         };
-        let line = serde_json::to_string(&record).context("encoding journal record")?;
+        let line = serde_json::to_string(&record).context("encoding event record")?;
         self.file
             .write_all(line.as_bytes())
-            .context("writing journal")?;
+            .context("writing events")?;
         self.file
             .write_all(b"\n")
-            .context("terminating journal record")?;
-        self.file.flush().context("flushing journal")?;
+            .context("terminating event record")?;
+        self.file.flush().context("flushing events")?;
         self.next_seq = seq.saturating_add(1);
         Ok(seq)
     }
@@ -1185,6 +946,105 @@ impl Journal {
     }
 }
 
+fn events_path(root: &Path, session_id: &str) -> PathBuf {
+    root.join(".sqwai")
+        .join("events")
+        .join(format!("{session_id}.jsonl"))
+}
+
+/// Pre-rename tails still live under `.sqwai/journal/`; they are read once
+/// and removed when their session is next merged.
+fn legacy_events_path(root: &Path, session_id: &str) -> PathBuf {
+    root.join(".sqwai")
+        .join("journal")
+        .join(format!("{session_id}.jsonl"))
+}
+
+fn events_session_ids(root: &Path) -> Vec<String> {
+    let mut ids = Vec::new();
+    for dir in [
+        root.join(".sqwai").join("events"),
+        root.join(".sqwai").join("journal"),
+    ] {
+        let Ok(entries) = fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+                continue;
+            }
+            if let Some(id) = path.file_stem().and_then(|s| s.to_str())
+                && !ids.iter().any(|known| known == id)
+            {
+                ids.push(id.to_string());
+            }
+        }
+    }
+    ids
+}
+
+/// Read the live events tail for one session, without touching the persisted
+/// session events. Missing files are normal; malformed lines are skipped.
+fn read_event_tail(root: &Path, session_id: &str) -> Result<Vec<Record>> {
+    let mut out = Vec::new();
+    for path in [
+        events_path(root, session_id),
+        legacy_events_path(root, session_id),
+    ] {
+        let Ok(file) = File::open(path) else {
+            continue;
+        };
+        for line in BufReader::new(file).lines() {
+            let line = line.context("reading events tail")?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            if let Ok(mut record) = serde_json::from_str::<Record>(&line) {
+                record.session = session_id.to_string();
+                out.push(record);
+            }
+        }
+    }
+    out.sort_by_key(|record| record.seq);
+    out.dedup_by_key(|record| record.seq);
+    Ok(out)
+}
+
+#[cfg(not(test))]
+fn session_events(root: &Path, session_id: &str) -> Vec<Record> {
+    let Ok(session) = crate::session::Session::load(session_id) else {
+        return Vec::new();
+    };
+    if session.project.as_deref().is_some_and(|p| p != root) {
+        return Vec::new();
+    }
+    session.events
+}
+
+#[cfg(test)]
+fn session_events(_root: &Path, _session_id: &str) -> Vec<Record> {
+    Vec::new()
+}
+
+fn session_event_seq(root: &Path, session_id: &str) -> u64 {
+    #[cfg(not(test))]
+    {
+        let Ok(session) = crate::session::Session::load(session_id) else {
+            return 0;
+        };
+        if session.project.as_deref() == Some(root) {
+            return session.max_event_seq();
+        }
+        0
+    }
+    #[cfg(test)]
+    {
+        let _ = (root, session_id);
+        0
+    }
+}
+
 fn timestamp() -> String {
     Utc::now().to_rfc3339()
 }
@@ -1222,14 +1082,14 @@ fn last_seq(path: &Path) -> Result<u64> {
     };
     let mut last = 0;
     for line in BufReader::new(file).lines() {
-        let line = line.context("reading journal")?;
+        let line = line.context("reading events")?;
         if line.trim().is_empty() {
             continue;
         }
-        let record: Record = serde_json::from_str(&line).context("invalid journal record")?;
+        let record: Record = serde_json::from_str(&line).context("invalid event record")?;
         if record.seq < last {
             bail!(
-                "journal sequence is not monotonic: {} after {last}",
+                "events sequence is not monotonic: {} after {last}",
                 record.seq
             );
         }
@@ -1241,7 +1101,7 @@ fn last_seq(path: &Path) -> Result<u64> {
 /// Truncate a partial trailing line, reporting how many bytes went.
 ///
 /// A crash mid-append leaves half a record; has the reader drop it. It
-/// also has the host write a `journal_repair` record, which is the part that
+/// also has the host write an `event_repair` record, which is the part that
 /// was missing: an append-only log that exists for auditing was quietly losing
 /// bytes with nothing to show it happened.
 fn repair_tail(path: &Path) -> Result<u64> {
@@ -1253,7 +1113,7 @@ fn repair_tail(path: &Path) -> Result<u64> {
     let mut last_complete = 0u64;
     loop {
         let mut line = String::new();
-        let bytes = reader.read_line(&mut line).context("scanning journal")?;
+        let bytes = reader.read_line(&mut line).context("scanning events")?;
         if bytes == 0 {
             break;
         }
@@ -1271,13 +1131,13 @@ fn repair_tail(path: &Path) -> Result<u64> {
             break;
         }
     }
-    let len = file.metadata().context("stat journal")?.len();
+    let len = file.metadata().context("stat events")?.len();
     if last_complete < len {
         file.seek(SeekFrom::Start(last_complete))
-            .context("seeking journal repair")?;
+            .context("seeking events repair")?;
         file.set_len(last_complete)
-            .context("truncating journal tail")?;
-        file.flush().context("flushing journal repair")?;
+            .context("truncating events tail")?;
+        file.flush().context("flushing events repair")?;
         return Ok(len - last_complete);
     }
     Ok(0)

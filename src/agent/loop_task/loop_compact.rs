@@ -19,66 +19,6 @@ use crate::providers::{
 /// compaction can remove, and gating on them fires futile compactions
 /// every turn (history already fits, trim no-ops, `after == before`).
 /// Real overflows still force-compact via the overflow path.
-/// L0 capture-nudge (deterministic): a fresh user message stating a
-/// restriction ("don't touch X") while a plan is active, where no plan
-/// constraint covers it, earns a host-owned tail line telling the model to
-/// record the restriction or justify why it needs none. Unformalized lore
-/// dies at the first hard trim; this is the cheapest place to catch it.
-pub fn capture_nudge(user_text: &str, constraints: &[String]) -> Option<String> {
-    let lower = user_text.to_lowercase();
-    if !has_restriction_marker(&lower) {
-        return None;
-    }
-    if constraint_covers(constraints, &lower) {
-        return None;
-    }
-    Some(
-        "\n[host note: this message states a restriction that is not among the \
-         active plan's constraints — record it with `note` (`kind: \"decision\"`) \
-         or `memory_write`, or note why it needs no protection.]"
-            .to_string(),
-    )
-}
-
-/// Substring scan for negative directives. Checked before any
-/// disk access so ordinary turns never pay for the plan lookup.
-pub fn has_restriction_marker(lower_text: &str) -> bool {
-    const MARKERS: &[&str] = &[
-        "don't touch",
-        "do not touch",
-        "don't change",
-        "do not change",
-        "don't modify",
-        "do not modify",
-        "don't break",
-        "do not break",
-        "don't delete",
-        "do not delete",
-        "leave as is",
-        "must not",
-        "forbidden",
-    ];
-    MARKERS.iter().any(|m| lower_text.contains(m))
-}
-
-/// Crude deterministic coverage: a constraint covers the directive when they
-/// share a significant token (4+ chars). Deliberately dumb — L0.
-fn constraint_covers(constraints: &[String], lower_directive: &str) -> bool {
-    let words: std::collections::HashSet<&str> = lower_directive
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|w| w.chars().count() >= 4)
-        .collect();
-    if words.is_empty() {
-        return false;
-    }
-    constraints.iter().any(|c| {
-        c.to_lowercase()
-            .split(|c: char| !c.is_alphanumeric())
-            .filter(|w| w.chars().count() >= 4)
-            .any(|w| words.contains(w))
-    })
-}
-
 /// Preformatted durable-plan block for the restricted summary:
 /// the summarizer can only exclude what it can see. Empty when no plan is
 /// active — then every user ask counts as uncovered.
@@ -97,14 +37,14 @@ pub(crate) fn plan_hint_for_summary(root: &std::path::Path, session_id: &str) ->
     hint
 }
 
-/// Journal-first compaction record: tokens and messages
+/// EventLog-first compaction record: tokens and messages
 /// before/after, whether a summary was written, and its text
 /// (secret-screened by `append`). The `/compact` path already wrote
 /// begin/end records; the automatic loop cuts wrote nothing — so G0's
 /// post-hoc lore question ("what survived the cut?") was unanswerable.
 /// It is now; bytes-freed is `before - after`.
 pub(crate) fn record_compaction(
-    journal: &mut Option<crate::agent::journal::Journal>,
+    events: &mut Option<crate::agent::events::EventLog>,
     before: u64,
     after: u64,
     msgs_before: usize,
@@ -112,7 +52,7 @@ pub(crate) fn record_compaction(
     summarized: bool,
     summary_text: &str,
 ) {
-    let Some(writer) = journal.as_mut() else {
+    let Some(writer) = events.as_mut() else {
         return;
     };
     let _ = writer.append(
@@ -238,8 +178,7 @@ pub(crate) async fn compact_history(
     // Pressure is judged on the WIRE size, not the raw store: aged-out tool
     // results are already stubs on the request, so counting stored bytes keeps
     // firing compaction long after the request stopped growing.
-    let wire_measured =
-        |m: &[Message]| context::wire_estimated_tokens(m, policy.context_limit);
+    let wire_measured = |m: &[Message]| context::wire_estimated_tokens(m, policy.context_limit);
     let before = measured(messages);
 
     // No per-turn pruning by design (Codex shape): what the model read

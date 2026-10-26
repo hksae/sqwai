@@ -903,7 +903,10 @@ fn sessions_rows_share_date_model_token_columns() {
         .map(|(l, _)| l.spans.iter().map(|s| s.content.as_ref()).collect())
         .collect();
     assert!(texts[0].starts_with("hi ("), "{texts:?}");
-    assert!(texts[1].starts_with("a medium length title! ("), "{texts:?}");
+    assert!(
+        texts[1].starts_with("a medium length title! ("),
+        "{texts:?}"
+    );
 }
 
 fn project_session(title: &str, project: Option<std::path::PathBuf>) -> Session {

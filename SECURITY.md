@@ -28,8 +28,8 @@ Please include in your report:
 sqwai executes shell commands, manipulates project files, and interacts with external model APIs and MCP servers. Security concerns include, but are not limited to:
 
 1. **Command Safety & Trust Gate Bypasses:** Circumvention of the shell command safety classifier (`src/agent/safety.rs`), blocked command patterns, or the taint-aware egress trust gate (`src/agent/trust.rs`), enabling destructive commands or network exfiltration without user approval.
-2. **Credential & Secret Leaks:** Exposure of provider API keys or tokens in session transcripts, journals (`.sqwai/journal/`), durable memory (`MEMORY.md` / `USER.md`), or tool outputs (`src/agent/secrets.rs`).
+2. **Credential & Secret Leaks:** Exposure of provider API keys or tokens in session transcripts, event tails (`.sqwai/events/`), or tool outputs (`src/agent/secrets.rs`).
 3. **Prompt Injection & Untrusted Content Escalation:** Vulnerabilities where untrusted repository files, command output, web responses (`webfetch` / `websearch`), or MCP server payloads bypass untrusted-content boundaries or project config allowlists (`.sqwai/config.toml`).
-4. **Workspace Jail & Host-Owned State Bypass:** Path traversal escaping the project root, subagent write-scope violations (`src/agent/tools/policy.rs`), or direct modification of host-owned state (`.sqwai/plans/`, `.sqwai/journal/`, `.sqwai/memory/`, `.sqwai/checkpoints/`) outside dedicated tools.
+4. **Workspace Jail & Host-Owned State Bypass:** Path traversal escaping the project root, subagent write-scope violations (`src/agent/tools/policy.rs`), or direct modification of host-owned state (`.sqwai/plans/`, `.sqwai/events/`, `.sqwai/checkpoints/`) outside dedicated tools.
 5. **SSRF & Local Network Access:** Bypassing loopback/private-network restrictions in `webfetch` (`src/agent/tools/web.rs`) when not explicitly permitted by `[web].allow_hosts`.
 

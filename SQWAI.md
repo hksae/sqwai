@@ -1,7 +1,7 @@
 # SQWAI.md — this agent's own rules
 
 Read by sqwai only (highest priority on conflict with AGENTS.md).
-Instructions, not facts — memories live in MEMORY.md/diary.
+This file is the project context; there is no automatic memory.
 
 ## Talk
 - Russian, short, no fluff. No emojis unless asked.

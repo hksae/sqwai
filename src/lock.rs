@@ -60,7 +60,7 @@ impl ProjectLock {
 
     pub fn status_message(&self) -> Option<String> {
         self.read_only.then(|| {
-            "another sqwai instance owns this project; plan/journal/memory writes are read-only (use --force to override)".into()
+            "another sqwai instance owns this project; plan and state writes are read-only (use --force to override)".into()
         })
     }
 }

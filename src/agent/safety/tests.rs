@@ -427,22 +427,22 @@ fn sqwai_protected_paths_are_blocked() {
         "del .sqwai/plans/01M1V0GK22W0PFVYBM0501N1FJ.json",
         "rm -rf .sqwai",
         "rm -rf .sqwai/",
-        "rm .sqwai/journal/live.jsonl",
-        "rm .sqwai/memory/MEMORY.md",
+        "rm .sqwai/events/live.jsonl",
+        "rm .sqwai/checkpoints/head.json",
         "mv .sqwai/plans/1.json .",
         "ren .sqwai\\plans\\1.json 2.json",
         "copy foo.txt .sqwai\\plans\\",
         "echo test > .sqwai/plans/1.json",
         "echo test >.sqwai/plans/1.json",
-        "echo test >> .sqwai/memory/MEMORY.md",
-        "cat .sqwai/journal/live.jsonl",
+        "echo test >> .sqwai/checkpoints/head.json",
+        "cat .sqwai/events/live.jsonl",
         "cat < .sqwai/plans/1.json",
         "type .sqwai\\plans\\1.json",
         "dir .sqwai",
         "dir .sqwai\\plans",
         "ls .sqwai",
         "ls .sqwai/plans",
-        "ls -la .sqwai/journal",
+        "ls -la .sqwai/events",
         "cat .sqwai/skills/../../plans/1.json",
         "cat \".sqwai/plans/1.json\"",
         "cat '.sqwai/plans/1.json'",
@@ -471,7 +471,7 @@ fn sqwai_protected_paths_are_blocked() {
 fn sqwai_quote_fragmentation_is_blocked() {
     let fragmented = [
         "printf pwned > \".sq\"wai/plans/x.json",
-        "echo test > '.sq'wai/memory/MEMORY.md",
+        "echo test > '.sq'wai/checkpoints/head.json",
         "cat .sqwai/jour\"nal\"/live.jsonl",
         "rm -rf .sqwai/pl\"ans\"",
         "type \".sqwai\\pla\"ns\\1.json",
@@ -500,12 +500,12 @@ fn sqwai_quote_fragmentation_is_blocked() {
 #[test]
 fn sqwai_variable_expansion_is_not_safe() {
     let expansion_cases = [
-        "x=sqwai; cat .$x/journal/live.jsonl",
+        "x=sqwai; cat .$x/events/live.jsonl",
         "cat .${d}/plans/1.json",
         "rm -rf .$DIR",
         "d=sqwai; cat .$d/x",
-        "echo pwned > .$x/memory/MEMORY.md",
-        "cat $HOME/.sqwai/journal/live.jsonl",
+        "echo pwned > .$x/checkpoints/head.json",
+        "cat $HOME/.sqwai/events/live.jsonl",
     ];
     for cmd in expansion_cases {
         for shell in [ShellKind::Bash, ShellKind::Sh] {
@@ -649,7 +649,7 @@ fn powershell_recursive_delete_is_flagged_without_force() {
 /// #180: `.sqwai` is host state as a path SEGMENT. The old rule looked at the
 /// characters before the spelling and never at what came after, so a scratch
 /// or backup directory that merely starts with it — `.sqwaitmp`,
-/// `.sqwai-backup` — was blocked as if it were the journal. A hard block on
+/// `.sqwai-backup` — was blocked as if it were the event log. A hard block on
 /// innocent paths is what trains a model to route around the gate. Names
 /// ending in the spelling are pinned from the other side of the same rule.
 #[test]
@@ -684,7 +684,7 @@ fn names_that_merely_contain_the_protected_spelling_are_not_host_state() {
 fn a_lookalike_name_does_not_hide_the_protected_segment() {
     for cmd in [
         "rm -rf .sqwaitmp/../.sqwai/plans",
-        "cat /tmp/x.sqwai-notes .sqwai/journal/live.jsonl",
+        "cat /tmp/x.sqwai-notes .sqwai/events/live.jsonl",
         "del notes.sqwai .sqwai\\plans\\1.json",
         "ls .sqwai-backup && rm .sqwai/config.toml.bak",
     ] {
@@ -765,14 +765,18 @@ fn git_force_and_clean_in_any_flag_position_and_script_interpreters_are_caught()
 
 #[test]
 fn compound_splitter_handles_chains_substitutions_and_rejects_dangling_ops() {
-    let subs = split_compound_commands("cargo build && rm -rf target/doc ; echo \"a && b\"").unwrap();
+    let subs =
+        split_compound_commands("cargo build && rm -rf target/doc ; echo \"a && b\"").unwrap();
     assert_eq!(
         subs,
         vec!["cargo build", "rm -rf target/doc", "echo \"a && b\""]
     );
 
     let with_sub = split_compound_commands("echo \"$(git clean -fd)\"").unwrap();
-    assert!(with_sub.iter().any(|s| s == "git clean -fd"), "{with_sub:?}");
+    assert!(
+        with_sub.iter().any(|s| s == "git clean -fd"),
+        "{with_sub:?}"
+    );
 
     // Dangling operator and unterminated quotes fail closed
     assert!(split_compound_commands("npm test &&").is_err());
@@ -800,4 +804,3 @@ fn interpreter_and_exec_grants_are_exact_only_to_prevent_privilege_escalation() 
         );
     }
 }
-

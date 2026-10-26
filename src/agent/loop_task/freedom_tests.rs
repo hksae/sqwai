@@ -39,7 +39,6 @@ fn plain_input(
         skills: Default::default(),
         compact_only: false,
         compact_focus: String::new(),
-        memory: Default::default(),
         compaction: Default::default(),
         plan_limits: crate::config::PlanConfig::default(),
         shadow_store: crate::config::ShadowStore::Off,
@@ -116,9 +115,9 @@ async fn a_mutation_runs_without_any_plan() {
         temp_dir.join("feature.rs").exists(),
         "the mutation must land on disk"
     );
-    // and the journal holds no gate refusal behind it
+    // and the event log holds no gate refusal behind it
     let refused: Vec<String> =
-        crate::agent::journal::Journal::records_for(&temp_dir, "no-plan-sess")
+        crate::agent::events::EventLog::records_for(&temp_dir, "no-plan-sess")
             .unwrap_or_default()
             .iter()
             .filter(|r| r.kind == "tool_result")
@@ -232,7 +231,6 @@ fn limited_input(
         skills: Default::default(),
         compact_only: false,
         compact_focus: String::new(),
-        memory: Default::default(),
         compaction: Default::default(),
         plan_limits: crate::config::PlanConfig::default(),
         shadow_store: crate::config::ShadowStore::Off,

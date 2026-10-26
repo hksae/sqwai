@@ -253,14 +253,6 @@ impl App {
         }
 
         let system = self.system_block();
-        if crate::agent::loop_task::has_restriction_marker(&text.to_lowercase())
-            && let Ok(Some(plan)) =
-                crate::plan::open_active_for_session(&root, Some(&self.session.id.to_string()))
-            && let Some(tail) = crate::agent::loop_task::capture_nudge(&text, &plan.constraints)
-            && let Some(last) = self.session.messages.last_mut()
-        {
-            last.content.push_str(&tail);
-        }
         let msgs: Vec<PMessage> = self.session.messages.clone();
         let fallback_chain = self
             .cfg
@@ -319,7 +311,6 @@ impl App {
             summary: self.session.summary.clone(),
             compact_only: false,
             compact_focus: String::new(),
-            memory: self.cfg.memory.clone(),
             compaction: self.cfg.compaction.clone(),
             plan_limits: self.cfg.plan,
             shadow_store: self.cfg.undo.shadow,
@@ -465,7 +456,6 @@ impl App {
             summary: self.session.summary.clone(),
             compact_only: true,
             compact_focus: focus.to_string(),
-            memory: self.cfg.memory.clone(),
             compaction: self.cfg.compaction.clone(),
             plan_limits: self.cfg.plan,
             shadow_store: self.cfg.undo.shadow,
@@ -484,6 +474,7 @@ impl App {
 
     pub(super) fn apply_session(&mut self, mut s: Session) {
         if self.session_has_messages() {
+            self.merge_host_events();
             self.session.save().ok();
         }
         if !self.cfg.models.contains_key(&s.model_key) {
@@ -598,6 +589,7 @@ impl App {
             return false;
         }
         if self.session_has_messages() {
+            self.merge_host_events();
             self.session.save().ok();
         }
         self.run_undo_maintenance();

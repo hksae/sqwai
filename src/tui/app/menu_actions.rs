@@ -81,10 +81,7 @@ impl App {
                 {
                     let removed = self.active_skills.remove(pos);
                     self.context_bootstrap_pending = true;
-                    self.status(
-                        &format!("unpinned skill: {}", removed.name),
-                        StatusKind::Ok,
-                    );
+                    self.status(&format!("unpinned skill: {}", removed.name), StatusKind::Ok);
                 } else {
                     if let Some(skill) = self
                         .cached_skills()
@@ -116,10 +113,7 @@ impl App {
                     self.active_skills.clear();
                     self.context_bootstrap_pending = true;
                     self.sync_active_skills_to_session();
-                    self.status(
-                        &format!("cleared {count} pinned skill(s)"),
-                        StatusKind::Ok,
-                    );
+                    self.status(&format!("cleared {count} pinned skill(s)"), StatusKind::Ok);
                     self.build_menu_rows();
                     self.dirty = true;
                 }
@@ -493,14 +487,12 @@ impl App {
                     Ok(()) if !plan_path.exists() => {
                         self.session.plan_id = None;
                         self.session.save().ok();
-                        if let Ok(mut journal) = crate::agent::journal::Journal::open(
+                        if let Ok(mut events) = crate::agent::events::EventLog::open(
                             &root,
                             &self.session.id.to_string(),
                         ) {
-                            let _ = journal.append(
-                                "plan_deleted",
-                                serde_json::json!({ "plan_id": id }),
-                            );
+                            let _ =
+                                events.append("plan_deleted", serde_json::json!({ "plan_id": id }));
                         }
                         let sid = self.session.id.to_string();
                         let note = match crate::plan::open_active_for_session(&root, Some(&sid))

@@ -18,16 +18,12 @@ Never claim the plan was approved; only the user switches modes.";
 
 impl App {
     /// Stable part of the system block: built-in markdown (overridable by
-    /// config_dir/system.md), AGENTS.md, the static environment, durable
-    /// memory, then the loaded skills — one cacheable part per layer.
+    /// config_dir/system.md), AGENTS.md, SQWAI.md, the static environment,
+    /// then the loaded skills — one cacheable part per layer.
     pub(super) fn stable_parts(&self) -> Vec<crate::providers::SystemPart> {
         use crate::providers::PrefixSection;
         let root = self.project_root.clone();
-        let mut layers = crate::prompts::stable_prefix_layers_at(
-            &root,
-            &self.cfg.memory,
-            self.session.context_limit,
-        );
+        let mut layers = crate::prompts::stable_prefix_layers_at(&root);
         // The catalog is cached: re-scanning every skill directory on every
         // turn cost a full directory walk plus a parse per skill, on top of
         // the popup and menu paths that read it.
@@ -135,10 +131,14 @@ impl App {
         // of the session, never learning the user had switched to full
         // access where `write` resolves anywhere.
         let approval_line = match self.approval_mode {
-            ApprovalMode::Full => "approval: full — file tools resolve any path, nothing asks; \
-                                   prefer write/edit/read over shell workarounds",
-            ApprovalMode::Ask => "approval: ask — every shell command and every mutating call \
-                                  asks the user first",
+            ApprovalMode::Full => {
+                "approval: full — file tools resolve any path, nothing asks; \
+                                   prefer write/edit/read over shell workarounds"
+            }
+            ApprovalMode::Ask => {
+                "approval: ask — every shell command and every mutating call \
+                                  asks the user first"
+            }
             ApprovalMode::Auto => {
                 "approval: auto — risky shell commands and writes outside the project root ask \
                  first; everything else runs"
@@ -158,7 +158,7 @@ impl App {
         // `turn_facts` (date, git status, directory tree) is populated off the
         // UI thread at the start of `run_agent` so pressing Enter never blocks
         // on git subprocesses.
-        // The anchor is host-generated from this session's journal, and it
+        // The anchor is host-generated from this session's events, and it
         // rides only where the transcript has actually lost detail: once a
         // compaction has dropped messages. Rebuilt fresh each turn so
         // resume/compaction never relies on a model-written summary.

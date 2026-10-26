@@ -87,12 +87,11 @@ impl App {
             }
             AgentEvent::RequestBreakdown(b) => {
                 self.session.last_breakdown = Some(b);
-                let fixed = b.system_tokens + b.memory_tokens + b.skills_tokens + b.host_tokens;
+                let fixed = b.system_tokens + b.skills_tokens + b.host_tokens;
                 crate::providers::log_http(&format!(
-                    "request breakdown: system={}B memory={}B skills={}B history={}B \
+                    "request breakdown: system={}B skills={}B history={}B \
                      tool_output={}B host={}B reasoning={}B total={}B fixed={}t",
                     b.system_bytes,
-                    b.memory_bytes,
                     b.skills_bytes,
                     b.history_bytes,
                     b.tool_output_bytes,
@@ -119,10 +118,10 @@ impl App {
             }
             AgentEvent::SubagentText { id, text } => {
                 if let Some(chat) = self.subagent_chats.get_mut(&id)
-                    && let Some(Segment::Assistant { text: current, .. }) =
-                        chat.iter_mut().rev().find(|segment| {
-                            matches!(segment, Segment::Assistant { live: true, .. })
-                        })
+                    && let Some(Segment::Assistant { text: current, .. }) = chat
+                        .iter_mut()
+                        .rev()
+                        .find(|segment| matches!(segment, Segment::Assistant { live: true, .. }))
                 {
                     current.push_str(&text);
                 }
@@ -163,29 +162,28 @@ impl App {
                     output.push_str(&step_line);
                     self.touch_segment(pos);
                 }
-                let preamble: Option<(usize, String)> = if let Some(chat) =
-                    self.subagent_chats.get_mut(&id)
-                {
-                    chat.iter()
-                        .rposition(|segment| {
-                            matches!(segment, Segment::Assistant { live: true, .. })
-                        })
-                        .and_then(|pos| {
-                            if let Some(Segment::Assistant { text, .. }) = chat.get_mut(pos) {
-                                let t = text.trim();
-                                if !t.is_empty() {
-                                    Some((pos, std::mem::take(text)))
+                let preamble: Option<(usize, String)> =
+                    if let Some(chat) = self.subagent_chats.get_mut(&id) {
+                        chat.iter()
+                            .rposition(|segment| {
+                                matches!(segment, Segment::Assistant { live: true, .. })
+                            })
+                            .and_then(|pos| {
+                                if let Some(Segment::Assistant { text, .. }) = chat.get_mut(pos) {
+                                    let t = text.trim();
+                                    if !t.is_empty() {
+                                        Some((pos, std::mem::take(text)))
+                                    } else {
+                                        text.clear();
+                                        None
+                                    }
                                 } else {
-                                    text.clear();
                                     None
                                 }
-                            } else {
-                                None
-                            }
-                        })
-                } else {
-                    None
-                };
+                            })
+                    } else {
+                        None
+                    };
                 if let Some((pos, p)) = preamble {
                     let trimmed = p.trim();
                     if !trimmed.is_empty() {
@@ -201,9 +199,7 @@ impl App {
                             matches!(segment, Segment::Assistant { live: true, .. })
                         })
                     })
-                    .unwrap_or_else(|| {
-                        self.subagent_chats.get(&id).map(|c| c.len()).unwrap_or(0)
-                    });
+                    .unwrap_or_else(|| self.subagent_chats.get(&id).map(|c| c.len()).unwrap_or(0));
                 self.sub_insert(
                     id,
                     tool_pos,
@@ -300,8 +296,9 @@ impl App {
                 if let Some(chat) = self.subagent_chats.get_mut(&id) {
                     for segment in chat {
                         match segment {
-                            Segment::Thinking { live, .. }
-                            | Segment::Assistant { live, .. } => *live = false,
+                            Segment::Thinking { live, .. } | Segment::Assistant { live, .. } => {
+                                *live = false
+                            }
                             _ => {}
                         }
                     }
@@ -794,7 +791,7 @@ impl App {
             .session
             .turn_checkpoint_start
             .min(self.session.checkpoints.len());
-        for entry in outcome.journal {
+        for entry in outcome.checkpoints {
             if !self.session.checkpoints[start..].contains(&entry) {
                 self.session.checkpoints.push(entry);
             }
@@ -941,7 +938,10 @@ impl App {
         Some((start, end))
     }
 
-    pub(super) fn build_activity_group(&self, (seg_start, seg_end): (usize, usize)) -> ActivityGroup {
+    pub(super) fn build_activity_group(
+        &self,
+        (seg_start, seg_end): (usize, usize),
+    ) -> ActivityGroup {
         let duration_ms = self
             .turn_started
             .map(|t| t.elapsed().as_millis() as u64)
@@ -1003,6 +1003,16 @@ impl App {
 
     pub(super) fn finish_turn(&mut self, res: Result<(), String>) {
         self.finish_turn_inner(res, true);
+    }
+
+    /// Fold the live events tail into the session. The tail is a crash guard
+    /// only: once merged it is deleted, and the session file is the source.
+    pub(super) fn merge_host_events(&mut self) {
+        if let Ok(records) =
+            crate::agent::events::EventLog::take(&self.project_root, &self.session.id.to_string())
+        {
+            self.session.merge_events(records);
+        }
     }
 
     pub(super) fn persist_transcript(
@@ -1128,6 +1138,7 @@ impl App {
         let aborted_turn = matches!(&res, Err(e) if e == "aborted");
         if aborted_turn || res.is_ok() {
             self.session.prev_turn_aborted = aborted_turn;
+            self.merge_host_events();
             self.session.save().ok();
         }
         let turn_note = match &res {

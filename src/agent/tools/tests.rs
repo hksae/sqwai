@@ -3,7 +3,7 @@ use super::*;
 use crate::plan;
 use serde_json::json;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 #[test]
 fn changed_any_file_requires_actual_lines() {
@@ -19,9 +19,21 @@ fn changed_any_file_requires_actual_lines() {
         blob_after: None,
     };
     assert!(!Outcome::ok("ok").changed_any_file());
-    assert!(!Outcome::ok("ok").with_file_diff(diff(0, 0)).changed_any_file());
-    assert!(Outcome::ok("ok").with_file_diff(diff(1, 0)).changed_any_file());
-    assert!(Outcome::ok("ok").with_file_diff(diff(0, 1)).changed_any_file());
+    assert!(
+        !Outcome::ok("ok")
+            .with_file_diff(diff(0, 0))
+            .changed_any_file()
+    );
+    assert!(
+        Outcome::ok("ok")
+            .with_file_diff(diff(1, 0))
+            .changed_any_file()
+    );
+    assert!(
+        Outcome::ok("ok")
+            .with_file_diff(diff(0, 1))
+            .changed_any_file()
+    );
 }
 
 #[test]
@@ -449,8 +461,8 @@ fn read_then_edit_flow_and_guards() {
         "{}",
         o.output
     );
-    // checkpoint journal got entries from the mutation above
-    assert!(!ctx.journal.is_empty());
+    // checkpoint events got entries from the mutation above
+    assert!(!ctx.checkpoints.is_empty());
     fs::remove_dir_all(&dir).ok();
 }
 
@@ -591,7 +603,12 @@ fn plan_ops_resolve_the_shapes_the_model_writes() {
     );
     assert!(premature.ok, "{}", premature.output);
     assert_eq!(
-        plan::open_active(&dir).unwrap().unwrap().step("1").unwrap().status,
+        plan::open_active(&dir)
+            .unwrap()
+            .unwrap()
+            .step("1")
+            .unwrap()
+            .status,
         plan::StepStatus::InProgress
     );
 
@@ -759,7 +776,7 @@ fn git_status_marks_paths_this_session_never_wrote() {
         out.output
     );
 
-    // what this session wrote through a tool is not foreign — the journal
+    // what this session wrote through a tool is not foreign — the event log
     // says so, and that is the whole basis of the line
     let mine = execute(
         &mut ctx,
@@ -767,7 +784,7 @@ fn git_status_marks_paths_this_session_never_wrote() {
         &json!({"file_path": "mine.rs", "content": "fn m() {}\n"}),
     );
     assert!(mine.ok, "{}", mine.output);
-    crate::agent::journal::Journal::open(&dir, &ctx.session_id)
+    crate::agent::events::EventLog::open(&dir, &ctx.session_id)
         .unwrap()
         .append("file_diff", json!({"path": "mine.rs", "added": 1}))
         .unwrap();
@@ -820,13 +837,13 @@ fn host_owned_state_is_unreachable_from_file_tools() {
     );
     assert!(created.ok, "{}", created.output);
     let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
-    fs::create_dir_all(dir.join(".sqwai/journal")).unwrap();
-    fs::write(dir.join(".sqwai/journal/live.jsonl"), "").unwrap();
+    fs::create_dir_all(dir.join(".sqwai/events")).unwrap();
+    fs::write(dir.join(".sqwai/events/live.jsonl"), "").unwrap();
 
     for path in [
         format!(".sqwai/plans/{plan_id}.json"),
-        ".sqwai/journal/live.jsonl".to_string(),
-        ".sqwai/journal/forged.jsonl".to_string(),
+        ".sqwai/events/live.jsonl".to_string(),
+        ".sqwai/events/forged.jsonl".to_string(),
         ".sqwai/checkpoints/head.json".to_string(),
         ".sqwai/exports/session.md".to_string(),
         ".sqwai".to_string(),
@@ -849,28 +866,8 @@ fn host_owned_state_is_unreachable_from_file_tools() {
                 "{tool} on {path} names a retired mechanism: {}",
                 out.output
             );
-            assert!(
-                out.output.contains("memory_write"),
-                "{tool} on {path} must offer the way in: {}",
-                out.output
-            );
         }
     }
-
-    // `.sqwai/memory/MEMORY.md` (and bare `MEMORY.md`) is readable via `read`,
-    // while direct file writes/edits stay refused so mutations go through `memory_write`.
-    for tool in ["write", "edit"] {
-        let out = execute(
-            &mut ctx,
-            tool,
-            &json!({"file_path": ".sqwai/memory/MEMORY.md", "content": "x",
-                    "old_string": "a", "new_string": "b"}),
-        );
-        assert!(!out.ok, "{tool} must refuse .sqwai/memory/MEMORY.md");
-        assert!(out.output.contains("host-owned state"));
-    }
-    let read_mem = execute(&mut ctx, "read", &json!({"file_path": "MEMORY.md"}));
-    assert!(read_mem.ok, "read(MEMORY.md) should resolve to .sqwai/memory/MEMORY.md: {}", read_mem.output);
 
     // the goal survived every attempt above
     let after = plan::open_active(&dir).unwrap().unwrap();
@@ -1658,9 +1655,9 @@ fn plan_ops_round_trip_through_the_dispatcher() {
     );
 
     let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
-    let mut evidence_journal = crate::agent::journal::Journal::open(&dir, &ctx.session_id).unwrap();
-    evidence_journal.set_attribution(Some("1".into()), Some(plan_id.clone()), "main");
-    evidence_journal
+    let mut evidence_events = crate::agent::events::EventLog::open(&dir, &ctx.session_id).unwrap();
+    evidence_events.set_attribution(Some("1".into()), Some(plan_id.clone()), "main");
+    evidence_events
         .append_evidence("tool_result", json!({"tool": "read", "ok": true}))
         .unwrap();
     let finish = plan_op(
@@ -1690,32 +1687,6 @@ fn plan_ops_round_trip_through_the_dispatcher() {
     fs::remove_dir_all(&dir).ok();
 }
 
-#[test]
-fn note_requires_an_allowed_kind_and_non_empty_text() {
-    let (mut ctx, dir) = proj();
-    let missing = execute(&mut ctx, "note", &json!({"note": "", "kind": "lesson"}));
-    assert!(!missing.ok);
-    assert!(missing.output.contains("1-2000"), "{}", missing.output);
-    let invalid = execute(
-        &mut ctx,
-        "note",
-        &json!({"note": "keep this", "kind": "other"}),
-    );
-    assert!(!invalid.ok);
-    assert!(invalid.output.contains("invalid"), "{}", invalid.output);
-    let accepted = execute(
-        &mut ctx,
-        "note",
-        &json!({"note": "keep this", "kind": "decision"}),
-    );
-    assert!(accepted.ok, "{}", accepted.output);
-    // default kind (decision) and `text` alias also work
-    let defaulted = execute(&mut ctx, "note", &json!({"text": "default decision note"}));
-    assert!(defaulted.ok, "{}", defaulted.output);
-    assert!(defaulted.output.contains("decision"));
-    fs::remove_dir_all(&dir).ok();
-}
-
 /// Steps close on a summary alone — the host records what it observed
 /// and never demands an oath to close progress.
 #[test]
@@ -1732,7 +1703,7 @@ fn soft_finish_closes_on_summary_alone() {
     );
     assert!(created.ok, "{}", created.output);
     let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
-    // no tool calls, no journal evidence at all
+    // no tool calls, no events evidence at all
     let done = plan_op(
         &mut ctx,
         &json!({"op": "finish", "id": "1", "summary": "thought about it"}),
@@ -1834,7 +1805,10 @@ fn abandon_surrenders_with_a_quote() {
     let plan = plan::read_plan_file(&dir, &plan_id).expect("abandoned plan reads back");
     assert_eq!(plan.status, plan::PlanStatus::Abandoned);
 
-    let next = plan_op(&mut ctx, &json!({"op": "finish", "id": "1", "summary": "x"}));
+    let next = plan_op(
+        &mut ctx,
+        &json!({"op": "finish", "id": "1", "summary": "x"}),
+    );
     assert!(!next.ok, "{}", next.output);
     assert!(next.output.contains("no active plan"), "{}", next.output);
     fs::remove_dir_all(&dir).ok();
@@ -2226,254 +2200,6 @@ fn glob_grep_ls_work() {
     assert!(o.ok && o.output.contains("main.rs"), "{}", o.output);
 }
 
-/// write a raw journal file with controlled timestamps
-fn write_journal(dir: &Path, session: &str, lines: &[String]) {
-    let journal_dir = dir.join(".sqwai").join("journal");
-    fs::create_dir_all(&journal_dir).unwrap();
-    fs::write(
-        journal_dir.join(format!("{session}.jsonl")),
-        lines.join("\n") + "\n",
-    )
-    .unwrap();
-}
-
-fn rec(seq: u64, ts: &str, kind: &str, extra: &str) -> String {
-    format!(
-        r#"{{"seq":{seq},"ts":"{ts}","step":null,"plan":null,"agent":"main","kind":"{kind}"{extra}}}"#
-    )
-}
-
-#[test]
-fn journal_read_renders_and_filters() {
-    let (mut ctx, dir) = proj();
-    write_journal(
-        &dir,
-        "shared",
-        &[
-            rec(1, "2026-01-01T10:00:00+00:00", "user_msg", r#","chars":42"#),
-            rec(
-                2,
-                "2026-02-01T10:00:00+00:00",
-                "file_diff",
-                r#","path":"src/main.rs","added":3,"removed":1"#,
-            ),
-            rec(
-                3,
-                "2026-03-01T10:00:00+00:00",
-                "tool_result",
-                r#","tool":"bash","ok":false,"code":"cancelled""#,
-            ),
-        ],
-    );
-
-    // default: chronological tail with a header
-    let o = execute(&mut ctx, "journal", &json!({}));
-    assert!(o.ok, "{}", o.output);
-    assert!(
-        o.output.contains("3 records total, 3 match"),
-        "{}",
-        o.output
-    );
-    // an unfiltered list points at the digest instead of making the model
-    // page through records to find out what happened recently
-    assert!(
-        o.output.contains("op=recap"),
-        "the bare read should hint at the recap: {}",
-        o.output
-    );
-    assert!(
-        o.output.contains("j#1 2026-01-01 10:00:00 user_msg"),
-        "{}",
-        o.output
-    );
-    assert!(
-        o.output.contains("j#3 2026-03-01 10:00:00 tool_result"),
-        "{}",
-        o.output
-    );
-    assert!(
-        o.output.contains("bash ok=false code=cancelled"),
-        "{}",
-        o.output
-    );
-
-    // kind filter
-    let o = execute(&mut ctx, "journal", &json!({"kind": "file_diff"}));
-    assert!(o.ok, "{}", o.output);
-    assert!(o.output.contains("src/main.rs +3 -1"), "{}", o.output);
-    assert!(!o.output.contains("j#1 "), "{}", o.output);
-
-    // tailing with `last`
-    let o = execute(&mut ctx, "journal", &json!({"last": 1}));
-    assert!(o.ok, "{}", o.output);
-    assert!(o.output.contains("j#3"), "{}", o.output);
-    assert!(!o.output.contains("j#2"), "{}", o.output);
-
-    // substring query over rendered lines
-    let o = execute(&mut ctx, "journal", &json!({"query": "MAIN.RS"}));
-    assert!(o.ok, "{}", o.output);
-    assert!(o.output.contains("j#2"), "{}", o.output);
-    assert!(!o.output.contains("j#1 "), "{}", o.output);
-    fs::remove_dir_all(&dir).ok();
-}
-
-/// `op=recap` summarizes the recent days from host records only:
-/// counts, files, and the plan a session worked on.
-#[test]
-fn journal_recap_summarizes_recent_sessions() {
-    let (mut ctx, dir) = proj();
-    let now = chrono::Local::now();
-    let ts = |mins: i64| (now - chrono::Duration::minutes(mins)).to_rfc3339();
-    write_journal(
-        &dir,
-        "recent",
-        &[
-            rec(1, &ts(90), "user_msg", r#","chars":20"#),
-            rec(2, &ts(80), "tool_call", r#","tool":"bash""#),
-            rec(
-                3,
-                &ts(70),
-                "tool_result",
-                r#","tool":"bash","ok":false,"code":"rejected""#,
-            ),
-            rec(
-                4,
-                &ts(60),
-                "file_diff",
-                r#","path":"src/a.rs","added":5,"removed":2"#,
-            ),
-        ],
-    );
-    write_journal(
-        &dir,
-        "ancient",
-        &[rec(
-            1,
-            "2020-01-01T00:00:00+00:00",
-            "tool_call",
-            r#","tool":"bash""#,
-        )],
-    );
-
-    let o = execute(&mut ctx, "journal", &json!({"op": "recap"}));
-    assert!(o.ok, "{}", o.output);
-    assert!(o.output.contains("recent"), "{}", o.output);
-    assert!(
-        !o.output.contains("ancient"),
-        "a session outside the window must not appear: {}",
-        o.output
-    );
-    assert!(
-        o.output.contains("src/a.rs +5/-2"),
-        "files must be aggregated: {}",
-        o.output
-    );
-    assert!(o.output.contains("1 call · 1 failed"), "{}", o.output);
-    assert!(o.output.contains("(no plan)"), "{}", o.output);
-    fs::remove_dir_all(&dir).ok();
-}
-
-/// The recap quotes what a session was working on: the goal of its plan,
-/// never the first message of the session — that is usually "привет".
-#[test]
-fn journal_recap_names_the_plan_and_its_goal() {
-    let (mut ctx, dir) = proj();
-    let created = execute(
-        &mut ctx,
-        "plan",
-        &json!({"op":"create","goal":"isolate the tests","criteria":["cargo test green"],
-                "steps":[{"title":"find the writers"}]}),
-    );
-    assert!(created.ok, "{}", created.output);
-    let plan = crate::plan::list(&dir).remove(0);
-    let now = chrono::Local::now();
-    let ts = |mins: i64| (now - chrono::Duration::minutes(mins)).to_rfc3339();
-    let line = |seq: u64, kind: &str, extra: &str| {
-        format!(
-            r#"{{"seq":{seq},"ts":"{}","step":"1","plan":"{}","agent":"main","kind":"{kind}"{extra}}}"#,
-            ts(30),
-            plan.id,
-        )
-    };
-    write_journal(
-        &dir,
-        "planned",
-        &[
-            line(1, "user_msg", r#","chars":7"#),
-            line(2, "tool_call", r#","tool":"edit""#),
-        ],
-    );
-    let o = execute(&mut ctx, "journal", &json!({"op": "recap"}));
-    assert!(o.ok, "{}", o.output);
-    assert!(
-        o.output.contains("«isolate the tests»"),
-        "the plan goal is the session's subject: {}",
-        o.output
-    );
-    assert!(
-        o.output.contains("0/1 steps"),
-        "step progress must show: {}",
-        o.output
-    );
-    assert!(
-        o.output.contains("unfinished: 1 find the writers"),
-        "an open step is the line that changes tomorrow's run: {}",
-        o.output
-    );
-    fs::remove_dir_all(&dir).ok();
-}
-
-#[test]
-fn journal_reads_across_sessions_sorted() {
-    let (mut ctx, dir) = proj();
-    write_journal(
-        &dir,
-        "shared",
-        &[rec(
-            1,
-            "2026-02-01T10:00:00+00:00",
-            "user_msg",
-            r#","chars":7"#,
-        )],
-    );
-    write_journal(
-        &dir,
-        "older",
-        &[
-            rec(
-                1,
-                "2026-01-01T10:00:00+00:00",
-                "plan",
-                r#","op":"start","id":"p1""#,
-            ),
-            rec(
-                2,
-                "2026-03-01T10:00:00+00:00",
-                "compaction",
-                r#","phase":"begin""#,
-            ),
-        ],
-    );
-    let o = execute(&mut ctx, "journal", &json!({"session": "all"}));
-    assert!(o.ok, "{}", o.output);
-    assert!(o.output.contains("all sessions"), "{}", o.output);
-    // chronological across files, not filesystem order
-    let first = o.output.find("j#1 ").unwrap();
-    let second = o.output.find("j#2 ").unwrap();
-    assert!(first < second, "{}", o.output);
-    fs::remove_dir_all(&dir).ok();
-}
-
-#[test]
-fn journal_rejects_path_like_session_ids() {
-    let (mut ctx, dir) = proj();
-    let o = execute(&mut ctx, "journal", &json!({"session": "../evil"}));
-    assert!(!o.ok, "{}", o.output);
-    let o = execute(&mut ctx, "journal", &json!({"session": "a\\b"}));
-    assert!(!o.ok, "{}", o.output);
-    fs::remove_dir_all(&dir).ok();
-}
-
 #[test]
 fn plan_cancel_without_id_is_refused() {
     let (mut ctx, dir) = proj();
@@ -2528,7 +2254,7 @@ fn plan_stale_session_commit_is_refused_not_regressed() {
     // session B loads the plan before A's next store
     let mut plan_b = plan::open(&dir, &plan_id).unwrap();
 
-    // A finishes step 1: journal intent, then store
+    // A finishes step 1: event-log intent, then store
     assert!(
         plan_op(
             &mut ctx_a,
@@ -2561,7 +2287,7 @@ fn plan_stale_session_commit_is_refused_not_regressed() {
     .expect_err("a stale-base commit must be refused");
     assert!(err.to_string().contains("plan_moved"), "{err:#}");
 
-    // A's work is intact, B's op left no trace on disk or in the journal
+    // A's work is intact, B's op left no trace on disk or in the event log
     let on_disk = plan::open(&dir, &plan_id).unwrap();
     assert_eq!(
         on_disk.step("1").unwrap().status,
@@ -2574,8 +2300,8 @@ fn plan_stale_session_commit_is_refused_not_regressed() {
         "step 2 is now in progress"
     );
     assert!(
-        !dir.join(".sqwai/journal/sess-b.jsonl").exists(),
-        "a refused commit must not journal an intent (it would stall replay)"
+        !dir.join(".sqwai/events/sess-b.jsonl").exists(),
+        "a refused commit must not events an intent (it would stall replay)"
     );
 
     let report = plan::replay(&dir).unwrap();
@@ -2609,28 +2335,28 @@ fn plan_replay_reattaches_evidence_behind_the_cursor() {
     );
     assert!(created.ok, "{}", created.output);
     let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
-    // tool evidence lands in the journal (live path attaches it too)
-    let mut journal = crate::agent::journal::Journal::open(&dir, &ctx.session_id).unwrap();
-    journal.set_attribution(Some("1".into()), Some(plan_id.clone()), "main");
-    let bash_seq = journal
+    // tool evidence lands in the event log (live path attaches it too)
+    let mut events = crate::agent::events::EventLog::open(&dir, &ctx.session_id).unwrap();
+    events.set_attribution(Some("1".into()), Some(plan_id.clone()), "main");
+    let bash_seq = events
         .append(
             "file_diff",
             json!({"path": "src/dirty.rs", "mode": "bash", "added": 2, "removed": 0}),
         )
         .unwrap();
-    let zero_seq = journal
+    let zero_seq = events
         .append(
             "file_diff",
             json!({"path": "src/zero.rs", "mode": "edit", "added": 0, "removed": 0}),
         )
         .unwrap();
-    let evidence_seq = journal
+    let evidence_seq = events
         .append(
             "file_diff",
             json!({"path": "src/x.rs", "mode": "edit", "added": 1, "removed": 0}),
         )
         .unwrap();
-    // crash: journal has it, the plan file does not
+    // crash: events has it, the plan file does not
     let mut plan = plan::open(&dir, &plan_id).unwrap();
     plan.step_mut("1").unwrap().evidence.clear();
     plan::store(&dir, &plan).unwrap();
@@ -2650,7 +2376,8 @@ fn plan_replay_reattaches_evidence_behind_the_cursor() {
         "replay must re-attach evidence seq {evidence_seq} (report: {report:?})"
     );
     assert!(
-        !step.evidence
+        !step
+            .evidence
             .iter()
             .any(|reference| reference.seq == bash_seq || reference.seq == zero_seq),
         "shell baselines and zero-change records are not plan evidence: {:?}",
@@ -2693,7 +2420,7 @@ fn plan_corrupt_rebuild_keeps_abandoned_sibling_down() {
     // a later op on the new plan (it is the only active one)
     let added = plan_op(&mut ctx, &json!({"op": "add", "title": "second step"}));
     assert!(added.ok, "{}", added.output);
-    // torn write on the new plan's file, journal intact
+    // torn write on the new plan's file, events intact
     std::fs::write(
         plan::plans_dir(&dir).join(format!("{new_id}.json")),
         "{torn",
@@ -2723,15 +2450,15 @@ fn plan_finish_reports_blast_radius() {
     assert!(created.ok, "{}", created.output);
     let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
     // the step wrote two files (one from a subagent session)
-    let mut journal = crate::agent::journal::Journal::open(&dir, &ctx.session_id).unwrap();
-    journal.set_attribution(Some("1".into()), Some(plan_id.clone()), "main");
-    journal
+    let mut events = crate::agent::events::EventLog::open(&dir, &ctx.session_id).unwrap();
+    events.set_attribution(Some("1".into()), Some(plan_id.clone()), "main");
+    events
         .append(
             "file_diff",
             json!({"path": "src/a.rs", "mode": "edit", "added": 1, "removed": 0}),
         )
         .unwrap();
-    let mut sub = crate::agent::journal::Journal::open(&dir, "sub-1").unwrap();
+    let mut sub = crate::agent::events::EventLog::open(&dir, "sub-1").unwrap();
     sub.set_attribution(Some("1".into()), Some(plan_id.clone()), "main");
     sub.append(
         "file_diff",
@@ -2764,13 +2491,13 @@ fn plan_finish_reports_blast_radius() {
     fs::remove_dir_all(&dir).ok();
 }
 
-/// Journal-first for step cancel: the dispatcher must commit (not bare
+/// EventLog-first for step cancel: the dispatcher must commit (not bare
 /// store), or crash recovery never sees the cancellation. First asserts
 /// the commit record exists; then simulates the crash between commit
-/// and store (intent journaled, file untouched) and requires replay to
+/// and store (intent recorded, file untouched) and requires replay to
 /// land the cancellation instead of reopening the step.
 #[test]
-fn plan_cancel_is_journaled_for_crash_recovery() {
+fn plan_cancel_is_recorded_for_crash_recovery() {
     let (mut ctx, dir) = proj();
     let created = plan_op(
         &mut ctx,
@@ -2789,19 +2516,19 @@ fn plan_cancel_is_journaled_for_crash_recovery() {
     );
     assert!(cancelled.ok, "{}", cancelled.output);
     // the commit record must exist (pre-fix: bare store wrote nothing)
-    let records = crate::agent::journal::Journal::records_for(&dir, &ctx.session_id).unwrap();
+    let records = crate::agent::events::EventLog::records_for(&dir, &ctx.session_id).unwrap();
     assert!(
         records.iter().any(|record| {
             record.kind == "plan"
                 && record.fields.get("op").and_then(|value| value.as_str()) == Some("cancel")
                 && record.fields.get("id").and_then(|value| value.as_str()) == Some("1")
         }),
-        "cancel intent must be journaled"
+        "cancel intent must be recorded"
     );
-    // the cancel intent for step 2, journaled the way plan::commit journals it,
+    // the cancel intent for step 2, recorded the way plan::commit records it,
     // with no store after it (the crash)
-    let mut journal = crate::agent::journal::Journal::open(&dir, &ctx.session_id).unwrap();
-    journal
+    let mut events = crate::agent::events::EventLog::open(&dir, &ctx.session_id).unwrap();
+    events
         .append(
             "plan",
             serde_json::json!({
@@ -3048,55 +2775,5 @@ fn an_edit_to_a_plain_file_does_not_add_a_bom() {
     let bytes = fs::read(dir.join("plain.rs")).unwrap();
     assert!(!bytes.starts_with(&[0xEF, 0xBB, 0xBF]), "{bytes:?}");
     assert_eq!(&bytes, b"fn b() {}\n");
-    fs::remove_dir_all(&dir).ok();
-}
-
-#[test]
-fn journal_resolves_recap_session_prefix_and_renders_tool_result_summaries_and_undo_files() {
-    let (mut ctx, dir) = proj();
-    write_journal(
-        &dir,
-        "01JXYZ99ABCDEF0000",
-        &[
-            rec(
-                1,
-                "2026-03-01T10:00:00+00:00",
-                "tool_result",
-                r#","tool":"bash","ok":false,"summary":"error[E0308]: mismatched types""#,
-            ),
-            rec(
-                2,
-                "2026-03-01T10:01:00+00:00",
-                "undo",
-                r#","to_checkpoint":"deadbeef123456","files":["src/foo.rs"]"#,
-            ),
-        ],
-    );
-
-    // 1. 8-char prefix from `op=recap` resolves to the full session file
-    let o = execute(
-        &mut ctx,
-        "journal",
-        &json!({"session": "01JXYZ99", "query": "E0308"}),
-    );
-    assert!(o.ok, "{}", o.output);
-    assert!(
-        o.output.contains("error[E0308]: mismatched types"),
-        "tool_result summary must be rendered and searchable: {}",
-        o.output
-    );
-
-    // 2. `undo` record renders checkpoint and reverted files
-    let o_undo = execute(
-        &mut ctx,
-        "journal",
-        &json!({"session": "01JXYZ99", "kind": "undo"}),
-    );
-    assert!(o_undo.ok, "{}", o_undo.output);
-    assert!(
-        o_undo.output.contains("files=[src/foo.rs]"),
-        "undo record must list reverted files: {}",
-        o_undo.output
-    );
     fs::remove_dir_all(&dir).ok();
 }

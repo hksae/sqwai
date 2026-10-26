@@ -379,9 +379,6 @@ pub(super) enum ScalarSetting {
     LimitMaxParallelTools,
     PlanMaxSteps,
     PlanNudgeAfter,
-    MemoryLoadBudgetRatio,
-    MemoryMaxTokens,
-    MemoryMaxProposals,
     CompactionThreshold,
     CompactionKeepTurns,
     CompactionAnchorRatio,
@@ -574,9 +571,6 @@ impl ScalarSetting {
             Self::LimitMaxParallelTools => "max parallel tools",
             Self::PlanMaxSteps => "max steps",
             Self::PlanNudgeAfter => "nudge after",
-            Self::MemoryLoadBudgetRatio => "load budget ratio",
-            Self::MemoryMaxTokens => "max tokens",
-            Self::MemoryMaxProposals => "max proposals",
             Self::CompactionThreshold => "threshold",
             Self::CompactionKeepTurns => "keep turns",
             Self::CompactionAnchorRatio => "anchor ratio",
@@ -602,9 +596,6 @@ impl ScalarSetting {
             Self::LimitMaxParallelTools => cfg.limits.max_parallel_tools.to_string(),
             Self::PlanMaxSteps => cfg.plan.max_steps.to_string(),
             Self::PlanNudgeAfter => cfg.plan.nudge_after.to_string(),
-            Self::MemoryLoadBudgetRatio => cfg.memory.load_budget_ratio.to_string(),
-            Self::MemoryMaxTokens => cfg.memory.max_tokens.to_string(),
-            Self::MemoryMaxProposals => cfg.memory.max_writes_per_turn.to_string(),
             Self::CompactionThreshold => cfg.compaction.threshold.to_string(),
             Self::CompactionKeepTurns => cfg.compaction.keep_turns.to_string(),
             Self::CompactionAnchorRatio => cfg.compaction.anchor_ratio.to_string(),
@@ -710,24 +701,6 @@ impl ScalarSetting {
             Self::PlanNudgeAfter => {
                 apply_num(label, raw, &mut cfg.plan.nudge_after, def.plan.nudge_after)
             }
-            Self::MemoryLoadBudgetRatio => apply_num(
-                label,
-                raw,
-                &mut cfg.memory.load_budget_ratio,
-                def.memory.load_budget_ratio,
-            ),
-            Self::MemoryMaxTokens => apply_num(
-                label,
-                raw,
-                &mut cfg.memory.max_tokens,
-                def.memory.max_tokens,
-            ),
-            Self::MemoryMaxProposals => apply_num(
-                label,
-                raw,
-                &mut cfg.memory.max_writes_per_turn,
-                def.memory.max_writes_per_turn,
-            ),
             Self::CompactionThreshold => apply_num(
                 label,
                 raw,
@@ -862,10 +835,7 @@ impl App {
                 .and_then(|n| self.cfg.providers.get(n))
                 .map(|pc| pc.format)
                 .unwrap_or(self.provider_draft.format);
-            self.menu_sel = WireFormat::ALL
-                .iter()
-                .position(|f| *f == fmt)
-                .unwrap_or(0);
+            self.menu_sel = WireFormat::ALL.iter().position(|f| *f == fmt).unwrap_or(0);
         }
         if let Some(Menu::EditModel { key: None, .. }) = self.cur_menu().cloned() {
             self.model_draft = ModelDraft::default();
@@ -958,10 +928,7 @@ impl App {
                 field.row_index()
             }
             (Some(Menu::Effort { .. }), Some(Menu::EditModel { .. })) => 3,
-            (
-                Some(Menu::EditProviderField { field, .. }),
-                Some(Menu::EditProvider { name }),
-            ) => {
+            (Some(Menu::EditProviderField { field, .. }), Some(Menu::EditProvider { name })) => {
                 let is_builtin = name
                     .as_ref()
                     .is_some_and(|n| self.cfg.is_builtin_provider(n));
@@ -1612,7 +1579,8 @@ impl App {
                 } else {
                     format!(" Skills ({}) ", all.len())
                 }
-            }            Some(Menu::SkillView { name }) => format!(" Skill · {name} "),
+            }
+            Some(Menu::SkillView { name }) => format!(" Skill · {name} "),
             None => String::new(),
         }
     }

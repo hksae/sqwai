@@ -4,8 +4,8 @@
 /// 1. built-in text from `src/prompts/system.md` (embedded at compile time),
 ///    overridable by `system.md` in the config directory without recompiling;
 /// 2. project instructions from `AGENTS.md` in the working directory;
-/// 3. process environment (OS, shell, working directory), captured once;
-/// 4. durable user/project memory.
+/// 3. `SQWAI.md` rules for this agent alone;
+/// 4. process environment (OS, shell, working directory), captured once.
 ///
 /// Session environment is a separate cacheable block built by the TUI on
 /// startup and after compaction, and it holds only what does not move: the OS
@@ -20,98 +20,25 @@
 pub mod env;
 pub mod skills;
 
-const MEMORY_MAX_CHARS: usize = 12_000;
-
-/// Durable user/project memory for the stable prefix. Missing files are normal;
-/// all loaded text is screened before it reaches the provider so secrets cannot
-/// be promoted into prompt context.
-///
-/// The diary used to ride here too (two days raw, five more as headings) and
-/// cost up to 24KB of prefix for a copy of the journal — whose writer had in
-/// fact never produced a line of prose. Recent history is pulled now, with
-/// `journal op=recap`.
-#[cfg(test)]
-pub fn memory_block(root: &std::path::Path) -> Option<String> {
-    memory_block_with_limit(root, MEMORY_MAX_CHARS)
-}
-
-pub fn memory_block_with_limit(root: &std::path::Path, max_chars: usize) -> Option<String> {
-    if max_chars == 0 {
-        return None;
-    }
-    let mut sections = Vec::new();
-    if let Ok(path) = crate::config::config_dir().map(|dir| dir.join("USER.md"))
-        && let Some(text) = read_bounded(&path, max_chars)
-    {
-        sections.push(format!("<user_memory>\n{text}\n</user_memory>"));
-    }
-    let project_memory = root.join(".sqwai").join("memory").join("MEMORY.md");
-    if let Some(text) = read_bounded(&project_memory, max_chars) {
-        sections.push(format!("<project_memory>\n{text}\n</project_memory>"));
-    }
-    (!sections.is_empty()).then(|| sections.join("\n\n"))
-}
-
-fn read_bounded(path: &std::path::Path, max_chars: usize) -> Option<String> {
-    let text = std::fs::read_to_string(path).ok()?;
-    let cleaned = crate::agent::memory::clean_for_prompt(&text)?;
-    let screened = crate::agent::secrets::screen(&cleaned).text;
-    Some(truncate_chars(&screened, max_chars))
-}
-
-fn truncate_chars(text: &str, max: usize) -> String {
-    if text.chars().count() <= max {
-        return text.to_string();
-    }
-    let raw: String = text.chars().take(max).collect();
-    let clipped = match raw.rfind('\n') {
-        Some(pos) if pos > raw.len() / 2 => &raw[..pos],
-        _ => raw.as_str(),
-    };
-    format!("{clipped}\n[truncated]")
-}
-
-/// Effective character budget for each memory file (`USER.md` / `MEMORY.md`),
-/// honoring both `[memory].max_tokens` and `[memory].load_budget_ratio`.
-pub fn memory_char_budget(memory_cfg: &crate::config::MemoryConfig, context_limit: u64) -> usize {
-    let by_tokens = (memory_cfg.max_tokens as usize).saturating_mul(4);
-    if context_limit > 0 && memory_cfg.load_budget_ratio > 0.0 {
-        let ratio = memory_cfg.load_budget_ratio.clamp(0.0, 1.0);
-        let by_ratio = ((context_limit as f64 * ratio).round() as usize).saturating_mul(4);
-        by_tokens.min(by_ratio)
-    } else {
-        by_tokens
-    }
-}
-
 /// One layer of the stable prefix: which section it belongs to, and its text.
 pub type PrefixLayer = (crate::providers::PrefixSection, String);
 
 /// The stable prefix as the layers it is made of, in wire order. `/context`
-/// bills these separately: durable memory and loaded skills are neither rules
-/// nor conversation, and lumping them into "system" made the biggest block on
-/// the scale a lie. Joined with blank lines, they are the bytes one string
-/// used to carry.
+/// bills these separately: loaded skills are neither rules nor conversation,
+/// and lumping them into "system" made the biggest block on the scale a lie.
+/// Joined with blank lines, they are the bytes one string used to carry.
 #[allow(dead_code)]
 pub fn stable_prefix_layers() -> Vec<PrefixLayer> {
-    prefix_layers_with_limit(
-        &std::env::current_dir().unwrap_or_default(),
-        MEMORY_MAX_CHARS,
-    )
+    prefix_layers(&std::env::current_dir().unwrap_or_default())
 }
 
-pub fn stable_prefix_layers_at(
-    root: &std::path::Path,
-    memory_cfg: &crate::config::MemoryConfig,
-    context_limit: u64,
-) -> Vec<PrefixLayer> {
-    let max_chars = memory_char_budget(memory_cfg, context_limit);
-    prefix_layers_with_limit(root, max_chars)
+pub fn stable_prefix_layers_at(root: &std::path::Path) -> Vec<PrefixLayer> {
+    prefix_layers(root)
 }
 
-fn prefix_layers_with_limit(root: &std::path::Path, memory_max_chars: usize) -> Vec<PrefixLayer> {
+fn prefix_layers(root: &std::path::Path) -> Vec<PrefixLayer> {
     use crate::providers::PrefixSection;
-    let mut layers = vec![
+    vec![
         (
             PrefixSection::System,
             compose(
@@ -121,11 +48,7 @@ fn prefix_layers_with_limit(root: &std::path::Path, memory_max_chars: usize) -> 
             ),
         ),
         (PrefixSection::System, env::process_block_at(root)),
-    ];
-    if let Some(memory) = memory_block_with_limit(root, memory_max_chars) {
-        layers.push((PrefixSection::Memory, memory));
-    }
-    layers
+    ]
 }
 
 /// The exact bytes the joined prefix used to carry: layers are already trimmed
@@ -305,18 +228,22 @@ pub const AGENTS_TEMPLATE: &str = "# AGENTS.md — instructions for sqwai\n\
 - rules for this agent alone live in SQWAI.md (other tools ignore it)\n";
 
 /// skeleton written by `/init` next to AGENTS.md: this agent's own
-/// rules (style, workflow habits). Instructions, not memories — facts
-/// and history belong to MEMORY.md and the journal, not here.
-pub const SQWAI_TEMPLATE: &str = "# SQWAI.md — this agent's own rules\n\
+/// rules and project context. Read every session; keep it short and
+/// hand-curated — there is no automatic memory.
+pub const SQWAI_TEMPLATE: &str = "# SQWAI.md — this agent's own rules and context\n\
 \n\
 Read by sqwai only (highest priority on conflict with AGENTS.md).\n\
-Put instructions here, not facts — memories live in MEMORY.md.\n\
+Put durable project context here: decisions, gotchas, commands.\n\
+There is no automatic memory; keep this file short and curated.\n\
 \n\
 ## Style\n\
 - <how to talk to the user>\n\
 \n\
 ## Workflow\n\
-- <habits for this project>\n";
+- <habits for this project>\n\
+\n\
+## Project notes\n\
+- <decisions, gotchas, commands worth knowing every session>\n";
 
 #[cfg(test)]
 mod tests {
@@ -328,7 +255,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("AGENTS.md"), "shared rule").unwrap();
         std::fs::write(dir.join("SQWAI.md"), "own rule").unwrap();
-        let p = super::join_layers(super::prefix_layers_with_limit(&dir, 0));
+        let p = super::join_layers(super::prefix_layers(&dir));
         assert!(p.contains("own rule"), "sqwai rules must load");
         assert!(p.contains("shared rule"), "agents rules must load");
         let agents_at = p.find("AGENTS.md").unwrap();
@@ -336,14 +263,18 @@ mod tests {
         assert!(agents_at < sqwai_at, "sqwai section comes last");
         // empty SQWAI.md behaves as absent
         std::fs::write(dir.join("SQWAI.md"), "  \n").unwrap();
-        let p = super::join_layers(super::prefix_layers_with_limit(&dir, 0));
-        assert!(!p.contains("SQWAI.md"), "empty file must not load");
+        let p = super::join_layers(super::prefix_layers(&dir));
+        assert!(
+            !p.contains("# Project instructions (SQWAI.md"),
+            "empty file must not load"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
-    fn sqwai_template_states_rules_not_memories() {
-        assert!(SQWAI_TEMPLATE.contains("MEMORY.md"));
+    fn sqwai_template_states_rules_and_context_without_memory() {
+        assert!(!SQWAI_TEMPLATE.contains("MEMORY.md"));
+        assert!(SQWAI_TEMPLATE.contains("no automatic memory"));
         assert!(SQWAI_TEMPLATE.contains("highest priority"));
         assert!(AGENTS_TEMPLATE.contains("SQWAI.md"));
     }
@@ -385,6 +316,9 @@ mod tests {
         let retired_tools = [
             "propose_plan",
             "memory_propose",
+            "memory_write",
+            "note",
+            "journal",
             "graph_query",
             "resolve_ref",
             "recall",
@@ -445,7 +379,7 @@ mod tests {
     #[test]
     fn integrity_section_contains_sqwai_blocking_rule() {
         let prompt = builtin_prompt();
-        assert!(prompt.contains("Do not modify host-owned plan, journal, memory, or checkpoint state through shell commands or general file tools."));
+        assert!(prompt.contains("Do not modify host-owned plan or checkpoint state through shell commands or general file tools."));
     }
 
     #[test]
@@ -458,27 +392,13 @@ mod tests {
         assert!(!include_str!("system.md").contains("{{TOOLS}}"));
     }
 
-    /// An empty project contributes no project memory. The user-level
-    /// `USER.md` is real state on a working machine — the agent writes it with
-    /// `memory_write` — so this test may not assume it is absent; it asserts the
-    /// project half only.
-    #[test]
-    fn an_empty_project_contributes_no_project_memory() {
-        let root = std::env::temp_dir().join(format!("sqwai-prompt-{}", std::process::id()));
-        let block = memory_block(&root).unwrap_or_default();
-        assert!(
-            !block.contains("<project_memory"),
-            "an empty project has no project memory: {block}"
-        );
-    }
-
     #[test]
     fn prefix_layers_root_at_explicit_directory_not_cwd() {
         let dir = std::env::temp_dir().join(format!("sqwai-prefix-root-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("AGENTS.md"), "EXPLICIT ROOT AGENTS MARKER").unwrap();
-        let p = super::join_layers(super::prefix_layers_with_limit(&dir, MEMORY_MAX_CHARS));
+        let p = super::join_layers(super::prefix_layers(&dir));
         assert!(
             p.contains(&dir.display().to_string()),
             "cwd must be the explicit root: {p:.200}"

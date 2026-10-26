@@ -28,14 +28,14 @@ struct PendingFrame {
 
 fn reopened_step_ids(
     active: &plan::Plan,
-    records: &[crate::agent::journal::Record],
+    records: &[crate::agent::events::Record],
     session_id: &str,
     files: &[String],
 ) -> Vec<String> {
     // Conservative rule: ANY reverted part of a done step's result
     // reopens it. Reverting a subset while the rest stays changed cannot
     // leave the step marked completed. Paths are separator-normalized so
-    // git forward slashes match journal backslashes on Windows.
+    // git forward slashes match events backslashes on Windows.
     let file_set: std::collections::HashSet<String> =
         files.iter().map(|f| f.replace('\\', "/")).collect();
     active
@@ -718,12 +718,16 @@ impl App {
         #[cfg(test)]
         let project_root: std::path::PathBuf =
             tempfile::tempdir().map(|d| d.keep()).unwrap_or_else(|_| {
-                std::env::temp_dir().join(format!("sqwai-test-{}", std::process::id()))
+                std::env::temp_dir().join(format!(
+                    "sqwai-test-{}-{}",
+                    std::process::id(),
+                    uuid::Uuid::new_v4()
+                ))
             });
         #[cfg(not(test))]
         let project_root = std::env::current_dir().unwrap_or_default();
         if !read_only {
-            // Heal a crash between a journal intent and its plan store
+            // Heal a crash between an event log intent and its plan store
             // before any plan read. No-op on a clean tree.
             let _ = crate::plan::replay(&project_root);
         }
@@ -743,6 +747,14 @@ impl App {
         let mut session = session;
         if session.project.is_none() && session.messages.is_empty() {
             session.project = Some(project_root.clone());
+        }
+        if !read_only
+            && let Ok(records) =
+                crate::agent::events::EventLog::take(&project_root, &session.id.to_string())
+            && !records.is_empty()
+        {
+            session.merge_events(records);
+            let _ = session.save();
         }
 
         let mut app = Self {
@@ -1701,9 +1713,7 @@ impl App {
                 if let Some(c) = ask.cursor.get_mut(q) {
                     *c = n;
                 }
-                if !multiple
-                    && let Some(opts) = ask.picked.get_mut(q)
-                {
+                if !multiple && let Some(opts) = ask.picked.get_mut(q) {
                     for v in opts.iter_mut() {
                         *v = false;
                     }
@@ -1806,7 +1816,10 @@ impl App {
             _ => return,
         };
         self.close_ask_segment(seg, Some(text.clone()));
-        if call_id.as_deref().is_some_and(|c| c.starts_with("test-ask-")) {
+        if call_id
+            .as_deref()
+            .is_some_and(|c| c.starts_with("test-ask-"))
+        {
             let ok = text != "(no answer)";
             self.handle_tool_notice("ask_user".into(), text, ok, None, call_id);
         } else if let Some(agent) = &self.agent {

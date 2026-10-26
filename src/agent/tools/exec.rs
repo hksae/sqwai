@@ -71,6 +71,7 @@ fn bg_jobs() -> &'static Mutex<Vec<BgJob>> {
 /// still alive. Undo restores consult this: the writer lock stops
 /// in-process dispatch, but an already-running shell keeps writing while
 /// the tree is being reverted — so undo refuses until these are gone.
+#[cfg(test)]
 pub(super) fn running_commands() -> Vec<(u64, String, String)> {
     poll_jobs();
     bg_jobs()
@@ -78,6 +79,22 @@ pub(super) fn running_commands() -> Vec<(u64, String, String)> {
         .map(|jobs| {
             jobs.iter()
                 .filter(|job| job.running())
+                .map(|job| (job.id, job.session.clone(), job.command.clone()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Running jobs owned by one session. Undo must not refuse a restore because
+/// an unrelated session (or another project in the same process) still has a
+/// background command alive.
+pub(super) fn running_commands_for(session: &str) -> Vec<(u64, String, String)> {
+    poll_jobs();
+    bg_jobs()
+        .lock()
+        .map(|jobs| {
+            jobs.iter()
+                .filter(|job| job.running() && job.session == session)
                 .map(|job| (job.id, job.session.clone(), job.command.clone()))
                 .collect()
         })
@@ -335,12 +352,7 @@ impl HeadTail {
     }
 }
 
-fn run_blocking(
-    ctx: &ToolCtx,
-    command: &str,
-    timeout_secs: u64,
-    workdir: Option<&str>,
-) -> Outcome {
+fn run_blocking(ctx: &ToolCtx, command: &str, timeout_secs: u64, workdir: Option<&str>) -> Outcome {
     use std::io::Read;
     use std::sync::{Arc, Mutex};
 

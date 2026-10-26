@@ -53,7 +53,6 @@ fn jitter_test_app() -> App {
         limits: Default::default(),
         mcp: Default::default(),
         skills: Default::default(),
-        memory: Default::default(),
         compaction: Default::default(),
         plan: Default::default(),
         verify: Default::default(),

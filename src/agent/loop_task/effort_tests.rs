@@ -425,8 +425,8 @@ async fn test_provider_fallback_chain_switch_on_failure() {
         summary: None,
         mcp: Default::default(),
         skills: Default::default(),
-        compact_only: false, compact_focus: String::new(),
-        memory: Default::default(),
+        compact_only: false,
+        compact_focus: String::new(),
         compaction: Default::default(),
         plan_limits: Default::default(),
         shadow_store: crate::config::ShadowStore::Off,
@@ -521,8 +521,8 @@ async fn partial_stream_failure_does_not_fall_back() {
         summary: None,
         mcp: Default::default(),
         skills: Default::default(),
-        compact_only: false, compact_focus: String::new(),
-        memory: Default::default(),
+        compact_only: false,
+        compact_focus: String::new(),
         compaction: Default::default(),
         plan_limits: Default::default(),
         shadow_store: crate::config::ShadowStore::Off,
@@ -738,7 +738,10 @@ fn repeat_verdict_and_read_windows_ignore_outputs_cleared_from_wire() {
     assert!(crate::agent::tool_output::is_cleared(&messages, "old_1"));
     assert!(crate::agent::tool_output::is_cleared(&messages, "old_2"));
     assert!(
-        matches!(repeat_verdict(&messages, &diff("new_1"), &big), RepeatVerdict::Fresh),
+        matches!(
+            repeat_verdict(&messages, &diff("new_1"), &big),
+            RepeatVerdict::Fresh
+        ),
         "cleared results are no longer visible on the wire, so re-running must be Fresh"
     );
 
@@ -891,8 +894,17 @@ fn compaction_request_dodges_thinking_histories() {
     let system = vec![crate::providers::SystemPart::cached("rules")];
     let tools = vec![];
     let prefix = parent_prefix(&system, &tools);
-    let (req, cache_aware) =
-        compaction_request(Some(&prefix), &history, &history, 0, None, "", None, "m", false);
+    let (req, cache_aware) = compaction_request(
+        Some(&prefix),
+        &history,
+        &history,
+        0,
+        None,
+        "",
+        None,
+        "m",
+        false,
+    );
     assert!(!cache_aware, "thinking histories take the text path");
     assert!(req.tools.is_empty());
     assert_eq!(req.messages.len(), 1);
@@ -914,9 +926,7 @@ async fn live_compaction_request_reuses_prefix() {
         .models
         .get(&cfg.last_model)
         .expect("last_model must exist in config");
-    let resolved = cfg
-        .resolve_provider(mc)
-        .expect("provider must resolve");
+    let resolved = cfg.resolve_provider(mc).expect("provider must resolve");
     let live_provider = crate::providers::create(&resolved).expect("provider must create");
     let live_model_id = mc.id.clone();
 
@@ -1032,8 +1042,17 @@ async fn live_compaction_request_reuses_prefix() {
     report("aware", &u);
 
     // standalone: tiny system + rendered transcript
-    let (alone, is_aware) =
-        compaction_request(None, older, &history, 0, None, "", None, &live_model_id, false);
+    let (alone, is_aware) = compaction_request(
+        None,
+        older,
+        &history,
+        0,
+        None,
+        "",
+        None,
+        &live_model_id,
+        false,
+    );
     assert!(!is_aware);
     let u = send(&live_provider, alone).await;
     report("alone", &u);
@@ -1259,19 +1278,11 @@ fn compaction_record_carries_tokens_and_summary() {
     let root = std::env::temp_dir().join(format!("sqwai-compact-rec-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
-    let journal = crate::agent::journal::Journal::open(&root, "sess").expect("open");
-    record_compaction(
-        &mut Some(journal),
-        10_000,
-        2_500,
-        40,
-        10,
-        true,
-        "did things",
-    );
-    // None journal: silent no-op, never panics
+    let events = crate::agent::events::EventLog::open(&root, "sess").expect("open");
+    record_compaction(&mut Some(events), 10_000, 2_500, 40, 10, true, "did things");
+    // None events: silent no-op, never panics
     record_compaction(&mut None, 1, 1, 1, 1, false, "");
-    let recs = crate::agent::journal::Journal::records(&root).expect("read");
+    let recs = crate::agent::events::EventLog::records(&root).expect("read");
     let c = recs
         .iter()
         .find(|r| r.kind == "compaction")
@@ -1283,33 +1294,6 @@ fn compaction_record_carries_tokens_and_summary() {
     assert_eq!(c.fields["summarized"], true);
     assert_eq!(c.fields["summary"], "did things");
     let _ = std::fs::remove_dir_all(&root);
-}
-
-#[test]
-fn capture_nudge_fires_only_on_uncovered_restrictions() {
-    let c = |s: &str| vec![s.to_string()];
-    // no marker → silent, whatever the plan holds
-    assert!(capture_nudge("please refactor the engine", &[]).is_none());
-    assert!(capture_nudge("please refactor the engine", &c("keep API stable")).is_none());
-    // marker + empty constraints → nudge
-    let tail = capture_nudge("don't touch storage/btree.rs", &[]).expect("must nudge");
-    assert!(
-        tail.contains("host note"),
-        "nudge must be marked host-owned"
-    );
-    // marker + covering constraint (shared token "touch"/"btree") → silent
-    assert!(
-        capture_nudge(
-            "don't touch storage/btree.rs",
-            &c("do not touch `storage/btree.rs` (deprecated)")
-        )
-        .is_none()
-    );
-    // marker + unrelated constraints → nudge
-    assert!(capture_nudge("don't touch storage/btree.rs", &c("keep API stable")).is_some());
-    // additional negative markers behave the same
-    assert!(capture_nudge("must not modify btree", &[]).is_some());
-    assert!(capture_nudge("must not modify btree", &c("do not modify btree")).is_none());
 }
 
 fn count_summaries(messages: &[Message]) -> usize {
@@ -1559,8 +1543,8 @@ async fn esc_between_tool_calls_stops_the_batch() {
         summary: None,
         mcp: Default::default(),
         skills: Default::default(),
-        compact_only: false, compact_focus: String::new(),
-        memory: Default::default(),
+        compact_only: false,
+        compact_focus: String::new(),
         compaction: Default::default(),
         plan_limits: Default::default(),
         shadow_store: crate::config::ShadowStore::Off,
@@ -1669,7 +1653,6 @@ async fn subagent_joins_its_parent_plan() {
         crate::config::SkillsConfig::default(),
         false,
         crate::config::ShadowStore::Off,
-        crate::config::MemoryConfig::default(),
         crate::config::CompactionConfig::default(),
         crate::config::PlanConfig::default(),
         Vec::new(),
@@ -1782,7 +1765,6 @@ async fn subagent_ignores_a_foreign_active_plan() {
         crate::config::SkillsConfig::default(),
         false,
         crate::config::ShadowStore::Off,
-        crate::config::MemoryConfig::default(),
         crate::config::CompactionConfig::default(),
         crate::config::PlanConfig::default(),
         Vec::new(),
@@ -1852,7 +1834,6 @@ async fn hung_subagent_times_out_and_aborts() {
         crate::config::SkillsConfig::default(),
         false,
         crate::config::ShadowStore::Off,
-        crate::config::MemoryConfig::default(),
         crate::config::CompactionConfig::default(),
         crate::config::PlanConfig::default(),
         Vec::new(),
@@ -1921,7 +1902,6 @@ async fn esc_stops_a_subagent_wait_without_the_timeout() {
         crate::config::SkillsConfig::default(),
         false,
         crate::config::ShadowStore::Off,
-        crate::config::MemoryConfig::default(),
         crate::config::CompactionConfig::default(),
         crate::config::PlanConfig::default(),
         Vec::new(),
@@ -1942,7 +1922,7 @@ async fn esc_stops_a_subagent_wait_without_the_timeout() {
 }
 
 /// first ToolNotice (a sequential loop would interleave start/notice
-/// pairs). Rows, journal and messages still come out in call order.
+/// pairs). Rows, events and messages still come out in call order.
 #[tokio::test]
 async fn same_turn_subagent_calls_overlap() {
     let provider: SharedProvider = std::sync::Arc::new(MockTestProvider {
@@ -2006,8 +1986,8 @@ async fn same_turn_subagent_calls_overlap() {
         summary: None,
         mcp: Default::default(),
         skills: Default::default(),
-        compact_only: false, compact_focus: String::new(),
-        memory: Default::default(),
+        compact_only: false,
+        compact_focus: String::new(),
         compaction: Default::default(),
         plan_limits: Default::default(),
         shadow_store: crate::config::ShadowStore::Off,
@@ -2122,8 +2102,8 @@ async fn parallel_read_only_batch_merges_read_state_before_following_mutation() 
         summary: None,
         mcp: Default::default(),
         skills: Default::default(),
-        compact_only: false, compact_focus: String::new(),
-        memory: Default::default(),
+        compact_only: false,
+        compact_focus: String::new(),
         compaction: Default::default(),
         plan_limits: Default::default(),
         shadow_store: crate::config::ShadowStore::Off,
@@ -2151,5 +2131,8 @@ async fn parallel_read_only_batch_merges_read_state_before_following_mutation() 
             ("w1".to_string(), true),
         ]
     );
-    assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "new a\n");
+    assert_eq!(
+        std::fs::read_to_string(root.join("a.txt")).unwrap(),
+        "new a\n"
+    );
 }

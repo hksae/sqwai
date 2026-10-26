@@ -4,7 +4,6 @@ use super::fs;
 use super::git;
 use super::outline;
 use super::policy::{bash_scope_hit, in_write_scope, mutation_target_paths, step_epoch_current};
-use super::specs;
 use super::verify::{rejection, with_authorship, with_blast_radius};
 use crate::plan;
 use serde_json::Value;
@@ -37,7 +36,7 @@ pub struct Outcome {
     pub exit_code: Option<i32>,
     /// unified diff of a file mutation, shown in the TUI when expanded
     pub diff: Option<String>,
-    /// host-derived metadata for the journal
+    /// host-derived metadata for the event log
     pub file_diff: Option<FileDiff>,
     /// host-derived metadata for all modified files (e.g. multi-file patch)
     pub file_diffs: Vec<FileDiff>,
@@ -46,7 +45,7 @@ pub struct Outcome {
     /// PDF documents the tool returned to the model (view_document today)
     pub documents: Vec<crate::providers::DocumentAttachment>,
     /// the user pressed Esc while this tool was running. Distinct from
-    /// an ordinary failure — the journal records `code: "cancelled"` rather
+    /// an ordinary failure — the event log records `code: "cancelled"` rather
     /// than folding it into an error the model is expected to react to.
     pub cancelled: bool,
 }
@@ -101,10 +100,7 @@ impl Outcome {
         self
     }
 
-    pub fn with_documents(
-        mut self,
-        documents: Vec<crate::providers::DocumentAttachment>,
-    ) -> Self {
+    pub fn with_documents(mut self, documents: Vec<crate::providers::DocumentAttachment>) -> Self {
         self.documents = documents;
         self
     }
@@ -150,8 +146,8 @@ impl Outcome {
 /// still alive. The undo preflight refuses a restore while any
 /// of these run — the writer lock stops in-process dispatch, but an
 /// already-running shell would keep writing mid-restore.
-pub(crate) fn bg_running_commands() -> Vec<(u64, String, String)> {
-    exec::running_commands()
+pub(crate) fn bg_running_commands_for(session: &str) -> Vec<(u64, String, String)> {
+    exec::running_commands_for(session)
 }
 
 /// End every still-running background job. Called once on app shutdown so
@@ -350,45 +346,17 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
             args["command"].as_str().unwrap_or_default(),
             args["timeout"].as_u64(),
             args["background"].as_bool().unwrap_or(false),
-            args["workdir"]
-                .as_str()
-                .or_else(|| args["cwd"].as_str()),
+            args["workdir"].as_str().or_else(|| args["cwd"].as_str()),
         ),
         "bash_output" => exec::bash_output(ctx, args),
         "bash_kill" => exec::bash_kill(ctx, args),
         "sleep" => exec::sleep(ctx, args),
         "plan" => plan_op(ctx, args),
-        "note" => {
-            let note = args
-                .get("note")
-                .or_else(|| args.get("text"))
-                .or_else(|| args.get("message"))
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .trim();
-            let kind = args
-                .get("kind")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .unwrap_or("decision");
-            if note.is_empty() || note.len() > 2000 {
-                Outcome::err("note must be 1-2000 bytes")
-            } else if !matches!(
-                kind,
-                "decision" | "rejected" | "assumption" | "lesson" | "blocker"
-            ) {
-                Outcome::err("note kind is invalid")
-            } else {
-                Outcome::ok(format!("note recorded: {kind}"))
-            }
-        }
         // direct dispatch never answers "unknown tool"
         "ask_user" => Outcome::err("ask_user is served by the agent loop, not by the dispatcher"),
         "recall_result" => {
             Outcome::err("recall_result is served by the agent loop, not by the dispatcher")
         }
-        "journal" => journal_op(ctx, args),
         "skill" => skill_op(ctx, args),
         other => Outcome::err(format!("unknown tool '{other}'")),
     }
@@ -438,7 +406,11 @@ fn skill_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
         ));
     };
 
-    if let Some(file) = args["file"].as_str().map(str::trim).filter(|f| !f.is_empty()) {
+    if let Some(file) = args["file"]
+        .as_str()
+        .map(str::trim)
+        .filter(|f| !f.is_empty())
+    {
         return match crate::prompts::skills::read_skill_file(&skill, file) {
             Ok(content) => Outcome::ok(format!(
                 "<skill_file skill=\"{}\" file=\"{}\">\n{}\n</skill_file>",
@@ -465,367 +437,6 @@ fn skill_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
     }
 
     Outcome::ok(crate::prompts::skills::render_skill_detail(&skill))
-}
-
-/// The `journal` tool: a read-only projection of the host journal.
-///
-/// The model never writes here except through `note`, and it cannot read the
-/// journal files directly (host-owned state), so this op is the one window on
-/// past actions. Everything it returns was screened when it was appended; the
-/// output is filtered and capped so a broad query cannot flood the context.
-fn journal_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
-    let op = args["op"].as_str().unwrap_or("read");
-    if op == "recap" {
-        let days = args["days"].as_u64().unwrap_or(3).clamp(1, 7) as i64;
-        let items = match crate::agent::journal::Journal::recap(&ctx.root, days) {
-            Ok(items) => items,
-            Err(e) => return Outcome::err(format!("journal recap failed: {e:#}")),
-        };
-        return Outcome::ok(recap_text(&items, days));
-    }
-    if op != "read" {
-        return Outcome::err("journal op must be 'read' or 'recap'");
-    }
-
-    let session_arg = args["session"].as_str().unwrap_or("current");
-    let show_session = session_arg == "all";
-    let (records, label) = match session_arg {
-        "current" | "" => (
-            crate::agent::journal::Journal::records_for(&ctx.root, &ctx.session_id),
-            ctx.session_id.clone(),
-        ),
-        "all" => (
-            crate::agent::journal::Journal::records(&ctx.root),
-            "all sessions".to_string(),
-        ),
-        other => {
-            // a session id is a bare file stem (or 4+ char prefix from recap), never a path
-            if other.contains('/') || other.contains('\\') || other.contains("..") {
-                return Outcome::err(format!("bad session id '{other}'"));
-            }
-            let resolved = crate::agent::journal::Journal::resolve_session_id(&ctx.root, other)
-                .unwrap_or_else(|| other.to_string());
-            (
-                crate::agent::journal::Journal::records_for(&ctx.root, &resolved),
-                resolved,
-            )
-        }
-    };
-    let records = match records {
-        Ok(records) => records,
-        Err(e) => return Outcome::err(format!("journal read failed: {e:#}")),
-    };
-    let total = records.len();
-    let mut records = records;
-    // records() walks session files in filesystem order; chronological order
-    // is needed when merging records across all sessions.
-    if show_session {
-        records.sort_by(|a, b| a.ts.cmp(&b.ts).then(a.seq.cmp(&b.seq)));
-    }
-
-    let kind = args["kind"].as_str();
-    let query = args["query"].as_str().map(str::to_lowercase);
-
-    let rendered: Vec<String> = records
-        .iter()
-        .filter(|r| kind.is_none_or(|k| r.kind == k))
-        .map(|r| journal_line_with_session(r, show_session))
-        .filter(|line| {
-            query
-                .as_ref()
-                .is_none_or(|q| line.to_lowercase().contains(q.as_str()))
-        })
-        .collect();
-    let matched = rendered.len();
-    if matched == 0 {
-        return Outcome::ok(format!(
-            "journal {label}: {total} records, 0 match the filters"
-        ));
-    }
-
-    let last = args["last"].as_u64().unwrap_or(40).clamp(1, 200) as usize;
-    let start = matched.saturating_sub(last);
-    const OUTPUT_BUDGET: usize = 20_000;
-    let mut lines: Vec<&String> = Vec::new();
-    let mut used = 0usize;
-    for line in rendered[start..].iter().rev() {
-        let cost = line.len() + 1;
-        if used + cost > OUTPUT_BUDGET && !lines.is_empty() {
-            break;
-        }
-        used += cost;
-        lines.push(line);
-    }
-    let dropped_oldest = matched - start - lines.len();
-    lines.reverse();
-
-    let mut out = format!(
-        "journal {label}: {total} records total, {matched} match, showing {} (oldest first, UTC)",
-        lines.len()
-    );
-    if kind.is_none() && query.is_none() {
-        out.push_str("\nhint: unfiltered list. For \"what happened recently\" use journal op=recap (days=3, session=all).");
-    }
-    if start > 0 {
-        out.push_str(&format!(
-            "; {start} older matches — narrow with 'query'/'kind' or raise 'last'"
-        ));
-    }
-    if dropped_oldest > 0 {
-        out.push_str(&format!(
-            "; {dropped_oldest} oldest dropped (20 KB output cap)"
-        ));
-    }
-    out.push('\n');
-    out.push_str(
-        &lines
-            .iter()
-            .map(|l| l.as_str())
-            .collect::<Vec<_>>()
-            .join("\n"),
-    );
-    Outcome::ok(out)
-}
-
-/// Rendered recap: a day header, then one entry per session. Bounded on
-/// purpose — a busy week must cost one tool result, not a transcript, which is
-/// the mistake the diary made by pasting the whole session in every day.
-fn recap_text(items: &[crate::agent::journal::Recap], days: i64) -> String {
-    const SESSIONS_PER_DAY: usize = 6;
-    const FILES_SHOWN: usize = 6;
-    if items.is_empty() {
-        return format!("recap: nothing recorded in the last {days} days");
-    }
-    let mut out = format!(
-        "recap · {} sessions in the last {days} days · local dates\n",
-        items.len()
-    );
-    let mut day = String::new();
-    let mut shown = 0usize;
-    let mut omitted = 0usize;
-    for r in items {
-        if r.day != day {
-            day = r.day.clone();
-            shown = 0;
-            out.push_str(&format!("— {day} —\n"));
-        }
-        if shown >= SESSIONS_PER_DAY {
-            omitted += 1;
-            continue;
-        }
-        shown += 1;
-        let head: String = r.session.chars().take(8).collect();
-        out.push_str(&format!("  {head} {}→{}  ", r.from, r.to));
-        match &r.ask {
-            Some(ask) => out.push_str(&format!("«{ask}»\n")),
-            None => out.push_str("(no plan)\n"),
-        }
-        for plan in &r.plans {
-            out.push_str(&format!(
-                "    plan {} · {} · {}/{} steps",
-                crate::agent::tools::specs::clip(&plan.id, 26),
-                plan.status,
-                plan.closed,
-                plan.total
-            ));
-            // A second plan in one session means the direction moved; its goal
-            // is the information, and repeating the first one is noise.
-            if r.ask.as_deref() != Some(plan.goal.as_str()) {
-                out.push_str(&format!(" · «{}»", plan.goal));
-            }
-            out.push('\n');
-            if !plan.unfinished.is_empty() {
-                out.push_str(&format!(
-                    "      unfinished: {}\n",
-                    plan.unfinished.join(" · ")
-                ));
-            }
-        }
-        if !r.files.is_empty() {
-            let listed: Vec<String> = r
-                .files
-                .iter()
-                .take(FILES_SHOWN)
-                .map(|(path, added, removed)| format!("{path} +{added}/-{removed}"))
-                .collect();
-            let more = r.files.len().saturating_sub(FILES_SHOWN);
-            let tail = if more > 0 {
-                format!(" · +{more} more")
-            } else {
-                String::new()
-            };
-            out.push_str(&format!("    files: {}{tail}\n", listed.join(" · ")));
-        }
-        let plural = |n: usize, word: &str| format!("{n} {word}{}", if n == 1 { "" } else { "s" });
-        out.push_str(&format!(
-            "    {} · {} failed · {} notes\n",
-            plural(r.calls, "call"),
-            r.failures,
-            plural(r.notes, "note")
-        ));
-    }
-    if omitted > 0 {
-        out.push_str(&format!(
-            "  +{omitted} sessions omitted (cap per day) — narrow with days= or session=\n"
-        ));
-    }
-    out
-}
-
-/// One rendered journal line: `j#<seq> <time> <kind> [session=S] [step=N] ([agent]) | body`.
-/// Everything after `|` is a kind-specific summary with a generic k=v fallback.
-fn journal_line_with_session(r: &crate::agent::journal::Record, show_session: bool) -> String {
-    let when = chrono::DateTime::parse_from_rfc3339(&r.ts)
-        .map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
-        .unwrap_or_else(|_| r.ts.clone());
-    let mut line = format!("j#{} {when} {}", r.seq, r.kind);
-    if show_session && !r.session.is_empty() {
-        let short_session: String = r.session.chars().take(8).collect();
-        line.push_str(&format!(" session={short_session}"));
-    }
-    if let Some(step) = &r.step {
-        line.push_str(&format!(" step={step}"));
-    }
-    if r.agent != "main" {
-        line.push_str(&format!(" [{}]", r.agent));
-    }
-    let body = specs::clip(&journal_body(r), 160);
-    if !body.is_empty() {
-        line.push_str(" | ");
-        line.push_str(&body);
-    }
-    line
-}
-
-/// Kind-specific one-line summary of a record's payload fields.
-fn journal_body(r: &crate::agent::journal::Record) -> String {
-    let f = &r.fields;
-    let s = |k: &str| f.get(k).and_then(Value::as_str);
-    let n = |k: &str| f.get(k).and_then(Value::as_u64);
-    match r.kind.as_str() {
-        "tool_call" => match (s("tool"), s("args_digest")) {
-            (Some(tool), Some(digest)) => format!("{tool}({digest})"),
-            (Some(tool), None) => tool.to_string(),
-            _ => String::new(),
-        },
-        "tool_result" => {
-            let mut parts: Vec<String> = Vec::new();
-            if let Some(tool) = s("tool") {
-                parts.push(tool.to_string());
-            }
-            if let Some(v) = f.get("ok") {
-                parts.push(format!("ok={v}"));
-            }
-            if let Some(code) = s("code") {
-                parts.push(format!("code={code}"));
-            }
-            let head = parts.join(" ");
-            match s("summary").map(str::trim).filter(|sum| !sum.is_empty()) {
-                Some(sum) => {
-                    let clean = sum.split_whitespace().collect::<Vec<_>>().join(" ");
-                    format!("{head} — {clean}")
-                }
-                None => head,
-            }
-        }
-        "file_diff" => {
-            let mut parts: Vec<String> = Vec::new();
-            if let Some(path) = s("path") {
-                parts.push(path.to_string());
-            }
-            if let Some(v) = n("added") {
-                parts.push(format!("+{v}"));
-            }
-            if let Some(v) = n("removed") {
-                parts.push(format!("-{v}"));
-            }
-            parts.join(" ")
-        }
-        "note" => match (s("note"), s("text")) {
-            (Some(kind), Some(text)) => format!("{kind}: {text}"),
-            _ => s("text").unwrap_or_default().to_string(),
-        },
-        "plan" => {
-            let mut parts: Vec<String> = Vec::new();
-            if let Some(v) = s("op") {
-                parts.push(v.to_string());
-            }
-            for key in ["id", "goal", "step", "title", "result"] {
-                if let Some(v) = s(key) {
-                    parts.push(v.to_string());
-                }
-            }
-            parts.join(" ")
-        }
-        "undo" | "redo" => {
-            let mut parts: Vec<String> = Vec::new();
-            if let Some(step) = s("step") {
-                parts.push(format!("step={step}"));
-            }
-            if let Some(cp) = s("to_checkpoint")
-                && !cp.is_empty()
-            {
-                parts.push(format!("to={}", specs::clip(cp, 12)));
-            }
-            if let Some(files) = f.get("files").and_then(Value::as_array) {
-                let list: Vec<&str> = files.iter().filter_map(Value::as_str).take(4).collect();
-                if !list.is_empty() {
-                    parts.push(format!("files=[{}]", list.join(", ")));
-                }
-            }
-            parts.join(" ")
-        }
-        "memory" => {
-            let scope = s("scope").unwrap_or("project");
-            let section = s("section").unwrap_or("Project");
-            let op = s("op").unwrap_or("written");
-            let text = s("text").unwrap_or("");
-            if text.is_empty() {
-                format!("{scope}/{section} ({op})")
-            } else {
-                format!("{scope}/{section} ({op}): {text}")
-            }
-        }
-        "checkpoint" => s("label").unwrap_or_default().to_string(),
-        "provider_error" => {
-            let mut parts: Vec<String> = Vec::new();
-            if let Some(class) = s("class") {
-                parts.push(class.to_string());
-            }
-            if let Some(v) = n("retries") {
-                parts.push(format!("retries={v}"));
-            }
-            if let Some(v) = f.get("recovered") {
-                parts.push(format!("recovered={v}"));
-            }
-            parts.join(" ")
-        }
-        "user_msg" => match n("chars") {
-            Some(chars) => format!("{} chars", chars),
-            None => String::new(),
-        },
-        "compaction" => s("phase").unwrap_or_default().to_string(),
-        "resume" => s("notice").unwrap_or_default().to_string(),
-        _ => {
-            // generic fallback: a few short k=v pairs
-            let mut parts: Vec<String> = Vec::new();
-            for (key, value) in f.iter() {
-                if parts.len() == 4 {
-                    break;
-                }
-                let rendered = match value {
-                    Value::String(v) => Some(specs::clip(v, 40)),
-                    Value::Number(v) => Some(v.to_string()),
-                    Value::Bool(v) => Some(v.to_string()),
-                    _ => None,
-                };
-                if let Some(v) = rendered {
-                    parts.push(format!("{key}={v}"));
-                }
-            }
-            parts.join(" ")
-        }
-    }
 }
 
 /// The `plan` tool: one operation per call, validated by the host.
@@ -875,9 +486,7 @@ fn resolve_step_id(args: &mut Value, root: &std::path::Path, session_id: &str) {
             }
         }
     }
-    if matches!(op.as_str(), "cancel" | "abandon" | "block_plan")
-        && !obj.contains_key("reason")
-    {
+    if matches!(op.as_str(), "cancel" | "abandon" | "block_plan") && !obj.contains_key("reason") {
         for alias in ["message", "text", "note", "summary"] {
             if let Some(val) = obj.remove(alias).and_then(|v| v.as_str().map(String::from)) {
                 obj.insert("reason".into(), val.into());
@@ -925,10 +534,12 @@ fn resolve_step_id(args: &mut Value, root: &std::path::Path, session_id: &str) {
     if !missing_or_plan_id {
         return;
     }
-    let mut candidates = active
-        .steps
-        .iter()
-        .filter(|s| matches!(s.status, plan::StepStatus::InProgress | plan::StepStatus::Reopened));
+    let mut candidates = active.steps.iter().filter(|s| {
+        matches!(
+            s.status,
+            plan::StepStatus::InProgress | plan::StepStatus::Reopened
+        )
+    });
     let (Some(first), None) = (candidates.next(), candidates.next()) else {
         return;
     };
@@ -976,7 +587,12 @@ pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
             let open: Vec<String> = active
                 .steps
                 .iter()
-                .filter(|s| !matches!(s.status, plan::StepStatus::Done | plan::StepStatus::Cancelled))
+                .filter(|s| {
+                    !matches!(
+                        s.status,
+                        plan::StepStatus::Done | plan::StepStatus::Cancelled
+                    )
+                })
                 .map(|s| s.id.clone())
                 .collect();
             if !open.is_empty() {
@@ -1061,7 +677,7 @@ pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                         });
                         match plan::commit(
                             &ctx.root,
-                            &ctx.session_id,
+                            &ctx.events_session,
                             &mut created,
                             "create",
                             "model",
@@ -1079,7 +695,7 @@ pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                                             &format!("step_{s1}_start"),
                                         )
                                     {
-                                        ctx.journal.push((sha, format!("step_{s1}_start")));
+                                        ctx.checkpoints.push((sha, format!("step_{s1}_start")));
                                     }
                                 }
                                 let steps = created
@@ -1185,7 +801,7 @@ pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                 Ok(applied) => {
                     if let Err(e) = plan::commit(
                         &ctx.root,
-                        &ctx.session_id,
+                        &ctx.events_session,
                         &mut active,
                         &op_name,
                         "model",
@@ -1202,7 +818,7 @@ pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                             &format!("step_{id}_finish"),
                         )
                     {
-                        ctx.journal.push((sha, format!("step_{id}_finish")));
+                        ctx.checkpoints.push((sha, format!("step_{id}_finish")));
                     }
                     let new_in_progress = if active.status == plan::PlanStatus::Active {
                         active
@@ -1222,7 +838,7 @@ pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                             &format!("step_{next_id}_start"),
                         )
                     {
-                        ctx.journal.push((sha, format!("step_{next_id}_start")));
+                        ctx.checkpoints.push((sha, format!("step_{next_id}_start")));
                     }
                     ctx.current_step = new_in_progress;
                     match applied {
@@ -1230,33 +846,18 @@ pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                             let msg = with_blast_radius(ctx, finishing.as_deref(), &active, message);
                             Outcome::ok(msg)
                         }
-                        plan::Applied::Completed { message } => {
-                            let mut msg =
-                                with_blast_radius(ctx, finishing.as_deref(), &active, message);
-                            let memory_empty =
-                                std::fs::read_to_string(crate::agent::memory::project_path(
-                                    &ctx.root,
-                                ))
-                                .map(|text| {
-                                    !text
-                                        .lines()
-                                        .any(|line| line.trim_start().starts_with("- "))
-                                })
-                                .unwrap_or(true);
-                            if memory_empty {
-                                msg.push_str(
-                                    " — if this run surfaced a durable fact (convention, \
-                                     decision, gotcha), memory_write it before context trims.",
-                                );
-                            }
-                            Outcome::ok(msg)
-                        }
+                        plan::Applied::Completed { message } => Outcome::ok(with_blast_radius(
+                            ctx,
+                            finishing.as_deref(),
+                            &active,
+                            message,
+                        )),
                     }
                 }
                 Err(r) => {
                     let _ = plan::commit(
                         &ctx.root,
-                        &ctx.session_id,
+                        &ctx.events_session,
                         &mut active,
                         &op_name,
                         "model",

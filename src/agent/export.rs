@@ -2,14 +2,14 @@
 //! two files). Pure functions — the TUI handler writes the files.
 //!
 //! Markdown is for humans (paste into an issue); JSON is for machines
-//! (journal tail, plan, transcript). Secrets are screened, sizes capped,
+//! (events tail, plan, transcript). Secrets are screened, sizes capped,
 //! paths stay relative. Nothing here touches the network or the model.
 
 use std::path::Path;
 
 /// Chars kept per transcript message; the rest becomes a marker, not a cut.
 const MESSAGE_CHARS: usize = 4000;
-/// Journal records in the JSON tail: recent context, not archaeology.
+/// EventLog records in the JSON tail: recent context, not archaeology.
 const JOURNAL_TAIL: usize = 500;
 
 pub struct Export {
@@ -54,7 +54,7 @@ pub fn export_session(
         .ok()
         .flatten();
     let plan_render = plan.as_ref().map(crate::plan::render);
-    let records = crate::agent::journal::Journal::records_for(root, session).unwrap_or_default();
+    let records = crate::agent::events::EventLog::records_for(root, session).unwrap_or_default();
     let tail: Vec<serde_json::Value> = records
         .iter()
         .rev()
@@ -88,8 +88,10 @@ pub fn export_session(
                 .tool_calls
                 .iter()
                 .map(|c| {
-                    let arg_summary =
-                        cap(&screen(&crate::agent::tools::call_summary(&c.name, &c.args)), 240);
+                    let arg_summary = cap(
+                        &screen(&crate::agent::tools::call_summary(&c.name, &c.args)),
+                        240,
+                    );
                     if arg_summary.is_empty() {
                         format!("{} ({})", c.name, c.id)
                     } else {
@@ -118,7 +120,7 @@ pub fn export_session(
         "os": std::env::consts::OS,
         "plan": plan.as_ref().and_then(|p| serde_json::to_value(p).ok()),
         "messages": json_messages,
-        "journal_tail": tail,
+        "event_tail": tail,
     });
     Export { markdown, json }
 }
@@ -150,9 +152,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("sqwai-export-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let mut journal =
-            crate::agent::journal::Journal::open(&dir, "sess").expect("journal opens");
-        journal
+        let mut events = crate::agent::events::EventLog::open(&dir, "sess").expect("events opens");
+        events
             .append(
                 "tool_result",
                 serde_json::json!({"tool": "bash", "ok": true}),
@@ -177,7 +178,7 @@ mod tests {
         assert!(out.markdown.contains("### User"));
         assert!(out.markdown.contains("## Plan"));
         assert_eq!(out.json["session"], serde_json::json!("sess"));
-        assert_eq!(out.json["journal_tail"].as_array().unwrap().len(), 1);
+        assert_eq!(out.json["event_tail"].as_array().unwrap().len(), 1);
         std::fs::remove_dir_all(&dir).ok();
     }
 

@@ -6,13 +6,13 @@ fn root() -> PathBuf {
 #[test]
 fn resync_advances_past_externally_appended_records() {
     let root = root();
-    let mut journal = Journal::open(&root, "session").unwrap();
-    assert_eq!(journal.append("a", json!({})).unwrap(), 1);
+    let mut events = EventLog::open(&root, "session").unwrap();
+    assert_eq!(events.append("a", json!({})).unwrap(), 1);
     // a short-lived handle (plan::commit) wrote behind our back
-    let mut other = Journal::open(&root, "session").unwrap();
+    let mut other = EventLog::open(&root, "session").unwrap();
     assert_eq!(other.append("b", json!({})).unwrap(), 2);
-    journal.resync().expect("resync");
-    assert_eq!(journal.append("c", json!({})).unwrap(), 3);
+    events.resync().expect("resync");
+    assert_eq!(events.append("c", json!({})).unwrap(), 3);
 }
 
 /// #189: a resync failure is loud and keeps the counter — never a
@@ -21,35 +21,33 @@ fn resync_advances_past_externally_appended_records() {
 fn resync_failure_returns_an_error() {
     use std::io::Write;
     let root = root();
-    let mut journal = Journal::open(&root, "session").unwrap();
-    assert_eq!(journal.append("a", json!({})).unwrap(), 1);
+    let mut events = EventLog::open(&root, "session").unwrap();
+    assert_eq!(events.append("a", json!({})).unwrap(), 1);
     // corrupt the tail with a non-record line
     let mut f = std::fs::OpenOptions::new()
         .append(true)
-        .open(journal.path())
+        .open(events.path())
         .unwrap();
     writeln!(f, "{{not json}}").unwrap();
     drop(f);
-    assert!(journal.resync().is_err(), "corrupt tail must fail loudly");
-    assert_eq!(journal.next_seq(), 2, "counter untouched on failure");
+    assert!(events.resync().is_err(), "corrupt tail must fail loudly");
+    assert_eq!(events.next_seq(), 2, "counter untouched on failure");
 }
 
 #[test]
 fn appends_monotonic_records_with_host_fields() {
     let root = root();
-    let mut journal = Journal::open(&root, "session").unwrap();
-    journal.set_attribution(Some("2".into()), Some("plan".into()), "main");
+    let mut events = EventLog::open(&root, "session").unwrap();
+    events.set_attribution(Some("2".into()), Some("plan".into()), "main");
     assert_eq!(
-        journal
-            .append("tool_call", json!({"tool": "read"}))
-            .unwrap(),
+        events.append("tool_call", json!({"tool": "read"})).unwrap(),
         1
     );
     assert_eq!(
-        journal.append("tool_result", json!({"ok": true})).unwrap(),
+        events.append("tool_result", json!({"ok": true})).unwrap(),
         2
     );
-    let text = fs::read_to_string(journal.path()).unwrap();
+    let text = fs::read_to_string(events.path()).unwrap();
     let records: Vec<Record> = text
         .lines()
         .map(|l| serde_json::from_str(l).unwrap())
@@ -67,11 +65,11 @@ fn appends_monotonic_records_with_host_fields() {
 #[test]
 fn interleaved_handles_stay_monotonic() {
     let root = root();
-    let mut main = Journal::open(&root, "session").unwrap();
+    let mut main = EventLog::open(&root, "session").unwrap();
     assert_eq!(main.append("tool_call", json!({})).unwrap(), 1);
     // another handle advances the file twice behind main's back
     // (e.g. receipt append + plan commit during verify)
-    let mut other = Journal::open(&root, "session").unwrap();
+    let mut other = EventLog::open(&root, "session").unwrap();
     assert_eq!(other.append("note", json!({})).unwrap(), 2);
     assert_eq!(other.append("plan", json!({})).unwrap(), 3);
     // main's counter is stale (2) — the append must heal, not reuse
@@ -83,22 +81,20 @@ fn interleaved_handles_stay_monotonic() {
         .collect();
     assert_eq!(seqs, vec![1, 2, 3, 4]);
     // and a later open/resync sees a clean file
-    let mut reopened = Journal::open(&root, "session").unwrap();
+    let mut reopened = EventLog::open(&root, "session").unwrap();
     assert_eq!(reopened.next_seq(), 5);
     reopened.resync().unwrap();
     fs::remove_dir_all(root).ok();
 }
 
-/// forbids secrets in the journal. The filter existed and was wired
-/// to the diary and to MEMORY.md, but not here — so a command that echoed
-/// a token wrote it verbatim into `.sqwai/journal/*.jsonl`, and from there
-/// into the diary host block and the compaction anchor, both of which are
-/// built from these records.
+/// Secrets must never reach the event tail: summaries and free text are
+/// screened before they are appended, and the tail feeds the compaction
+/// anchor.
 #[test]
-fn secrets_are_screened_out_of_summaries_and_notes() {
+fn secrets_are_screened_out_of_summaries_and_text() {
     let root = root();
-    let mut journal = Journal::open(&root, "session").unwrap();
-    journal
+    let mut events = EventLog::open(&root, "session").unwrap();
+    events
         .append(
             "tool_result",
             json!({
@@ -108,7 +104,7 @@ fn secrets_are_screened_out_of_summaries_and_notes() {
             }),
         )
         .unwrap();
-    journal
+    events
         .append(
             "note",
             json!({"by": "model", "note": "lesson", "text": "the token is ghp_abcdefghijklmnopqrstuvwxyz0123456789"}),
@@ -116,16 +112,22 @@ fn secrets_are_screened_out_of_summaries_and_notes() {
         .unwrap();
     // a path is not a secret and has to survive, or the record stops being
     // able to say what happened
-    journal
+    events
         .append(
             "tool_result",
             json!({"tool": "write", "ok": true, "summary": "wrote .sqwai/plans/01M1V0GK22W0PFVYBM0501N1FJ.json (+31/-31)"}),
         )
         .unwrap();
 
-    let raw = fs::read_to_string(root.join(".sqwai/journal/session.jsonl")).unwrap();
-    assert!(!raw.contains("sk-ant-api03"), "the key reached the journal");
-    assert!(!raw.contains("ghp_abcdef"), "the token reached the journal");
+    let raw = fs::read_to_string(root.join(".sqwai/events/session.jsonl")).unwrap();
+    assert!(
+        !raw.contains("sk-ant-api03"),
+        "the key reached the event log"
+    );
+    assert!(
+        !raw.contains("ghp_abcdef"),
+        "the token reached the event log"
+    );
     assert!(raw.contains("[redacted]"));
     assert!(
         raw.contains("01M1V0GK22W0PFVYBM0501N1FJ.json"),
@@ -140,28 +142,28 @@ fn secrets_are_screened_out_of_summaries_and_notes() {
 #[test]
 fn plan_evidence_skips_shell_baselines_and_zero_changes() {
     let root = root();
-    let mut journal = Journal::open(&root, "plan-evidence").unwrap();
-    journal.set_attribution(Some("1".into()), Some("plan-a".into()), "main");
-    journal
+    let mut events = EventLog::open(&root, "plan-evidence").unwrap();
+    events.set_attribution(Some("1".into()), Some("plan-a".into()), "main");
+    events
         .append(
             "file_diff",
             json!({"path": "dirty.rs", "mode": "bash", "added": 5, "removed": 0}),
         )
         .unwrap();
-    journal
+    events
         .append(
             "file_diff",
             json!({"path": "zero.rs", "mode": "edit", "added": 0, "removed": 0}),
         )
         .unwrap();
-    journal
+    events
         .append(
             "file_diff",
             json!({"path": "real.rs", "mode": "edit", "added": 2, "removed": 1}),
         )
         .unwrap();
 
-    let paths = Journal::step_changed_paths(&root, Some("plan-a"), "1").unwrap();
+    let paths = EventLog::step_changed_paths(&root, Some("plan-a"), "1").unwrap();
     assert_eq!(paths, vec!["real.rs".to_string()]);
 
     let mut fields = serde_json::Map::new();
@@ -179,23 +181,23 @@ fn plan_evidence_skips_shell_baselines_and_zero_changes() {
 #[test]
 fn unattributed_results_are_recorded_as_session_facts() {
     let root = root();
-    let mut journal = Journal::open(&root, "session").unwrap();
+    let mut events = EventLog::open(&root, "session").unwrap();
     // no set_attribution: no active plan, nothing in progress
     assert_eq!(
-        journal
+        events
             .append_evidence("tool_result", json!({"tool": "bash", "ok": true}))
             .unwrap(),
         1
     );
     assert_eq!(
-        journal
+        events
             .append_evidence("file_diff", json!({"path": "src/main.rs", "added": 3}))
             .unwrap(),
         2
     );
 
-    let records = Journal::records_for(&root, "session").unwrap();
-    assert_eq!(records.len(), 2, "records must reach the journal");
+    let records = EventLog::records_for(&root, "session").unwrap();
+    assert_eq!(records.len(), 2, "records must reach the event log");
     assert_eq!(records[0].kind, "tool_result");
     assert_eq!(records[1].kind, "file_diff");
     for record in &records {
@@ -213,7 +215,7 @@ fn unattributed_results_are_recorded_as_session_facts() {
             seq: record.seq,
         };
         assert!(
-            Journal::evidence(&root, "any-plan", Some("1"), &reference, None)
+            EventLog::evidence(&root, "any-plan", Some("1"), &reference, None)
                 .unwrap()
                 .is_none(),
             "record {index} must not qualify as evidence"
@@ -230,12 +232,12 @@ fn unattributed_results_are_recorded_as_session_facts() {
 #[test]
 fn a_file_written_twice_reverts_to_the_state_before_the_window() {
     let root = root();
-    let mut journal = Journal::open(&root, "session").unwrap();
+    let mut events = EventLog::open(&root, "session").unwrap();
     for (blob, hash) in [
         ("blake3:first", "sha256:one"),
         ("blake3:second", "sha256:two"),
     ] {
-        journal
+        events
             .append(
                 "file_diff",
                 serde_json::json!({
@@ -247,7 +249,7 @@ fn a_file_written_twice_reverts_to_the_state_before_the_window() {
             )
             .unwrap();
     }
-    let pre = Journal::recorded_pre_images(&root, &["cp1".to_string()]).unwrap();
+    let pre = EventLog::recorded_pre_images(&root, &["cp1".to_string()]).unwrap();
     assert_eq!(pre.len(), 1, "one entry per path: {pre:?}");
     assert_eq!(pre[0].blob_before.as_deref(), Some("blake3:first"));
     assert_eq!(pre[0].agent_hash.as_deref(), Some("sha256:two"));
@@ -259,8 +261,8 @@ fn a_file_written_twice_reverts_to_the_state_before_the_window() {
 #[test]
 fn a_record_without_a_blob_is_not_mistaken_for_a_created_file() {
     let root = root();
-    let mut journal = Journal::open(&root, "session").unwrap();
-    journal
+    let mut events = EventLog::open(&root, "session").unwrap();
+    events
         .append(
             "file_diff",
             serde_json::json!({
@@ -271,7 +273,7 @@ fn a_record_without_a_blob_is_not_mistaken_for_a_created_file() {
             }),
         )
         .unwrap();
-    let pre = Journal::recorded_pre_images(&root, &["cp1".to_string()]).unwrap();
+    let pre = EventLog::recorded_pre_images(&root, &["cp1".to_string()]).unwrap();
     assert_eq!(pre[0].blob_before, None);
     assert!(
         pre[0].existed_before,
@@ -287,10 +289,10 @@ fn a_record_without_a_blob_is_not_mistaken_for_a_created_file() {
 #[test]
 fn a_step_whose_file_a_later_step_rewrote_is_refused_by_name() {
     let root = root();
-    let mut journal = Journal::open(&root, "session").unwrap();
+    let mut events = EventLog::open(&root, "session").unwrap();
 
-    journal.set_attribution(Some("1".into()), Some("plan".into()), "main");
-    journal
+    events.set_attribution(Some("1".into()), Some("plan".into()), "main");
+    events
         .append(
             "file_diff",
             serde_json::json!({
@@ -301,7 +303,7 @@ fn a_step_whose_file_a_later_step_rewrote_is_refused_by_name() {
             }),
         )
         .unwrap();
-    journal
+    events
         .append(
             "file_diff",
             serde_json::json!({
@@ -314,8 +316,8 @@ fn a_step_whose_file_a_later_step_rewrote_is_refused_by_name() {
         .unwrap();
 
     // a later step rewrites one of the two files
-    journal.set_attribution(Some("2".into()), Some("plan".into()), "main");
-    journal
+    events.set_attribution(Some("2".into()), Some("plan".into()), "main");
+    events
         .append(
             "file_diff",
             serde_json::json!({
@@ -327,7 +329,7 @@ fn a_step_whose_file_a_later_step_rewrote_is_refused_by_name() {
         )
         .unwrap();
 
-    let revert = Journal::step_pre_images_in(&root, None, "1").unwrap();
+    let revert = EventLog::step_pre_images_in(&root, None, "1").unwrap();
     assert_eq!(
         revert.written_since,
         vec!["src/a.rs".to_string()],
@@ -346,7 +348,7 @@ fn a_step_whose_file_a_later_step_rewrote_is_refused_by_name() {
     );
 
     // and step 2 itself, being the latest writer, reverts freely
-    let revert = Journal::step_pre_images_in(&root, None, "2").unwrap();
+    let revert = EventLog::step_pre_images_in(&root, None, "2").unwrap();
     assert!(revert.written_since.is_empty());
     assert_eq!(
         revert.files[0].blob_before.as_deref(),
@@ -364,8 +366,8 @@ fn a_step_whose_file_a_later_step_rewrote_is_refused_by_name() {
 #[test]
 fn written_since_orders_across_sessions_by_time_not_seq() {
     let root = root();
-    let mut sess_a = Journal::open(&root, "sess-a").unwrap();
-    let mut sess_b = Journal::open(&root, "sess-b").unwrap();
+    let mut sess_a = EventLog::open(&root, "sess-a").unwrap();
+    let mut sess_b = EventLog::open(&root, "sess-b").unwrap();
     let diff = |path: &str, before: &str| {
         serde_json::json!({
             "path": path,
@@ -398,7 +400,7 @@ fn written_since_orders_across_sessions_by_time_not_seq() {
 
     // step 1's X predates step 2's rewrite: reverting alone would
     // clobber it, so X is refused; Y is step 1's own latest word.
-    let revert = Journal::step_pre_images_in(&root, Some("plan-a"), "1").unwrap();
+    let revert = EventLog::step_pre_images_in(&root, Some("plan-a"), "1").unwrap();
     assert_eq!(revert.written_since, vec!["x.rs".to_string()]);
     assert_eq!(
         revert
@@ -412,7 +414,7 @@ fn written_since_orders_across_sessions_by_time_not_seq() {
     // step 2's X is its own latest word (step 1's early X predates it
     // despite the busy session's high counters); step 1's late Y ties
     // it to the second, so Y is refused as ambiguous.
-    let revert = Journal::step_pre_images_in(&root, Some("plan-a"), "2").unwrap();
+    let revert = EventLog::step_pre_images_in(&root, Some("plan-a"), "2").unwrap();
     assert_eq!(revert.written_since, vec!["y.rs".to_string()]);
     assert_eq!(
         revert
@@ -431,28 +433,28 @@ fn written_since_orders_across_sessions_by_time_not_seq() {
 #[test]
 fn a_step_reverts_only_its_own_writes() {
     let root = root();
-    let mut journal = Journal::open(&root, "session").unwrap();
-    journal.set_attribution(Some("7".into()), Some("plan".into()), "main");
-    journal
+    let mut events = EventLog::open(&root, "session").unwrap();
+    events.set_attribution(Some("7".into()), Some("plan".into()), "main");
+    events
         .append(
             "file_diff",
             serde_json::json!({"path": "mine.rs", "blob_before": "blake3:mine"}),
         )
         .unwrap();
-    journal.set_attribution(None, Some("plan".into()), "main");
-    journal
+    events.set_attribution(None, Some("plan".into()), "main");
+    events
         .append(
             "file_diff",
             serde_json::json!({"path": "unattributed.rs", "blob_before": "blake3:other"}),
         )
         .unwrap();
 
-    let revert = Journal::step_pre_images_in(&root, None, "7").unwrap();
+    let revert = EventLog::step_pre_images_in(&root, None, "7").unwrap();
     assert_eq!(revert.files.len(), 1);
     assert_eq!(revert.files[0].path, "mine.rs");
 
     assert!(
-        Journal::step_pre_images_in(&root, None, "9")
+        EventLog::step_pre_images_in(&root, None, "9")
             .unwrap()
             .files
             .is_empty(),
@@ -469,7 +471,7 @@ fn a_step_reverts_only_its_own_writes() {
 #[test]
 fn step_pre_images_are_scoped_to_one_plan() {
     let root = root();
-    let mut a = Journal::open(&root, "sess-a").unwrap();
+    let mut a = EventLog::open(&root, "sess-a").unwrap();
     a.set_attribution(Some("1".into()), Some("plan-a".into()), "main");
     a.append(
         "file_diff",
@@ -481,7 +483,7 @@ fn step_pre_images_are_scoped_to_one_plan() {
         }),
     )
     .unwrap();
-    let mut b = Journal::open(&root, "sess-b").unwrap();
+    let mut b = EventLog::open(&root, "sess-b").unwrap();
     b.set_attribution(Some("1".into()), Some("plan-b".into()), "main");
     b.append(
         "file_diff",
@@ -507,14 +509,14 @@ fn step_pre_images_are_scoped_to_one_plan() {
     )
     .unwrap();
 
-    let revert = Journal::step_pre_images_in(&root, Some("plan-a"), "1").unwrap();
+    let revert = EventLog::step_pre_images_in(&root, Some("plan-a"), "1").unwrap();
     assert_eq!(revert.files.len(), 1, "{revert:?}");
     assert_eq!(revert.files[0].path, "a.rs");
     assert!(
         revert.written_since.is_empty(),
         "foreign plan writes must not block: {revert:?}"
     );
-    let other = Journal::step_pre_images_in(&root, Some("plan-b"), "1").unwrap();
+    let other = EventLog::step_pre_images_in(&root, Some("plan-b"), "1").unwrap();
     assert_eq!(other.files.len(), 1);
     assert_eq!(other.files[0].path, "b.rs");
 }
@@ -524,14 +526,14 @@ fn step_pre_images_are_scoped_to_one_plan() {
 #[test]
 fn recorded_writes_scopes_undo_to_the_hosts_own_writes() {
     let root = root();
-    let mut journal = Journal::open(&root, "session").unwrap();
-    journal
+    let mut events = EventLog::open(&root, "session").unwrap();
+    events
         .append(
             "file_diff",
             json!({"path": "src/a.rs", "hash_after": "aaa", "checkpoint": "sha-1"}),
         )
         .unwrap();
-    journal
+    events
         .append(
             "file_diff",
             json!({"path": "src/b.rs", "hash_after": "bbb", "checkpoint": "sha-2"}),
@@ -539,14 +541,14 @@ fn recorded_writes_scopes_undo_to_the_hosts_own_writes() {
         .unwrap();
     // same file written twice inside the undone window: the newest hash is
     // the one it was left at
-    journal
+    events
         .append(
             "file_diff",
             json!({"path": "src/a.rs", "hash_after": "aaa2", "checkpoint": "sha-2"}),
         )
         .unwrap();
     // a record belonging to a checkpoint that is not being undone
-    journal
+    events
         .append(
             "file_diff",
             json!({"path": "src/untouched.rs", "hash_after": "zzz", "checkpoint": "sha-9"}),
@@ -554,7 +556,7 @@ fn recorded_writes_scopes_undo_to_the_hosts_own_writes() {
         .unwrap();
 
     let writes =
-        Journal::recorded_writes(&root, &["sha-1".to_string(), "sha-2".to_string()]).unwrap();
+        EventLog::recorded_writes(&root, &["sha-1".to_string(), "sha-2".to_string()]).unwrap();
     assert_eq!(
         writes,
         vec![
@@ -566,7 +568,7 @@ fn recorded_writes_scopes_undo_to_the_hosts_own_writes() {
     // a checkpoint with no file records — a bash mutation — cannot narrow
     // the scope, and says so by returning nothing
     assert!(
-        Journal::recorded_writes(&root, &["sha-bash".to_string()])
+        EventLog::recorded_writes(&root, &["sha-bash".to_string()])
             .unwrap()
             .is_empty()
     );
@@ -576,9 +578,9 @@ fn recorded_writes_scopes_undo_to_the_hosts_own_writes() {
 #[test]
 fn records_undo_checkpoint_files_and_reopened_steps() {
     let root = root();
-    let mut journal = Journal::open(&root, "session").unwrap();
-    journal.set_attribution(None, Some("plan-1".into()), "host");
-    let seq = journal
+    let mut events = EventLog::open(&root, "session").unwrap();
+    events.set_attribution(None, Some("plan-1".into()), "host");
+    let seq = events
         .append_undo(
             "checkpoint-1",
             &["src/lib.rs".into(), "src/main.rs".into()],
@@ -586,7 +588,7 @@ fn records_undo_checkpoint_files_and_reopened_steps() {
         )
         .unwrap();
 
-    let record = Journal::records_for(&root, "session")
+    let record = EventLog::records_for(&root, "session")
         .unwrap()
         .pop()
         .unwrap();
@@ -603,16 +605,16 @@ fn records_undo_checkpoint_files_and_reopened_steps() {
 #[test]
 fn repairs_partial_tail_and_records_that_it_did() {
     let root = root();
-    let path = root.join(".sqwai").join("journal").join("session.jsonl");
+    let path = root.join(".sqwai").join("events").join("session.jsonl");
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(&path, "{\"seq\":1,\"ts\":\"1\",\"step\":null,\"plan\":null,\"agent\":\"main\",\"kind\":\"note\",\"text\":\"ok\"}\n{\"seq\":2").unwrap();
-    let mut journal = Journal::open(&root, "session").unwrap();
+    let mut events = EventLog::open(&root, "session").unwrap();
 
     // the partial line goes, and the host says so. Truncating an
     // append-only log in silence is the one thing an audit record cannot do.
-    let records = Journal::records_for(&root, "session").unwrap();
+    let records = EventLog::records_for(&root, "session").unwrap();
     assert_eq!(records.len(), 2, "{records:?}");
-    assert_eq!(records[1].kind, "journal_repair");
+    assert_eq!(records[1].kind, "event_repair");
     assert!(
         records[1]
             .fields
@@ -622,10 +624,10 @@ fn repairs_partial_tail_and_records_that_it_did() {
     );
 
     // and the sequence continues past it
-    assert_eq!(journal.next_seq(), 3);
-    assert_eq!(journal.append("note", json!({"text": "next"})).unwrap(), 3);
+    assert_eq!(events.next_seq(), 3);
+    assert_eq!(events.append("note", json!({"text": "next"})).unwrap(), 3);
     assert_eq!(
-        fs::read_to_string(journal.path()).unwrap().lines().count(),
+        fs::read_to_string(events.path()).unwrap().lines().count(),
         3
     );
     fs::remove_dir_all(root).ok();
@@ -654,10 +656,10 @@ fn nudges_after_unaccounted_step_actions() {
     )
     .unwrap();
     crate::plan::store(&root, &plan).unwrap();
-    let mut journal = Journal::open(&root, "nudge").unwrap();
-    journal.set_attribution(Some("1".into()), Some(plan.id.clone()), "main");
+    let mut events = EventLog::open(&root, "nudge").unwrap();
+    events.set_attribution(Some("1".into()), Some(plan.id.clone()), "main");
     for _ in 0..3 {
-        journal
+        events
             .append("tool_result", json!({"tool": "read", "ok": true}))
             .unwrap();
     }
@@ -665,44 +667,42 @@ fn nudges_after_unaccounted_step_actions() {
     // carries the creating session); the test mirrors that membership so
     // open_active_for_session resolves this session's own plan.
     assert!(
-        Journal::nudge(&root, Some("nudge"), 2)
+        EventLog::nudge(&root, Some("nudge"), 2)
             .unwrap()
             .unwrap()
             .contains("3 actions")
     );
-    journal.append("plan", json!({"op": "add"})).unwrap();
-    assert!(Journal::nudge(&root, Some("nudge"), 2).unwrap().is_none());
+    events.append("plan", json!({"op": "add"})).unwrap();
+    assert!(EventLog::nudge(&root, Some("nudge"), 2).unwrap().is_none());
     fs::remove_dir_all(root).ok();
 }
 
 #[test]
 fn rejects_non_object_fields() {
     let root = root();
-    let mut journal = Journal::open(&root, "session").unwrap();
-    assert!(journal.append("bad", json!("nope")).is_err());
+    let mut events = EventLog::open(&root, "session").unwrap();
+    assert!(events.append("bad", json!("nope")).is_err());
     fs::remove_dir_all(root).ok();
 }
 
 #[test]
 fn writer_stamps_inherited_epoch_and_defaults_to_none() {
     let root = root();
-    let mut journal = Journal::open(&root, "epoch-stamp").unwrap();
-    let plain = journal
-        .append("note", json!({"text": "main work"}))
-        .unwrap();
-    journal.set_epoch(Some(3));
-    let stamped = journal
+    let mut events = EventLog::open(&root, "epoch-stamp").unwrap();
+    let plain = events.append("note", json!({"text": "main work"})).unwrap();
+    events.set_epoch(Some(3));
+    let stamped = events
         .append("note", json!({"text": "child work"}))
         .unwrap();
 
-    let records = Journal::records_for(&root, "epoch-stamp").unwrap();
+    let records = EventLog::records_for(&root, "epoch-stamp").unwrap();
     let by_seq = |seq| records.iter().find(|r| r.seq == seq).unwrap().epoch;
     assert_eq!(by_seq(plain), None);
     assert_eq!(by_seq(stamped), Some(3));
     fs::remove_dir_all(root).ok();
 }
 
-/// Concurrent handles on one journal file must never duplicate a seq:
+/// Concurrent handles on one events file must never duplicate a seq:
 /// without the per-file append lock two handles read the same tail and
 /// write the same number twice, poisoning replay cursors downstream.
 /// One malformed line mid-file (a crash, a disk error, a hand edit)
@@ -713,7 +713,7 @@ fn writer_stamps_inherited_epoch_and_defaults_to_none() {
 #[test]
 fn records_skip_a_corrupt_mid_file_line() {
     let dir = tempfile::tempdir().unwrap();
-    let jdir = dir.path().join(".sqwai/journal");
+    let jdir = dir.path().join(".sqwai/events");
     std::fs::create_dir_all(&jdir).unwrap();
     std::fs::write(
         jdir.join("s.jsonl"),
@@ -725,7 +725,7 @@ fn records_skip_a_corrupt_mid_file_line() {
     )
     .unwrap();
     let records =
-        Journal::records(dir.path()).expect("a corrupt line must not kill the whole read");
+        EventLog::records(dir.path()).expect("a corrupt line must not kill the whole read");
     let seqs: Vec<u64> = records.iter().map(|r| r.seq).collect();
     assert_eq!(seqs, vec![1, 3]);
     assert_eq!(records[0].session, "s", "session stamp survives");
@@ -735,16 +735,16 @@ fn records_skip_a_corrupt_mid_file_line() {
 fn concurrent_handles_never_duplicate_seq() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().to_path_buf();
-    std::fs::create_dir_all(root.join(".sqwai/journal")).unwrap();
+    std::fs::create_dir_all(root.join(".sqwai/events")).unwrap();
     let mut handles = Vec::new();
     for _ in 0..8 {
         let root = root.clone();
         handles.push(std::thread::spawn(move || {
-            let mut journal = Journal::open(&root, "race").expect("open");
+            let mut events = EventLog::open(&root, "race").expect("open");
             let mut seqs = Vec::new();
             for i in 0..25 {
                 seqs.push(
-                    journal
+                    events
                         .append("note", serde_json::json!({"text": i}))
                         .expect("append"),
                 );

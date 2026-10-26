@@ -91,7 +91,7 @@ pub struct RedoEntry {
     pub label: String,
     #[serde(default)]
     pub checkpoints: Vec<(String, String)>,
-    pub files: Vec<crate::agent::journal::PreImage>,
+    pub files: Vec<crate::agent::events::PreImage>,
     #[serde(default)]
     pub reopened_steps: Vec<String>,
 }
@@ -160,7 +160,12 @@ pub struct Session {
     /// only valid for the model that produced it
     #[serde(default)]
     pub last_response_model: Option<String>,
-    /// (sha, label) undo journal: one entry per mutating agent action
+    /// Compact host events for this session: file changes, plan ops,
+    /// checkpoints, undo/redo, observations, acks, compaction. Tool call
+    /// payloads stay in `messages`; this list is host bookkeeping only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub events: Vec<crate::agent::events::Record>,
+    /// (sha, label) undo events: one entry per mutating agent action
     #[serde(default)]
     pub checkpoints: Vec<(String, String)>,
     /// Index in `checkpoints` where the latest agent turn started, used by
@@ -198,7 +203,7 @@ pub struct Session {
     #[serde(default)]
     pub undo_layer2: Option<bool>,
     /// project root this session was born in; stamped by the host on
-    /// creation. Plans, journals and undo chains live under this root, so
+    /// creation. Plans, event logs and undo chains live under this root, so
     /// opening the session elsewhere dangles those links (the UI warns).
     /// `None` marks a legacy save: shown everywhere, never filtered out.
     #[serde(default)]
@@ -240,6 +245,7 @@ impl Session {
             current_step_id: None,
             last_response_id: None,
             last_response_model: None,
+            events: Vec::new(),
             checkpoints: Vec::new(),
             turn_checkpoint_start: 0,
             redo_stack: Vec::new(),
@@ -252,6 +258,25 @@ impl Session {
             active_skills: Vec::new(),
             read_ledger: Default::default(),
         }
+    }
+
+    /// Merge host events into this session, deduplicating by sequence and
+    /// stamping the owning session id. Events are compact host bookkeeping;
+    /// tool payloads stay in `messages`.
+    pub fn merge_events(&mut self, records: Vec<crate::agent::events::Record>) {
+        let id = self.id.to_string();
+        for mut record in records {
+            record.session = id.clone();
+            if !self.events.iter().any(|known| known.seq == record.seq) {
+                self.events.push(record);
+            }
+        }
+        self.events.sort_by_key(|record| record.seq);
+    }
+
+    #[cfg_attr(test, allow(dead_code))]
+    pub fn max_event_seq(&self) -> u64 {
+        self.events.last().map(|record| record.seq).unwrap_or(0)
     }
 
     /// pinned sessions first, then by latest activity
@@ -520,6 +545,10 @@ impl Session {
         let raw = std::fs::read_to_string(path)?;
         let mut s: Self = serde_json::from_str(&raw)?;
         s.strip_system_messages();
+        let id = s.id.to_string();
+        for record in &mut s.events {
+            record.session = id.clone();
+        }
         Ok(s)
     }
 
@@ -830,6 +859,35 @@ mod tests {
         let back = Session::load_from(&path).unwrap();
         assert!(!back.read_ledger.is_empty());
         assert_eq!(back.read_ledger, s.read_ledger);
+    }
+
+    #[test]
+    fn host_events_round_trip_and_deduplicate_by_seq() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events-session.json");
+        let mut s = Session::new("m".into(), 1000);
+        s.push(Role::User, "work");
+        let record = crate::agent::events::Record {
+            seq: 7,
+            ts: "2026-10-25T12:00:00Z".into(),
+            session: String::new(),
+            step: Some("1".into()),
+            plan: Some("plan-1".into()),
+            agent: "main".into(),
+            epoch: None,
+            kind: "file_diff".into(),
+            fields: serde_json::json!({"path": "src/main.rs", "added": 2, "removed": 0})
+                .as_object()
+                .cloned()
+                .unwrap(),
+        };
+        s.merge_events(vec![record.clone(), record]);
+        assert_eq!(s.events.len(), 1);
+        s.save_to(&path).unwrap();
+        let back = Session::load_from(&path).unwrap();
+        assert_eq!(back.events.len(), 1);
+        assert_eq!(back.events[0].session, s.id.to_string());
+        assert_eq!(back.events[0].seq, 7);
     }
 
     #[test]

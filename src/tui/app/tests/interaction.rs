@@ -6,11 +6,8 @@ fn a_history_marker_resolves_to_the_image_target() {
     let mut image = crate::media::test_image(8, 8, "shot.png");
     image.marker = Some(1);
     app.session.messages = vec![
-        crate::providers::Message::new(
-            crate::providers::Role::User,
-            "look [image 1]",
-        )
-        .with_images(vec![image.clone()]),
+        crate::providers::Message::new(crate::providers::Role::User, "look [image 1]")
+            .with_images(vec![image.clone()]),
     ];
     app.push_segment(Segment::User("look [image 1]".into()));
 
@@ -75,11 +72,8 @@ fn markers_renumber_in_text_order() {
     assert_eq!(app.image_marker, 3);
 
     // Every live marker binds an image block, in the same text order.
-    let message = crate::providers::Message::new(
-        crate::providers::Role::User,
-        app.input_text(),
-    )
-    .with_images(app.pending_images.clone());
+    let message = crate::providers::Message::new(crate::providers::Role::User, app.input_text())
+        .with_images(app.pending_images.clone());
     let bound: Vec<String> = crate::providers::user_parts(&message)
         .into_iter()
         .filter_map(|part| match part {
@@ -99,8 +93,7 @@ fn backspace_removes_a_marker_as_one_token_and_renumbers() {
     two.marker = Some(2);
     app.pending_images = vec![one, two];
     app.input = App::fresh_input("A [image 1] B [image 2] C".to_string());
-    app.input
-        .move_cursor(tui_textarea::CursorMove::Jump(0, 11));
+    app.input.move_cursor(tui_textarea::CursorMove::Jump(0, 11));
 
     assert!(app.atomic_erase(true));
 
@@ -117,11 +110,9 @@ fn a_selection_over_a_marker_deletes_the_whole_token() {
     one.marker = Some(1);
     app.pending_images = vec![one];
     app.input = App::fresh_input("[image 1]".to_string());
-    app.input
-        .move_cursor(tui_textarea::CursorMove::Jump(0, 2));
+    app.input.move_cursor(tui_textarea::CursorMove::Jump(0, 2));
     app.input.start_selection();
-    app.input
-        .move_cursor(tui_textarea::CursorMove::Jump(0, 5));
+    app.input.move_cursor(tui_textarea::CursorMove::Jump(0, 5));
 
     assert!(app.atomic_erase(true));
 
@@ -589,7 +580,7 @@ fn cancelled_tool_turn_does_not_backfill_prior_answer() {
         summary: None,
         todos: Vec::new(),
         plan_todos: Vec::new(),
-        journal: Vec::new(),
+        checkpoints: Vec::new(),
         approval_grants: Default::default(),
         read_ledger: Default::default(),
     });
@@ -653,7 +644,7 @@ fn cancelled_tool_turn_keeps_streamed_partial() {
         summary: None,
         todos: Vec::new(),
         plan_todos: Vec::new(),
-        journal: Vec::new(),
+        checkpoints: Vec::new(),
         approval_grants: Default::default(),
         read_ledger: Default::default(),
     });
@@ -698,7 +689,7 @@ fn finish_turn_ok_rebases_notes_after_compaction() {
         summary: Some("summary".into()),
         todos: Vec::new(),
         plan_todos: Vec::new(),
-        journal: Vec::new(),
+        checkpoints: Vec::new(),
         approval_grants: Default::default(),
         read_ledger: Default::default(),
     });
@@ -719,11 +710,16 @@ fn transcript_row_toggles_subagent_inline_like_standard_tool() {
         id: 7,
         task: "inspect rendering".into(),
         status: "completed".into(),
-        output: "found 3 callers in src/view.rs\n[Subagent receipt: ok | 2 tool call(s): grep(render)]".into(),
+        output:
+            "found 3 callers in src/view.rs\n[Subagent receipt: ok | 2 tool call(s): grep(render)]"
+                .into(),
         expanded: false,
     });
     let collapsed = render_to_string(&mut app, 100, 30);
-    assert!(!collapsed.contains("found 3 callers"), "collapsed by default:\n{collapsed}");
+    assert!(
+        !collapsed.contains("found 3 callers"),
+        "collapsed by default:\n{collapsed}"
+    );
 
     let row = app
         .cache_rowseg
@@ -731,10 +727,19 @@ fn transcript_row_toggles_subagent_inline_like_standard_tool() {
         .position(|t| *t == Some(0))
         .expect("child row");
     app.click(row);
-    assert_eq!(app.active_subagent, None, "stays in main chat instead of switching screens");
+    assert_eq!(
+        app.active_subagent, None,
+        "stays in main chat instead of switching screens"
+    );
     let unfolded = render_to_string(&mut app, 100, 30);
-    assert!(unfolded.contains("found 3 callers in src/view.rs"), "unfolds inline:\n{unfolded}");
-    assert!(unfolded.contains("[Subagent receipt: ok"), "receipt visible inline:\n{unfolded}");
+    assert!(
+        unfolded.contains("found 3 callers in src/view.rs"),
+        "unfolds inline:\n{unfolded}"
+    );
+    assert!(
+        unfolded.contains("[Subagent receipt: ok"),
+        "receipt visible inline:\n{unfolded}"
+    );
 }
 
 #[test]
@@ -1278,10 +1283,11 @@ fn approval_mode_change_is_a_notice_not_a_history_row() {
         before,
         "a mode switch must not write into the history"
     );
-    assert!(app
-        .toast
-        .as_ref()
-        .is_some_and(|t| t.text == "approval: auto → full"));
+    assert!(
+        app.toast
+            .as_ref()
+            .is_some_and(|t| t.text == "approval: auto → full")
+    );
 }
 
 /// the status bar shows the *effective* mapping. Selecting `max` on
@@ -1530,10 +1536,7 @@ fn submenu_open_jitter_does_not_move_effort_cursor() {
     tx.send(me(MouseEventKind::Moved, max_row, effort_col))
         .unwrap();
     app.poll_input(&rx).unwrap();
-    assert_eq!(
-        app.menu_sel, want,
-        "hover jitter must not yank the cursor"
-    );
+    assert_eq!(app.menu_sel, want, "hover jitter must not yank the cursor");
 }
 
 /// Keyboard-opened pickers never had a press: a resting mouse's ambient
@@ -2268,7 +2271,6 @@ fn context_menu_shows_parts_legend_and_honest_gaps() {
 
     app.session.last_breakdown = Some(crate::providers::RequestBreakdown {
         system_bytes: 4_000,
-        memory_bytes: 800,
         skills_bytes: 1_200,
         history_bytes: 8_000,
         tool_output_bytes: 16_000,
@@ -2276,7 +2278,6 @@ fn context_menu_shows_parts_legend_and_honest_gaps() {
         reasoning_bytes: 400,
         total_bytes: 32_000,
         system_tokens: 1_000,
-        memory_tokens: 200,
         skills_tokens: 300,
         history_tokens: 2_000,
         tool_output_tokens: 4_000,
@@ -2347,9 +2348,8 @@ fn context_menu_shows_parts_legend_and_honest_gaps() {
         dot("tools"),
         "the fattest part (tools, i.e. their output) leads the bar"
     );
-    // memory and skills are their own parts: burying them in "system" made the
-    // biggest block on the scale unreadable
-    assert!(t.contains("● memory"), "memory is a legend row: {t}");
+    // skills are their own part: burying them in "system" made the biggest
+    // block on the scale unreadable
     assert!(t.contains("● skills"), "skills is a legend row: {t}");
     // and the replayed chain of thought is not allowed to hide inside a row
     // named after the mode line
@@ -2418,7 +2418,8 @@ fn context_view_renders_sections_and_scrolls_with_arrows() {
     use ratatui::layout::Rect;
 
     let mut app = test_app("http://127.0.0.1:9/v1".into());
-    app.session.push(crate::providers::Role::User, "check the context");
+    app.session
+        .push(crate::providers::Role::User, "check the context");
     app.command("context-view");
     assert!(matches!(app.cur_menu(), Some(Menu::ContextView)));
 
@@ -2437,7 +2438,10 @@ fn context_view_renders_sections_and_scrolls_with_arrows() {
 
     app.menu_nav(1);
     app.render_into(&mut buf, area);
-    assert_eq!(app.surf_top, 1, "down arrow scrolls /context-view by one line");
+    assert_eq!(
+        app.surf_top, 1,
+        "down arrow scrolls /context-view by one line"
+    );
 }
 
 #[test]
@@ -2475,7 +2479,10 @@ fn test_ask_settles_tool_row_on_confirm_and_on_skip() {
     app.command("test ask");
     assert!(app.tool_running());
     app.inline_ask_skip();
-    assert!(!app.tool_running(), "skipping /test ask must settle the tool row");
+    assert!(
+        !app.tool_running(),
+        "skipping /test ask must settle the tool row"
+    );
     assert!(matches!(
         app.segments.last(),
         Some(Segment::Tool {

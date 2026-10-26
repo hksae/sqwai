@@ -20,7 +20,13 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
+#[cfg(not(test))]
 static RESTORE: AtomicBool = AtomicBool::new(false);
+
+#[cfg(test)]
+thread_local! {
+    static TEST_RESTORE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 
 /// RAII hold on the restore lock. Dropped (released) at end of scope.
 pub struct RestoreGuard {
@@ -31,20 +37,33 @@ pub struct RestoreGuard {
 /// releases on drop; `true` means it was already held (nested undo) and
 /// there is nothing to release.
 pub fn hold_restore() -> RestoreGuard {
+    #[cfg(not(test))]
     let outer = RESTORE
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .is_err();
+    #[cfg(test)]
+    let outer = TEST_RESTORE.with(|held| held.replace(true));
     RestoreGuard { outer }
 }
 
 pub(crate) fn restore_active() -> bool {
-    RESTORE.load(Ordering::SeqCst)
+    #[cfg(not(test))]
+    {
+        RESTORE.load(Ordering::SeqCst)
+    }
+    #[cfg(test)]
+    {
+        TEST_RESTORE.with(std::cell::Cell::get)
+    }
 }
 
 impl Drop for RestoreGuard {
     fn drop(&mut self) {
         if !self.outer {
+            #[cfg(not(test))]
             RESTORE.store(false, Ordering::SeqCst);
+            #[cfg(test)]
+            TEST_RESTORE.with(|held| held.set(false));
         }
     }
 }

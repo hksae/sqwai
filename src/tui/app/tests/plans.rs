@@ -46,7 +46,7 @@ fn plan_delete_user_command_flow() {
         Some(Menu::ConfirmDelete { label, .. }) if label == "Are you sure? (y/N)"
     ));
 
-    // 4. Confirming delete removes file, clears session.plan_id, and records journal event
+    // 4. Confirming delete removes file, clears session.plan_id, and records events event
     app.run_confirm_action();
     assert!(!plan_file.exists(), "plan file must be deleted");
     assert_eq!(app.session.plan_id, None, "session plan_id must be cleared");
@@ -56,14 +56,14 @@ fn plan_delete_user_command_flow() {
         toast_text(&app)
     );
 
-    // Verify journal has plan_deleted event
+    // Verify events has plan_deleted event
     let records =
-        crate::agent::journal::Journal::records_for(&temp_dir, &app.session.id.to_string())
+        crate::agent::events::EventLog::records_for(&temp_dir, &app.session.id.to_string())
             .unwrap();
     assert!(
         records.iter().any(|r| r.kind == "plan_deleted"
             && r.fields.get("plan_id").and_then(|v| v.as_str()) == Some(&created.id)),
-        "journal must record plan_deleted event"
+        "events must record plan_deleted event"
     );
 
     let _ = std::fs::remove_dir_all(&temp_dir);
@@ -922,7 +922,8 @@ fn toggled_tool_with_tabbed_output_leaves_no_control_cells() {
         name: "read".into(),
         args: "Cargo.toml".into(),
         ok: Some(true),
-        output: "     5\tdescription = \"TUI coding agent\"\n     6\tlicense = \"Apache-2.0\"".into(),
+        output: "     5\tdescription = \"TUI coding agent\"\n     6\tlicense = \"Apache-2.0\""
+            .into(),
         diff: None,
         preview: Vec::new(),
         preview_total: 0,
@@ -1135,4 +1136,3 @@ fn resize_preserves_mid_history_scroll_anchor() {
     assert_eq!(app.view_top, start_120);
     assert_eq!(app.cache_rowseg[app.view_top], Some(target_seg));
 }
-

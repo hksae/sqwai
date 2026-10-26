@@ -434,7 +434,7 @@ fn replay_heals_other_session_crash_leaving_mine_alone() {
     plan.applied_events.insert("bbb".to_string(), 0);
     store(&dir, &plan).unwrap();
 
-    let mut ja = crate::agent::journal::Journal::open(&dir, "aaa").unwrap();
+    let mut ja = crate::agent::events::EventLog::open(&dir, "aaa").unwrap();
     ja.append(
         "plan",
         serde_json::json!({
@@ -443,7 +443,7 @@ fn replay_heals_other_session_crash_leaving_mine_alone() {
         }),
     )
     .unwrap();
-    let mut jb = crate::agent::journal::Journal::open(&dir, "bbb").unwrap();
+    let mut jb = crate::agent::events::EventLog::open(&dir, "bbb").unwrap();
     jb.append(
         "plan",
         serde_json::json!({
@@ -474,8 +474,8 @@ fn replay_stall_in_one_session_does_not_block_the_other() {
     plan.applied_events.insert("bbb".to_string(), 0);
     store(&dir, &plan).unwrap();
 
-    // aaa journaled a finish on a missing step: diverges
-    let mut ja = crate::agent::journal::Journal::open(&dir, "aaa").unwrap();
+    // aaa recorded a finish on a missing step: diverges
+    let mut ja = crate::agent::events::EventLog::open(&dir, "aaa").unwrap();
     ja.append(
         "plan",
         serde_json::json!({
@@ -484,8 +484,8 @@ fn replay_stall_in_one_session_does_not_block_the_other() {
         }),
     )
     .unwrap();
-    // bbb journaled a valid finish on step 1
-    let mut jb = crate::agent::journal::Journal::open(&dir, "bbb").unwrap();
+    // bbb recorded a valid finish on step 1
+    let mut jb = crate::agent::events::EventLog::open(&dir, "bbb").unwrap();
     jb.append(
         "plan",
         serde_json::json!({
@@ -506,10 +506,10 @@ fn replay_stall_in_one_session_does_not_block_the_other() {
 }
 
 #[test]
-fn open_rebuilds_torn_plan_file_from_journal() {
+fn open_rebuilds_torn_plan_file_from_events() {
     let dir = std::env::temp_dir().join(format!("sqwai-plan-rebuild-{}", new_id()));
     let id = "rebuild-me";
-    let mut ja = crate::agent::journal::Journal::open(&dir, "aaa").unwrap();
+    let mut ja = crate::agent::events::EventLog::open(&dir, "aaa").unwrap();
     ja.append(
         "plan",
         serde_json::json!({
@@ -522,7 +522,7 @@ fn open_rebuilds_torn_plan_file_from_journal() {
         }),
     )
     .unwrap();
-    let mut jb = crate::agent::journal::Journal::open(&dir, "bbb").unwrap();
+    let mut jb = crate::agent::events::EventLog::open(&dir, "bbb").unwrap();
     jb.append(
         "plan",
         serde_json::json!({
@@ -558,7 +558,7 @@ fn open_rebuilds_torn_plan_file_from_journal() {
 fn open_quarantines_when_rebuild_diverges_or_lacks_intent() {
     let dir = std::env::temp_dir().join(format!("sqwai-plan-diverge-{}", new_id()));
     let id = "diverged";
-    let mut j = crate::agent::journal::Journal::open(&dir, "aaa").unwrap();
+    let mut j = crate::agent::events::EventLog::open(&dir, "aaa").unwrap();
     j.append(
         "plan",
         serde_json::json!({
@@ -592,7 +592,7 @@ fn open_quarantines_when_rebuild_diverges_or_lacks_intent() {
     );
 
     let dir2 = std::env::temp_dir().join(format!("sqwai-plan-del-{}", new_id()));
-    let mut j2 = crate::agent::journal::Journal::open(&dir2, "aaa").unwrap();
+    let mut j2 = crate::agent::events::EventLog::open(&dir2, "aaa").unwrap();
     j2.append(
         "plan",
         serde_json::json!({
@@ -618,14 +618,14 @@ fn open_quarantines_when_rebuild_diverges_or_lacks_intent() {
 }
 
 #[test]
-fn replay_heals_crash_between_journal_and_store() {
+fn replay_heals_crash_between_events_and_store() {
     let dir = std::env::temp_dir().join(format!("sqwai-plan-replay-{}", new_id()));
     let mut plan = new_plan();
     plan.applied_events.insert("crash".to_string(), 0);
     store(&dir, &plan).unwrap();
 
-    let mut journal = crate::agent::journal::Journal::open(&dir, "crash").unwrap();
-    let seq = journal
+    let mut events = crate::agent::events::EventLog::open(&dir, "crash").unwrap();
+    let seq = events
         .append(
             "plan",
             serde_json::json!({
@@ -651,15 +651,15 @@ fn replay_heals_crash_between_journal_and_store() {
 }
 
 #[test]
-fn join_is_journal_first_idempotent_and_replayable() {
+fn join_is_event_first_idempotent_and_replayable() {
     let dir = std::env::temp_dir().join(format!("sqwai-plan-join-{}", new_id()));
     let mut plan = new_plan();
     plan.sessions = vec!["parent".to_string()];
     plan.applied_events.insert("parent".to_string(), 0);
     store(&dir, &plan).unwrap();
 
-    let mut journal = crate::agent::journal::Journal::open(&dir, "parent").unwrap();
-    journal
+    let mut events = crate::agent::events::EventLog::open(&dir, "parent").unwrap();
+    events
         .append(
             "plan",
             serde_json::json!({
@@ -693,8 +693,8 @@ fn join_is_journal_first_idempotent_and_replayable() {
 #[test]
 fn replay_rebuilds_orphan_create_and_respects_delete() {
     let dir = std::env::temp_dir().join(format!("sqwai-plan-orphan-{}", new_id()));
-    let mut journal = crate::agent::journal::Journal::open(&dir, "orphan").unwrap();
-    journal
+    let mut events = crate::agent::events::EventLog::open(&dir, "orphan").unwrap();
+    events
         .append(
             "plan",
             serde_json::json!({
@@ -718,7 +718,7 @@ fn replay_rebuilds_orphan_create_and_respects_delete() {
     assert_eq!(rebuilt.goal.text, "orphaned goal");
     assert_eq!(rebuilt.applied_events.get("orphan"), Some(&1));
 
-    journal
+    events
         .append(
             "plan_deleted",
             serde_json::json!({"plan_id": "01J000ORPHAN00000000000001"}),
@@ -737,8 +737,8 @@ fn replay_skips_rejected_intents() {
     let mut plan = new_plan();
     plan.applied_events.insert("rs".to_string(), 0);
     store(&dir, &plan).unwrap();
-    let mut journal = crate::agent::journal::Journal::open(&dir, "rs").unwrap();
-    journal
+    let mut events = crate::agent::events::EventLog::open(&dir, "rs").unwrap();
+    events
         .append(
             "plan",
             serde_json::json!({

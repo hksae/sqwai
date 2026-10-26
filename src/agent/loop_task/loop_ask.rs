@@ -338,7 +338,7 @@ pub(crate) async fn bash_call(
     next_id: &mut u64,
     subagent_depth: u8,
     approval: ApprovalMode,
-    journal: &mut Option<crate::agent::journal::Journal>,
+    events: &mut Option<crate::agent::events::EventLog>,
     outside_target: &mut Option<std::path::PathBuf>,
 ) -> tools::Outcome {
     let command = call.args["command"].as_str().unwrap_or("").to_string();
@@ -401,7 +401,7 @@ pub(crate) async fn bash_call(
     // reaches here; a command both dangerous and exfiltrating carries one
     // combined reason into the single dialog. One dialog per (session, egress
     // kind): a kind the user already confirmed passes.
-    let acked = crate::agent::trust::acked_egress(&ctx.root, &ctx.session_id);
+    let acked = crate::agent::trust::acked_egress(&ctx.root, &ctx.events_session);
     let mut taint_kind: Option<&'static str> = None;
     match crate::agent::trust::trust_gate(
         &command,
@@ -462,7 +462,7 @@ pub(crate) async fn bash_call(
             tx,
             ctl,
             next_id,
-            journal,
+            events,
         )
         .await
         else {
@@ -472,10 +472,10 @@ pub(crate) async fn bash_call(
             ApprovalDecision::Deny => {
                 return tools::Outcome::err(format!("command denied by user ({reason})"));
             }
-            // The user looked at this egress shape and said yes: journal
+            // The user looked at this egress shape and said yes: events
             // it so the same kind passes for the rest of the session.
             ApprovalDecision::AlwaysSession => {
-                if let (Some(kind), Some(writer)) = (taint_kind, journal.as_mut()) {
+                if let (Some(kind), Some(writer)) = (taint_kind, events.as_mut()) {
                     crate::agent::trust::ack_egress(writer, kind);
                 }
                 always_allow.push(Grant::from_command(&command, reason));
@@ -487,7 +487,7 @@ pub(crate) async fn bash_call(
                 }
             }
             ApprovalDecision::RunOnce => {
-                if let (Some(kind), Some(writer)) = (taint_kind, journal.as_mut()) {
+                if let (Some(kind), Some(writer)) = (taint_kind, events.as_mut()) {
                     crate::agent::trust::ack_egress(writer, kind);
                 }
             }
@@ -512,7 +512,8 @@ pub(crate) async fn bash_call(
             &format!("pre_bash {command}"),
         )
     {
-        ctx.journal.push((sha.clone(), format!("bash {command}")));
+        ctx.checkpoints
+            .push((sha.clone(), format!("bash {command}")));
         bash_sha = Some(sha);
     }
 
@@ -521,7 +522,7 @@ pub(crate) async fn bash_call(
     let mut outcome = run_tool_blocking(ctx, "bash", &call.args).await;
 
     // 3. OpenCode-style `before -> after` bash attribution: if a pre-bash
-    //    snapshot was taken (or exists on the chain when a journal is active)
+    //    snapshot was taken (or exists on the chain when an event log is active)
     //    and the command modified files, record their pre-images and post-bash
     //    hashes so `/undo` can revert bash writes (including `mv`/`rm`) while
     //    protecting later user edits.
@@ -535,8 +536,8 @@ pub(crate) async fn bash_call(
 }
 
 /// The approval dialog itself: show the subject, await one answer, and
-/// journal the decision — a live session's approvals were invisible in
-/// the journal, which made "why was the agent allowed to do that"
+/// events the decision — a live session's approvals were invisible in
+/// the event log, which made "why was the agent allowed to do that"
 /// unanswerable after the fact. `None` means the channel died (tui
 /// closed or agent cancelled).
 pub(crate) async fn approval_dialog(
@@ -546,7 +547,7 @@ pub(crate) async fn approval_dialog(
     tx: &mpsc::Sender<AgentEvent>,
     ctl: &mut mpsc::Receiver<ControlMsg>,
     next_id: &mut u64,
-    journal: &mut Option<crate::agent::journal::Journal>,
+    events: &mut Option<crate::agent::events::EventLog>,
 ) -> Option<ApprovalDecision> {
     let id = *next_id;
     *next_id += 1;
@@ -560,14 +561,12 @@ pub(crate) async fn approval_dialog(
     .ok()?;
     let decision = loop {
         match ctl.recv().await {
-            Some(ControlMsg::ApprovalAnswer { id: aid, decision }) if aid == id => {
-                break decision
-            }
+            Some(ControlMsg::ApprovalAnswer { id: aid, decision }) if aid == id => break decision,
             Some(_) => continue,
             None => return None,
         }
     };
-    if let Some(writer) = journal.as_mut() {
+    if let Some(writer) = events.as_mut() {
         let _ = writer.append(
             "approval",
             serde_json::json!({
@@ -600,7 +599,7 @@ pub(crate) async fn mutating_tool_gate(
     next_id: &mut u64,
     mode: ApprovalMode,
     tool_grants: &mut Vec<String>,
-    journal: &mut Option<crate::agent::journal::Journal>,
+    events: &mut Option<crate::agent::events::EventLog>,
 ) -> Option<tools::Outcome> {
     let name = call.name.as_str();
     let granted = tool_grants.iter().any(|t| t == name);
@@ -626,14 +625,14 @@ pub(crate) async fn mutating_tool_gate(
             tx,
             ctl,
             next_id,
-            journal,
+            events,
         )
         .await;
         match decision {
             Some(ApprovalDecision::Deny) => {
                 return Some(tools::Outcome::err(format!(
                     "{name} denied by user ({OUTSIDE_WRITE_REASON})"
-                )))
+                )));
             }
             Some(ApprovalDecision::AlwaysSession) => {
                 if let Some(d) = ctx.outside_grant_dir(&path) {
@@ -663,14 +662,14 @@ pub(crate) async fn mutating_tool_gate(
             tx,
             ctl,
             next_id,
-            journal,
+            events,
         )
         .await;
         match decision {
             Some(ApprovalDecision::Deny) => {
                 return Some(tools::Outcome::err(format!(
                     "{name} call denied by user (ask mode)"
-                )))
+                )));
             }
             Some(ApprovalDecision::AlwaysSession) => tool_grants.push(name.to_string()),
             Some(ApprovalDecision::RunOnce) => {}
@@ -701,7 +700,7 @@ pub(crate) fn read_call_path(name: &str, args: &serde_json::Value) -> Option<Str
 /// which, when the scheduler places `run_agent` on the `block_on` driver thread,
 /// freezes the TUI for the whole call. `spawn_blocking` uses a separate thread
 /// pool, so the runtime (and the UI) stay responsive. The cloned `ToolCtx` is
-/// moved in and its journal/checkpoint bookkeeping is merged back afterwards so
+/// moved in and its events/checkpoint bookkeeping is merged back afterwards so
 /// callers observe every mutation the handler recorded.
 pub(crate) async fn run_tool_blocking(
     ctx: &mut ToolCtx,
@@ -715,12 +714,16 @@ pub(crate) async fn run_tool_blocking(
     // and takes the live maps with it.
     let files_read = std::mem::take(&mut ctx.files_read);
     let read_windows = std::mem::take(&mut ctx.read_windows);
-    let journal = std::mem::take(&mut ctx.journal);
-    let fallback = (files_read.clone(), read_windows.clone(), journal.clone());
+    let checkpoints = std::mem::take(&mut ctx.checkpoints);
+    let fallback = (
+        files_read.clone(),
+        read_windows.clone(),
+        checkpoints.clone(),
+    );
     let mut exec_ctx = ctx.clone();
     exec_ctx.files_read = files_read;
     exec_ctx.read_windows = read_windows;
-    exec_ctx.journal = journal;
+    exec_ctx.checkpoints = checkpoints;
     let name = name.to_string();
     let args = args.clone();
     let joined = tokio::task::spawn_blocking(move || {
@@ -730,15 +733,15 @@ pub(crate) async fn run_tool_blocking(
     .await;
     match joined {
         Ok((outcome, worker)) => {
-            ctx.journal = worker.journal;
+            ctx.checkpoints = worker.checkpoints;
             ctx.files_read = worker.files_read;
             ctx.read_windows = worker.read_windows;
             ctx.activated_skills = worker.activated_skills;
             outcome
         }
         Err(e) => {
-            let (files_read, read_windows, journal) = fallback;
-            ctx.journal = journal;
+            let (files_read, read_windows, checkpoints) = fallback;
+            ctx.checkpoints = checkpoints;
             ctx.files_read = files_read;
             ctx.read_windows = read_windows;
             tools::Outcome::err(format!("tool thread failed: {e}"))

@@ -35,10 +35,13 @@ pub struct ToolCtx {
     /// interleave their checkpoint history — and retention can truncate one
     /// session's chain without touching another's.
     pub session_id: String,
+    /// Session that owns the host event log. Children write into the parent's
+    /// log so evidence and undo remain reachable after the child exits.
+    pub events_session: String,
     /// Override for the checkpoint chain only: a child session's
     /// snapshots land on its parent's chain, so the parent's `/undo` sees
     /// the child's step boundaries and bash mutations. `None` means the own
-    /// chain. Job isolation, read-guard and journal identity all stay on
+    /// chain. Job isolation, read-guard and events identity all stay on
     /// `session_id` — only the shadow chain is shared.
     pub checkpoint_session: Option<String>,
     /// Files read in this run and the content hash they had at the time,
@@ -67,8 +70,8 @@ pub struct ToolCtx {
     /// call ids. The loop sets it before each request, so a pointer never
     /// claims an edit diff is "above" after that result was cleared.
     pub visible_calls: Option<HashSet<String>>,
-    /// journal of checkpoints created by this session's mutations
-    pub journal: Vec<(String, String)>,
+    /// events of checkpoints created by this session's mutations
+    pub checkpoints: Vec<(String, String)>,
     /// Host limits on the plan, and the model context they are derived from.
     /// The budget used to come from a `context_limit` the model passed in its
     /// own tool arguments.
@@ -85,7 +88,7 @@ pub struct ToolCtx {
     pub shadow_store: crate::config::ShadowStore,
     /// Step this session currently holds. Set on `plan start`,
     /// cleared on `finish`/`block`/`cancel`; the loop mirrors it into the
-    /// journal attribution at dispatch. `None` means idle.
+    /// events attribution at dispatch. `None` means idle.
     pub current_step: Option<String>,
     /// Immutable spawn context for subagent sessions. `None` for
     /// the main agent. Mutating tools refuse to run when the inherited
@@ -97,7 +100,7 @@ pub struct ToolCtx {
     /// the main agent never set it.
     pub subagent_write_paths: Option<Vec<String>>,
     /// Session id of the spawning agent, if any (audit H1). A child starts
-    /// with an empty journal, so its own taint reads clean no matter what
+    /// with an empty events, so its own taint reads clean no matter what
     /// the parent consumed; trust gates must see the parent's external
     /// exposure too. `None` for main agents.
     pub parent_session: Option<String>,
@@ -159,12 +162,13 @@ impl ToolCtx {
             outside_roots: Vec::new(),
             outside_granted: Vec::new(),
             session_id: "shared".into(),
+            events_session: "shared".into(),
             checkpoint_session: None,
             files_read: HashMap::new(),
             read_windows: HashMap::new(),
             read_ledger: ReadLedger::default(),
             visible_calls: None,
-            journal: Vec::new(),
+            checkpoints: Vec::new(),
             plan_limits: crate::config::PlanConfig::default(),
             context_limit: 0,
             cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -223,11 +227,11 @@ impl ToolCtx {
     }
 
     /// External taint that trust gates must honor: this session's own
-    /// journal, OR the spawning parent's when this is a child (audit H1 —
-    /// a fresh child journal reads clean no matter what the parent
+    /// events, OR the spawning parent's when this is a child (audit H1 —
+    /// a fresh child events reads clean no matter what the parent
     /// consumed, and the task text itself may be shaped by it).
     pub fn external_taint(&self) -> bool {
-        crate::agent::trust::taint_level(&self.root, &self.session_id).external
+        crate::agent::trust::taint_level(&self.root, &self.events_session).external
             || self
                 .parent_session
                 .as_deref()
@@ -257,7 +261,9 @@ impl ToolCtx {
 
     /// Name the session whose checkpoint chain this context appends to.
     pub fn in_session(mut self, session_id: impl Into<String>) -> Self {
-        self.session_id = session_id.into();
+        let session_id = session_id.into();
+        self.session_id = session_id.clone();
+        self.events_session = session_id;
         self
     }
 
@@ -266,7 +272,7 @@ impl ToolCtx {
     pub fn checkpoint_chain(&self) -> &str {
         self.checkpoint_session
             .as_deref()
-            .unwrap_or(&self.session_id)
+            .unwrap_or(&self.events_session)
     }
 
     /// Share a cancellation flag across this context and its clones. The
@@ -369,20 +375,12 @@ impl ToolCtx {
     /// write jail: an outside write is an approval, not a refusal. An
     /// unresolvable path is not an escape — the jail itself errors on it
     /// if the call ever runs.
+    #[cfg(test)]
     pub fn write_escapes(&self, p: &str) -> bool {
         match self.resolve_target(p) {
             Ok((_, resolved)) => resolved.strip_prefix(&self.root_canon).is_err(),
             Err(_) => false,
         }
-    }
-
-    /// The same question for a raw shell operand or redirect destination:
-    /// relative targets resolve against the working directory (the root),
-    /// surrounding quotes come off. Null sinks are the caller's filter.
-    pub fn shell_target_escapes(&self, target: &str) -> bool {
-        let t = target.trim();
-        let t = t.trim_matches(|c| c == '"' || c == '\'');
-        !t.is_empty() && self.write_escapes(t)
     }
 
     /// Is `p` outside the root AND outside every approved directory?
@@ -413,17 +411,6 @@ impl ToolCtx {
     /// display spelling (uncanonicalized join) and the canonical
     /// project-relative path the security decisions run on.
     fn resolve_parts(&self, p: &str, mutating: bool) -> Result<(PathBuf, PathBuf), String> {
-        let p_trimmed = p.trim().trim_start_matches("./").trim_start_matches(".\\");
-        let redirected;
-        let p = if !mutating
-            && p_trimmed.eq_ignore_ascii_case("MEMORY.md")
-            && !self.root.join(p_trimmed).exists()
-        {
-            redirected = ".sqwai/memory/MEMORY.md".to_string();
-            redirected.as_str()
-        } else {
-            p
-        };
         let (joined, resolved) = self.resolve_target(p)?;
         let Ok(relative) = resolved.strip_prefix(&self.root_canon) else {
             // the jail is a prompt, not a wall: full access resolves every
@@ -438,9 +425,8 @@ impl ToolCtx {
                 joined.display()
             ));
         };
-        // Plan, journal, memory and graph are reachable only through their own
-        // tools. Enforcing it here is what makes "host-written" and
-        // "append-only" guarantees rather than requests.
+        // Plan and checkpoints are host-owned state. Enforcing it here is what
+        // makes their guarantees rather than requests.
         if let Some(denied) = host_owned_denial(relative, mutating) {
             return Err(denied);
         }
@@ -449,7 +435,7 @@ impl ToolCtx {
         // *uncanonicalized* root, and where the root itself is reached
         // through a symlink (macOS `/var` -> `/private/var`) a canonical
         // path would miss that prefix and leak absolute machine-specific
-        // paths into the journal. The security decision above was already
+        // paths into the event log. The security decision above was already
         // made in canonical space, so the spelling returned here only
         // affects labels, never the verdict.
         Ok((joined, relative.to_path_buf()))
@@ -886,9 +872,9 @@ fn file_hash(path: &Path) -> String {
 }
 
 /// The agent's own state directory. File tools see only `skills/`,
-/// `config.toml` and spilled tool output under `spill/` inside it; plan,
-/// journal, memory and checkpoints are host-owned and reachable only through
-/// their dedicated tools.
+/// `config.toml` and spilled tool output under `spill/` inside it; plan and
+/// checkpoints are host-owned and reachable only through their dedicated
+/// tools.
 const STATE_DIR: &str = ".sqwai";
 
 /// Deny message when `relative` points at host-owned state, `None` otherwise.
@@ -906,12 +892,9 @@ fn host_owned_denial(relative: &Path, mutating: bool) -> Option<String> {
     }
     let allowed = match components.next() {
         Some(Component::Normal(second)) if second == "skills" || second == "config.toml" => true,
-        // `.sqwai/spill/<file>` and `.sqwai/memory/MEMORY.md`: read-only access
-        // is allowed so the model can inspect spilled output or project memory,
-        // while mutations stay blocked so writes must go through `memory_write`.
-        Some(Component::Normal(second))
-            if (second == "spill" || second == "memory") && !mutating =>
-        {
+        // `.sqwai/spill/<file>`: read-only access is allowed so the model can
+        // inspect spilled output, while mutations stay blocked.
+        Some(Component::Normal(second)) if second == "spill" && !mutating => {
             matches!(components.next(), Some(Component::Normal(_)))
         }
         // `.sqwai` itself: listing or writing the directory is not allowed
@@ -921,10 +904,9 @@ fn host_owned_denial(relative: &Path, mutating: bool) -> Option<String> {
         return None;
     }
     Some(format!(
-        "path '{}' is host-owned state: the plan, the journal, memory and checkpoints are \
-         reachable only through their own tools (plan, note, journal, \
-         memory_write). Inside {STATE_DIR}/ the file tools may use skills/, config.toml and \
-         files under spill/ (read only) — nothing else.",
+        "path '{}' is host-owned state: the plan and checkpoints are reachable only through \
+         their own tools (plan). Inside {STATE_DIR}/ the file tools may use skills/, \
+         config.toml and files under spill/ (read only) — nothing else.",
         relative.display()
     ))
 }
@@ -986,7 +968,10 @@ mod outside_jail_tests {
         let ctx = ToolCtx::new(&root);
         // `/c/...` normalizes instead of building the phantom `C:\c\...`
         let (joined, resolved) = ctx.resolve_target("/c/Users/x/a.txt").unwrap();
-        assert!(joined.to_string_lossy().starts_with("C:/Users/x/"), "{joined:?}");
+        assert!(
+            joined.to_string_lossy().starts_with("C:/Users/x/"),
+            "{joined:?}"
+        );
         assert!(resolved.to_string_lossy().contains("Users"), "{resolved:?}");
         // ...including when the target is the project itself
         let root_unix = format!(

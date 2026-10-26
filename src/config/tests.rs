@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn detect_verify_commands_probes_repo_and_memory() {
+fn detect_verify_commands_probes_repo_and_instructions() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     // repo probing: cargo + make (test preferred over test-all) + npm
@@ -19,10 +19,9 @@ fn detect_verify_commands_probes_repo_and_memory() {
         get("test").map(|(_, c, _)| c),
         Some("cargo test".to_string())
     );
-    // MEMORY.md overrides on clash + adds new names
-    std::fs::create_dir_all(root.join(".sqwai/memory")).unwrap();
+    // SQWAI.md overrides on clash + adds new names
     std::fs::write(
-        root.join(".sqwai/memory/MEMORY.md"),
+        root.join("SQWAI.md"),
         "notes\nverify: test = make test-ci\nverify: lint = cargo clippy\n",
     )
     .unwrap();
@@ -30,7 +29,7 @@ fn detect_verify_commands_probes_repo_and_memory() {
     let get = |n: &str| found.iter().find(|(k, _, _)| k == n).cloned();
     assert_eq!(
         get("test"),
-        Some(("test".to_string(), "make test-ci".to_string(), "MEMORY.md"))
+        Some(("test".to_string(), "make test-ci".to_string(), "SQWAI.md"))
     );
     assert_eq!(
         get("lint").map(|(_, c, _)| c),
@@ -989,16 +988,23 @@ fn approval_mode_parses_and_defaults() {
         ("auto", ApprovalMode::Auto),
         ("full", ApprovalMode::Full),
     ] {
-        let cfg: Config = toml::from_str(&format!("[safety]
+        let cfg: Config = toml::from_str(&format!(
+            "[safety]
 approval_mode = \"{text}\"
-"))
-            .unwrap();
+"
+        ))
+        .unwrap();
         assert_eq!(cfg.safety.approval_mode, want, "approval_mode = {text}");
     }
     // unknown value refuses to load rather than silently downgrading
-    assert!(toml::from_str::<Config>("[safety]
+    assert!(
+        toml::from_str::<Config>(
+            "[safety]
 approval_mode = \"yolo\"
-").is_err());
+"
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -1007,6 +1013,9 @@ fn approval_mode_cycle_is_the_escalation_ladder() {
     assert_eq!(ApprovalMode::Auto.cycle_next(), ApprovalMode::Full);
     assert_eq!(ApprovalMode::Full.cycle_next(), ApprovalMode::Ask);
     // the flag accepts the longer spelling humans type
-    assert_eq!(ApprovalMode::from_str("full_access"), Some(ApprovalMode::Full));
+    assert_eq!(
+        ApprovalMode::from_str("full_access"),
+        Some(ApprovalMode::Full)
+    );
     assert_eq!(ApprovalMode::from_str("nope"), None);
 }

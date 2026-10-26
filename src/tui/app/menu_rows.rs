@@ -207,26 +207,6 @@ impl App {
                 ],
             ),
             (
-                "Memory",
-                vec![
-                    (
-                        "load budget ratio",
-                        ScalarSetting::MemoryLoadBudgetRatio.current(&self.cfg),
-                        MenuAction::EditScalar(ScalarSetting::MemoryLoadBudgetRatio),
-                    ),
-                    (
-                        "max tokens",
-                        ScalarSetting::MemoryMaxTokens.current(&self.cfg),
-                        MenuAction::EditScalar(ScalarSetting::MemoryMaxTokens),
-                    ),
-                    (
-                        "max proposals",
-                        ScalarSetting::MemoryMaxProposals.current(&self.cfg),
-                        MenuAction::EditScalar(ScalarSetting::MemoryMaxProposals),
-                    ),
-                ],
-            ),
-            (
                 "Compaction",
                 vec![
                     (
@@ -433,9 +413,7 @@ impl App {
                 MenuAction::None,
             )
         };
-        let log_path_buf = crate::config::data_dir()
-            .map(|d| d.join("debug.log"))
-            .ok();
+        let log_path_buf = crate::config::data_dir().map(|d| d.join("debug.log")).ok();
         let log_size = log_path_buf
             .as_ref()
             .and_then(|p| std::fs::metadata(p).ok())
@@ -551,8 +529,10 @@ impl App {
         self.menu_rows.push(info("continuation", cont_state));
         self.menu_rows.push(info("context", ctx_info));
         self.menu_rows.push(info("undo", undo_info));
-        self.menu_rows
-            .push(info("project root", self.project_root.display().to_string()));
+        self.menu_rows.push(info(
+            "project root",
+            self.project_root.display().to_string(),
+        ));
         self.menu_rows.push(info("data dir", data_dir));
         self.menu_rows.push(info("log file", log_path));
         self.menu_rows.push(info("config", cfg_dir));
@@ -685,7 +665,8 @@ impl App {
                     pc.api_key_env.clone().unwrap_or_default(),
                 ),
                 None => (
-                    name.clone().unwrap_or_else(|| self.provider_draft.name.clone()),
+                    name.clone()
+                        .unwrap_or_else(|| self.provider_draft.name.clone()),
                     self.provider_draft.format.as_str().to_string(),
                     self.provider_draft.base_url.clone(),
                     super::forms::FormField::mask_value(&self.provider_draft.api_key),
@@ -705,11 +686,8 @@ impl App {
                 name_val,
                 MenuAction::OpenProviderField(ProviderField::Name),
             ));
-            self.menu_rows.push(field_row(
-                "format",
-                fmt_val,
-                MenuAction::OpenProviderFormat,
-            ));
+            self.menu_rows
+                .push(field_row("format", fmt_val, MenuAction::OpenProviderFormat));
             self.menu_rows.push(field_row(
                 "base url",
                 url_val,
@@ -919,7 +897,6 @@ impl App {
         let b = session.last_breakdown;
         let mut ranked: Vec<(&str, u64)> = vec![
             ("system", b.map(|b| b.system_tokens).unwrap_or(0)),
-            ("memory", b.map(|b| b.memory_tokens).unwrap_or(0)),
             ("skills", b.map(|b| b.skills_tokens).unwrap_or(0)),
             ("history", b.map(|b| b.history_tokens).unwrap_or(0)),
             ("tools", b.map(|b| b.tool_output_tokens).unwrap_or(0)),
@@ -942,7 +919,11 @@ impl App {
             Line::from(vec![
                 Span::styled(session.model_key.clone(), Theme::FG()),
                 Span::styled(
-                    format!(" · used {} ({:.1}%)", fmt_k(used), session.context_percent()),
+                    format!(
+                        " · used {} ({:.1}%)",
+                        fmt_k(used),
+                        session.context_percent()
+                    ),
                     Theme::dim(),
                 ),
             ]),
@@ -1052,10 +1033,7 @@ impl App {
             let shown: String = all.iter().take(STRIP).collect();
             self.menu_rows.push(row(
                 Line::from(vec![
-                    Span::styled(
-                        format!("{} ", crate::tui::anim::frame_at(set, tick)),
-                        loud,
-                    ),
+                    Span::styled(format!("{} ", crate::tui::anim::frame_at(set, tick)), loud),
                     Span::styled(format!("{:<15}", set.name), Theme::dim()),
                     Span::styled(format!("{shown}{rest}"), Theme::meta()),
                 ]),
@@ -1181,11 +1159,7 @@ impl App {
                 self.menu_rows.push(row(Line::from(spans), action));
             }
             if q.allow_free {
-                let custom_text = self
-                    .ask_custom
-                    .get(q_idx)
-                    .map(|s| s.as_str())
-                    .unwrap_or("");
+                let custom_text = self.ask_custom.get(q_idx).map(|s| s.as_str()).unwrap_or("");
                 let is_custom_focused = self.ask_custom_focus == Some(q_idx);
                 if is_custom_focused {
                     self.menu_rows.push(row(
@@ -1306,10 +1280,7 @@ impl App {
         ));
         self.menu_rows.push(row(Line::default(), MenuAction::None));
         self.menu_rows.push(row(
-            Line::from(vec![Span::styled(
-                "cancel".to_string(),
-                Theme::ERR(),
-            )]),
+            Line::from(vec![Span::styled("cancel".to_string(), Theme::ERR())]),
             MenuAction::Back,
         ));
         self.menu_rows.push(row(
@@ -1359,14 +1330,8 @@ impl App {
                     .description
                     .as_ref()
                     .is_some_and(|d| d.to_lowercase().contains(&q));
-                let trig_hit = skill
-                    .triggers
-                    .iter()
-                    .any(|t| t.to_lowercase().contains(&q));
-                let glob_hit = skill
-                    .globs
-                    .iter()
-                    .any(|g| g.to_lowercase().contains(&q));
+                let trig_hit = skill.triggers.iter().any(|t| t.to_lowercase().contains(&q));
+                let glob_hit = skill.globs.iter().any(|g| g.to_lowercase().contains(&q));
                 let scope_hit = skill.scope.as_str().contains(&q);
                 if !name_hit && !desc_hit && !trig_hit && !glob_hit && !scope_hit {
                     continue;
@@ -1685,7 +1650,13 @@ fn plan_rows(plan: &crate::plan::Plan) -> Vec<MenuRow> {
         let prefix = format!("{marker} {:<2} ", s.id);
         push_wrapped(&mut rows, &prefix, &s.title, style, style);
         if let Some(reason) = &s.reason {
-            push_wrapped(&mut rows, "       reason: ", reason, Theme::dim(), Theme::dim());
+            push_wrapped(
+                &mut rows,
+                "       reason: ",
+                reason,
+                Theme::dim(),
+                Theme::dim(),
+            );
         }
         if let Some(summary) = &s.summary {
             push_wrapped(&mut rows, "       ", summary, Theme::dim(), Theme::dim());

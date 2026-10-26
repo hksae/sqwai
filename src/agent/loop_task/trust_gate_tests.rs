@@ -6,8 +6,8 @@ fn tainted_project(name: &str) -> (std::path::PathBuf, String) {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let session = "trust-sess".to_string();
-    let mut journal = crate::agent::journal::Journal::open(&dir, &session).expect("journal opens");
-    journal
+    let mut events = crate::agent::events::EventLog::open(&dir, &session).expect("events opens");
+    events
         .append(
             "tool_result",
             serde_json::json!({"tool": "webfetch", "ok": true, "taint": "external"}),
@@ -69,16 +69,16 @@ async fn trust_gate_denies_egress_for_subagents_under_taint() {
 }
 
 /// Audit H1: a real spawned child gets a FRESH session — its own
-/// journal has no taint records, so the parent's external exposure was
+/// events has no taint records, so the parent's external exposure was
 /// silently dropped and the trust gate never fired. The parent link
 /// must carry the taint into the child's gate.
 #[tokio::test]
 async fn trust_gate_inherits_parent_taint_for_a_fresh_child_session() {
     let (dir, parent_session) = tainted_project("inherit");
     let child_session = "child-fresh".to_string();
-    // the child's journal exists and is empty of taint, as after a
+    // the child's events exists and is empty of taint, as after a
     // real spawn
-    crate::agent::journal::Journal::open(&dir, &child_session).expect("journal opens");
+    crate::agent::events::EventLog::open(&dir, &child_session).expect("events opens");
     let (call, mut ctx, tx_agent, _rx_ui, _tx_ui, mut rx_agent) =
         bash_call_parts(&dir, &child_session);
     ctx.parent_session = Some(parent_session);
@@ -175,13 +175,13 @@ async fn safe_mutating_bash_on_clean_tree_skips_snapshot_but_stays_revertible() 
     .await;
     assert!(outcome.ok, "{}", outcome.output);
     assert!(dir.join("probe.txt").exists(), "command mutated");
-    // the gate skipped: no pre_bash snapshot journaled…
+    // the gate skipped: no pre_bash snapshot recorded…
     assert!(
-        !ctx.journal
+        !ctx.checkpoints
             .iter()
             .any(|(_, label)| label.starts_with("bash ")),
-        "no snapshot must be journaled for Safe-on-clean: {:?}",
-        ctx.journal
+        "no snapshot must be recorded for Safe-on-clean: {:?}",
+        ctx.checkpoints
     );
     // …but the mutation stays revertible through the head, which is
     // exactly what full /undo diffs against (unscoped fallback)
@@ -248,7 +248,7 @@ async fn trust_gate_prompts_with_reason_and_honors_deny() {
     let (call, mut ctx, tx_agent, mut rx_ui, tx_ui, mut rx_agent) = bash_call_parts(&dir, &session);
     let mut always_allow = Vec::new();
     let mut next_id = 0u64;
-    let mut no_journal: Option<crate::agent::journal::Journal> = None;
+    let mut no_events: Option<crate::agent::events::EventLog> = None;
     let mut no_target: Option<std::path::PathBuf> = None;
     let future = bash_call(
         &call,
@@ -260,7 +260,7 @@ async fn trust_gate_prompts_with_reason_and_honors_deny() {
         &mut next_id,
         0,
         crate::config::ApprovalMode::Auto,
-        &mut no_journal,
+        &mut no_events,
         &mut no_target,
     );
     tokio::pin!(future);
@@ -295,13 +295,13 @@ async fn trust_gate_prompts_with_reason_and_honors_deny() {
 
 /// one dialog per (session, egress kind). After the user answers for
 /// a push, the next push in the same session runs without asking, and the
-/// answer is in the journal — so it survives a resume.
+/// answer is in the event log — so it survives a resume.
 #[tokio::test]
 async fn an_approved_egress_kind_does_not_ask_again() {
     let (dir, session) = tainted_project("ack");
     let (call, mut ctx, tx_agent, mut rx_ui, tx_ui, mut rx_agent) = bash_call_parts(&dir, &session);
-    let mut journal =
-        Some(crate::agent::journal::Journal::open(&dir, &session).expect("journal opens"));
+    let mut events =
+        Some(crate::agent::events::EventLog::open(&dir, &session).expect("events opens"));
     let mut no_target: Option<std::path::PathBuf> = None;
     let mut always_allow = Vec::new();
     let mut next_id = 0u64;
@@ -310,18 +310,18 @@ async fn an_approved_egress_kind_does_not_ask_again() {
     // same parts.
     let asked = {
         let future = bash_call(
-        &call,
-        &mut ctx,
-        &tx_agent,
-        &mut rx_agent,
-        &mut always_allow,
-        &[],
-        &mut next_id,
-        0,
-        crate::config::ApprovalMode::Auto,
-        &mut journal,
-        &mut no_target,
-    );
+            &call,
+            &mut ctx,
+            &tx_agent,
+            &mut rx_agent,
+            &mut always_allow,
+            &[],
+            &mut next_id,
+            0,
+            crate::config::ApprovalMode::Auto,
+            &mut events,
+            &mut no_target,
+        );
         let mut asked = false;
         tokio::pin!(future);
         let _ = loop {
@@ -347,7 +347,7 @@ async fn an_approved_egress_kind_does_not_ask_again() {
     assert_eq!(
         crate::agent::trust::acked_egress(&dir, &session),
         vec!["git push".to_string()],
-        "the answer must be journaled"
+        "the answer must be recorded"
     );
     // second push, same kind, different spelling: no dialog
     let second = crate::providers::ToolCallReq::new(
@@ -357,18 +357,18 @@ async fn an_approved_egress_kind_does_not_ask_again() {
     );
     let asked_again = {
         let future = bash_call(
-        &second,
-        &mut ctx,
-        &tx_agent,
-        &mut rx_agent,
-        &mut always_allow,
-        &[],
-        &mut next_id,
-        0,
-        crate::config::ApprovalMode::Auto,
-        &mut journal,
-        &mut no_target,
-    );
+            &second,
+            &mut ctx,
+            &tx_agent,
+            &mut rx_agent,
+            &mut always_allow,
+            &[],
+            &mut next_id,
+            0,
+            crate::config::ApprovalMode::Auto,
+            &mut events,
+            &mut no_target,
+        );
         let mut asked_again = false;
         tokio::pin!(future);
         let _ = loop {
@@ -458,7 +458,7 @@ async fn ask_mode_prompts_even_for_a_safe_command() {
     let mut ctx = tools::ToolCtx::new(&dir).in_session(session.clone());
     let mut always_allow = Vec::new();
     let mut next_id = 0u64;
-    let mut no_journal: Option<crate::agent::journal::Journal> = None;
+    let mut no_events: Option<crate::agent::events::EventLog> = None;
     let mut no_target: Option<std::path::PathBuf> = None;
     let future = bash_call(
         &call,
@@ -470,7 +470,7 @@ async fn ask_mode_prompts_even_for_a_safe_command() {
         &mut next_id,
         0,
         crate::config::ApprovalMode::Ask,
-        &mut no_journal,
+        &mut no_events,
         &mut no_target,
     );
     // the block scope drops the pinned future (and its borrows) before
@@ -526,7 +526,7 @@ async fn full_mode_runs_the_dangerous_command_without_asking() {
     let mut ctx = tools::ToolCtx::new(&dir).in_session(session);
     let mut always_allow = Vec::new();
     let mut next_id = 0u64;
-    let mut no_journal: Option<crate::agent::journal::Journal> = None;
+    let mut no_events: Option<crate::agent::events::EventLog> = None;
     let outcome = bash_call(
         &call,
         &mut ctx,
@@ -537,15 +537,12 @@ async fn full_mode_runs_the_dangerous_command_without_asking() {
         &mut next_id,
         0,
         crate::config::ApprovalMode::Full,
-        &mut no_journal,
+        &mut no_events,
         &mut None,
     )
     .await;
     assert!(outcome.ok, "full mode runs it: {}", outcome.output);
-    assert!(
-        !dir.join("victim").exists(),
-        "the command really executed"
-    );
+    assert!(!dir.join("victim").exists(), "the command really executed");
     while let Ok(ev) = rx_ui.try_recv() {
         assert!(
             !matches!(ev, AgentEvent::Approval { .. }),
@@ -571,15 +568,14 @@ async fn full_mode_keeps_the_hard_gates() {
         serde_json::json!({"command": "rm -rf .sqwai"}),
     );
     let mut ctx = tools::ToolCtx::new(&dir).in_session(session);
-    let blocked = vec![("no-forever".to_string(), regex::Regex::new("forever").unwrap())];
+    let blocked = vec![(
+        "no-forever".to_string(),
+        regex::Regex::new("forever").unwrap(),
+    )];
     // blocked pattern wins even in full
     let mut next_id = 0u64;
-    let mut no_journal: Option<crate::agent::journal::Journal> = None;
-    let call_hit = ToolCallReq::new(
-        "c0",
-        "bash",
-        serde_json::json!({"command": "echo forever"}),
-    );
+    let mut no_events: Option<crate::agent::events::EventLog> = None;
+    let call_hit = ToolCallReq::new("c0", "bash", serde_json::json!({"command": "echo forever"}));
     let outcome = bash_call(
         &call_hit,
         &mut ctx,
@@ -590,7 +586,7 @@ async fn full_mode_keeps_the_hard_gates() {
         &mut next_id,
         0,
         crate::config::ApprovalMode::Full,
-        &mut no_journal,
+        &mut no_events,
         &mut None,
     )
     .await;
@@ -607,7 +603,7 @@ async fn full_mode_keeps_the_hard_gates() {
         &mut next_id,
         0,
         crate::config::ApprovalMode::Full,
-        &mut no_journal,
+        &mut no_events,
         &mut None,
     )
     .await;
@@ -638,7 +634,7 @@ async fn outside_bash_write_asks_in_auto() {
     let mut ctx = tools::ToolCtx::new(&root).in_session("outside-sess".to_string());
     let mut always_allow = Vec::new();
     let mut next_id = 0u64;
-    let mut no_journal: Option<crate::agent::journal::Journal> = None;
+    let mut no_events: Option<crate::agent::events::EventLog> = None;
     let mut no_target: Option<std::path::PathBuf> = None;
     let future = bash_call(
         &call,
@@ -650,7 +646,7 @@ async fn outside_bash_write_asks_in_auto() {
         &mut next_id,
         0,
         crate::config::ApprovalMode::Auto,
-        &mut no_journal,
+        &mut no_events,
         &mut no_target,
     );
     let asked = {
@@ -718,7 +714,10 @@ async fn outside_bash_write_runs_silently_in_full() {
     assert!(outcome.ok, "full access writes outside: {}", outcome.output);
     assert!(outside.exists());
     while let Ok(ev) = rx_ui.try_recv() {
-        assert!(!matches!(ev, AgentEvent::Approval { .. }), "no dialog in full");
+        assert!(
+            !matches!(ev, AgentEvent::Approval { .. }),
+            "no dialog in full"
+        );
     }
     let _ = std::fs::remove_dir_all(&base);
 }
@@ -743,7 +742,12 @@ async fn outside_file_write_gate_denies_and_permits() {
     let ev_task = tokio::spawn(async move {
         loop {
             match rx_ui.recv().await {
-                Some(AgentEvent::Approval { id, subject, reason, .. }) => {
+                Some(AgentEvent::Approval {
+                    id,
+                    subject,
+                    reason,
+                    ..
+                }) => {
                     assert!(subject.starts_with("write "), "{subject}");
                     assert_eq!(reason, "writes outside the project directory");
                     tx_ui
@@ -774,10 +778,7 @@ async fn outside_file_write_gate_denies_and_permits() {
     .expect("denied");
     assert!(!refused.ok);
     assert!(refused.output.contains("denied by user"));
-    assert!(
-        ctx.outside_roots.is_empty(),
-        "denial opens no directory"
-    );
+    assert!(ctx.outside_roots.is_empty(), "denial opens no directory");
     ev_task.abort();
 
     // full access: no dialog, the call resolves on its own

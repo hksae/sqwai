@@ -1,7 +1,7 @@
 //! Secret screening for everything the host writes down.
 //!
-//! Applied to MEMORY.md, the prompt blocks built from them, and the
-//! free-text fields of journal records. It is the last thing between a command
+//! Applied to events summaries, prompt blocks, and the
+//! free-text fields of event records. It is the last thing between a command
 //! that echoes a token and a file that keeps it forever.
 
 use regex::Regex;
@@ -13,7 +13,7 @@ pub struct Screened {
     pub redacted: bool,
 }
 
-/// The secret shapes, compiled once: `screen` runs on every journal append,
+/// The secret shapes, compiled once: `screen` runs on every events append,
 /// and recompiling eight expressions per call would tax exactly the hot path
 /// the filter sits on.
 fn secret_patterns() -> &'static [Regex] {
@@ -44,7 +44,7 @@ fn opaque_token_pattern() -> &'static Regex {
     TOKEN.get_or_init(|| Regex::new(r##"[^\s`\"']{20,}"##).unwrap())
 }
 
-/// Screen text before it reaches durable memory or summary storage.
+/// Screen text before it reaches an event summary or durable storage.
 pub fn screen(text: &str) -> Screened {
     let mut output = text.to_string();
     let mut redacted = false;
@@ -88,7 +88,7 @@ pub fn screen(text: &str) -> Screened {
 /// | a JWT | 5.45 |
 ///
 /// At 4.0 the plan path, the build path and every https URL were replaced by
-/// `[redacted]` — in the journal, whose whole purpose is to hold those facts.
+/// `[redacted]` — in the event log, whose whole purpose is to hold those facts.
 /// The highest benign value measured is 4.54 and the lowest credential 4.71,
 /// so 4.6 separates them, with the explicit patterns above covering the shapes
 /// every common provider uses. It is a heuristic and the margin is thin: the
@@ -127,7 +127,7 @@ mod tests {
         assert!(!value.text.contains("Bearer"));
     }
 
-    /// The journal's `summary` carries command output, which is full of paths.
+    /// The event log's `summary` carries command output, which is full of paths.
     /// A path is not a secret and must survive screening, or the record stops
     /// being able to answer "what did you do?".
     #[test]
@@ -158,8 +158,7 @@ mod tests {
         let samples = [
             format!(
                 "{}{}",
-                "export ANTHROPIC_API_KEY=sk-ant-api03-",
-                "abcdefghijklmnopqrstuvwxyz012345"
+                "export ANTHROPIC_API_KEY=sk-ant-api03-", "abcdefghijklmnopqrstuvwxyz012345"
             ),
             "https://user:hunter2hunter2@internal.example.com/repo.git".to_string(),
             format!("{}{}", "ghp_", "abcdefghijklmnopqrstuvwxyz0123456789"),

@@ -486,9 +486,9 @@ fn form_label_column_fits_long_setting_names() {
     // short-label form keeps the legacy 16-column layout
     app.open_menu(Menu::EditProvider { name: None });
     assert_eq!(app.form_label_w(), 16);
-    // long scalar labels widen the column so the value never overlaps
-    app.open_menu(Menu::EditScalar(ScalarSetting::MemoryLoadBudgetRatio));
-    assert_eq!(app.form_label_w(), 21);
+    // scalar labels fit the same column; the value never overlaps
+    app.open_menu(Menu::EditScalar(ScalarSetting::CompactionThreshold));
+    assert_eq!(app.form_label_w(), 16);
 }
 
 #[test]
@@ -540,7 +540,11 @@ fn plan_subcommand_popup_filters_and_inserts() {
     app.popup_move(1);
     assert!(app.popup_accepted().is_some());
     app.apply_subcommand_insert("/plan", "delete");
-    assert_eq!(app.popup_accepted(), None, "subcommand insert clears focus so next Enter submits");
+    assert_eq!(
+        app.popup_accepted(),
+        None,
+        "subcommand insert clears focus so next Enter submits"
+    );
 }
 
 #[test]
@@ -1482,7 +1486,7 @@ fn undo_reopens_only_done_steps_with_reverted_recorded_evidence() {
         session: "session".into(),
         seq: 11,
     }];
-    let record = |seq: u64, step: &str, path: &str| crate::agent::journal::Record {
+    let record = |seq: u64, step: &str, path: &str| crate::agent::events::Record {
         seq,
         ts: "now".into(),
         session: "session".into(),
@@ -1527,7 +1531,7 @@ fn undo_reopens_step_on_any_partial_revert() {
             seq: 11,
         },
     ];
-    let record = |seq: u64, path: &str| crate::agent::journal::Record {
+    let record = |seq: u64, path: &str| crate::agent::events::Record {
         seq,
         ts: "now".into(),
         session: "session".into(),
@@ -1567,7 +1571,7 @@ fn undo_reopened_step_ids_matches_across_path_separators() {
         session: "session".into(),
         seq: 10,
     }];
-    let record = crate::agent::journal::Record {
+    let record = crate::agent::events::Record {
         seq: 10,
         ts: "now".into(),
         session: "session".into(),
@@ -1578,7 +1582,7 @@ fn undo_reopened_step_ids_matches_across_path_separators() {
         kind: "file_diff".into(),
         fields: serde_json::from_value(serde_json::json!({"path": "src\\changed.rs"})).unwrap(),
     };
-    // Git provides forward slashes, journal had backslashes
+    // Git provides forward slashes, events had backslashes
     let reopened = reopened_step_ids(&active, &[record], "session", &["src/changed.rs".into()]);
     assert_eq!(reopened, vec!["1"]);
 }
@@ -1594,7 +1598,10 @@ fn edit_model_is_a_four_row_surface_with_effort_on_enter() {
         provider: "p".into(),
         key: Some("m".into()),
     });
-    assert!(!app.is_form_menu(), "EditModel is a surface list, not a modal form");
+    assert!(
+        !app.is_form_menu(),
+        "EditModel is a surface list, not a modal form"
+    );
     assert_eq!(app.menu_rows.len(), 4);
     for (i, (label, val)) in [
         ("key", "m"),
@@ -1761,7 +1768,10 @@ fn list_surface_scales_to_half_terminal_with_eight_minimum_and_stays_compact_for
     let short = Rect::new(0, 0, 100, 24);
     let mut sbuf = Buffer::empty(short);
     app.render_into(&mut sbuf, short);
-    assert_eq!(app.surf_rows, 14, "short terminal keeps 8-item minimum window");
+    assert_eq!(
+        app.surf_rows, 14,
+        "short terminal keeps 8-item minimum window"
+    );
 
     // 2. Tall terminal (height 44) with only 9 items: window can fit up to 16,
     // but since there are only 9 items (no overflow), the surface stays compact
@@ -1827,12 +1837,13 @@ fn pinned_skills_are_session_scoped_and_reload_by_name() {
 fn recent_paths_feed_skill_glob_hints() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.session.messages.push(
-        crate::providers::Message::new(crate::providers::Role::Assistant, "")
-            .with_tool_calls(vec![crate::providers::ToolCallReq::new(
+        crate::providers::Message::new(crate::providers::Role::Assistant, "").with_tool_calls(
+            vec![crate::providers::ToolCallReq::new(
                 "c1",
                 "read",
                 serde_json::json!({"file_path": "src\\tui\\app\\mod.rs"}),
-            )]),
+            )],
+        ),
     );
     assert_eq!(
         app.recent_touched_paths(),
@@ -1864,10 +1875,7 @@ fn skills_menu_toggles_views_and_completes_level2() {
     // 1b. Typing more letters keeps the popup cheap and filtered: the catalog
     // is cached, so the list is rebuilt from memory on every keystroke.
     app.input = App::fresh_input("/skill tui".into());
-    assert_eq!(
-        app.popup_items(),
-        vec!["/skill tui-rules".to_string()]
-    );
+    assert_eq!(app.popup_items(), vec!["/skill tui-rules".to_string()]);
 
     // 1c. The catalog is cached, not re-scanned: removing the skill from disk
     // does not change the popup, so a keystroke never touches the filesystem.
@@ -1894,7 +1902,10 @@ fn skills_menu_toggles_views_and_completes_level2() {
     let stable_before = app.stable_parts.clone();
     app.run_action(MenuAction::ToggleSkill("tui-rules".into()));
     assert_eq!(app.active_skills.len(), 1);
-    assert_eq!(app.stable_parts, stable_before, "pinning a skill must not invalidate cached stable_parts");
+    assert_eq!(
+        app.stable_parts, stable_before,
+        "pinning a skill must not invalidate cached stable_parts"
+    );
 
     // 4. `ViewSkill` opens `Menu::SkillView` and renders the skill markdown
     app.run_action(MenuAction::ViewSkill("tui-rules".into()));
@@ -1910,5 +1921,3 @@ fn skills_menu_toggles_views_and_completes_level2() {
     app.run_action(MenuAction::ClearPinnedSkills);
     assert!(app.active_skills.is_empty());
 }
-
-

@@ -4,7 +4,7 @@
 //! receipts, the `verify` op) was retired 2026-10-06: the host observes and
 //! records, it no longer certifies or blocks. What survives are the advisory
 //! lines attached to a successful `finish` — all of them facts from the
-//! journal, none of them gates — and the rejection envelope shared by the
+//! events, none of them gates — and the rejection envelope shared by the
 //! plan dispatcher.
 
 use super::Outcome;
@@ -13,7 +13,7 @@ use crate::plan;
 use serde_json::json;
 
 /// One-line blast radius on `finish`: the files this step actually changed,
-/// from the journal's plan-visible `file_diff` chain (all sessions — subagent
+/// from the event log's plan-visible `file_diff` chain (all sessions — subagent
 /// writes count). Shell baselines and zero-change records are not plan
 /// evidence. Silent when the step wrote nothing (research steps).
 /// Informational, never a refusal: scope made visible.
@@ -26,12 +26,9 @@ pub(crate) fn with_blast_radius(
     let Some(step) = finished_step else {
         return message;
     };
-    let paths = crate::agent::journal::Journal::step_changed_paths(
-        &ctx.root,
-        Some(&active.id),
-        step,
-    )
-    .unwrap_or_default();
+    let paths =
+        crate::agent::events::EventLog::step_changed_paths(&ctx.root, Some(&active.id), step)
+            .unwrap_or_default();
     if paths.is_empty() {
         return message;
     }
@@ -52,14 +49,14 @@ pub(crate) fn with_blast_radius(
 }
 
 /// One advisory line on a tree-reading call (`git_status`, `git_diff`): which
-/// of the dirty paths this session's journal has no write of. Without it a
+/// of the dirty paths this session's events has no write of. Without it a
 /// model that finds a modified file assumes it modified the file — measured in
 /// the first live session, where another agent's uncommitted edits set off a
-/// check-commit-close ritual over work the model never took on. The journal
+/// check-commit-close ritual over work the model never took on. The events
 /// knows who wrote what, so saying so is showing, not gating: nothing here
 /// refuses, and the wording names the ways a path can be dirty without a
 /// record (shell writes leave no `file_diff`, humans and sibling sessions
-/// write outside this journal).
+/// write outside this events).
 pub(crate) fn with_authorship(ctx: &ToolCtx, mut outcome: Outcome) -> Outcome {
     if !outcome.ok {
         return outcome;
@@ -69,7 +66,7 @@ pub(crate) fn with_authorship(ctx: &ToolCtx, mut outcome: Outcome) -> Outcome {
         return outcome;
     }
     let written: Vec<String> =
-        crate::agent::journal::Journal::records_for(&ctx.root, &ctx.session_id)
+        crate::agent::events::EventLog::records_for(&ctx.root, &ctx.events_session)
             .unwrap_or_default()
             .iter()
             .filter(|record| record.kind == "file_diff")
@@ -97,7 +94,7 @@ pub(crate) fn with_authorship(ctx: &ToolCtx, mut outcome: Outcome) -> Outcome {
         )
     };
     outcome.output.push_str(&format!(
-        "\nauthorship: this session's journal records no write of {list} — they predate it, \
+        "\nauthorship: this session's event records no write of {list} — they predate it, \
          came from a human or another session, or were written through bash (which records no \
          diff). Not yours to commit unless you know where they came from."
     ));

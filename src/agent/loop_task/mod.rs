@@ -25,7 +25,6 @@ use loop_compact::{
     CompactionPrefix, compact_history, effort_ignored_reason, plan_hint_for_summary,
     record_compaction, turn_shows_no_reasoning,
 };
-pub(crate) use loop_compact::{capture_nudge, has_restriction_marker};
 use loop_subagent::{
     SUBAGENT_TIMEOUT_SECS, adopt_in_progress_step, run_subagent, run_subagent_batch,
 };
@@ -69,7 +68,7 @@ pub enum ApprovalDecision {
 }
 
 impl ApprovalDecision {
-    /// Journal spelling of the answer.
+    /// EventLog spelling of the answer.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::RunOnce => "run_once",
@@ -110,7 +109,7 @@ pub struct AgentOutcome {
     /// checklist derived from the durable project plan
     pub plan_todos: Vec<String>,
     /// (sha, label) checkpoints created by this run's mutations
-    pub journal: Vec<(String, String)>,
+    pub checkpoints: Vec<(String, String)>,
     /// approval grants earned during this run, so "always allow this
     /// session" survives the turn that earned it
     pub approval_grants: SessionGrants,
@@ -215,6 +214,7 @@ pub enum AgentEvent {
         grant: String,
     },
     /// a shadow git or layer-1 checkpoint was taken before a mutation
+    #[allow(dead_code)]
     Checkpoint {
         sha: String,
         label: String,
@@ -287,7 +287,7 @@ impl AgentHandle {
 
     /// Ask the tool currently running to stop cooperatively. The call still
     /// gets a normal `tool_result` (`ok:false`, cancelled) recorded in the
-    /// journal and the transcript, but `run_agent` then stops requesting
+    /// events and the transcript, but `run_agent` then stops requesting
     /// further model turns rather than letting the model react and try
     /// something else — Esc is the user saying "stop", not a hint for the
     /// model to keep going on its own.
@@ -333,7 +333,7 @@ pub struct AgentInput {
     pub messages: Vec<Message>,
     /// project root where tool paths are jailed
     pub root: PathBuf,
-    /// session id used for the host-owned journal file
+    /// session id used for the host-owned events file
     pub session_id: String,
     /// hard-blocked command patterns from [safety].blocked_patterns
     pub blocked_patterns: Vec<String>,
@@ -385,8 +385,6 @@ pub struct AgentInput {
     pub compact_only: bool,
     /// Optional `/compact <focus>` tail, folded into the summarizer prompt.
     pub compact_focus: String,
-    /// memory proposal limits copied from configuration
-    pub memory: crate::config::MemoryConfig,
     /// `[web].allow_hosts`: the user's opt-in loopback targets for webfetch.
     /// Empty means the SSRF gate refuses every local host, as before.
     pub web_allow_hosts: Vec<String>,
@@ -400,12 +398,12 @@ pub struct AgentInput {
     /// children, but children cannot recursively create more children.
     pub subagent_depth: u8,
     /// Immutable step context inherited from the spawning session.
-    /// `None` for main agents. The child stamps it on its journal records
+    /// `None` for main agents. The child stamps it on its event records
     /// and refuses mutations once the step moves to a newer epoch.
     pub parent_step: Option<plan::StepContext>,
     /// Session id of the spawning agent, if any. The child's shadow
     /// snapshots land on this chain so the parent's `/undo` sees them
-    ///; everything else (journal, jobs, read-guard) stays on the
+    ///; everything else (events, jobs, read-guard) stays on the
     /// child's own session.
     pub parent_session: Option<String>,
     /// Optional fallback models to switch to if primary model fails with retry-exhausted network/5xx.
@@ -458,7 +456,7 @@ enum RepeatVerdict {
 }
 
 /// Repeat handling for any tool outcome. Compares full outputs, not
-/// journal summaries (truncated to 200 chars), so same-headed but
+/// events summaries (truncated to 200 chars), so same-headed but
 /// different-tailed outputs never match.
 ///
 /// Two earlier versions let the loop through. The guard covered `bash` only,
@@ -560,14 +558,15 @@ fn strip_host_repeat_marks(output: &str) -> &str {
     }
 }
 
-/// One journal record per snapshot commit, named for what actually took it.
+/// One event record per snapshot commit, named for what actually took it.
 ///
 /// Every entry here is a shadow-git snapshot (`snapshot_session` for mutations,
 /// `snapshot_boundary` for step edges), so the layer is stated once and the
 /// reason carries the difference. Step tags arrive through the same vector as
 /// mutations because `plan` snapshots its own boundaries — reading the label
-/// is how the two stop being journaled twice, once as a step edge and once as
+/// is how the two stop being recorded twice, once as a step edge and once as
 /// a phantom "post_mutation".
+#[cfg(test)]
 fn checkpoint_fields(sha: &str, label: &str) -> serde_json::Value {
     if let Some(step) = label.strip_prefix("step_") {
         for (suffix, reason) in [("_start", "step_start"), ("_finish", "step_finish")] {
@@ -731,9 +730,9 @@ pub(crate) async fn execute_parallel_read_only_call(
 
 /// Sessions this process already opened an agent run for. `run_agent` is
 /// spawned per turn, but `session_start` plus the resume record describe a
-/// run's beginning: writing them every turn journaled a phantom "Session
+/// run's beginning: writing them every turn recorded a phantom "Session
 /// resumed" while any step was merely open — and the model, reading it in
-/// the tail and via `journal`, concluded context is restored constantly and
+/// the tail and via `events`, concluded context is restored constantly and
 /// re-verified the plan before each step. A fresh process (restart/crash)
 /// starts empty, so genuine restores still record.
 static AGENT_RUNS_STARTED: std::sync::OnceLock<
@@ -784,7 +783,6 @@ async fn run_agent(
         mut summary,
         compact_only,
         compact_focus,
-        memory,
         compaction,
         plan_limits,
         mcp,
@@ -795,6 +793,12 @@ async fn run_agent(
         parent_session,
         mut fallback_chain,
     } = input;
+    let events_session = parent_session.clone().unwrap_or_else(|| session_id.clone());
+    let events_agent = if parent_session.is_some() {
+        session_id.clone()
+    } else {
+        "main".to_string()
+    };
     let mut current_model_key = model_key;
 
     // Compile the hard-block patterns once per run. The gate used to call
@@ -876,12 +880,12 @@ async fn run_agent(
     // only thing that made the compaction visible to the next session, and the
     // writer never produced a line of prose.
     if compact_only {
-        let mut compaction_journal = if !read_only {
-            crate::agent::journal::Journal::open(&root, &session_id).ok()
+        let mut compaction_events = if !read_only {
+            crate::agent::events::EventLog::open(&root, &events_session).ok()
         } else {
             None
         };
-        if let Some(writer) = compaction_journal.as_mut() {
+        if let Some(writer) = compaction_events.as_mut() {
             writer.set_attribution(
                 None,
                 plan::open_active_for_session(&root, Some(&session_id))
@@ -911,7 +915,7 @@ async fn run_agent(
         )
         .await;
         if let Some((before, after, summarized)) = outcome.as_ref()
-            && let Some(writer) = compaction_journal.as_mut()
+            && let Some(writer) = compaction_events.as_mut()
         {
             let _ = writer.append(
                 "compaction",
@@ -921,7 +925,7 @@ async fn run_agent(
                     "after": after,
                     "dropped_msgs": message_count_before.saturating_sub(messages.len()),
                     "kept_msgs": messages.len(),
-                    "anchor_tokens": context::anchor(&root, &session_id).len().div_ceil(4),
+                    "anchor_tokens": context::anchor(&root, &events_session).len().div_ceil(4),
                     "summarized": summarized,
                     "summary": summary.as_deref().unwrap_or(""),
                 }),
@@ -950,7 +954,7 @@ async fn run_agent(
                 summary,
                 todos: Vec::new(),
                 plan_todos: Vec::new(),
-                journal: Vec::new(),
+                checkpoints: Vec::new(),
                 // compaction runs no tool calls, so the grants and read
                 // ledger pass through exactly as they arrived
                 approval_grants,
@@ -975,21 +979,20 @@ async fn run_agent(
     ctx.outside_granted = approval_grants.dirs.clone();
     ctx.tools = tool_caps.clone();
     ctx.limits = limits.clone();
-    ctx.activated_skills
-        .extend(active_skills.iter().cloned());
+    ctx.activated_skills.extend(active_skills.iter().cloned());
     ctx.read_ledger = read_ledger;
     crate::agent::tools::web::router::set_max_body_bytes(tool_caps.web.fetch_bytes.max(1024));
     // slow baseline capture defers to the background worker on interactive
     // turns; everywhere else the tool call captures synchronously
     ctx.background_baselines = background_baselines;
     // A child's shadow snapshots belong on the parent chain, so the
-    // parent's `/undo` sees step boundaries and bash mutations; the journal,
+    // parent's `/undo` sees step boundaries and bash mutations; the event log,
     // job isolation and read-guard stay on the child's own session.
     ctx.checkpoint_session = parent_session.clone();
     // Subagents inherit their spawn context: it stamps their
-    // journal records and gates their mutations against reopen races.
+    // event records and gates their mutations against reopen races.
     ctx.subagent_step = parent_step.clone();
-    // ...and their parent's trust state: a fresh child journal reads
+    // ...and their parent's trust state: a fresh child events reads
     // clean, and the task text itself may be shaped by what the parent
     // consumed (audit H1).
     ctx.parent_session = parent_session.clone();
@@ -1002,6 +1005,7 @@ async fn run_agent(
     // ...and their shadow snapshots land on the parent chain, so the
     // parent's `/undo` sees them (ToolCtx::checkpoint_session).
     ctx.checkpoint_session = parent_session.clone();
+    ctx.events_session = events_session.clone();
     // The session's current step. Adopt whatever the plan holds in
     // progress — after a crash that is the interrupted step — and
     // keep it in lockstep with plan outcomes below. `ctx.current_step` is
@@ -1010,16 +1014,16 @@ async fn run_agent(
     let mut edited_since_green_bash = false;
     let mut consecutive_edit_bash_failures = 0usize;
     if enable_tools && !read_only {
-        // Heal a crash between a journal intent and its plan store before anything — including this session's writer — reads the
+        // Heal a crash between an event log intent and its plan store before anything — including this session's writer — reads the
         // plan or the tail counter. No-op on a clean tree.
         let _ = plan::replay(&root);
     }
-    let mut journal = if enable_tools && !read_only {
-        crate::agent::journal::Journal::open(&root, &session_id).ok()
+    let mut events = if enable_tools && !read_only {
+        crate::agent::events::EventLog::open(&root, &events_session).ok()
     } else {
         None
     };
-    if let Some(writer) = journal.as_mut() {
+    if let Some(writer) = events.as_mut() {
         if let Some(inherited) = parent_step.as_ref() {
             // Stamp the inherited epoch on every record this writer produces
             // so post-reopen validation can tell stale work apart.
@@ -1029,11 +1033,11 @@ async fn run_agent(
             .ok()
             .flatten()
             .map(|p| p.id);
-        writer.set_attribution(None, plan_id, "main");
+        writer.set_attribution(None, plan_id, &events_agent);
         // once per process+session: run_agent is spawned per turn, so an
-        // unguarded write here journaled session_start + resume every turn
+        // unguarded write here recorded session_start + resume every turn
         if mark_agent_run_started(&session_id) {
-            let resumed_from = context::resume_notice(&root, &session_id).map(|_| "journal");
+            let resumed_from = context::resume_notice(&root, &events_session).map(|_| "events");
             let _ = writer.session_start(
                 &model_id,
                 if plan_mode { "plan" } else { "act" },
@@ -1042,12 +1046,12 @@ async fn run_agent(
                 "unknown",
                 resumed_from,
             );
-            if let Some(notice) = context::resume_notice(&root, &session_id) {
+            if let Some(notice) = context::resume_notice(&root, &events_session) {
                 let _ = writer.append("resume", serde_json::json!({"notice": notice}));
             }
         }
         if let Some(user_message) = messages.iter().rev().find(|m| m.role == Role::User) {
-            // per-turn attribution: the journal once credited this session
+            // per-turn attribution: the event log once credited this session
             // to a model it was not running on, because session_start names
             // only the first run's model. The turn record names the one
             // that actually answers, plus the approval axis it ran under.
@@ -1077,9 +1081,8 @@ async fn run_agent(
     // in `AgentOutcome`.
     let mut always_allow: Vec<loop_ask::Grant> = approval_grants.bash;
     let mut tool_grants: Vec<String> = approval_grants.tools;
-    let mut memory_writes_this_turn: u8;
     // present-tense plan nudge, at most one per model request
-    let mut plan_nudged = false;
+    let mut plan_nudged;
     // "no plan at all" nudge, once per run: one reminder per user submit
     let mut no_plan_nudged = false;
     let mut next_id: u64 = 0;
@@ -1112,9 +1115,11 @@ async fn run_agent(
 
     let build_turn_system = |base: &[SystemPart], root: &std::path::Path, session_id: &str| {
         let mut ts = base.to_vec();
-        if let Ok(Some(nudge)) =
-            crate::agent::journal::Journal::nudge(root, Some(session_id), plan_limits.nudge_after)
-        {
+        if let Ok(Some(nudge)) = crate::agent::events::EventLog::nudge(
+            root,
+            Some(&events_session),
+            plan_limits.nudge_after,
+        ) {
             ts.push(crate::providers::SystemPart::volatile(nudge));
         }
         if let Some(plan) = crate::prompts::plan_block(root, Some(session_id)) {
@@ -1142,9 +1147,6 @@ async fn run_agent(
                 })
                 .await;
         }
-        // The write limit applies to one model request/turn, not the whole
-        // session. A new request gets a fresh allowance.
-        memory_writes_this_turn = 0;
         // the plan nudge rides at most one mutating result per model
         // request: every result carrying it waters the next one down
         plan_nudged = false;
@@ -1172,7 +1174,7 @@ async fn run_agent(
         .await
         {
             record_compaction(
-                &mut journal,
+                &mut events,
                 before,
                 after,
                 msgs_before,
@@ -1184,7 +1186,7 @@ async fn run_agent(
             // owns has changed, so the provider's copy of it is no longer the
             // context this turn is about.
             previous_response_id = None;
-            refresh_anchor_in_system(&mut system, &root, &session_id);
+            refresh_anchor_in_system(&mut system, &root, &events_session);
             turn_system = build_turn_system(&system, &root, &session_id);
             let _ = tx
                 .send(AgentEvent::Compaction {
@@ -1277,7 +1279,7 @@ async fn run_agent(
                 {
                     effort_ignored_reported = true;
                     effort_ignored_observed = !turn.effort_rejected;
-                    if let Some(writer) = journal.as_mut() {
+                    if let Some(writer) = events.as_mut() {
                         let _ = writer.append(
                             "effort_ignored",
                             serde_json::json!({
@@ -1308,7 +1310,7 @@ async fn run_agent(
                     }
                 }
                 if turn.retries > 0
-                    && let Some(writer) = journal.as_mut()
+                    && let Some(writer) = events.as_mut()
                 {
                     // The turn only succeeded because the host waited and
                     // asked again; "what happened?" should be able to say so.
@@ -1325,7 +1327,7 @@ async fn run_agent(
             }
             Err(failure) => {
                 use crate::providers::ErrorClass;
-                if let Some(writer) = journal.as_mut() {
+                if let Some(writer) = events.as_mut() {
                     let _ = writer.append(
                         "provider_error",
                         serde_json::json!({
@@ -1341,7 +1343,7 @@ async fn run_agent(
                 if failure.continuation_rejected && continuation_usable {
                     continuation_usable = false;
                     previous_response_id = None;
-                    if let Some(writer) = journal.as_mut() {
+                    if let Some(writer) = events.as_mut() {
                         let _ = writer.append(
                             "provider_error",
                             serde_json::json!({
@@ -1380,7 +1382,7 @@ async fn run_agent(
                     .await
                     {
                         record_compaction(
-                            &mut journal,
+                            &mut events,
                             before,
                             after,
                             overflow_msgs_before,
@@ -1392,7 +1394,7 @@ async fn run_agent(
                         // provider holds any more, so the reference cannot be
                         // reused for the retry either.
                         previous_response_id = None;
-                        refresh_anchor_in_system(&mut system, &root, &session_id);
+                        refresh_anchor_in_system(&mut system, &root, &events_session);
                         turn_system = build_turn_system(&system, &root, &session_id);
                         let _ = tx
                             .send(AgentEvent::Compaction {
@@ -1424,7 +1426,7 @@ async fn run_agent(
                     ) || failure.retries > 0);
                 if can_fallback && !fallback_chain.is_empty() {
                     let next = fallback_chain.remove(0);
-                    if let Some(writer) = journal.as_mut() {
+                    if let Some(writer) = events.as_mut() {
                         let _ = writer.append(
                             "provider_error",
                             serde_json::json!({
@@ -1524,7 +1526,7 @@ async fn run_agent(
         // A turn that only delegates to subagents fans the calls out
         // concurrently (each awaits its children inside run_subagent);
         // every other batch keeps the sequential loop below. Pre/post
-        // bookkeeping is identical in both shapes: rows, journal and
+        // bookkeeping is identical in both shapes: rows, events and
         // messages stay in call order, only the waits overlap.
         let pure_subagents = subagent_depth == 0
             && !turn.calls.is_empty()
@@ -1552,7 +1554,7 @@ async fn run_agent(
                     &session_id,
                     &root,
                     &ctx.cancel,
-                    &mut journal,
+                    &mut events,
                     &tx,
                     ctx.current_step.clone(),
                     &provider,
@@ -1576,7 +1578,6 @@ async fn run_agent(
                     read_only,
                     shadow_store,
                     &mut messages,
-                    memory.clone(),
                     compaction.clone(),
                     plan_limits,
                     fallback_chain.clone(),
@@ -1657,7 +1658,7 @@ async fn run_agent(
                                 &tx,
                                 &mut ctl,
                                 &mut next_id,
-                                &mut journal,
+                                &mut events,
                             )
                             .await;
                             match decision {
@@ -1745,13 +1746,12 @@ async fn run_agent(
                 // but the reset must not swallow an Esc that landed between
                 // calls (#192): swap reports whether it was set, and if so this
                 // call is recorded as cancelled without running. Downstream
-                // (ToolNotice, journal, the interrupted path) treats it exactly
+                // (ToolNotice, events, the interrupted path) treats it exactly
                 // like a mid-tool cancel.
                 let pre_cancelled = ctx.cancel.swap(false, std::sync::atomic::Ordering::Relaxed);
-                let journal_mark = ctx.journal.len();
                 let tool_started = Instant::now();
                 let mut precomputed_duration_ms: Option<u128> = None;
-                if let Some(writer) = journal.as_mut() {
+                if let Some(writer) = events.as_mut() {
                     let active = plan::open_active_for_session(&root, Some(&session_id))
                         .ok()
                         .flatten();
@@ -1770,14 +1770,14 @@ async fn run_agent(
                             })
                         })
                     };
-                    writer.set_attribution(step, plan_id, "main");
+                    writer.set_attribution(step, plan_id, &events_agent);
                     let _ = writer.append(
                         "tool_call",
                         serde_json::json!({
                             "tool": call.name,
                             "call_id": call.id,
                             "args_digest": tools::call_summary(&call.name, &call.args),
-                            "args": tools::call_args_for_journal(&call.args),
+                            "args": tools::call_args_for_event(&call.args),
                             "path": tools::call_path(&call.name, &call.args),
                         }),
                     );
@@ -1833,7 +1833,7 @@ async fn run_agent(
                         &mut next_id,
                         approval_mode,
                         &mut tool_grants,
-                        &mut journal,
+                        &mut events,
                     )
                     .await
                     {
@@ -1862,7 +1862,7 @@ async fn run_agent(
                                 &mut next_id,
                                 subagent_depth,
                                 approval_mode,
-                                &mut journal,
+                                &mut events,
                                 &mut None,
                             )
                             .await
@@ -1908,7 +1908,6 @@ async fn run_agent(
                                 skills.clone(),
                                 read_only,
                                 shadow_store,
-                                memory.clone(),
                                 compaction.clone(),
                                 plan_limits,
                                 fallback_chain.clone(),
@@ -1932,54 +1931,6 @@ async fn run_agent(
                             outcome
                         }
                         "subagent" => tools::Outcome::err("nested subagents are not allowed"),
-                        "memory_write" if subagent_depth > 0 => tools::Outcome::err(
-                            "subagents cannot write durable memories; memories belong to the primary session",
-                        ),
-                        "memory_write" => {
-                            memory_writes_this_turn = memory_writes_this_turn.saturating_add(1);
-                            if memory_writes_this_turn > memory.max_writes_per_turn {
-                                tools::Outcome::err("memory write limit reached for this turn")
-                            } else {
-                                let text = call.args["text"].as_str().unwrap_or_default().trim();
-                                let replaces = call.args["replaces"].as_str();
-                                match crate::agent::memory::Scope::parse(
-                                    call.args["scope"].as_str().unwrap_or("project"),
-                                )
-                                .and_then(|scope| {
-                                    crate::agent::memory::apply_proposal_with_stats(
-                                        &root,
-                                        scope,
-                                        call.args["section"].as_str().unwrap_or("Project"),
-                                        text,
-                                        replaces,
-                                        &session_id,
-                                        memory.max_tokens,
-                                    )
-                                    .map(|res| (scope, res))
-                                    .map_err(|error| error.to_string())
-                                }) {
-                                    Ok((scope, res)) => {
-                                        if let Some(writer) = journal.as_mut() {
-                                            let _ = writer.append(
-                                                "memory",
-                                                serde_json::json!({
-                                                    "scope": scope.label(),
-                                                    "section": res.section,
-                                                    "op": res.op,
-                                                    "text": if text.is_empty() {
-                                                        replaces.unwrap_or_default()
-                                                    } else {
-                                                        text
-                                                    },
-                                                }),
-                                            );
-                                        }
-                                        tools::Outcome::ok(res.summary())
-                                    }
-                                    Err(error) => tools::Outcome::err(error),
-                                }
-                            }
-                        }
                         "recall_result" => crate::agent::tool_output::recall_args_with_limit(
                             &messages,
                             &call.args,
@@ -2029,11 +1980,10 @@ async fn run_agent(
                         }
                         other => {
                             if other == "read" {
-                                let cleared =
-                                    crate::agent::tool_output::cleared_indices_with_limit(
-                                        &messages,
-                                        context_limit,
-                                    );
+                                let cleared = crate::agent::tool_output::cleared_indices_with_limit(
+                                    &messages,
+                                    context_limit,
+                                );
                                 let visible_ids: std::collections::HashSet<String> = messages
                                     .iter()
                                     .enumerate()
@@ -2067,7 +2017,7 @@ async fn run_agent(
                         "post_bash cancelled",
                     )
                 {
-                    ctx.journal.push((sha, "bash (cancelled)".to_string()));
+                    ctx.checkpoints.push((sha, "bash (cancelled)".to_string()));
                 }
 
                 let _ = tx
@@ -2080,34 +2030,9 @@ async fn run_agent(
                     })
                     .await;
 
-                if let Some(writer) = journal.as_mut() {
-                    if call.name == "note" && outcome.ok {
-                        let note_kind = call
-                            .args
-                            .get("kind")
-                            .and_then(|v| v.as_str())
-                            .map(str::trim)
-                            .filter(|s| !s.is_empty())
-                            .unwrap_or("decision");
-                        let note_text = call
-                            .args
-                            .get("note")
-                            .or_else(|| call.args.get("text"))
-                            .or_else(|| call.args.get("message"))
-                            .and_then(|v| v.as_str())
-                            .unwrap_or_default()
-                            .trim();
-                        let _ = writer.append(
-                            "note",
-                            serde_json::json!({
-                                "by": "model",
-                                "note": note_kind,
-                                "text": note_text,
-                            }),
-                        );
-                    }
-                    let duration_ms =
-                        precomputed_duration_ms.unwrap_or_else(|| tool_started.elapsed().as_millis());
+                if let Some(writer) = events.as_mut() {
+                    let duration_ms = precomputed_duration_ms
+                        .unwrap_or_else(|| tool_started.elapsed().as_millis());
                     let result_seq = if call.name == "plan" {
                         writer
                         .append(
@@ -2149,7 +2074,7 @@ async fn run_agent(
                                     None => "none",
                                 },
                                 // distinct from an ordinary failure, so the
-                                // journal can say the user stopped this rather
+                                // events can say the user stopped this rather
                                 // than that it went wrong on its own
                                 "code": if outcome.cancelled { Some("cancelled") } else { None },
                             }),
@@ -2185,7 +2110,7 @@ async fn run_agent(
                                 "mode": metadata.mode,
                                 "checkpoint": metadata.checkpoint,
                                 // links into the layer-1 blob store, so a
-                                // single step can be reverted from the journal
+                                // single step can be reverted from the event log
                                 // alone; absent when nothing was stored
                                 "blob_before": metadata.blob_before,
                                 "blob_after": metadata.blob_after,
@@ -2198,7 +2123,7 @@ async fn run_agent(
                             .flatten();
                         let plan_id = active.as_ref().map(|p| p.id.clone());
                         let current = adopt_in_progress_step(&root, &session_id);
-                        writer.set_attribution(current.clone(), plan_id, "main");
+                        writer.set_attribution(current.clone(), plan_id, &events_agent);
                         ctx.current_step = current.clone();
                         if subagent_depth == 0 {
                             let _ = tx.send(AgentEvent::StepCurrent { step: current }).await;
@@ -2279,7 +2204,9 @@ async fn run_agent(
                                  now, each with its own call: plan(op=\"finish\", \
                                  id=\"<step>\", summary=\"what it settled\") — do not save them \
                                  up for the end.]",
-                                first.id, ids, active.steps.len()
+                                first.id,
+                                ids,
+                                active.steps.len()
                             ));
                         }
                         [] => {}
@@ -2337,10 +2264,7 @@ async fn run_agent(
                 // `git_diff` five times over the same 18KB. Media results are
                 // exempt: their attachment is the delivery, and a cleared
                 // earlier copy makes the duplicate check meaningless.
-                if outcome.ok
-                    && outcome.images.is_empty()
-                    && outcome.documents.is_empty()
-                {
+                if outcome.ok && outcome.images.is_empty() && outcome.documents.is_empty() {
                     match repeat_verdict_with_limit(&messages, call, &outcome.output, context_limit)
                     {
                         RepeatVerdict::Fresh => {}
@@ -2391,7 +2315,7 @@ async fn run_agent(
             messages,
             summary,
             todos,
-            journal: ctx.journal,
+            checkpoints: ctx.checkpoints,
             plan_todos,
             approval_grants: SessionGrants {
                 bash: always_allow,
@@ -2420,4 +2344,4 @@ mod freedom_tests;
 mod trust_gate_tests;
 
 #[cfg(test)]
-mod checkpoint_journal_tests;
+mod checkpoint_event_tests;

@@ -1,12 +1,12 @@
 use super::checkpoint_fields;
 
 /// One commit, one record, and the record names the edge it is. Step
-/// boundaries used to be journaled twice — once as `shadow/step_start`,
+/// boundaries used to be recorded twice — once as `shadow/step_start`,
 /// once as `legacy/post_mutation` — where "legacy" described the very same
 /// shadow snapshot layer, so the ledger claimed a mutation that never
 /// happened.
 #[test]
-fn a_step_boundary_is_journaled_as_a_boundary_not_a_mutation() {
+fn a_step_boundary_is_recorded_as_a_boundary_not_a_mutation() {
     let start = checkpoint_fields("sha1", "step_2_start");
     assert_eq!(start["layer"], "shadow");
     assert_eq!(start["reason"], "step_start");

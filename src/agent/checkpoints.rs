@@ -166,10 +166,7 @@ pub fn bash_file_diffs(
             .as_deref()
             .and_then(|b| crate::agent::blobs::put(root, b).ok());
         let hash_before = before.as_deref().map(bytes_hash);
-        let hash_after = after
-            .as_deref()
-            .map(bytes_hash)
-            .unwrap_or_default();
+        let hash_after = after.as_deref().map(bytes_hash).unwrap_or_default();
         diffs.push(crate::agent::tools::FileDiff {
             path: rel_norm,
             added: 0,
@@ -241,10 +238,10 @@ pub fn changed_since_head(root: &Path, store: ShadowStore, session_id: &str) -> 
     shadow.changed_files(&head).unwrap_or_default()
 }
 
-/// What one maintenance pass did, for the status line and the journal.
+/// What one maintenance pass did, for the status line and the event log.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Maintenance {
-    /// session chains dropped because their journal is gone
+    /// session chains dropped because their event log is gone
     pub chains_dropped: Vec<String>,
     /// Length of the surviving session's chain, against
     /// `[undo].keep_per_session`. Reported rather than enforced — see the
@@ -266,10 +263,10 @@ impl Maintenance {
 
 /// Retention for both layers, run when a session ends.
 ///
-/// Layer 1: a blob is kept while any journal still names it, or while it is
+/// Layer 1: a blob is kept while any event log still names it, or while it is
 /// younger than `[undo].blob_grace_secs`.
 ///
-/// Layer 2: a session chain whose journal is gone has nothing left that could
+/// Layer 2: a session chain whose events is gone has nothing left that could
 /// reference its checkpoints, so its ref is dropped; `git gc --prune=now`
 /// then collects what became unreachable. Collection also runs when the
 /// shadow repository is over `[undo].shadow_max_bytes`, because that is the
@@ -282,7 +279,7 @@ impl Maintenance {
 /// deliberate gap rather than an oversight. stores checkpoints as a
 /// commit chain, and dropping the oldest commits of a chain requires
 /// rewriting every descendant — which changes the shas the session already
-/// recorded in its journal and in plan evidence, turning working undo
+/// recorded in its events and in plan evidence, turning working undo
 /// references into dangling ones. Reporting the overrun keeps the promise
 /// honest until the chain shape is revisited (see the PR that added this).
 pub fn maintain(
@@ -292,7 +289,7 @@ pub fn maintain(
 ) -> Result<Maintenance> {
     let mut report = Maintenance::default();
 
-    let referenced = crate::agent::journal::Journal::referenced_blobs(root)?;
+    let referenced = crate::agent::events::EventLog::referenced_blobs(root)?;
     let purged = crate::agent::blobs::purge(
         root,
         &referenced,
@@ -304,7 +301,7 @@ pub fn maintain(
     let Some(shadow) = shadow(root, cfg.shadow) else {
         return Ok(report);
     };
-    let alive = crate::agent::journal::Journal::sessions_on_disk(root);
+    let alive = crate::agent::events::EventLog::sessions_on_disk(root);
     for session in shadow.sessions()? {
         if session == keep_session || alive.contains(&session) {
             continue;
@@ -332,7 +329,7 @@ pub struct Target {
     pub agent_hash: Option<String>,
 }
 
-/// What a restore actually did, for the journal and the status line.
+/// What a restore actually did, for the event log and the status line.
 #[derive(Debug, Default)]
 pub struct RestoreReport {
     /// put back from the snapshot
@@ -363,7 +360,7 @@ impl RestoreReport {
 /// Sha-256 of a file's bytes, in the same `sha256:`-prefixed format the file
 /// tools record in `file_diff.hash_after`. `None` when the file is gone.
 ///
-/// The prefix matters: comparing a raw hex digest against a journal record
+/// The prefix matters: comparing a raw hex digest against an event record
 /// never matches, which silently turned every scoped restore into a row of
 /// skips while hand-rolled test hashes stayed green.
 fn current_hash(path: &Path) -> Option<String> {
@@ -412,14 +409,14 @@ pub fn finalize_redo_images(
     root: &Path,
     touched_paths: &[String],
     pre_undo: &std::collections::HashMap<String, (Option<String>, bool)>,
-) -> Vec<crate::agent::journal::PreImage> {
+) -> Vec<crate::agent::events::PreImage> {
     let mut out = Vec::with_capacity(touched_paths.len());
     for rel in touched_paths {
         let Some((blob_before, existed_before)) = pre_undo.get(rel).cloned() else {
             continue;
         };
         let post_undo_hash = current_hash(&root.join(rel)).unwrap_or_default();
-        out.push(crate::agent::journal::PreImage {
+        out.push(crate::agent::events::PreImage {
             path: rel.clone(),
             blob_before,
             existed_before,
@@ -434,14 +431,14 @@ pub fn finalize_redo_images(
 /// This is what means by "the constraint 'undo unavailable outside git
 /// repositories' is lifted": every file the host wrote through
 /// `write | edit | multi_edit | patch` has its pre-image in the store, keyed
-/// from the journal, so putting it back is a copy.
+/// from the event log, so putting it back is a copy.
 ///
 /// The same outside-edit rule as the git path applies: a file whose current
 /// content is not what the host last left is reported as skipped, never
 /// overwritten. A pre-image of `None` means the file did not exist before the
 /// undone window, so reverting it means removing it.
-/// Journal-provided paths are trusted to be project-relative. A `..`
-/// segment or an absolute spelling means the journal is corrupt or
+/// event-log-provided paths are trusted to be project-relative. A `..`
+/// segment or an absolute spelling means the event log is corrupt or
 /// tampered; restore must never join it onto the root (audit H17) — it
 /// would write or delete outside the project.
 fn traversal_path(p: &str) -> bool {
@@ -455,7 +452,7 @@ fn traversal_path(p: &str) -> bool {
 
 pub fn restore_from_blobs(
     root: &Path,
-    pre_images: &[crate::agent::journal::PreImage],
+    pre_images: &[crate::agent::events::PreImage],
 ) -> Result<RestoreReport> {
     let mut report = RestoreReport::default();
     for item in pre_images {
@@ -531,7 +528,7 @@ pub fn restore_from_blobs(
 /// back). Retention or a failed blob write can leave a window half covered, and
 /// taking the blob path then reports the rest as "no stored pre-image" while the
 /// shadow snapshot could have restored every one of them.
-pub fn blobs_cover(root: &Path, pre_images: &[crate::agent::journal::PreImage]) -> bool {
+pub fn blobs_cover(root: &Path, pre_images: &[crate::agent::events::PreImage]) -> bool {
     !pre_images.is_empty()
         && pre_images
             .iter()

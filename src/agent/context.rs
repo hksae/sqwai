@@ -21,7 +21,7 @@ use crate::providers::{Message, Role};
 
 /// Host-generated state anchor for the moments when the transcript really has
 /// lost detail: after a compaction and on a restored session. It contains only
-/// durable plan data and bounded journal-derived facts; the model never writes
+/// durable plan data and bounded events-derived facts; the model never writes
 /// or rewrites this block.
 ///
 /// It used to ride every request while `system.md` told the model to treat it
@@ -30,17 +30,16 @@ use crate::providers::{Message, Role};
 /// own previous turn.
 pub fn anchor(root: &std::path::Path, session_id: &str) -> String {
     let mut out =
-        String::from("ANCHOR (host-generated working memo; journal facts, not a summary)\n");
+        String::from("ANCHOR (host-generated working memo; events facts, not a summary)\n");
     // No plan content here by design: goal/constraints/step state ride
     // live on every request (rebuilt per request, cache-hot when
     // unchanged), so a turn-start snapshot would only resurrect the
-    // two-plan problem. The anchor keeps what the journal proves got done.
+    // two-plan problem. The anchor keeps what the event log proves got done.
     let mut changed = Vec::new();
     let mut recent_reads: Vec<String> = Vec::new();
     let mut last_verification = None;
     let mut decisions: Vec<String> = Vec::new();
-    let records =
-        crate::agent::journal::Journal::records_for(root, session_id).unwrap_or_default();
+    let records = crate::agent::events::EventLog::records_for(root, session_id).unwrap_or_default();
     for record in &records {
         if record.kind == "file_diff"
             && let Some(path) = record.fields.get("path").and_then(|value| value.as_str())
@@ -141,7 +140,12 @@ pub fn anchor(root: &std::path::Path, session_id: &str) -> String {
     } else {
         out.push_str(&format!(
             "files changed this session: {}\n",
-            changed.iter().take(24).cloned().collect::<Vec<_>>().join(" · ")
+            changed
+                .iter()
+                .take(24)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(" · ")
         ));
     }
     recent_reads.retain(|p| !changed.contains(p));
@@ -209,10 +213,7 @@ pub fn anchor(root: &std::path::Path, session_id: &str) -> String {
     } else {
         out.push_str(&format!("recent failures: {}\n", failures.join(" · ")));
     }
-    // No imperatives here. The anchor describes what the journal proves; the
-    // rule that durable facts belong in `memory_write` lives in system.md, where
-    // it is stated once. Riding every request as a command is what made a live
-    // session call `memory_write` in the middle of an unrelated loop.
+    // No imperatives here. The anchor describes what the host ledger proves.
     out
 }
 
@@ -220,13 +221,13 @@ pub fn anchor(root: &std::path::Path, session_id: &str) -> String {
 /// A plan `start` without a later `finish`, `block`, or `cancel` is evidence
 /// that the process stopped while work was in progress.
 ///
-/// The journal signal alone is not trusted: steps from older, abandoned
+/// The events signal alone is not trusted: steps from older, abandoned
 /// plans leave `start` records too, and a plan file can be revised after the
 /// crash. The open step is only reported when it belongs to the currently
 /// active plan for this session and the plan's own state agrees that the
 /// step is in progress.
 pub fn resume_notice(root: &std::path::Path, session_id: &str) -> Option<String> {
-    let records = crate::agent::journal::Journal::records_for(root, session_id).ok()?;
+    let records = crate::agent::events::EventLog::records_for(root, session_id).ok()?;
     let active = crate::plan::open_active_for_session(root, Some(session_id))
         .ok()
         .flatten();
@@ -500,7 +501,7 @@ pub fn wire_estimated_tokens(messages: &[Message], context_limit: u64) -> u64 {
                     .iter()
                     .map(|c| c.name.len() as u64 + c.args.to_string().len() as u64)
                     .sum::<u64>())
-                .div_ceil(4)
+            .div_ceil(4)
                 + if cleared.contains(&i) {
                     0
                 } else {
@@ -689,7 +690,7 @@ pub const SUMMARY_SHORT_MAX_CHARS: usize = 3_200;
 /// Enforce the cap: truncate to whole characters, mark the cut so a
 /// reader knows the tail is missing (truncation drops the END — goal and
 /// constraints ride first in these summaries, fresh work survives in the
-/// verbatim keep-tail and the journal).
+/// verbatim keep-tail and the event log).
 pub fn truncate_summary(text: &str) -> String {
     const MARKER: &str = "\n[…truncated to fit the compaction budget]";
     if text.chars().count() <= SUMMARY_SHORT_MAX_CHARS {

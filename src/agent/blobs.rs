@@ -6,17 +6,17 @@
 //! file becomes a copy, not a tree operation. That is what lifts the old
 //! restriction "undo is unavailable outside a git repository", and it is what
 //! makes reverting a single step possible at all — a tree snapshot cannot say
-//! which of several files belonged to which step, and the journal can.
+//! which of several files belonged to which step, and the event log can.
 //!
 //! Blobs are named by their blake3 hash, stored under
 //! `.sqwai/checkpoints/blobs/<first two hex>/<hash>` and deduplicated by that
 //! name: writing the same content twice costs one existence check.
 //!
-//! The journal's `file_diff` keeps recording `hash_before` / `hash_after` as
+//! The event log's `file_diff` keeps recording `hash_before` / `hash_after` as
 //! sha256 — his scoped-undo matching reads that format — and gains
 //! `blob_before` / `blob_after`, which are the blake3 names *in this store*.
 //! Two algorithms sound like an accident; it is the alternative that is worse.
-//! Renaming the journal's hashes would silently invalidate every record
+//! Renaming the event log's hashes would silently invalidate every record
 //! written before the change, and dropping blake3 would contradict . So
 //! the record carries both, and the link is explicit rather than implied.
 
@@ -120,7 +120,7 @@ pub fn has(root: &Path, id: &str) -> bool {
 
 /// Remove blobs nothing references any more.
 ///
-/// A blob is kept when a journal still names it, or when it is younger than
+/// A blob is kept when an event log still names it, or when it is younger than
 /// `grace` — the second condition is what stops a race with a write that has
 /// stored its pre-image but not yet appended the `file_diff` record.
 ///
@@ -260,7 +260,7 @@ mod tests {
         let dir = root();
         let root_path = dir.path();
 
-        let referenced = put(root_path, b"still needed by a journal record").unwrap();
+        let referenced = put(root_path, b"still needed by an event record").unwrap();
         let orphan = put(root_path, b"nothing points here any more").unwrap();
         let young = put(root_path, b"stored a moment ago").unwrap();
 

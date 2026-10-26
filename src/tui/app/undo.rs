@@ -25,7 +25,7 @@ fn reopen_undone_steps(
     if let Some(mut active) = active_opt {
         active_id = Some(active.id.clone());
         let records =
-            crate::agent::journal::Journal::records_for(root, session_id).unwrap_or_default();
+            crate::agent::events::EventLog::records_for(root, session_id).unwrap_or_default();
         reopened = reopened_step_ids(&active, &records, session_id, files);
         for step_id in &reopened {
             let _ = plan::reopen_for_undo(
@@ -42,15 +42,10 @@ fn reopen_undone_steps(
             let _ = plan::commit(root, session_id, &mut active, "reopen", "host", true, args);
         }
     }
-    if let Ok(mut journal) = crate::agent::journal::Journal::open(root, session_id) {
-        journal.set_attribution(None, active_id, "host");
-        let _ = journal.append_undo_window(
-            checkpoint,
-            undone_checkpoints,
-            files,
-            &reopened,
-            redo_blobs,
-        );
+    if let Ok(mut events) = crate::agent::events::EventLog::open(root, session_id) {
+        events.set_attribution(None, active_id, "host");
+        let _ =
+            events.append_undo_window(checkpoint, undone_checkpoints, files, &reopened, redo_blobs);
     }
     reopened
 }
@@ -87,23 +82,32 @@ fn restore_redone_steps(
         }
         if !restored.is_empty() {
             plan::auto_advance(&mut active);
-            if active
-                .steps
-                .iter()
-                .all(|s| matches!(s.status, plan::StepStatus::Done | plan::StepStatus::Cancelled))
-            {
+            if active.steps.iter().all(|s| {
+                matches!(
+                    s.status,
+                    plan::StepStatus::Done | plan::StepStatus::Cancelled
+                )
+            }) {
                 active.status = plan::PlanStatus::Completed;
             }
             active.revision = active.revision.saturating_add(1);
             let args = serde_json::json!({
                 "ids": restored,
             });
-            let _ = plan::commit(root, session_id, &mut active, "redo_steps", "host", true, args);
+            let _ = plan::commit(
+                root,
+                session_id,
+                &mut active,
+                "redo_steps",
+                "host",
+                true,
+                args,
+            );
         }
     }
-    if let Ok(mut journal) = crate::agent::journal::Journal::open(root, session_id) {
-        journal.set_attribution(None, active_id, "host");
-        let _ = journal.append_redo(checkpoints, files, &restored);
+    if let Ok(mut events) = crate::agent::events::EventLog::open(root, session_id) {
+        events.set_attribution(None, active_id, "host");
+        let _ = events.append_redo(checkpoints, files, &restored);
     }
     restored
 }
@@ -189,7 +193,7 @@ impl App {
                 StatusKind::Info,
             );
         }
-        let running = crate::agent::tools::bg_running_commands();
+        let running = crate::agent::tools::bg_running_commands_for(&self.session.id.to_string());
         if !running.is_empty() {
             let ids: Vec<String> = running
                 .iter()
@@ -240,6 +244,7 @@ impl App {
         let touched = report.touched();
         self.arm_undo_note(what, &touched);
         self.context_bootstrap_pending = true;
+        self.merge_host_events();
         self.session.save().ok();
         self.status(
             &format!(
@@ -339,14 +344,14 @@ impl App {
         let undone_pairs: Vec<(String, String)> = self.session.checkpoints[idx..].to_vec();
         let undone: Vec<String> = undone_pairs.iter().map(|(sha, _)| sha.clone()).collect();
         let recorded =
-            crate::agent::journal::Journal::recorded_writes(&root, &undone).unwrap_or_default();
+            crate::agent::events::EventLog::recorded_writes(&root, &undone).unwrap_or_default();
         let scoped = !recorded.is_empty();
         // A window can mix file edits with a `bash` call. Scoping to the
-        // journal then silently leaves the shell command's effects in place,
+        // events then silently leaves the shell command's effects in place,
         // so count the non-boundary checkpoints that contributed nothing.
         let unrecorded = if scoped {
             let with_records =
-                crate::agent::journal::Journal::checkpoints_with_writes(&root, &undone)
+                crate::agent::events::EventLog::checkpoints_with_writes(&root, &undone)
                     .unwrap_or_default();
             undone_pairs
                 .iter()
@@ -361,7 +366,7 @@ impl App {
         // No git needed, and it is the only path that works in a project that
         // is not a repository at all.
         let pre_images =
-            crate::agent::journal::Journal::recorded_pre_images(&root, &undone).unwrap_or_default();
+            crate::agent::events::EventLog::recorded_pre_images(&root, &undone).unwrap_or_default();
         // Layer 1 covers this window only when every item is either backed by a
         // blob that is still there or is a pure creation with nothing to put
         // back. Retention or a failed blob write can leave a window half
@@ -482,6 +487,7 @@ impl App {
                 // would carry the model straight back to it. The next request
                 // sends the transcript the host owns instead.
                 self.context_bootstrap_pending = true;
+                self.merge_host_events();
                 self.session.save().ok();
 
                 let mut note = format!("undo{cov}: reverted '{label}' ({} file(s)", touched.len());
@@ -527,7 +533,7 @@ impl App {
 
     /// Revert one plan step.
     ///
-    /// Only layer 1 is involved: the journal knows which `file_diff` records
+    /// Only layer 1 is involved: the event log knows which `file_diff` records
     /// belong to `step` against an explicit root.
     pub(super) fn undo_step_in(&mut self, root: &std::path::Path, step: &str) {
         // Step numbers restart per plan, so "3" names nothing without one — and
@@ -551,7 +557,7 @@ impl App {
             return;
         };
         let revert =
-            match crate::agent::journal::Journal::step_pre_images_in(root, Some(&plan_id), step) {
+            match crate::agent::events::EventLog::step_pre_images_in(root, Some(&plan_id), step) {
                 Ok(revert) => revert,
                 Err(e) => {
                     self.status(&format!("undo step {step}: {e:#}"), StatusKind::Err);
@@ -621,12 +627,12 @@ impl App {
                     .iter()
                     .filter_map(|f| f.blob_before.clone())
                     .collect();
-                if let Ok(mut journal) =
-                    crate::agent::journal::Journal::open(root, &self.session.id.to_string())
+                if let Ok(mut events) =
+                    crate::agent::events::EventLog::open(root, &self.session.id.to_string())
                 {
                     // host-written, like every other undo record
-                    journal.set_attribution(None, Some(plan_id.clone()), "host");
-                    let _ = journal.append_undo_step(step, &touched, &reopened, &redo_blobs);
+                    events.set_attribution(None, Some(plan_id.clone()), "host");
+                    let _ = events.append_undo_step(step, &touched, &reopened, &redo_blobs);
                 }
                 self.session.redo_stack.push(crate::session::RedoEntry {
                     label: format!("step {step}"),
@@ -637,6 +643,7 @@ impl App {
                 // The provider's copy of the conversation still contains the
                 // reverted work.
                 self.context_bootstrap_pending = true;
+                self.merge_host_events();
                 self.session.save().ok();
 
                 let mut note = format!("undo step {step}{cov}: {} file(s)", touched.len());
@@ -684,7 +691,7 @@ impl App {
         root: &std::path::Path,
         idx: usize,
         label: &str,
-        pre_images: &[crate::agent::journal::PreImage],
+        pre_images: &[crate::agent::events::PreImage],
         unrecorded: usize,
         coverage: UndoCoverage,
     ) {
@@ -707,8 +714,7 @@ impl App {
                     return;
                 }
                 let touched = report.touched();
-                let undone_pairs: Vec<(String, String)> =
-                    self.session.checkpoints[idx..].to_vec();
+                let undone_pairs: Vec<(String, String)> = self.session.checkpoints[idx..].to_vec();
                 let undone_shas: Vec<String> =
                     undone_pairs.iter().map(|(sha, _)| sha.clone()).collect();
                 let sha = undone_shas.first().cloned().unwrap_or_default();
@@ -739,6 +745,7 @@ impl App {
                     .min(self.session.checkpoints.len());
                 self.arm_undo_note(&format!("undo to '{label}'"), &touched);
                 self.context_bootstrap_pending = true;
+                self.merge_host_events();
                 self.session.save().ok();
 
                 let mut note = format!(
@@ -815,7 +822,10 @@ impl App {
                 Ok(report) => {
                     if let Some(err) = report.failed {
                         self.status(
-                            &format!("redo stopped: {err}; {} file(s) re-applied", total_touched.len()),
+                            &format!(
+                                "redo stopped: {err}; {} file(s) re-applied",
+                                total_touched.len()
+                            ),
                             StatusKind::Err,
                         );
                         self.dirty = true;
@@ -862,6 +872,7 @@ impl App {
             self.session.pending_undo_note = None;
         }
         self.context_bootstrap_pending = true;
+        self.merge_host_events();
         self.session.save().ok();
 
         let mut note = format!(
@@ -873,7 +884,10 @@ impl App {
         }
         note.push(')');
         if !total_restored_steps.is_empty() {
-            note.push_str(&format!("; restored {} step(s)", total_restored_steps.len()));
+            note.push_str(&format!(
+                "; restored {} step(s)",
+                total_restored_steps.len()
+            ));
         }
         let kind = if !total_skipped.is_empty() {
             note.push_str(&format!(

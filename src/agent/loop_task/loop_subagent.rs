@@ -105,7 +105,14 @@ fn subagent_task_spec(item: &serde_json::Value, default_clean: bool) -> Option<S
                 .unwrap_or(default_clean);
             (write, paths, context, files, skills, clean)
         }
-        _ => (false, Vec::new(), None, Vec::new(), Vec::new(), default_clean),
+        _ => (
+            false,
+            Vec::new(),
+            None,
+            Vec::new(),
+            Vec::new(),
+            default_clean,
+        ),
     };
     Some(SubagentTask {
         label,
@@ -182,11 +189,11 @@ pub(crate) fn subagent_tasks_from_args(
 }
 
 /// Run a pure-subagent batch concurrently: every call gets its pre-phase
-/// (cancel check, journal row, ToolStart row) in call order, the children
+/// (cancel check, events row, ToolStart row) in call order, the children
 /// run overlapped, and results are processed back in call order, so rows,
-/// journal and transcript look exactly like a fast sequential batch — only
+/// events and transcript look exactly like a fast sequential batch — only
 /// the waits overlap. Mixed batches keep the sequential loop: interleaving
-/// arbitrary tools would tangle journal attribution and mutation order.
+/// arbitrary tools would tangle events attribution and mutation order.
 ///
 /// Esc semantics match one running subagent: the wait loop polls the
 /// parent flag, so a stop request cooperatively stops the children (each
@@ -197,7 +204,7 @@ pub(crate) async fn run_subagent_batch(
     session_id: &str,
     root: &Path,
     cancel: &std::sync::Arc<std::sync::atomic::AtomicBool>,
-    journal: &mut Option<crate::agent::journal::Journal>,
+    events: &mut Option<crate::agent::events::EventLog>,
     tx: &mpsc::Sender<AgentEvent>,
     current_step: Option<String>,
     provider: &SharedProvider,
@@ -221,7 +228,6 @@ pub(crate) async fn run_subagent_batch(
     read_only: bool,
     shadow_store: crate::config::ShadowStore,
     messages: &mut Vec<Message>,
-    memory: crate::config::MemoryConfig,
     compaction: crate::config::CompactionConfig,
     plan_limits: crate::config::PlanConfig,
     fallback_chain: Vec<FallbackCandidate>,
@@ -236,7 +242,7 @@ pub(crate) async fn run_subagent_batch(
     let mut interrupted = false;
     for (index, call) in calls.iter().enumerate() {
         let pre_cancelled = cancel.swap(false, std::sync::atomic::Ordering::Relaxed);
-        if let Some(writer) = journal.as_mut() {
+        if let Some(writer) = events.as_mut() {
             let active = plan::open_active_for_session(root, Some(session_id))
                 .ok()
                 .flatten();
@@ -256,7 +262,7 @@ pub(crate) async fn run_subagent_batch(
                     "tool": call.name,
                     "call_id": call.id,
                     "args_digest": tools::call_summary(&call.name, &call.args),
-                    "args": tools::call_args_for_journal(&call.args),
+                    "args": tools::call_args_for_event(&call.args),
                     "path": tools::call_path(&call.name, &call.args),
                 }),
             );
@@ -287,7 +293,6 @@ pub(crate) async fn run_subagent_batch(
                 let system = system.to_vec();
                 let mcp = mcp.clone();
                 let skills = skills.clone();
-                let memory = memory.clone();
                 let compaction = compaction.clone();
                 let fallback_chain = fallback_chain.clone();
                 let tools = tools.clone();
@@ -320,7 +325,6 @@ pub(crate) async fn run_subagent_batch(
                         skills,
                         read_only,
                         shadow_store,
-                        memory,
                         compaction,
                         plan_limits,
                         fallback_chain,
@@ -344,7 +348,7 @@ pub(crate) async fn run_subagent_batch(
                 call_id: call.id.clone(),
             })
             .await;
-        if let Some(writer) = journal.as_mut() {
+        if let Some(writer) = events.as_mut() {
             let _ = writer
                 .append_evidence(
                     "tool_result",
@@ -383,7 +387,7 @@ pub(crate) async fn run_subagent_batch(
                 call_id: call.id.clone(),
             })
             .await;
-        if let Some(writer) = journal.as_mut() {
+        if let Some(writer) = events.as_mut() {
             let _ = writer
                 .append_evidence(
                     "tool_result",
@@ -461,7 +465,6 @@ pub(crate) async fn run_subagent(
     skills: crate::config::SkillsConfig,
     read_only: bool,
     shadow_store: crate::config::ShadowStore,
-    memory: crate::config::MemoryConfig,
     compaction: crate::config::CompactionConfig,
     plan_limits: crate::config::PlanConfig,
     fallback_chain: Vec<FallbackCandidate>,
@@ -493,7 +496,6 @@ pub(crate) async fn run_subagent(
                 let system = system.clone();
                 let mcp = mcp.clone();
                 let skills = skills.clone();
-                let memory = memory.clone();
                 let compaction = compaction.clone();
                 let fallback_chain = fallback_chain.clone();
                 let tools = tools.clone();
@@ -525,7 +527,6 @@ pub(crate) async fn run_subagent(
                         skills,
                         read_only,
                         shadow_store,
-                        memory,
                         compaction,
                         plan_limits,
                         fallback_chain,
@@ -630,7 +631,7 @@ pub(crate) async fn run_subagent(
         messages: vec![Message::new(Role::User, user_prompt)],
         root: root.to_path_buf(),
         // #190: NOT `sub-{id}` — the numeric counter resets on restart
-        // and would append to a previous run's journal file
+        // and would append to a previous run's events file
         session_id: child_session.clone(),
         blocked_patterns: blocked_patterns.to_vec(),
         web_allow_hosts: web_allow_hosts.to_vec(),
@@ -657,8 +658,8 @@ pub(crate) async fn run_subagent(
         summary: None,
         mcp,
         skills,
-        compact_only: false, compact_focus: String::new(),
-        memory,
+        compact_only: false,
+        compact_focus: String::new(),
         compaction,
         plan_limits,
         shadow_store,
@@ -686,6 +687,7 @@ pub(crate) async fn run_subagent(
                 id,
                 "cancelled by user",
                 root,
+                parent_session,
                 &child_session,
                 &mut trail,
                 &output,
@@ -714,6 +716,7 @@ pub(crate) async fn run_subagent(
                     id,
                     &format!("timed out after {}s", timeout.as_secs()),
                     root,
+                    parent_session,
                     &child_session,
                     &mut trail,
                     &output,
@@ -763,7 +766,7 @@ pub(crate) async fn run_subagent(
                 let _ = parent_tx.send(AgentEvent::Checkpoint { sha, label }).await;
             }
             AgentEvent::Completed(result) => {
-                trail.collect_journal_writes(root, &child_session);
+                trail.collect_event_writes(root, parent_session, &child_session);
                 let result = match result {
                     Ok(outcome) => {
                         if output.is_empty() {
@@ -826,6 +829,7 @@ async fn stop_child(
     id: u64,
     reason: &str,
     root: &Path,
+    parent_session: &str,
     child_session: &str,
     trail: &mut SubagentTrail,
     partial_output: &str,
@@ -834,7 +838,7 @@ async fn stop_child(
     let grace = std::time::Duration::from_secs(SUBAGENT_CANCEL_GRACE_SECS);
     let finished = tokio::time::timeout(grace, child.rx.recv()).await;
     child.abort();
-    trail.collect_journal_writes(root, child_session);
+    trail.collect_event_writes(root, parent_session, child_session);
     let base_msg = if matches!(finished, Ok(Some(AgentEvent::Completed(_)))) {
         format!("subagent {reason} (finished during cancel, result discarded)")
     } else {
@@ -880,11 +884,19 @@ impl SubagentTrail {
         }
     }
 
-    pub(crate) fn collect_journal_writes(&mut self, root: &Path, child_session: &str) {
-        let Ok(records) = crate::agent::journal::Journal::records_for(root, child_session) else {
+    pub(crate) fn collect_event_writes(
+        &mut self,
+        root: &Path,
+        parent_session: &str,
+        child_session: &str,
+    ) {
+        let Ok(records) = crate::agent::events::EventLog::records_for(root, parent_session) else {
             return;
         };
         for rec in records {
+            if rec.agent != child_session {
+                continue;
+            }
             if rec.kind == "file_diff"
                 && let Some(path) = rec.fields.get("path").and_then(|v| v.as_str())
                 && !path.is_empty()
@@ -925,7 +937,9 @@ impl SubagentTrail {
         } else {
             format!(" | modified: {}", self.modified_files.join(", "))
         };
-        Some(format!("[Subagent receipt: {status} | {calls_part}{mod_part}]"))
+        Some(format!(
+            "[Subagent receipt: {status} | {calls_part}{mod_part}]"
+        ))
     }
 
     pub(crate) fn attach_receipt(&self, output: &str, ok: bool) -> String {
@@ -962,7 +976,10 @@ pub(crate) fn build_subagent_user_prompt(task: &SubagentTask) -> String {
         }
     }
     if !focus_files.is_empty() {
-        prompt.push_str(&format!("\n\nTarget files/paths: {}", focus_files.join(", ")));
+        prompt.push_str(&format!(
+            "\n\nTarget files/paths: {}",
+            focus_files.join(", ")
+        ));
     }
     if let Some(ref ctx) = task.context {
         prompt.push_str(&format!("\n\nAdditional context from parent:\n{ctx}"));
@@ -982,7 +999,7 @@ pub(crate) fn build_subagent_tail(
             "<subagent_contract>\n\
              Role: READ-ONLY EXPLORER SUBAGENT\n\
              - You are running in an isolated child context to investigate and report back to the parent agent.\n\
-             - Do NOT call mutating tools (`write`, `edit`, `multi_edit`, `patch`, `git_commit`, `git_stage`), `plan`, `memory_write`, `subagent`, or `ask_user`.\n\
+             - Do NOT call mutating tools (`write`, `edit`, `multi_edit`, `patch`, `git_commit`, `git_stage`), `plan`, `subagent`, or `ask_user`.\n\
              - Emit independent `grep`, `glob`, `outline`, and `read(offset, limit)` calls in parallel batches.\n\
              - Structure your final report concisely for the parent agent:\n\
                1. **Findings:** Verified facts with exact `path:line` references and symbol names.\n\
@@ -1001,7 +1018,7 @@ pub(crate) fn build_subagent_tail(
              Role: SCOPED WRITER SUBAGENT\n\
              Allowed write scope: [{scope_list}]\n\
              - You are running in an isolated child context to implement changes strictly inside the allowed write scope above. Writes outside those paths are rejected by the host.\n\
-             - Do NOT call `plan`, `memory_write`, `git_commit`, `subagent`, or `ask_user` — the parent agent owns plan state, git commits, memory, and user interaction.\n\
+             - Do NOT call `plan`, `git_commit`, `subagent`, or `ask_user` — the parent agent owns plan state, git commits, and user interaction.\n\
              - Read target files before overwriting or editing, and verify your changes (e.g. `cargo check` or targeted tests) before finishing when feasible.\n\
              - Structure your final report concisely for the parent agent:\n\
                1. **Changes Made:** Exact files and symbols modified (`path:line`) and what changed.\n\
@@ -1059,10 +1076,9 @@ pub(crate) fn build_parent_context_brief(root: &Path, parent_session: &str) -> O
         }
     }
 
-    if let Ok(records) = crate::agent::journal::Journal::records_for(root, parent_session) {
+    if let Ok(records) = crate::agent::events::EventLog::records_for(root, parent_session) {
         let mut modified: Vec<String> = Vec::new();
         let mut inspected: Vec<String> = Vec::new();
-        let mut notes: Vec<String> = Vec::new();
 
         for rec in records.iter().rev() {
             match rec.kind.as_str() {
@@ -1076,7 +1092,11 @@ pub(crate) fn build_parent_context_brief(root: &Path, parent_session: &str) -> O
                     }
                 }
                 "tool_call" => {
-                    let tool = rec.fields.get("tool").and_then(|v| v.as_str()).unwrap_or("");
+                    let tool = rec
+                        .fields
+                        .get("tool")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
                     if matches!(tool, "read" | "outline")
                         && inspected.len() < 10
                         && let Some(p) = rec.fields.get("path").and_then(|v| v.as_str())
@@ -1086,40 +1106,18 @@ pub(crate) fn build_parent_context_brief(root: &Path, parent_session: &str) -> O
                         inspected.push(p.to_string());
                     }
                 }
-                "note" => {
-                    if notes.len() < 5 {
-                        let (kind, text) = match (
-                            rec.fields.get("note").and_then(|v| v.as_str()),
-                            rec.fields.get("text").and_then(|v| v.as_str()),
-                        ) {
-                            (Some(k), Some(t)) if !t.is_empty() => (k, t),
-                            (Some(t), None) if !t.is_empty() => ("note", t),
-                            _ => continue,
-                        };
-                        let entry = format!("[{kind}] {text}");
-                        if !notes.contains(&entry) {
-                            notes.push(entry);
-                        }
-                    }
-                }
                 _ => {}
             }
         }
 
         if !modified.is_empty() {
-            lines.push(format!(
-                "Parent modified files: {}",
-                modified.join(", ")
-            ));
+            lines.push(format!("Parent modified files: {}", modified.join(", ")));
         }
         if !inspected.is_empty() {
             lines.push(format!(
                 "Parent recently read files: {}",
                 inspected.join(", ")
             ));
-        }
-        if !notes.is_empty() {
-            lines.push(format!("Parent session notes: {}", notes.join(" | ")));
         }
     }
 
@@ -1144,10 +1142,10 @@ static PLAN_JOIN_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(()
 
 /// Join one child session into its parent plan (#171: without membership
 /// its evidence cannot attach under session-strict resolution).
-/// Journal-first like every plan mutation, in the PARENT's journal: the
+/// EventLog-first like every plan mutation, in the PARENT's events: the
 /// startup replay only scans the cursor session's suffix, so an intent in
 /// the child's file would never replay. The cursor advances, so a crash
-/// heals by replay instead of leaving a store write the journal never saw.
+/// heals by replay instead of leaving a store write the event log never saw.
 fn join_plan_session(
     root: &Path,
     parent_step: Option<&plan::StepContext>,
@@ -1160,7 +1158,7 @@ fn join_plan_session(
     {
         let mut plan = plan;
         // apply first: commit only persists the already-mutated plan behind
-        // the journal intent (same order as the plan tool path)
+        // the event log intent (same order as the plan tool path)
         if plan::apply(
             &mut plan,
             plan::Op::Join {
@@ -1183,7 +1181,7 @@ fn join_plan_session(
     }
 }
 
-/// Journal/shadow identity for a child agent. Unique across process
+/// EventLog/shadow identity for a child agent. Unique across process
 /// restarts (#190): a bare per-process counter resets to 1, so a resumed
 /// session's new subagent would append to the previous run's `sub-1.jsonl`.
 /// Wall ms + pid + counter cannot repeat (same pid means same process,

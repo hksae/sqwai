@@ -18,20 +18,19 @@ use uuid::Uuid;
 mod ops;
 mod render;
 pub(crate) mod store;
-pub use ops::{
-    Applied, Limits, NewStep, Op, Rejection, apply, create, validate_surrender_reason,
-};
 pub(crate) use ops::auto_advance;
+pub use ops::{Applied, Limits, NewStep, Op, Rejection, apply, create, validate_surrender_reason};
 pub use render::{render, render_goal, render_status};
+#[cfg(test)]
+pub use store::list;
 #[cfg(test)]
 pub use store::open_active;
 pub use store::{
-    StepContext, commit, list, list_active, open, open_active_for_session, read_plan_file, replay,
-    store,
+    StepContext, commit, list_active, open, open_active_for_session, read_plan_file, replay, store,
 };
 
-/// A host-owned journal reference. The session is part of the identity because
-/// journal sequence numbers restart for every session.
+/// A host-owned events reference. The session is part of the identity because
+/// events sequence numbers restart for every session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct EvidenceRef {
     pub session: String,
@@ -147,7 +146,7 @@ pub struct Step {
     pub summary: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
-    /// Journal seq values. Written by the host only.
+    /// EventLog seq values. Written by the host only.
     #[serde(default)]
     pub evidence: Vec<EvidenceRef>,
     /// Bumped by every host-only reopen; subagent evidence from an older
@@ -164,7 +163,7 @@ pub struct Plan {
     pub created: String,
     #[serde(default)]
     pub sessions: Vec<String>,
-    /// Per-session replay cursors (`session -> last applied journal seq`).
+    /// Per-session replay cursors (`session -> last applied events seq`).
     /// Each session advances only its own entry; sessions with no entry
     /// replay nothing. The plan is a projection replayed from here on load.
     #[serde(default)]

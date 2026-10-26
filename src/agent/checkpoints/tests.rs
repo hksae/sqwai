@@ -4,7 +4,7 @@ use std::fs;
 /// Audit H4: bash mutations leave no file_diff; the shadow-head diff
 /// attributes them so passed receipts over those paths can go stale.
 #[test]
-fn changed_since_head_attributes_unjournaled_writes() {
+fn changed_since_head_attributes_unrecorded_writes() {
     let dir = tempfile::Builder::new()
         .prefix("sqwai-h4")
         .tempdir()
@@ -17,7 +17,7 @@ fn changed_since_head_attributes_unjournaled_writes() {
     snapshot_boundary(root, ShadowStore::Local, "s", "base")
         .unwrap()
         .expect("first boundary commits");
-    // a bash-style write with no journal record anywhere
+    // a bash-style write with no event record anywhere
     fs::write(root.join("a.rs"), "fn a() { changed(); }\n").unwrap();
     let paths = changed_since_head(root, ShadowStore::Local, "s");
     assert!(
@@ -31,11 +31,11 @@ fn changed_since_head_attributes_unjournaled_writes() {
     assert!(changed_since_head(root, ShadowStore::Local, "s").is_empty());
 }
 
-/// Audit H17: restore joins journal-provided paths straight onto the
-/// root. A corrupted or hand-edited journal with `..` in a path made
+/// Audit H17: restore joins events-provided paths straight onto the
+/// root. A corrupted or hand-edited events with `..` in a path made
 /// undo delete (or overwrite) files outside the project.
 #[test]
-fn restore_refuses_traversal_paths_from_the_journal() {
+fn restore_refuses_traversal_paths_from_the_event_log() {
     let dir = tempfile::Builder::new()
         .prefix("sqwai-traversal")
         .tempdir()
@@ -46,7 +46,7 @@ fn restore_refuses_traversal_paths_from_the_journal() {
     fs::write(&outside, "user data").unwrap();
 
     // agent-created-inside-the-window shape: revert = delete
-    let pre_images = vec![crate::agent::journal::PreImage {
+    let pre_images = vec![crate::agent::events::PreImage {
         path: "../outside.txt".to_string(),
         blob_before: None,
         existed_before: false,
@@ -77,12 +77,12 @@ fn available_in_respects_the_configured_store() {
     );
 }
 
-/// blobs are *"purged together with the session journal"*. A chain
-/// whose journal is gone has nothing left that could reference its
-/// checkpoints; a chain whose journal is still there must survive, and so
+/// blobs are *"purged together with the session events"*. A chain
+/// whose events is gone has nothing left that could reference its
+/// checkpoints; a chain whose events is still there must survive, and so
 /// must the session running the maintenance.
 #[test]
-fn maintenance_drops_only_the_chains_whose_journal_is_gone() {
+fn maintenance_drops_only_the_chains_whose_event_log_is_gone() {
     let dir = tempfile::Builder::new()
         .prefix("sqwai-maintain")
         .tempdir()
@@ -99,10 +99,10 @@ fn maintenance_drops_only_the_chains_whose_journal_is_gone() {
         fs::write(root.join("a.rs"), format!("// {session}")).unwrap();
         shadow.snapshot(session, "one").unwrap();
     }
-    // two of the three still have a journal on disk
-    fs::create_dir_all(root.join(".sqwai/journal")).unwrap();
+    // two of the three still have an event log on disk
+    fs::create_dir_all(root.join(".sqwai/events")).unwrap();
     for session in ["current", "alive"] {
-        fs::write(root.join(format!(".sqwai/journal/{session}.jsonl")), b"").unwrap();
+        fs::write(root.join(format!(".sqwai/events/{session}.jsonl")), b"").unwrap();
     }
 
     let report = maintain(root, &cfg, "current").unwrap();
@@ -119,7 +119,7 @@ fn maintenance_drops_only_the_chains_whose_journal_is_gone() {
 }
 
 /// `keep_per_session` is reported, not enforced — truncating a commit
-/// chain would rewrite the shas the journal recorded. The report has to
+/// chain would rewrite the shas the event log recorded. The report has to
 /// say so, or the setting silently means nothing.
 #[test]
 fn maintenance_reports_a_chain_over_the_keep_limit() {
@@ -152,7 +152,7 @@ fn maintenance_reports_a_chain_over_the_keep_limit() {
 /// repository at all. No `git init` anywhere in this test.
 #[test]
 fn a_project_without_git_can_still_be_reverted() {
-    use crate::agent::journal::PreImage;
+    use crate::agent::events::PreImage;
     let dir = tempfile::Builder::new()
         .prefix("sqwai-blob-undo")
         .tempdir()
@@ -204,7 +204,7 @@ fn a_project_without_git_can_still_be_reverted() {
 /// wrote it is reported, never overwritten.
 #[test]
 fn a_file_edited_outside_sqwai_is_left_alone() {
-    use crate::agent::journal::PreImage;
+    use crate::agent::events::PreImage;
     let dir = tempfile::Builder::new()
         .prefix("sqwai-blob-skip")
         .tempdir()
@@ -214,7 +214,7 @@ fn a_file_edited_outside_sqwai_is_left_alone() {
 
     let original = b"# notes\n";
     let blob = crate::agent::blobs::put(root, original).unwrap();
-    // what the host left, recorded in the journal
+    // what the host left, recorded in the event log
     fs::write(&path, b"# notes, by the agent\n").unwrap();
     let agent_hash = current_hash(&path);
     // ...and then the user edited it themselves
@@ -246,7 +246,7 @@ fn a_file_edited_outside_sqwai_is_left_alone() {
 /// restored). Contrast the agent-deleted case, which must come back.
 #[test]
 fn a_file_the_user_deleted_stays_deleted() {
-    use crate::agent::journal::PreImage;
+    use crate::agent::events::PreImage;
     let dir = tempfile::Builder::new()
         .prefix("sqwai-blob-userdel")
         .tempdir()
@@ -256,7 +256,7 @@ fn a_file_the_user_deleted_stays_deleted() {
 
     let original = b"# notes\n";
     let blob = crate::agent::blobs::put(root, original).unwrap();
-    // what the host left, recorded in the journal
+    // what the host left, recorded in the event log
     fs::write(&path, b"# notes, by the agent\n").unwrap();
     let agent_hash = current_hash(&path);
     // ...and then the user deleted it themselves
@@ -286,7 +286,7 @@ fn a_file_the_user_deleted_stays_deleted() {
 /// created this file" would delete a file it had merely edited.
 #[test]
 fn a_record_without_a_pre_image_is_reported_not_deleted() {
-    use crate::agent::journal::PreImage;
+    use crate::agent::events::PreImage;
     let dir = tempfile::Builder::new()
         .prefix("sqwai-blob-legacy")
         .tempdir()
@@ -318,7 +318,7 @@ fn a_record_without_a_pre_image_is_reported_not_deleted() {
 /// put back, and the user has to know which files the tree lost.
 #[test]
 fn a_missing_blob_stops_the_restore_and_reports_what_already_happened() {
-    use crate::agent::journal::PreImage;
+    use crate::agent::events::PreImage;
     let dir = tempfile::Builder::new()
         .prefix("sqwai-blob-missing")
         .tempdir()
@@ -360,7 +360,7 @@ fn a_missing_blob_stops_the_restore_and_reports_what_already_happened() {
 /// unrevertible while the shadow snapshot had every one of them.
 #[test]
 fn blobs_cover_requires_the_whole_window_not_one_lucky_file() {
-    use crate::agent::journal::PreImage;
+    use crate::agent::events::PreImage;
     let dir = tempfile::Builder::new()
         .prefix("sqwai-cover")
         .tempdir()
@@ -391,7 +391,7 @@ fn blobs_cover_requires_the_whole_window_not_one_lucky_file() {
 /// for it: the state to return to has no `src/foo/` either.
 #[test]
 fn undo_removes_the_directories_it_emptied() {
-    use crate::agent::journal::PreImage;
+    use crate::agent::events::PreImage;
     let dir = tempfile::Builder::new()
         .prefix("sqwai-blob-dirs")
         .tempdir()
@@ -483,7 +483,7 @@ fn tmp_repo() -> tempfile::TempDir {
     dir
 }
 
-/// Hash in exactly the format a journal `file_diff` record carries in
+/// Hash in exactly the format an event log `file_diff` record carries in
 /// `hash_after` (`sha256:`-prefixed). Earlier this helper returned raw
 /// hex while production records are prefixed, so the tests passed and
 /// production skipped everything — every `agent_hash` below must go
@@ -494,24 +494,24 @@ fn hash_of(path: &Path) -> String {
     format!("sha256:{:x}", hasher.finalize())
 }
 
-/// The live hash and the journal hash are compared for equality, so they
+/// The live hash and the event log hash are compared for equality, so they
 /// must share a format. If either side drops the `sha256:` prefix, every
 /// scoped restore degrades to reporting skips.
 #[test]
-fn live_and_journal_hashes_share_a_format() {
+fn live_and_event_hashes_share_a_format() {
     let repo = tmp_repo();
     let target = repo.path().join("a.txt");
     assert_eq!(current_hash(&target).unwrap(), hash_of(&target));
 }
 
 /// End to end across the module boundary: a hash that went through a real
-/// journal `file_diff` record must come back out and restore, not skip.
+/// events `file_diff` record must come back out and restore, not skip.
 /// Unit hashes on both sides used to match each other while production
-/// prefixed only the journal side, so every scoped undo skipped every
+/// prefixed only the event log side, so every scoped undo skipped every
 /// file and no test saw it.
 #[test]
-fn restore_accepts_hashes_read_back_from_the_journal() {
-    use crate::agent::journal::Journal;
+fn restore_accepts_hashes_read_back_from_the_event_log() {
+    use crate::agent::events::EventLog;
     use serde_json::json;
 
     let repo = tmp_repo();
@@ -521,8 +521,8 @@ fn restore_accepts_hashes_read_back_from_the_journal() {
         .expect("snapshot");
     std::fs::write(dir.join("a.txt"), "agent edit\n").unwrap();
 
-    let mut journal = Journal::open(dir, "session").unwrap();
-    journal
+    let mut events = EventLog::open(dir, "session").unwrap();
+    events
         .append(
             "file_diff",
             json!({
@@ -532,7 +532,7 @@ fn restore_accepts_hashes_read_back_from_the_journal() {
             }),
         )
         .unwrap();
-    let targets: Vec<Target> = Journal::recorded_writes(dir, std::slice::from_ref(&sha))
+    let targets: Vec<Target> = EventLog::recorded_writes(dir, std::slice::from_ref(&sha))
         .unwrap()
         .into_iter()
         .map(|(path, agent_hash)| Target { path, agent_hash })
@@ -830,7 +830,7 @@ fn session_chains_do_not_interleave() {
 
 #[test]
 fn edit_tool_stores_original_content_not_path_in_layer1_blob_and_works_with_shadow_off() {
-    use crate::agent::journal::Journal;
+    use crate::agent::events::EventLog;
     use serde_json::json;
 
     let dir = tempfile::Builder::new()
@@ -846,11 +846,7 @@ fn edit_tool_stores_original_content_not_path_in_layer1_blob_and_works_with_shad
     let mut ctx = crate::agent::tools::ToolCtx::new(root);
     ctx.session_id = "s-edit".to_string();
     ctx.shadow_store = ShadowStore::Off;
-    crate::agent::tools::execute(
-        &mut ctx,
-        "read",
-        &json!({ "file_path": "src/lib.rs" }),
-    );
+    crate::agent::tools::execute(&mut ctx, "read", &json!({ "file_path": "src/lib.rs" }));
     let out = crate::agent::tools::execute(
         &mut ctx,
         "edit",
@@ -872,8 +868,8 @@ fn edit_tool_stores_original_content_not_path_in_layer1_blob_and_works_with_shad
         "pub fn answer() -> u32 {\n    42\n}\n"
     );
 
-    let mut journal = Journal::open(root, "s-edit").unwrap();
-    journal
+    let mut events = EventLog::open(root, "s-edit").unwrap();
+    events
         .append(
             "file_diff",
             json!({
@@ -887,7 +883,7 @@ fn edit_tool_stores_original_content_not_path_in_layer1_blob_and_works_with_shad
         )
         .unwrap();
 
-    let pre_images = Journal::recorded_pre_images(root, std::slice::from_ref(&ckpt)).unwrap();
+    let pre_images = EventLog::recorded_pre_images(root, std::slice::from_ref(&ckpt)).unwrap();
     assert_eq!(pre_images.len(), 1);
     let report = restore_from_blobs(root, &pre_images).unwrap();
     assert_eq!(report.restored, vec!["src/lib.rs".to_string()]);
@@ -900,7 +896,7 @@ fn edit_tool_stores_original_content_not_path_in_layer1_blob_and_works_with_shad
 
 #[test]
 fn bash_file_diffs_records_layer1_blobs_and_hashes_for_scoped_undo() {
-    use crate::agent::journal::Journal;
+    use crate::agent::events::EventLog;
     use serde_json::json;
 
     let repo = tmp_repo();
@@ -918,9 +914,9 @@ fn bash_file_diffs_records_layer1_blobs_and_hashes_for_scoped_undo() {
     let diffs = bash_file_diffs(dir, ShadowStore::Local, &sha);
     assert_eq!(diffs.len(), 3, "diffs: {diffs:?}");
 
-    let mut journal = Journal::open(dir, "s-bash").unwrap();
+    let mut events = EventLog::open(dir, "s-bash").unwrap();
     for d in &diffs {
-        journal
+        events
             .append(
                 "file_diff",
                 json!({
@@ -938,7 +934,7 @@ fn bash_file_diffs_records_layer1_blobs_and_hashes_for_scoped_undo() {
     // User manually edits a.txt after bash completed
     fs::write(dir.join("a.txt"), "user edit after bash\n").unwrap();
 
-    let pre_images = Journal::recorded_pre_images(dir, std::slice::from_ref(&sha)).unwrap();
+    let pre_images = EventLog::recorded_pre_images(dir, std::slice::from_ref(&sha)).unwrap();
     assert!(blobs_cover(dir, &pre_images));
     let report = restore_from_blobs(dir, &pre_images).unwrap();
 

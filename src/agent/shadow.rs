@@ -688,18 +688,18 @@ mod tests {
         );
     }
 
-    /// `.sqwai/` holds the journal, the plan and the blob store. A snapshot
+    /// `.sqwai/` holds the event log, the plan and the blob store. A snapshot
     /// that contained them would grow without bound and a restore could
     /// rewrite the host's own state.
     #[test]
     fn host_state_is_never_snapshotted() {
         let dir = project();
         let root = dir.path();
-        std::fs::create_dir_all(root.join(".sqwai/journal")).unwrap();
-        std::fs::write(root.join(".sqwai/journal/s.jsonl"), b"{}").unwrap();
+        std::fs::create_dir_all(root.join(".sqwai/events")).unwrap();
+        std::fs::write(root.join(".sqwai/events/s.jsonl"), b"{}").unwrap();
         let shadow = open(root);
         let sha = shadow.snapshot("s", "one").unwrap().unwrap();
-        assert_eq!(shadow.show(&sha, ".sqwai/journal/s.jsonl").unwrap(), None);
+        assert_eq!(shadow.show(&sha, ".sqwai/events/s.jsonl").unwrap(), None);
     }
 
     #[test]

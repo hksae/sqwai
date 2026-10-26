@@ -4,7 +4,7 @@ use super::loop_subagent::{
 };
 
 /// #190: every child session id is distinct, even back-to-back —
-/// journal files must never be shared between runs.
+/// events files must never be shared between runs.
 #[test]
 fn subagent_session_ids_are_unique() {
     let a = next_subagent_session();
@@ -13,7 +13,7 @@ fn subagent_session_ids_are_unique() {
     assert!(a.starts_with("sub-"), "{a}");
     assert!(
         !a.contains('/') && !a.contains('\\') && !a.contains(".."),
-        "journal-file safe: {a}"
+        "events-file safe: {a}"
     );
 }
 
@@ -112,7 +112,7 @@ fn subagent_contract_parent_context_and_receipt_salvage() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
 
-    // Create an active plan and parent journal entries so `<parent_context>` is populated.
+    // Create an active plan and parent events entries so `<parent_context>` is populated.
     let mut plan = crate::plan::create(
         "Refactor parser module".into(),
         vec!["Preserve public AST API".into()],
@@ -127,7 +127,7 @@ fn subagent_contract_parent_context_and_receipt_salvage() {
     plan.sessions = vec!["parent-s1".into()];
     crate::plan::store(root, &plan).unwrap();
 
-    let mut j = crate::agent::journal::Journal::open(root, "parent-s1").unwrap();
+    let mut j = crate::agent::events::EventLog::open(root, "parent-s1").unwrap();
     j.append(
         "tool_call",
         serde_json::json!({"tool": "read", "path": "src/parser.rs"}),
@@ -138,12 +138,6 @@ fn subagent_contract_parent_context_and_receipt_salvage() {
         serde_json::json!({"path": "src/lexer.rs", "diff": "+token"}),
     )
     .unwrap();
-    j.append(
-        "note",
-        serde_json::json!({"note": "decision", "text": "Keep Token enum Copy"}),
-    )
-    .unwrap();
-
     let tasks = subagent_tasks_from_args(&serde_json::json!({
         "tasks": [
             {
@@ -170,7 +164,6 @@ fn subagent_contract_parent_context_and_receipt_salvage() {
     assert!(explorer_tail.contains("Active step [1]: Extract lexer tokens"));
     assert!(explorer_tail.contains("Parent modified files: src/lexer.rs"));
     assert!(explorer_tail.contains("Parent recently read files: src/parser.rs"));
-    assert!(explorer_tail.contains("[decision] Keep Token enum Copy"));
 
     let writer_tail = build_subagent_tail(root, "parent-s1", &tasks[1], false);
     assert!(writer_tail.contains("Role: SCOPED WRITER SUBAGENT"));
@@ -187,7 +180,7 @@ fn subagent_contract_parent_context_and_receipt_salvage() {
     assert!(clean_tail.contains("Role: READ-ONLY EXPLORER SUBAGENT"));
     assert!(
         !clean_tail.contains("<parent_context>"),
-        "clean:true subagent must not receive parent history/notes: {clean_tail}"
+        "clean:true subagent must not receive parent history: {clean_tail}"
     );
 
     // Failure-loop intervention fires every 3 consecutive edit -> bash failure cycles
@@ -208,7 +201,10 @@ fn subagent_contract_parent_context_and_receipt_salvage() {
     let attached = trail.attach_receipt("All callers updated.", true);
     assert!(attached.contains("[Subagent receipt: ok | 2 tool call(s): grep(parse_expr), read(src/parser.rs) | modified: src/lexer.rs]"));
 
-    let salvaged = trail.salvage_on_error("subagent timed out after 600s", "Found 3 callers in src/ast.rs:42");
+    let salvaged = trail.salvage_on_error(
+        "subagent timed out after 600s",
+        "Found 3 callers in src/ast.rs:42",
+    );
     assert!(salvaged.contains("subagent timed out after 600s"));
     assert!(salvaged.contains("[Subagent receipt: stopped | 2 tool call(s)"));
     assert!(salvaged.contains("Partial findings before stop:\nFound 3 callers in src/ast.rs:42"));

@@ -35,7 +35,7 @@ fn document_pages_count_toward_estimated_and_wire_pressure() {
 }
 
 #[test]
-fn anchor_keeps_journal_facts_not_plan_state() {
+fn anchor_keeps_event_facts_not_plan_state() {
     let root = temp_root("anchor");
     let mut plan = crate::plan::create(
         "ship the anchor".into(),
@@ -53,12 +53,12 @@ fn anchor_keeps_journal_facts_not_plan_state() {
     plan.sessions = vec!["anchor-session".to_string()];
     crate::plan::store(&root, &plan).unwrap();
 
-    let mut journal = crate::agent::journal::Journal::open(&root, "anchor-session").unwrap();
-    journal.set_attribution(Some("1".into()), Some(plan.id.clone()), "main");
-    journal
+    let mut events = crate::agent::events::EventLog::open(&root, "anchor-session").unwrap();
+    events.set_attribution(Some("1".into()), Some(plan.id.clone()), "main");
+    events
         .append("file_diff", serde_json::json!({"path": "src/main.rs"}))
         .unwrap();
-    journal
+    events
         .append(
             "tool_result",
             serde_json::json!({"tool": "bash", "ok": true}),
@@ -71,7 +71,7 @@ fn anchor_keeps_journal_facts_not_plan_state() {
     assert!(!rendered.contains("goal: ship the anchor"), "{rendered}");
     assert!(!rendered.contains("keep the goal host-owned"), "{rendered}");
     assert!(!rendered.contains("implement anchor"), "{rendered}");
-    // journal facts stay
+    // events facts stay
     assert!(rendered.contains("files changed this session: src/main.rs"));
     assert!(rendered.contains("last verification: successful exec j#2"));
     std::fs::remove_dir_all(root).ok();
@@ -86,13 +86,13 @@ fn anchor_drops_files_that_a_later_undo_reverted() {
     let root = temp_root("anchor-undo");
     std::fs::remove_dir_all(&root).ok();
     std::fs::create_dir_all(&root).unwrap();
-    let mut journal = crate::agent::journal::Journal::open(&root, "s").unwrap();
+    let mut events = crate::agent::events::EventLog::open(&root, "s").unwrap();
     for path in ["src/a.rs", "src/b.rs"] {
-        journal
+        events
             .append("file_diff", serde_json::json!({"path": path}))
             .unwrap();
     }
-    journal
+    events
         .append_undo("deadbeef", &["src/a.rs".to_string()], &[])
         .unwrap();
 
@@ -107,7 +107,7 @@ fn anchor_drops_files_that_a_later_undo_reverted() {
     );
 
     // writing it again after the revert counts, exactly like the live tree
-    journal
+    events
         .append("file_diff", serde_json::json!({"path": "src/a.rs"}))
         .unwrap();
     let rendered = anchor(&root, "s");
@@ -125,32 +125,32 @@ fn anchor_drops_files_that_a_later_undo_reverted() {
 #[test]
 fn anchor_surfaces_decisions_and_recent_failures() {
     let root = temp_root("anchor-decisions");
-    let mut journal = crate::agent::journal::Journal::open(&root, "s").unwrap();
-    journal
+    let mut events = crate::agent::events::EventLog::open(&root, "s").unwrap();
+    events
         .append(
             "note",
             serde_json::json!({"note": "decision", "text": "chose btree over lsm"}),
         )
         .unwrap();
-    journal
+    events
         .append(
             "note",
             serde_json::json!({"note": "lesson", "text": "flush before read"}),
         )
         .unwrap();
-    journal
+    events
         .append(
             "note",
             serde_json::json!({"note": "assumption", "text": "disk is fast"}),
         )
         .unwrap();
-    journal
+    events
         .append(
             "tool_result",
             serde_json::json!({"tool": "bash", "ok": false, "summary": "boom: segfault"}),
         )
         .unwrap();
-    journal
+    events
         .append(
             "tool_result",
             serde_json::json!({"tool": "bash", "ok": false, "code": "cancelled"}),
@@ -231,12 +231,12 @@ fn resume_notice_reports_unfinished_plan_step() {
     )
     .unwrap();
     crate::plan::store(&root, &plan).unwrap();
-    let mut journal = crate::agent::journal::Journal::open(&root, "resume-session").unwrap();
-    journal.set_attribution(Some("1".into()), Some(plan.id), "main");
-    journal
+    let mut events = crate::agent::events::EventLog::open(&root, "resume-session").unwrap();
+    events.set_attribution(Some("1".into()), Some(plan.id), "main");
+    events
         .append("plan", serde_json::json!({"op": "create"}))
         .unwrap();
-    journal
+    events
         .append(
             "tool_result",
             serde_json::json!({"tool": "read", "ok": true}),
@@ -251,11 +251,11 @@ fn resume_notice_reports_unfinished_plan_step() {
 #[test]
 fn completed_plan_step_has_no_resume_notice() {
     let root = temp_root("resume-closed");
-    let mut journal = crate::agent::journal::Journal::open(&root, "closed-session").unwrap();
-    journal
+    let mut events = crate::agent::events::EventLog::open(&root, "closed-session").unwrap();
+    events
         .append("plan", serde_json::json!({"op": "start", "id": "1"}))
         .unwrap();
-    journal
+    events
         .append("plan", serde_json::json!({"op": "finish", "id": "1"}))
         .unwrap();
     assert!(resume_notice(&root, "closed-session").is_none());
@@ -263,7 +263,7 @@ fn completed_plan_step_has_no_resume_notice() {
 }
 
 #[test]
-fn anchor_degrades_without_plan_or_journal() {
+fn anchor_degrades_without_plan_or_events() {
     let root = temp_root("empty");
     let rendered = anchor(&root, "missing-session");
     assert!(rendered.contains("ANCHOR"), "{rendered}");
@@ -288,7 +288,7 @@ fn anchor_ignores_completed_plans() {
     .unwrap();
     let rendered = anchor(&root, "s1");
     // completed plans surface nowhere in the anchor: done work stays
-    // visible through the journal (file_diff records), not a plan echo
+    // visible through the event log (file_diff records), not a plan echo
     assert!(!rendered.contains("ship it"), "{rendered}");
     assert!(!rendered.contains("keep it green"), "{rendered}");
     assert!(!rendered.contains("plan: none"), "{rendered}");
@@ -297,20 +297,17 @@ fn anchor_ignores_completed_plans() {
     std::fs::remove_dir_all(root).ok();
 }
 
-/// The anchor describes what the journal proves and gives no orders. Its
-/// `memory_write` imperative used to ride every request inside the host
-/// block, and a live session obeyed it in the middle of an unrelated loop
-///.
+/// The anchor describes what the host ledger proves and gives no orders.
 #[test]
 fn anchor_states_facts_and_issues_no_commands() {
     let root = temp_root("facts");
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
-    let mut journal = crate::agent::journal::Journal::open(&root, "facts-session").unwrap();
-    journal
+    let mut events = crate::agent::events::EventLog::open(&root, "facts-session").unwrap();
+    events
         .append("file_diff", serde_json::json!({"path": "src/x.rs"}))
         .unwrap();
-    journal
+    events
         .append(
             "tool_result",
             serde_json::json!({"tool": "bash", "ok": true}),
@@ -318,7 +315,7 @@ fn anchor_states_facts_and_issues_no_commands() {
         .unwrap();
     let rendered = anchor(&root, "facts-session");
     assert!(rendered.contains("src/x.rs"), "{rendered}");
-    for command in ["memory_write", "call ", "Do not", "must "] {
+    for command in ["call ", "Do not", "must "] {
         assert!(
             !rendered.contains(command),
             "imperative {command:?} left in the anchor: {rendered}"
@@ -421,7 +418,10 @@ fn split_for_summary_adaptive_force_compacts_a_short_conversation() {
         user("second request"),
     ];
     let (older, _keep) = split_for_summary_with_keep(&messages, 4);
-    assert!(older.is_empty(), "configured keep_turns leaves nothing: {older:?}");
+    assert!(
+        older.is_empty(),
+        "configured keep_turns leaves nothing: {older:?}"
+    );
     let (older, keep) = split_for_summary_adaptive(&messages, 4, true);
     assert_eq!(older.len(), 2, "the earlier exchange is summarized");
     assert_eq!(keep.len(), 1, "the last turn stays verbatim");
@@ -437,7 +437,11 @@ fn wire_estimated_tokens_counts_cleared_results_as_stubs() {
     // bytes would keep firing compaction long after the request stopped growing.
     let mut messages = Vec::new();
     for i in 0..40 {
-        messages.push(Message::tool_result(format!("c{i}"), "x".repeat(8 * 1024), false));
+        messages.push(Message::tool_result(
+            format!("c{i}"),
+            "x".repeat(8 * 1024),
+            false,
+        ));
     }
     let raw = estimated_tokens(&messages);
     let wire = wire_estimated_tokens(&messages, 0);
@@ -766,17 +770,17 @@ fn anchor_restores_files_on_redo_and_lists_recent_reads_and_blockers() {
     let root = temp_root("anchor-redo-reads");
     std::fs::remove_dir_all(&root).ok();
     std::fs::create_dir_all(&root).unwrap();
-    let mut journal = crate::agent::journal::Journal::open(&root, "s").unwrap();
-    journal
+    let mut events = crate::agent::events::EventLog::open(&root, "s").unwrap();
+    events
         .append("file_diff", serde_json::json!({"path": "src/a.rs"}))
         .unwrap();
-    journal
+    events
         .append_undo("cp1", &["src/a.rs".to_string()], &[])
         .unwrap();
-    journal
+    events
         .append_redo(&["cp1".to_string()], &["src/a.rs".to_string()], &[])
         .unwrap();
-    journal
+    events
         .append(
             "tool_call",
             serde_json::json!({
@@ -786,7 +790,7 @@ fn anchor_restores_files_on_redo_and_lists_recent_reads_and_blockers() {
             }),
         )
         .unwrap();
-    journal
+    events
         .append(
             "note",
             serde_json::json!({"note": "blocker", "text": "waiting on schema migration"}),
@@ -814,8 +818,8 @@ fn anchor_tracks_fused_paths_hard_trim_deducts_summary_head_and_local_summary_sk
     let root = temp_root("anchor-fused-reads");
     std::fs::remove_dir_all(&root).ok();
     std::fs::create_dir_all(&root).unwrap();
-    let mut journal = crate::agent::journal::Journal::open(&root, "s").unwrap();
-    journal
+    let mut events = crate::agent::events::EventLog::open(&root, "s").unwrap();
+    events
         .append(
             "tool_call",
             serde_json::json!({
@@ -836,7 +840,10 @@ fn anchor_tracks_fused_paths_hard_trim_deducts_summary_head_and_local_summary_sk
     // `hard_trim` deducts the leading `<conversation-summary>` token weight from `budget`
     let summary_msg = Message::new(
         Role::User,
-        format!("<conversation-summary>\n{}\n</conversation-summary>", "s".repeat(400)),
+        format!(
+            "<conversation-summary>\n{}\n</conversation-summary>",
+            "s".repeat(400)
+        ),
     );
     let msgs = vec![
         summary_msg.clone(),

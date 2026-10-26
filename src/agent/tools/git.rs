@@ -299,7 +299,7 @@ pub fn commit(ctx: &mut ToolCtx, args: &Value) -> Outcome {
         ctx.checkpoint_chain(),
         "git_commit",
     ) {
-        ctx.journal.push((sha, "git_commit".to_string()));
+        ctx.checkpoints.push((sha, "git_commit".to_string()));
     }
     if all {
         run_git(ctx, &["commit", "-am", message])
@@ -414,7 +414,7 @@ pub fn branch(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                     ctx.checkpoint_chain(),
                     "git_branch create",
                 ) {
-                    ctx.journal.push((sha, "git_branch create".to_string()));
+                    ctx.checkpoints.push((sha, "git_branch create".to_string()));
                 }
                 run_git(ctx, &["branch", name])
             }
@@ -429,7 +429,7 @@ pub fn branch(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                     ctx.checkpoint_chain(),
                     "git_branch switch",
                 ) {
-                    ctx.journal.push((sha, "git_branch switch".to_string()));
+                    ctx.checkpoints.push((sha, "git_branch switch".to_string()));
                 }
                 run_git(ctx, &["switch", name])
             }
@@ -515,7 +515,7 @@ pub fn patch(ctx: &mut ToolCtx, args: &Value) -> Outcome {
         ctx.checkpoint_chain(),
         "patch",
     );
-    ctx.journal.push((sha.clone(), "patch".to_string()));
+    ctx.checkpoints.push((sha.clone(), "patch".to_string()));
     let checkpoint = Some(sha);
 
     let mut apply = match Command::new("git")
@@ -870,8 +870,7 @@ fn seek_lines(lines: &[String], pattern: &[String], start: usize, eof: bool) -> 
         |a, b| a.trim_end() == b.trim_end(),
         |a, b| a.trim() == b.trim(),
         |a, b| {
-            super::fs::normalize_typographic(a.trim())
-                == super::fs::normalize_typographic(b.trim())
+            super::fs::normalize_typographic(a.trim()) == super::fs::normalize_typographic(b.trim())
         },
     ];
     if eof {
@@ -896,8 +895,16 @@ fn seek_lines(lines: &[String], pattern: &[String], start: usize, eof: bool) -> 
     None
 }
 
-fn apply_chunks_to_text(path: &str, original: &str, chunks: &[PatchChunk]) -> Result<String, String> {
-    let eol = if original.contains("\r\n") { "\r\n" } else { "\n" };
+fn apply_chunks_to_text(
+    path: &str,
+    original: &str,
+    chunks: &[PatchChunk],
+) -> Result<String, String> {
+    let eol = if original.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
     let had_trailing_nl = original.ends_with('\n') || original.is_empty();
     let mut lines: Vec<String> = original
         .split('\n')
@@ -994,8 +1001,8 @@ fn apply_structured_patch_inner(
                 let resolved = ctx
                     .resolve_writable(&path)
                     .map_err(|e| format!("forbidden path '{path}': {e}"))?;
-                let prev = std::fs::read(&resolved)
-                    .map_err(|e| format!("cannot delete '{path}': {e}"))?;
+                let prev =
+                    std::fs::read(&resolved).map_err(|e| format!("cannot delete '{path}': {e}"))?;
                 staged.push(StagedWrite {
                     src_path: resolved.clone(),
                     dst_path: resolved,
@@ -1031,14 +1038,17 @@ fn apply_structured_patch_inner(
                 };
                 let current_text = String::from_utf8_lossy(&current_bytes).into_owned();
                 let has_bom = current_text.starts_with('\u{feff}');
-                let body = current_text.strip_prefix('\u{feff}').unwrap_or(&current_text);
+                let body = current_text
+                    .strip_prefix('\u{feff}')
+                    .unwrap_or(&current_text);
                 let updated_body = apply_chunks_to_text(&path, body, &chunks)?;
                 let final_text = if has_bom {
                     format!("\u{feff}{updated_body}")
                 } else {
                     updated_body
                 };
-                if let Some(existing) = staged.iter_mut().rev().find(|s| s.dst_path == src_resolved) {
+                if let Some(existing) = staged.iter_mut().rev().find(|s| s.dst_path == src_resolved)
+                {
                     existing.dst_path = dst_resolved;
                     existing.after = Some(final_text.into_bytes());
                 } else {
@@ -1059,7 +1069,7 @@ fn apply_structured_patch_inner(
         ctx.checkpoint_chain(),
         "patch",
     );
-    ctx.journal.push((sha.clone(), "patch".to_string()));
+    ctx.checkpoints.push((sha.clone(), "patch".to_string()));
     let checkpoint = Some(sha);
 
     let mut file_diffs = Vec::new();
@@ -1141,7 +1151,9 @@ pub(super) fn extract_patch_files(ctx: &ToolCtx, patch: &str) -> Vec<String> {
                 push_unique(&mut files, rest.trim().to_string());
             }
         }
-        if let Some(rest) = line.strip_prefix("--- ").or_else(|| line.strip_prefix("+++ "))
+        if let Some(rest) = line
+            .strip_prefix("--- ")
+            .or_else(|| line.strip_prefix("+++ "))
             && let Some(clean) = strip_diff_prefix(rest)
         {
             push_unique(&mut files, clean);
@@ -1340,9 +1352,9 @@ mod tests {
     fn git_read_tools_refuse_host_owned_state() {
         let dir = tempfile::tempdir().unwrap();
         init_repo(dir.path());
-        std::fs::create_dir_all(dir.path().join(".sqwai/journal")).unwrap();
+        std::fs::create_dir_all(dir.path().join(".sqwai/events")).unwrap();
         std::fs::write(
-            dir.path().join(".sqwai/journal/active.json"),
+            dir.path().join(".sqwai/events/active.json"),
             "TOP-SECRET-PLAN",
         )
         .unwrap();
@@ -1350,13 +1362,13 @@ mod tests {
         git_out(dir.path(), &["add", "-A"]);
         git_out(dir.path(), &["commit", "-m", "init"]);
         std::fs::write(
-            dir.path().join(".sqwai/journal/active.json"),
+            dir.path().join(".sqwai/events/active.json"),
             "TOP-SECRET-PLAN-v2",
         )
         .unwrap();
 
         let ctx = ToolCtx::new(dir.path());
-        let shown = show(&ctx, &json!({"commit": "HEAD:.sqwai/journal/active.json"}));
+        let shown = show(&ctx, &json!({"commit": "HEAD:.sqwai/events/active.json"}));
         assert!(
             !shown.ok,
             "git_show leaked host state via rev:path: {}",
@@ -1368,7 +1380,7 @@ mod tests {
             shown.output
         );
 
-        let d = diff(&ctx, &json!({"target": ".sqwai/journal/active.json"}));
+        let d = diff(&ctx, &json!({"target": ".sqwai/events/active.json"}));
         assert!(
             !d.output.contains("TOP-SECRET-PLAN"),
             "git_diff leaked host state: {}",

@@ -6,15 +6,6 @@ use serde_json::{Value, json};
 
 use crate::agent::loop_task::{ASK_MAX_OPTIONS, ASK_MAX_QUESTIONS, ASK_MIN_OPTIONS};
 
-/// Clip to `max` chars on a char boundary (… marks the cut).
-pub(crate) fn clip(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        return s.to_string();
-    }
-    let taken: String = s.chars().take(max.saturating_sub(1)).collect();
-    format!("{taken}…")
-}
-
 /// whether a tool may run in parallel with others
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Kind {
@@ -469,38 +460,6 @@ via `file`.",
             }),
         },
         ToolDef {
-            name: "note",
-            kind: Kind::ReadOnly,
-            description: "Record a reasoning note in the host journal so it survives compaction \
-and feeds ANCHOR. Kinds: decision (default), rejected, assumption, lesson, blocker.",
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "note": {"type": "string", "description": "concise reasoning note (1-2000 bytes)"},
-                    "kind": {"type": "string", "enum": ["decision", "rejected", "assumption", "lesson", "blocker"], "description": "note category (default: decision)"}
-                },
-                "required": ["note"]
-            }),
-        },
-        ToolDef {
-            name: "journal",
-            kind: Kind::ReadOnly,
-            description: "Read the host journal: the project's event log (messages, tools, \
-diffs, plan ops, notes, checkpoints, undo). Filter by `query` or `kind`; `op: recap` gives a \
-cross-session digest.",
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "op": {"type": "string", "enum": ["read", "recap"], "description": "read journal records (default) or recap recent sessions"},
-                    "query": {"type": "string", "description": "case-insensitive substring matched against the rendered record"},
-                    "kind": {"type": "string", "description": "filter by record kind (e.g. file_diff, note, tool_result, plan)"},
-                    "session": {"type": "string", "description": "whose journal to read: 'current' (default), 'all', or a session id / prefix from op=recap"},
-                    "last": {"type": "integer", "description": "max records to return for op=read (default 40, max 200)"},
-                    "days": {"type": "integer", "description": "recap only: how many days back, today included (default 3, max 7)"}
-                }
-            }),
-        },
-        ToolDef {
             name: "recall_result",
             kind: Kind::ReadOnly,
             description: "Return a cleared tool result by the `call_id` in its `[output cleared]` \
@@ -515,14 +474,6 @@ stub. Optional `query` or `offset`/`limit` for part of a large result.",
                 },
                 "required": ["call_id"]
             }),
-        },
-        ToolDef {
-            name: "memory_write",
-            kind: Kind::ReadOnly,
-            description: "Persist one durable fact to project or user memory: preferences, \
-agreements, conventions, environment gotchas. Not transient task state or guesses. `replaces` \
-updates or deletes an entry in place.",
-            parameters: json!({"type":"object","properties":{"section":{"type":"string","enum":["Project","Conventions","User","Agreements"]},"scope":{"type":"string","enum":["project","user"]},"text":{"type":"string","description":"new fact to record, or empty string when using `replaces` to delete an outdated entry"},"replaces":{"type":"string","description":"existing fact text to update in place (or delete when `text` is empty)"}},"required":["section","text"]}),
         },
         ToolDef {
             name: "plan",
@@ -595,8 +546,7 @@ re-read the plan through tools.",
             name: "ask_user",
             kind: Kind::ReadOnly,
             description: "Ask the user (1-4) structured questions with 2-5 options each. Use only \
-for material decisions, never trivial clarification or facts you can look up; query the journal \
-before asking about past work.",
+for material decisions, never trivial clarification or facts you can look up.",
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -685,11 +635,11 @@ pub fn call_path(name: &str, args: &Value) -> Option<String> {
         .map(|s| s.to_string())
 }
 
-/// full call arguments for the journal (forensics): same object the model
+/// full call arguments for the event log (forensics): same object the model
 /// sent, with long strings cut to a head so a `write` body cannot bloat
-/// the journal. `args_digest` stays the human skim; this is the audit trail
+/// the event log. `args_digest` stays the human skim; this is the audit trail
 /// (e.g. whether a `read` used offset/limit windows or re-read the file).
-pub fn call_args_for_journal(args: &Value) -> Value {
+pub fn call_args_for_event(args: &Value) -> Value {
     const MAX_STR: usize = 500;
     fn cut(value: &Value) -> Value {
         match value {
@@ -838,7 +788,6 @@ fn call_summary_raw(name: &str, args: &Value) -> String {
                 format!("{name} / {file}")
             }
         }
-        "memory_write" => format!("{}: {}", s("scope"), s("text")),
         "ask_user" => {
             let single = s("question");
             if !single.is_empty() {
@@ -869,24 +818,6 @@ fn call_summary_raw(name: &str, args: &Value) -> String {
             }
         }
         "plan" => format!("plan {}", s("op")),
-        "journal" => {
-            let op = args["op"].as_str().unwrap_or("read");
-            if op == "recap" {
-                let days = args["days"].as_u64().unwrap_or(3);
-                return format!("recap {days}d");
-            }
-            let mut parts: Vec<String> = Vec::new();
-            for key in ["kind", "query", "session"] {
-                if let Some(v) = args[key].as_str() {
-                    parts.push(format!("{key}={v}"));
-                }
-            }
-            if parts.is_empty() {
-                "recent records".to_string()
-            } else {
-                parts.join(" ")
-            }
-        }
         _ => String::new(),
     }
 }
@@ -1200,13 +1131,13 @@ fn decode_child_output_handles_console_codepage() {
 }
 
 #[test]
-fn call_args_for_journal_cuts_long_strings() {
+fn call_args_for_event_cuts_long_strings() {
     let args = serde_json::json!({
         "file_path": "a.txt",
         "content": "x".repeat(600),
         "offset": 3,
     });
-    let kept = call_args_for_journal(&args);
+    let kept = call_args_for_event(&args);
     assert_eq!(kept["file_path"], serde_json::json!("a.txt"));
     assert_eq!(kept["offset"], serde_json::json!(3));
     let body = kept["content"].as_str().unwrap();
@@ -1271,7 +1202,7 @@ fn tool_specs_wire_weight() {
 }
 
 /// A mutating tool has to report the files it touched as a `FileDiff` so the
-/// journal, replayed diffs, checkpoints and undo see the change; the few tools
+/// events, replayed diffs, checkpoints and undo see the change; the few tools
 /// without a per-call source path are listed here. A new mutating tool that
 /// lands in neither bucket fails this test on purpose — the bug being fixed
 /// was `patch` changing files while the gate knew only three names.

@@ -1,7 +1,7 @@
 //! R: untrusted-input machinery.
 //!
 //! The prompt rule already declares every content source untrusted; this
-//! module is the machinery behind it. Three pieces, all journal-derived
+//! module is the machinery behind it. Three pieces, all events-derived
 //! (no new host state to crash-recover):
 //!
 //! - [`banner_wrap`] marks external bytes model-visibly, so the boundary
@@ -15,7 +15,7 @@
 //!   with the safety classifier at every level.
 //!
 //! The approval is per (session, egress kind), not per command: the user's
-//! answer is journaled as a `user_ack` record and read back by
+//! answer is recorded as a `user_ack` record and read back by
 //! [`acked_egress`], so one dialog covers the kind for the rest of the
 //! session — across a resume too.
 
@@ -30,7 +30,7 @@ pub enum TaintClass {
 }
 
 /// Classify a tool by the bytes its results carry. `is_mcp` covers the
-/// dynamic registry names the host knows at dispatch but the journal
+/// dynamic registry names the host knows at dispatch but the event log
 /// query cannot. Everything unlisted is a host observation (plan records,
 /// git metadata, diagnostics, listings) and stays high.
 pub fn tool_taint(name: &str, is_mcp: bool) -> Option<TaintClass> {
@@ -55,7 +55,7 @@ pub fn banner_wrap(output: &str) -> String {
     )
 }
 
-/// Session taint derived from the journal: external seen, plus how many
+/// Session taint derived from the event log: external seen, plus how many
 /// local sources. Only successful results count — a failed fetch showed
 /// nothing, so there is nothing to be tainted by.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,7 +75,7 @@ impl TaintLevel {
 
 pub fn taint_level(root: &Path, session: &str) -> TaintLevel {
     let mut level = TaintLevel::clean();
-    let records = crate::agent::journal::Journal::records_for(root, session).unwrap_or_default();
+    let records = crate::agent::events::EventLog::records_for(root, session).unwrap_or_default();
     for record in &records {
         if record.kind != "tool_result"
             || record.fields.get("ok").and_then(|v| v.as_bool()) != Some(true)
@@ -127,10 +127,10 @@ pub fn trust_gate(command: &str, tainted_external: bool, headless: bool, acked: 
 }
 
 /// The egress kinds the user already confirmed in this session. Read from the
-/// journal like the taint level itself, so a resume or a restart keeps the
+/// events like the taint level itself, so a resume or a restart keeps the
 /// answer the human gave.
 pub fn acked_egress(root: &Path, session: &str) -> Vec<String> {
-    crate::agent::journal::Journal::records_for(root, session)
+    crate::agent::events::EventLog::records_for(root, session)
         .unwrap_or_default()
         .iter()
         .filter(|record| record.kind == "user_ack")
@@ -139,10 +139,10 @@ pub fn acked_egress(root: &Path, session: &str) -> Vec<String> {
         .collect()
 }
 
-/// Journal the user's answer: this egress kind passes for the rest of the
+/// EventLog the user's answer: this egress kind passes for the rest of the
 /// session without asking again.
-pub fn ack_egress(journal: &mut crate::agent::journal::Journal, kind: &str) {
-    let _ = journal.append(
+pub fn ack_egress(events: &mut crate::agent::events::EventLog, kind: &str) {
+    let _ = events.append(
         "user_ack",
         serde_json::json!({"egress": kind, "by": "user", "ok": true}),
     );
@@ -163,7 +163,6 @@ mod tests {
         assert_eq!(tool_taint("read", false), Some(TaintClass::Local));
         assert_eq!(tool_taint("bash", false), Some(TaintClass::Local));
         assert_eq!(tool_taint("plan", false), None);
-        assert_eq!(tool_taint("journal", false), None);
         // an MCP-named tool without the registry flag is host data
         assert_eq!(tool_taint("some-mcp-tool", false), None);
     }
@@ -218,14 +217,13 @@ mod tests {
     }
 
     #[test]
-    fn the_ack_survives_through_the_journal() {
+    fn the_ack_survives_through_the_event_log() {
         let dir = std::env::temp_dir().join(format!("sqwai-ack-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         assert!(acked_egress(&dir, "sess").is_empty());
-        let mut journal =
-            crate::agent::journal::Journal::open(&dir, "sess").expect("journal opens");
-        ack_egress(&mut journal, "git push");
+        let mut events = crate::agent::events::EventLog::open(&dir, "sess").expect("events opens");
+        ack_egress(&mut events, "git push");
         assert_eq!(acked_egress(&dir, "sess"), vec!["git push".to_string()]);
         // a sibling session gets no share of the answer
         assert!(acked_egress(&dir, "other").is_empty());
@@ -233,27 +231,26 @@ mod tests {
     }
 
     #[test]
-    fn taint_level_reads_the_journal() {
+    fn taint_level_reads_the_event_log() {
         let dir = std::env::temp_dir().join(format!("sqwai-taint-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         assert_eq!(taint_level(&dir, "sess"), TaintLevel::clean());
-        let mut journal =
-            crate::agent::journal::Journal::open(&dir, "sess").expect("journal opens");
-        journal
+        let mut events = crate::agent::events::EventLog::open(&dir, "sess").expect("events opens");
+        events
             .append(
                 "tool_result",
                 serde_json::json!({"tool": "read", "ok": true, "taint": "local"}),
             )
             .unwrap();
-        journal
+        events
             .append(
                 "tool_result",
                 serde_json::json!({"tool": "read", "ok": true, "taint": "local"}),
             )
             .unwrap();
         // failed fetches showed nothing: not counted
-        journal
+        events
             .append(
                 "tool_result",
                 serde_json::json!({"tool": "webfetch", "ok": false, "taint": "external"}),
@@ -262,7 +259,7 @@ mod tests {
         let mid = taint_level(&dir, "sess");
         assert!(!mid.external);
         assert_eq!(mid.local, 2);
-        journal
+        events
             .append(
                 "tool_result",
                 serde_json::json!({"tool": "webfetch", "ok": true, "taint": "external"}),

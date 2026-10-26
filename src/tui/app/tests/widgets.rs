@@ -436,9 +436,9 @@ fn undo_refuses_an_argument_that_is_not_a_count() {
 }
 
 /// `/undo step N` reverts through layer 1, so it must reach that path
-/// rather than the checkpoint one — with no journal records for the step
+/// rather than the checkpoint one — with no event records for the step
 /// there is nothing to put back, and saying so is the correct answer.
-/// Runs hermetic in a temp dir: the scan walks every journal under the root,
+/// Runs hermetic in a temp dir: the scan walks every events under the root,
 /// so the repo root would pick up live agent sessions.
 #[test]
 fn undo_step_reports_a_step_with_no_recorded_writes() {
@@ -749,35 +749,60 @@ fn inline_ask_arrows_chevron_marker_and_custom_erase_resets_focus() {
 
     // Initial render shows `› ` on option 1 in Q1 (and not on Q2).
     let s0 = render_to_string(&mut app, 70, 30);
-    assert!(s0.contains("› ○ 1. alpha"), "chevron on first option:\n{s0}");
+    assert!(
+        s0.contains("› ○ 1. alpha"),
+        "chevron on first option:\n{s0}"
+    );
 
     // Press Down arrow -> moves cursor to option 2 ("beta") inside Q1 and selects it.
     let (tx, rx) = std::sync::mpsc::channel();
-    tx.send(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::empty())))
-        .unwrap();
+    tx.send(Event::Key(KeyEvent::new(
+        KeyCode::Down,
+        KeyModifiers::empty(),
+    )))
+    .unwrap();
     app.poll_input(&rx).unwrap();
     let s1 = render_to_string(&mut app, 70, 30);
-    assert!(s1.contains("› ● 2. beta"), "Down arrow selects option 2 with ›:\n{s1}");
+    assert!(
+        s1.contains("› ● 2. beta"),
+        "Down arrow selects option 2 with ›:\n{s1}"
+    );
     assert_eq!(app.inline_ask_text(seg), "Q1: beta | Q2: (no answer)");
 
     // Press Down arrow again -> moves to 3. your answer… and opens custom focus.
-    tx.send(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::empty())))
-        .unwrap();
+    tx.send(Event::Key(KeyEvent::new(
+        KeyCode::Down,
+        KeyModifiers::empty(),
+    )))
+    .unwrap();
     app.poll_input(&rx).unwrap();
     assert_eq!(app.ask_custom_focus, Some(0));
 
     // Type "hi", then erase both chars with Backspace -> custom focus resets to None!
     for ch in ['h', 'i'] {
-        tx.send(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::empty())))
-            .unwrap();
+        tx.send(Event::Key(KeyEvent::new(
+            KeyCode::Char(ch),
+            KeyModifiers::empty(),
+        )))
+        .unwrap();
     }
-    tx.send(Event::Key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::empty())))
-        .unwrap();
+    tx.send(Event::Key(KeyEvent::new(
+        KeyCode::Backspace,
+        KeyModifiers::empty(),
+    )))
+    .unwrap();
     app.poll_input(&rx).unwrap();
-    assert_eq!(app.ask_custom_focus, Some(0), "still focused while 1 char remains");
+    assert_eq!(
+        app.ask_custom_focus,
+        Some(0),
+        "still focused while 1 char remains"
+    );
 
-    tx.send(Event::Key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::empty())))
-        .unwrap();
+    tx.send(Event::Key(KeyEvent::new(
+        KeyCode::Backspace,
+        KeyModifiers::empty(),
+    )))
+    .unwrap();
     app.poll_input(&rx).unwrap();
     assert_eq!(
         app.ask_custom_focus, None,
@@ -785,8 +810,11 @@ fn inline_ask_arrows_chevron_marker_and_custom_erase_resets_focus() {
     );
 
     // Pressing digit '1' now selects option 1 ("alpha") instead of typing '1' into custom text!
-    tx.send(Event::Key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::empty())))
-        .unwrap();
+    tx.send(Event::Key(KeyEvent::new(
+        KeyCode::Char('1'),
+        KeyModifiers::empty(),
+    )))
+    .unwrap();
     app.poll_input(&rx).unwrap();
     assert_eq!(app.inline_ask_text(seg), "Q1: alpha | Q2: (no answer)");
 }
@@ -1845,7 +1873,6 @@ fn session_recovery_with_deleted_or_broken_plan_id() {
         limits: Default::default(),
         mcp: Default::default(),
         skills: Default::default(),
-        memory: Default::default(),
         compaction: Default::default(),
         plan: Default::default(),
         verify: Default::default(),
@@ -1899,7 +1926,7 @@ fn truncate_chars_clips_to_columns_not_characters() {
 
 #[test]
 fn undo_and_redo_round_trip_restores_files_and_recompletes_plan_step() {
-    use crate::agent::journal::Journal;
+    use crate::agent::events::EventLog;
     use serde_json::json;
     use sha2::Digest;
 
@@ -1940,12 +1967,12 @@ fn undo_and_redo_round_trip_restores_files_and_recompletes_plan_step() {
     app.session.plan_id = Some(plan.id.clone());
 
     let ckpt = "blob:test-ckpt-1".to_string();
-    let mut journal = Journal::open(root, &sid).unwrap();
-    journal.set_attribution(Some("1".into()), Some(plan.id.clone()), "main");
+    let mut events = EventLog::open(root, &sid).unwrap();
+    events.set_attribution(Some("1".into()), Some(plan.id.clone()), "main");
     let mut hasher = sha2::Sha256::new();
     hasher.update(after);
     let hash_after = format!("sha256:{:x}", hasher.finalize());
-    journal
+    events
         .append(
             "file_diff",
             json!({
@@ -1969,7 +1996,10 @@ fn undo_and_redo_round_trip_restores_files_and_recompletes_plan_step() {
     assert!(app.session.checkpoints.is_empty());
     assert_eq!(app.session.redo_stack.len(), 1);
     let plan_after_undo = crate::plan::open(root, &plan.id).unwrap();
-    assert_eq!(plan_after_undo.steps[0].status, crate::plan::StepStatus::Reopened);
+    assert_eq!(
+        plan_after_undo.steps[0].status,
+        crate::plan::StepStatus::Reopened
+    );
 
     // 2. Run redo
     app.redo(1);
@@ -1977,12 +2007,15 @@ fn undo_and_redo_round_trip_restores_files_and_recompletes_plan_step() {
     assert_eq!(app.session.checkpoints.len(), 1);
     assert!(app.session.redo_stack.is_empty());
     let plan_after_redo = crate::plan::open(root, &plan.id).unwrap();
-    assert_eq!(plan_after_redo.steps[0].status, crate::plan::StepStatus::Done);
+    assert_eq!(
+        plan_after_redo.steps[0].status,
+        crate::plan::StepStatus::Done
+    );
 }
 
 #[test]
 fn undo_turn_reverts_only_latest_turn_and_keeps_aborted_turn_checkpoints() {
-    use crate::agent::journal::Journal;
+    use crate::agent::events::EventLog;
     use serde_json::json;
     use sha2::Digest;
 
@@ -2007,8 +2040,8 @@ fn undo_turn_reverts_only_latest_turn_and_keeps_aborted_turn_checkpoints() {
     };
 
     let sid = app.session.id.to_string();
-    let mut journal = Journal::open(root, &sid).unwrap();
-    journal
+    let mut events = EventLog::open(root, &sid).unwrap();
+    events
         .append(
             "file_diff",
             json!({
@@ -2020,7 +2053,7 @@ fn undo_turn_reverts_only_latest_turn_and_keeps_aborted_turn_checkpoints() {
             }),
         )
         .unwrap();
-    journal
+    events
         .append(
             "file_diff",
             json!({

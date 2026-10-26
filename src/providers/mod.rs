@@ -371,14 +371,13 @@ impl Usage {
 /// Which layer of the prompt a system part belongs to. The wire does not care:
 /// [`stable_system_text`] joins every cacheable part whatever its section. The
 /// diagnostic breakdown does — `/context` cannot call a block honest until it
-/// knows whether it is rules, durable memory, skills, or a fact the host adds
-/// to this one request.
+/// knows whether it is rules, skills, or a fact the host adds to this one
+/// request.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum PrefixSection {
     /// built-in rules, project instructions, the environment, tool schemas
     #[default]
     System,
-    Memory,
     Skills,
 }
 
@@ -524,8 +523,6 @@ pub fn promote_lone_volatile_system(system: &mut [SystemPart]) {
 pub struct RequestBreakdown {
     /// built-in rules, project instructions, the environment, every tool schema
     pub system_bytes: u64,
-    /// durable user/project memory
-    pub memory_bytes: u64,
     /// loaded `SKILL.md` bodies
     pub skills_bytes: u64,
     /// the conversation itself: user and assistant turns
@@ -544,7 +541,6 @@ pub struct RequestBreakdown {
     pub reasoning_bytes: u64,
     pub total_bytes: u64,
     pub system_tokens: u64,
-    pub memory_tokens: u64,
     pub skills_tokens: u64,
     pub history_tokens: u64,
     pub tool_output_tokens: u64,
@@ -558,7 +554,6 @@ impl RequestBreakdown {
         for part in &req.system {
             let bytes = part.text.len() as u64;
             match part.section {
-                PrefixSection::Memory => out.memory_bytes += bytes,
                 PrefixSection::Skills => out.skills_bytes += bytes,
                 PrefixSection::System if part.cacheable => out.system_bytes += bytes,
                 // not an instruction — a fact about this request
@@ -614,12 +609,10 @@ impl RequestBreakdown {
             .tools
             .iter()
             .map(|tool| {
-                (tool.name.len() + tool.description.len()) as u64
-                    + json_byte_len(&tool.parameters)
+                (tool.name.len() + tool.description.len()) as u64 + json_byte_len(&tool.parameters)
             })
             .sum::<u64>();
         out.total_bytes = out.system_bytes
-            + out.memory_bytes
             + out.skills_bytes
             + out.history_bytes
             + out.tool_output_bytes
@@ -628,7 +621,6 @@ impl RequestBreakdown {
         // Same counter the session uses for its own estimate: bytes over four.
         let tok = |bytes: u64| bytes.div_ceil(4);
         out.system_tokens = tok(out.system_bytes);
-        out.memory_tokens = tok(out.memory_bytes);
         out.skills_tokens = tok(out.skills_bytes);
         out.history_tokens = tok(out.history_bytes);
         out.tool_output_tokens = tok(out.tool_output_bytes);
@@ -1390,8 +1382,8 @@ mod system_layout_tests {
 
     /// The cuts `/context` draws its scale on: a tool's schema is billed with
     /// the fixed instruction surface it rides, its output with the transcript;
-    /// durable memory and loaded skills are neither rules nor conversation;
-    /// and what the host adds to this one request is its own part.
+    /// loaded skills are neither rules nor conversation, and what the host
+    /// adds to this one request is its own part.
     #[test]
     fn the_breakdown_cuts_the_request_where_a_reader_can_act_on_it() {
         let schema = serde_json::json!({"p": "the one param"});
@@ -1405,7 +1397,6 @@ mod system_layout_tests {
             model_id: "m".into(),
             system: vec![
                 SystemPart::cached("rules"),
-                SystemPart::cached("durable memory").in_section(PrefixSection::Memory),
                 SystemPart::cached("skill bodies").in_section(PrefixSection::Skills),
                 SystemPart::volatile("Mode: act"),
             ],
@@ -1433,7 +1424,6 @@ mod system_layout_tests {
                 + schema.to_string().len() as u64,
             "the schema rides with the instructions, not on its own row"
         );
-        assert_eq!(b.memory_bytes, "durable memory".len() as u64);
         assert_eq!(b.skills_bytes, "skill bodies".len() as u64);
         assert_eq!(
             b.host_bytes,
@@ -1456,7 +1446,6 @@ mod system_layout_tests {
         assert_eq!(
             b.total_bytes,
             b.system_bytes
-                + b.memory_bytes
                 + b.skills_bytes
                 + b.history_bytes
                 + b.tool_output_bytes

@@ -10,7 +10,7 @@ use std::path::Path;
 /// store regressed the earlier one's content and cursor, and replay then
 /// stalled on the re-apply conflict. An exclusive lock file (create-only,
 /// PID-stale pruned, same pattern as the project lock) serializes the
-/// journal-append + store pair; [`commit`] additionally refuses when the
+/// events-append + store pair; [`commit`] additionally refuses when the
 /// file moved since the caller loaded it.
 pub(crate) struct PlanLock {
     path: std::path::PathBuf,
@@ -89,18 +89,18 @@ pub struct StepContext {
     pub step_epoch: u64,
 }
 
-// ---------------------------------------------------------------- journal-first commits and replay
+// ---------------------------------------------------------------- events-first commits and replay
 //
-// Every mutation of a plan file is preceded by a journal `plan` intent
+// Every mutation of a plan file is preceded by an event log `plan` intent
 // record carrying the full op args. The record's seq becomes the file's
 // per-session cursor (`applied_events`) in the same store, so a crash
-// between the two is detectable: on load the host replays journal events
+// between the two is detectable: on load the host replays events events
 // after the cursor. Replay is pure re-application — no commands run, no
 // approvals, no evidence gates — which is sound because every replayed op
 // was already accepted (and validated, where validation applies) when
-// first journaled.
+// first recorded.
 
-/// Journal-first commit: append the intent record, point the file at it,
+/// EventLog-first commit: append the intent record, point the file at it,
 /// then store. A crash before the append leaves nothing behind (the op only
 /// ran in memory); a crash after it heals by `replay`.
 pub fn commit(
@@ -138,8 +138,8 @@ pub fn commit(
     );
     fields.insert("by".to_string(), serde_json::Value::String(by.to_string()));
     fields.insert("ok".to_string(), serde_json::Value::Bool(ok));
-    let mut journal = crate::agent::journal::Journal::open(root, session_id)?;
-    let seq = journal.append("plan", serde_json::Value::Object(fields))?;
+    let mut events = crate::agent::events::EventLog::open(root, session_id)?;
+    let seq = events.append("plan", serde_json::Value::Object(fields))?;
     plan.applied_events.insert(session_id.to_string(), seq);
     store(root, plan)?;
     Ok(seq)
@@ -154,9 +154,9 @@ pub struct ReplayReport {
     pub stalled: Vec<String>,
 }
 
-/// Re-apply journaled plan ops the plan files have not caught up with, and
+/// Re-apply recorded plan ops the plan files have not caught up with, and
 /// re-attach evidence refs whose file update was lost. Files without any
-/// cursor (never committed through journal-first) are skipped.
+/// cursor (never committed through events-first) are skipped.
 /// Idempotent: a clean tree changes nothing and stores nothing.
 pub fn replay(root: &Path) -> Result<ReplayReport> {
     let mut report = ReplayReport::default();
@@ -171,14 +171,14 @@ pub fn replay(root: &Path) -> Result<ReplayReport> {
         let mut plan = plan;
         let mut dirty = false;
         for (sess, cursor) in cursors.iter() {
-            let mut records = match crate::agent::journal::Journal::records_for(root, sess) {
+            let mut records = match crate::agent::events::EventLog::records_for(root, sess) {
                 Ok(records) => records,
                 Err(_) => continue,
             };
             records.sort_by_key(|record| record.seq);
             // The cursor gates plan ops only. Evidence moves no cursor and
             // is idempotent (deduped by session+seq below), so it re-attaches
-            // from anywhere in the stream — even journaled before a crash and
+            // from anywhere in the stream — even recorded before a crash and
             // overtaken by a later finish. Gating it on the cursor lost the
             // receipt forever whenever the file missed the live attach.
             for record in records.iter() {
@@ -216,7 +216,7 @@ pub fn replay(root: &Path) -> Result<ReplayReport> {
                 }
                 if matches!(record.kind.as_str(), "tool_result" | "file_diff")
                     && (record.kind != "file_diff"
-                        || crate::agent::journal::file_diff_is_plan_evidence(&record.fields))
+                        || crate::agent::events::file_diff_is_plan_evidence(&record.fields))
                     && record.plan.as_deref() == Some(plan.id.as_str())
                 {
                     let Some(step) = record
@@ -256,9 +256,9 @@ pub fn replay(root: &Path) -> Result<ReplayReport> {
         for plan_id in report.plans_healed.clone() {
             let sess = applied_session(root, &plan_id);
             if let Some(sess) = sess
-                && let Ok(mut journal) = crate::agent::journal::Journal::open(root, &sess)
+                && let Ok(mut events) = crate::agent::events::EventLog::open(root, &sess)
             {
-                let _ = journal.append(
+                let _ = events.append(
                     "plan",
                     serde_json::json!({
                         "op": "replay",
@@ -282,12 +282,12 @@ fn applied_session(root: &Path, plan_id: &str) -> Option<String> {
         .map(|(sess, _)| sess)
 }
 
-/// Rebuild plans whose create intent was journaled but whose file is
+/// Rebuild plans whose create intent was recorded but whose file is
 /// missing — the crash landed between the record and the store. A later
 /// `plan_deleted` for the same id means the absence is deliberate.
 fn replay_orphans(root: &Path, ops_applied: &mut usize) -> Vec<String> {
     let mut rebuilt = Vec::new();
-    let dir = root.join(".sqwai").join("journal");
+    let dir = root.join(".sqwai").join("events");
     let Ok(entries) = std::fs::read_dir(dir) else {
         return rebuilt;
     };
@@ -303,7 +303,7 @@ fn replay_orphans(root: &Path, ops_applied: &mut usize) -> Vec<String> {
         else {
             continue;
         };
-        let records = match crate::agent::journal::Journal::records_for(root, &sess) {
+        let records = match crate::agent::events::EventLog::records_for(root, &sess) {
             Ok(records) => records,
             Err(_) => continue,
         };
@@ -391,14 +391,7 @@ fn rebuild_created(
         .filter_map(|value| value.as_str().map(str::to_string))
         .collect();
     let steps: Vec<NewStep> = serde_json::from_value(get("steps")?.clone()).ok()?;
-    let mut plan = create(
-        goal,
-        constraints,
-        criteria,
-        steps,
-        &Limits::default(),
-    )
-    .ok()?;
+    let mut plan = create(goal, constraints, criteria, steps, &Limits::default()).ok()?;
     restore_create_criteria(&mut plan, fields);
     plan.id = get("result_id")?.as_str()?.to_string();
     plan.created = get("result_created")?.as_str()?.to_string();
@@ -412,15 +405,12 @@ fn rebuild_created(
     Some(plan)
 }
 
-/// Apply one journaled intent to an in-memory plan. `Ok(true)` means the op
+/// Apply one recorded intent to an in-memory plan. `Ok(true)` means the op
 /// took effect; `Ok(false)` means the record carries no replayable effect
 /// (rejected op, read-only op, unknown shape); `Err` means the plan state
 /// diverged from what the op was accepted against — the caller holds the
 /// cursor there.
-fn apply_record(
-    plan: &mut Plan,
-    record: &crate::agent::journal::Record,
-) -> Result<bool, Rejection> {
+fn apply_record(plan: &mut Plan, record: &crate::agent::events::Record) -> Result<bool, Rejection> {
     let fields = &record.fields;
     if fields.get("ok") == Some(&serde_json::Value::Bool(false)) {
         return Ok(false);
@@ -470,11 +460,12 @@ fn apply_record(
                 }
             }
             super::ops::auto_advance(plan);
-            if plan
-                .steps
-                .iter()
-                .all(|s| matches!(s.status, super::StepStatus::Done | super::StepStatus::Cancelled))
-            {
+            if plan.steps.iter().all(|s| {
+                matches!(
+                    s.status,
+                    super::StepStatus::Done | super::StepStatus::Cancelled
+                )
+            }) {
                 plan.status = PlanStatus::Completed;
             }
             plan.revision = plan.revision.saturating_add(1);
@@ -498,7 +489,7 @@ pub fn store(root: &Path, plan: &Plan) -> Result<()> {
     // and a shared tmp name lets one writer's rename publish another's
     // half-written bytes (a torn read then quarantines a healthy plan).
     // Renames stay atomic, so the last whole write wins and readers never
-    // see a half. Logical lost updates still heal from the journal.
+    // see a half. Logical lost updates still heal from the event log.
     static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let tmp = dir.join(format!(
         "{}.{}.{}.json.tmp",
@@ -526,7 +517,7 @@ pub fn read_plan_file(root: &Path, id: &str) -> Option<Plan> {
 
 /// A plan that fails schema validation is moved aside, never silently dropped.
 /// A well-formed file from a newer binary is refused without moving it:
-/// rebuilding it through this binary's journal intents would silently
+/// rebuilding it through this binary's event-log intents would silently
 /// downgrade fields the old code does not know.
 pub fn open(root: &Path, id: &str) -> Result<Plan> {
     let dir = plans_dir(root);
@@ -544,7 +535,7 @@ pub fn open(root: &Path, id: &str) -> Result<Plan> {
             Ok(plan)
         }
         Err(e) => {
-            // torn write or schema drift: rebuild from journaled intents
+            // torn write or schema drift: rebuild from recorded intents
             // before giving up on the bytes (F1b). Only a clean rebuild
             // returns; anything doubtful quarantines below as before.
             if let Some(plan) = rebuild_corrupt(root, id) {
@@ -562,21 +553,21 @@ pub fn open(root: &Path, id: &str) -> Result<Plan> {
     }
 }
 
-/// Rebuild a schema-broken plan file from journaled intents.
+/// Rebuild a schema-broken plan file from recorded intents.
 /// Collects the create intent plus every later op for this plan id across all
-/// session journals — ordered best-effort by (ts, session, seq), because there
+/// session event logs — ordered best-effort by (ts, session, seq), because there
 /// is no total-order counter — and re-applies them onto a fresh base. Any
 /// Rejection, a missing create intent, or a deliberate `plan_deleted` aborts
 /// to `None` and the caller quarantines the bytes.
 fn rebuild_corrupt(root: &Path, id: &str) -> Option<Plan> {
-    // (ts, session, seq, fields) over every session journal
+    // (ts, session, seq, fields) over every session events
     let mut records: Vec<(
         String,
         String,
         u64,
         serde_json::Map<String, serde_json::Value>,
     )> = Vec::new();
-    let dir = root.join(".sqwai").join("journal");
+    let dir = root.join(".sqwai").join("events");
     let Ok(entries) = std::fs::read_dir(dir) else {
         return None;
     };
@@ -679,7 +670,7 @@ fn rebuild_corrupt(root: &Path, id: &str) -> Option<Plan> {
         if !after_birth {
             continue;
         }
-        let record = crate::agent::journal::Record {
+        let record = crate::agent::events::Record {
             seq: *seq,
             ts: ts.clone(),
             session: sess.clone(),
@@ -711,9 +702,9 @@ pub fn open_active(root: &Path) -> Result<Option<Plan>> {
 static PLAN_META_CACHE: std::sync::LazyLock<std::sync::Mutex<PlanMetaCache>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(PlanMetaCache::default()));
 
-/// Directory-scan key: (plan id, status, created, sessions-hash). The journal
+/// Directory-scan key: (plan id, status, created, sessions-hash). The events
 /// replay only matters for content accuracy, never for "which plans are
-/// active" — status flips only through a journaled intent, and the file moves
+/// active" — status flips only through a recorded intent, and the file moves
 /// with the intent in the same commit, so metadata read from the file is
 /// current exactly when the file is.
 #[derive(Debug, Clone)]
