@@ -1087,6 +1087,34 @@ fn session_switch_drops_stale_notices() {
 }
 
 #[test]
+fn a_refused_model_key_shows_in_the_menu_notice_row() {
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.open_menu(Menu::Models {
+        provider: "p".into(),
+    });
+    app.status("model 'gpt-6-luna' already exists", StatusKind::Err);
+    let area = Rect::new(0, 0, 100, 30);
+    let mut buf = Buffer::empty(area);
+    app.render_into(&mut buf, area);
+    let rows: Vec<String> = buf
+        .content
+        .chunks(buf.area.width as usize)
+        .map(|r| r.iter().map(|c| c.symbol()).collect())
+        .collect();
+    let title = rows
+        .iter()
+        .position(|r| r.contains("Models · p"))
+        .expect("menu title rendered");
+    assert!(
+        rows[title + 1].contains("model 'gpt-6-luna' already exists"),
+        "a surface must show the notice it just raised, under its title: {rows:#?}"
+    );
+}
+
+#[test]
 fn start_new_session_stamps_project() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     assert!(app.start_new_session());

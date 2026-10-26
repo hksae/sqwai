@@ -960,6 +960,14 @@ impl App {
                 );
             }
         }
+        // The air row under the title carries whatever the bottom bar would
+        // say: a form that refuses a key, a retry, an expired notice. Without
+        // this the surface owns the screen and those messages go unseen.
+        if let Some(line) = self.notice_line(area.width)
+            && let Some(y) = row_y(2)
+        {
+            buf.set_line(area.x, y, &line, area.width);
+        }
         let body = self.menu_rows.len().saturating_sub(head);
         let shown = body.min(win).max(1);
         let mut top = self.surf_top.min(body.saturating_sub(shown));
