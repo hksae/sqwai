@@ -107,6 +107,18 @@ fn host_owned_path(p: &str) -> bool {
 /// Git parses a leading `--` in any value position as a flag; ref names and
 /// revisions arriving from the model must never start with one (audit H20).
 fn run_git(ctx: &ToolCtx, args: &[&str]) -> Outcome {
+    let outcome = git_text(ctx, args);
+    if outcome.ok && outcome.output.is_empty() {
+        // A command that succeeded with nothing to say. Callers that report to
+        // the model must not stop here: for a diff or a status, silence carries
+        // information, and `ok` reads like confirmation of something else.
+        return Outcome::ok("ok".to_string()).with_exit_code(outcome.exit_code);
+    }
+    outcome
+}
+
+/// The same call with git's own bytes, emptiness left empty.
+fn git_text(ctx: &ToolCtx, args: &[&str]) -> Outcome {
     let mut child = match Command::new("git")
         .current_dir(&ctx.root)
         .args(args)
@@ -139,12 +151,7 @@ fn run_git(ctx: &ToolCtx, args: &[&str]) -> Outcome {
     let text = truncate(&text);
     let code = output.status.code();
     if output.status.success() {
-        Outcome::ok(if text.is_empty() {
-            "ok".to_string()
-        } else {
-            text
-        })
-        .with_exit_code(code)
+        Outcome::ok(text).with_exit_code(code)
     } else {
         Outcome::err(if text.is_empty() {
             format!("git failed with {}", output.status)
@@ -203,19 +210,79 @@ pub fn status(ctx: &ToolCtx, args: &Value) -> Outcome {
     } else {
         "--short"
     };
-    run_git(ctx, &["status", porcelain, "--branch"])
+    let outcome = git_text(ctx, &["status", porcelain, "--branch"]);
+    if !outcome.ok || !porcelain_paths(&outcome.output).is_empty() {
+        return outcome;
+    }
+    // `--branch` always prints a header, so a quiet tree arrives as 36 bytes of
+    // branch line and nothing else. The model cannot tell that from "my files
+    // are hidden here", and re-asks; say which of the two it is.
+    let note = "no tracked changes and no untracked files; gitignored paths never appear in this list";
+    Outcome::ok(if outcome.output.trim().is_empty() {
+        note.to_string()
+    } else {
+        format!("{}\n{note}", outcome.output.trim())
+    })
+    .with_exit_code(outcome.exit_code)
 }
 
 pub fn diff(ctx: &ToolCtx, args: &Value) -> Outcome {
     let target = arg(args, "target");
-    if target.is_empty() {
-        run_git(ctx, &["diff", "--"])
-    } else if host_owned_path(target) {
+    if !target.is_empty() && host_owned_path(target) {
         // audit M22: the diff target is a git-resolved path like any other
-        Outcome::err(".sqwai is host-owned state and cannot be read with git_diff")
-    } else {
-        run_git(ctx, &["diff", "--", target])
+        return Outcome::err(".sqwai is host-owned state and cannot be read with git_diff");
     }
+    let call = if target.is_empty() {
+        ["diff", "--"].to_vec()
+    } else {
+        ["diff", "--", target].to_vec()
+    };
+    let outcome = git_text(ctx, &call);
+    if !outcome.ok || !outcome.output.trim().is_empty() {
+        return outcome;
+    }
+    // An empty diff is the answer git gives for three different situations, and
+    // `ok` claims none of them. Name the one that applies.
+    let why = if target.is_empty() {
+        "no unstaged changes in tracked files; untracked and gitignored paths have no diff to show".to_string()
+    } else {
+        path_state(ctx, target)
+    };
+    Outcome::ok(why).with_exit_code(outcome.exit_code)
+}
+
+/// What git makes of one path when a diff of it came back empty.
+fn path_state(ctx: &ToolCtx, target: &str) -> String {
+    let probe = git_text(
+        ctx,
+        &[
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+            "--ignored",
+            "--",
+            target,
+        ],
+    );
+    if !probe.ok {
+        return format!("no diff for {target}, and git could not say why: {}", probe.output.trim());
+    }
+    let line = probe.output.trim().to_string();
+    if let Some(rest) = line.strip_prefix("!! ") {
+        return format!("{rest} is gitignored: git holds no version of it, so there is nothing to diff — `read` shows the file");
+    }
+    if let Some(rest) = line.strip_prefix("?? ") {
+        return format!("{rest} is untracked: git has no stored version to diff against — `read` shows the file");
+    }
+    if line.is_empty() {
+        let tracked = git_text(ctx, &["ls-files", "--error-unmatch", "--", target]);
+        return if tracked.ok {
+            format!("{target} is tracked and identical to its committed version: no unstaged change")
+        } else {
+            format!("git has no entry for {target}: not tracked, not untracked, not ignored — check the path")
+        };
+    }
+    format!("git reports `{line}` for {target}")
 }
 
 #[cfg(test)]
@@ -330,6 +397,63 @@ mod tests {
             !d.output.contains("TOP-SECRET-PLAN"),
             "git_diff leaked host state: {}",
             d.output
+        );
+    }
+
+    /// An empty diff is git's answer for three different situations, and `ok`
+    /// claimed none of them: a live session kept re-running `git_status` and
+    /// `git_diff` on its own gitignored notes folder, reading 36 bytes of branch
+    /// header and 2 bytes of `ok` as if they said something about its files.
+    #[test]
+    fn an_empty_git_answer_says_why() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path());
+        std::fs::write(dir.path().join(".gitignore"), "notes.txt\n").unwrap();
+        std::fs::write(dir.path().join("notes.txt"), "hidden from git\n").unwrap();
+        std::fs::write(dir.path().join("tracked.txt"), "kept\n").unwrap();
+        git_out(dir.path(), &["add", "-A"]);
+        git_out(dir.path(), &["commit", "-m", "init"]);
+        let ctx = ToolCtx::new(dir.path());
+
+        let quiet = status(&ctx, &json!({"porcelain": true}));
+        assert!(
+            quiet.output.contains("gitignored paths never appear"),
+            "a quiet tree must say which of the two it is: {}",
+            quiet.output
+        );
+
+        let ignored = diff(&ctx, &json!({"target": "notes.txt"}));
+        assert!(
+            ignored.ok && ignored.output.contains("is gitignored"),
+            "{}",
+            ignored.output
+        );
+        let clean = diff(&ctx, &json!({"target": "tracked.txt"}));
+        assert!(
+            clean.output.contains("identical to its committed version"),
+            "{}",
+            clean.output
+        );
+        let whole = diff(&ctx, &json!({}));
+        assert!(
+            whole.output.contains("no unstaged changes"),
+            "{}",
+            whole.output
+        );
+
+        std::fs::write(dir.path().join("loose.txt"), "untracked\n").unwrap();
+        let untracked = diff(&ctx, &json!({"target": "loose.txt"}));
+        assert!(
+            untracked.output.contains("is untracked"),
+            "{}",
+            untracked.output
+        );
+        let dirty = status(&ctx, &json!({"porcelain": true}));
+        assert!(
+            dirty.output.contains("loose.txt")
+                && !dirty.output.contains("gitignored paths never appear"),
+            "a tree with something to report keeps its report: {}",
+            dirty.output
         );
     }
 
