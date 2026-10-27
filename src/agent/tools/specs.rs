@@ -317,7 +317,9 @@ instructions.",
             name: "subagent",
             kind: Kind::ReadOnly,
             description: "Delegate 1–8 focused tasks to isolated child agents (up to 4 \
-concurrently). Read-only explorers gather broadly without polluting parent context; scoped \
+concurrently). Use it for recon whose output is large compared with what you will use — exploring \
+a codebase, gathering docs or web pages, sweeping logs — so the child reads the bytes and you get \
+the report. Read-only explorers gather broadly without polluting parent context; scoped \
 writers get `write: true, paths` with non-overlapping scopes. Pass `files`, `context`, `skills` \
 and `clean` as needed. Returns each report with a host-verified receipt of executed tools and \
 modified files.",
