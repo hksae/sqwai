@@ -995,5 +995,36 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
+/// What the agent is told about its own runtime: which model is answering, and
+/// how full the window was on the last request. A capacity to plan a batch
+/// against, not a quota to ration — compaction stays the host's job. Silent
+/// until the provider reports a real request size, so the first request of a
+/// session guesses nothing.
+pub fn agent_state(model_key: &str, used: u64, policy: &Policy) -> String {
+    if model_key.is_empty() || used == 0 || policy.context_limit == 0 {
+        return String::new();
+    }
+    let limit = policy.context_limit;
+    format!(
+        "<agent_state>
+Model: {model_key}
+Context: {} used of {} · ~{} free · history compacts at {}
+</agent_state>
+",
+        k_thousands(used),
+        k_thousands(limit),
+        k_thousands(limit.saturating_sub(used)),
+        k_thousands(policy.budget())
+    )
+}
+
+fn k_thousands(tokens: u64) -> String {
+    if tokens >= 1000 {
+        format!("{:.0}k", tokens as f64 / 1000.0)
+    } else {
+        tokens.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests;

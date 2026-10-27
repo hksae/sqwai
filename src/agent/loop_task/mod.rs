@@ -1128,6 +1128,22 @@ async fn run_agent(
             }
         };
 
+    // The model's own runtime facts, refreshed on every request: a fallback
+    // switch and a growing transcript both have to show up before the next
+    // decision, not at the start of the turn.
+    let refresh_agent_state =
+        |ts: &mut Vec<SystemPart>, model: &str, used: u64, policy: &context::Policy| {
+            let text = context::agent_state(model, used, policy);
+            if let Some(slot) = ts
+                .iter_mut()
+                .find(|p| !p.cacheable && p.text.starts_with("<agent_state>"))
+            {
+                *slot = SystemPart::volatile(text);
+            } else if !text.is_empty() {
+                ts.push(SystemPart::volatile(text));
+            }
+        };
+
     let build_turn_system = |base: &[SystemPart], root: &std::path::Path, session_id: &str| {
         let mut ts = base.to_vec();
         if let Ok(Some(nudge)) = crate::agent::events::EventLog::nudge(
@@ -1165,6 +1181,7 @@ async fn run_agent(
         // the plan nudge rides at most one mutating result per model
         // request: every result carrying it waters the next one down
         plan_nudged = false;
+        refresh_agent_state(&mut turn_system, &current_model_key, prompt_size, &policy);
         // Compaction gate. History only: the provider's full request size
         // is observed here, but the gate must use
         // what compaction can actually remove — otherwise a big fixed

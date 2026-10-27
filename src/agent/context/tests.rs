@@ -883,3 +883,20 @@ fn anchor_tracks_fused_paths_hard_trim_deducts_summary_head_and_local_summary_sk
         "cleared stubs must be skipped in local_summary: {summary}"
     );
 }
+
+/// The runtime block is what lets the model plan a batch: it must name the
+/// answering model and the point where history gets compacted, and stay silent
+/// while the numbers are still guesses.
+#[test]
+fn agent_state_names_the_model_and_the_compaction_point() {
+    let p = Policy::with_compaction(256_000, 0.08, 4, 0.80);
+    let s = agent_state("gpt-6-luna2", 61_000, &p);
+    assert!(s.contains("Model: gpt-6-luna2"), "{s}");
+    assert!(s.contains("61k used of 256k"), "{s}");
+    assert!(s.contains("compacts at 205k"), "{s}");
+    assert!(agent_state("m", 0, &p).is_empty(), "no size yet");
+    assert!(
+        agent_state("m", 10, &Policy::new(0)).is_empty(),
+        "no window known"
+    );
+}
