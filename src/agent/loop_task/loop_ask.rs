@@ -605,7 +605,7 @@ pub(crate) async fn mutating_tool_gate(
     let granted = tool_grants.iter().any(|t| t == name);
     // the workspace boundary, asked as an approval rather than refused:
     // one yes opens the target directory for the run (or the session)
-    if matches!(name, "write" | "edit" | "multi_edit")
+    if matches!(name, "write" | "edit")
         && let Some(path) = tools::call_path(name, &call.args)
         && ctx.outside_uncovered(&path)
     {

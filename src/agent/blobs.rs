@@ -1,7 +1,7 @@
 //! Layer 1: a content-addressed store of file pre-images.
 //!
 //! The point of this layer is that it has **no dependency on git at all**. For
-//! `write | edit | multi_edit | patch` the file about to change is known in
+//! `write | edit` the file about to change is known in
 //! advance, so its bytes are kept before the mutation and `/undo` for that
 //! file becomes a copy, not a tree operation. That is what lifts the old
 //! restriction "undo is unavailable outside a git repository", and it is what

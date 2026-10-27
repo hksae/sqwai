@@ -4,7 +4,6 @@
 //! Moved byte-for-byte from `tools/mod.rs`; behavior unchanged.
 //!
 use super::ToolCtx;
-use super::git;
 use crate::plan;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -25,23 +24,15 @@ pub(crate) fn step_epoch_current(root: &Path, inherited: &plan::StepContext) -> 
 }
 
 /// Project-relative, lexically cleaned mutation targets of a file-writing
-/// call: `file_path` for write/edit/multi_edit, `+++` files for patch.
+/// call: the `file_path` of a write or an edit.
 /// Unresolvable or empty spellings yield nothing — the tool's own
 /// validation reports those, not the scope gates.
-pub(crate) fn mutation_target_paths(ctx: &ToolCtx, name: &str, args: &Value) -> Vec<String> {
-    let raws: Vec<String> = if name == "patch" {
-        let patch = args["patch"].as_str().unwrap_or_default();
-        if patch.trim().is_empty() {
-            return Vec::new();
-        }
-        git::extract_patch_files(ctx, patch)
-    } else {
-        let raw = args["file_path"].as_str().unwrap_or_default();
-        if raw.trim().is_empty() {
-            return Vec::new();
-        }
-        vec![raw.to_string()]
-    };
+pub(crate) fn mutation_target_paths(ctx: &ToolCtx, args: &Value) -> Vec<String> {
+    let raw = args["file_path"].as_str().unwrap_or_default();
+    if raw.trim().is_empty() {
+        return Vec::new();
+    }
+    let raws: Vec<String> = vec![raw.to_string()];
     raws.into_iter()
         .filter_map(|raw| {
             // scope decisions run in canonical space: the OS resolves

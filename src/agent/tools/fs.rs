@@ -90,7 +90,7 @@ fn require_read(ctx: &ToolCtx, p: &Path) -> Result<(), String> {
 }
 
 /// freshness-only gate for self-validating writes: single exact edits and
-/// atomic multi_edits match-or-error before touching disk, so they need no
+/// edits match-or-error before touching disk, so they need no
 /// prior read — but working from a stale read is still refused, stale
 /// knowledge pointing at moved code.
 fn require_fresh(ctx: &ToolCtx, p: &Path) -> Result<(), String> {
@@ -1293,83 +1293,6 @@ pub(super) fn edit(
         .with_file_diff(metadata)
 }
 
-pub(super) fn multi_edit(
-    ctx: &mut ToolCtx,
-    raw: &str,
-    edits: &[(String, String, bool)],
-) -> Outcome {
-    let p = match existing_writable(ctx, raw) {
-        Ok(p) => p,
-        Err(e) => return Outcome::err(e),
-    };
-    if edits.iter().any(|(_, _, all)| *all) {
-        if let Err(e) = require_read(ctx, &p) {
-            return Outcome::err(e);
-        }
-    } else if let Err(e) = require_fresh(ctx, &p) {
-        return Outcome::err(e);
-    }
-    let original = match fs::read_to_string(&p) {
-        Ok(c) => c,
-        Err(e) => return Outcome::err(format!("read failed: {e}")),
-    };
-    // #214 L26: the replacements are validated, diffed and spanned on the text
-    // without the encoding marker — the text the model was actually shown —
-    // while the bytes written and hashed keep it.
-    let (body, had_bom) = split_bom(&original);
-    // validate all replacements against the evolving text before touching disk
-    let mut staged = body.to_string();
-    for (i, (old, new, all)) in edits.iter().enumerate() {
-        match apply_one(&staged, old, new, *all) {
-            Ok(next) => staged = next,
-            Err(e) => return Outcome::err(format!("edit #{} failed: {e}", i + 1)),
-        }
-    }
-    let checkpoint_id = Some(checkpoint(ctx, &p, "multi_edit"));
-    let updated = restore_bom(staged, had_bom);
-    let hash_before = content_hash(original.as_bytes());
-    if let Err(e) = fs::write(&p, &updated) {
-        return Outcome::err(format!("write failed: {e}"));
-    }
-    ctx.mark_read(&p);
-    let (shown, _) = split_bom(&updated);
-    let diff = make_diff(body, shown);
-    let (add, rem) = diff_counts(&diff);
-    ctx.read_ledger.note_edit(
-        &p,
-        "multi_edit",
-        add,
-        rem,
-        &hash_before,
-        &content_hash(updated.as_bytes()),
-        ctx.current_call_id.clone(),
-    );
-    let metadata = file_diff(
-        &p,
-        &ctx.root,
-        Some(original.as_bytes()),
-        updated.as_bytes(),
-        "multi_edit",
-        checkpoint_id,
-        &diff,
-    );
-    // Several hunks can sit anywhere in the file, so the honest report is the
-    // outer span — naming one of their lines as if it were the change would be
-    // a guess.
-    let span = match changed_span(body, shown) {
-        Some((from, to)) => format!("→ across lines {from}–{to}"),
-        None => "→ lines removed".to_string(),
-    };
-    let out_msg = format!(
-        "applied {} edit(s) to {} (+{add}/-{rem}) {span}",
-        edits.len(),
-        rel_label(&ctx.root, &p)
-    );
-    Outcome::ok(out_msg)
-        .with_diff(diff)
-        .with_file_diff(metadata)
-}
-
 pub(super) fn ls(ctx: &mut ToolCtx, raw: &str) -> Outcome {
     let p = match ctx.resolve(raw) {
         Ok(p) => p,
@@ -2198,39 +2121,6 @@ mod tests {
         let lf_content = "line1\nline2\nline3\n";
         let res_lf = apply_one(lf_content, "line2\r\n", "modified\r\n", false).unwrap();
         assert_eq!(res_lf, "line1\nmodified\nline3\n");
-    }
-
-    /// Audit verification (Phase 0): each replacement applies exactly once.
-    /// An overlapping `a → ba` on content `a` must yield `ba`, not `bba` —
-    /// the validation pass result is discarded, only the second call writes.
-    #[test]
-    fn multi_edit_applies_each_replacement_once() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("t.txt"), "a").unwrap();
-        let mut ctx = ToolCtx::new(dir.path());
-        assert!(read(&mut ctx, "t.txt", &json!({})).ok);
-        let out = multi_edit(&mut ctx, "t.txt", &[("a".into(), "ba".into(), false)]);
-        assert!(out.ok, "{}", out.output);
-        assert_eq!(
-            std::fs::read_to_string(dir.path().join("t.txt")).unwrap(),
-            "ba"
-        );
-        // chained edits see each other's results, still once each
-        std::fs::write(dir.path().join("u.txt"), "a").unwrap();
-        assert!(read(&mut ctx, "u.txt", &json!({})).ok);
-        let out = multi_edit(
-            &mut ctx,
-            "u.txt",
-            &[
-                ("a".into(), "ba".into(), false),
-                ("ba".into(), "cba".into(), false),
-            ],
-        );
-        assert!(out.ok, "{}", out.output);
-        assert_eq!(
-            std::fs::read_to_string(dir.path().join("u.txt")).unwrap(),
-            "cba"
-        );
     }
 
     #[test]

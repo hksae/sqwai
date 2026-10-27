@@ -154,7 +154,7 @@ fn subagent_write_scope_confines_file_mutations() {
 }
 
 /// The scope gate is a boundary, not a suggestion: bash redirects obey
-/// it too. Pre-fix only write/edit/multi_edit/patch were confined — a
+/// it too. Pre-fix only write and edit were confined — a
 /// scoped child wrote anywhere through `echo x > ../outside`.
 #[test]
 fn subagent_write_scope_confines_bash_redirects() {
@@ -428,37 +428,6 @@ fn read_then_edit_flow_and_guards() {
 }
 
 #[test]
-fn multi_edit_without_read_is_atomic_and_allowed() {
-    let (mut ctx, dir) = proj();
-    // all legs valid: applies without any prior read (validated
-    // against the evolving text before touching disk)
-    let o = execute(
-        &mut ctx,
-        "multi_edit",
-        &json!({"file_path": "src/main.rs", "edits": [
-            {"old_string": "TODO", "new_string": "DONE"},
-            {"old_string": "fn main() {}", "new_string": "fn main() { /* x */ }"},
-        ]}),
-    );
-    assert!(o.ok, "atomic multi_edit needs no prior read: {}", o.output);
-    // one bad leg aborts the whole batch: nothing lands on disk
-    let o = execute(
-        &mut ctx,
-        "multi_edit",
-        &json!({"file_path": "src/main.rs", "edits": [
-            {"old_string": "DONE", "new_string": "DONE2"},
-            {"old_string": "MISSING", "new_string": "X"},
-        ]}),
-    );
-    assert!(!o.ok, "bad leg must abort the batch");
-    assert_eq!(
-        fs::read_to_string(dir.join("src/main.rs")).unwrap(),
-        "fn main() { /* x */ }\n// DONE\n"
-    );
-    fs::remove_dir_all(&dir).ok();
-}
-
-#[test]
 fn read_output_reports_totals_and_spills_when_truncated() {
     let (mut ctx, dir) = proj();
     // small file: totals footer, no spill
@@ -655,23 +624,6 @@ fn edit_reports_where_the_change_landed() {
     );
     assert!(o.ok, "{}", o.output);
     assert!(o.output.contains("at line 5"), "{}", o.output);
-    // Several hunks get the outer span, which is the honest answer: for a
-    // batch that touches both ends of the file, "everything between" is
-    // true, while naming one line would not be.
-    let o = execute(
-        &mut ctx,
-        "multi_edit",
-        &json!({"file_path": "t.txt", "edits": [
-            {"old_string": "line 1\n", "new_string": "one\n"},
-            {"old_string": "line 9\n", "new_string": "nine\n"}
-        ]}),
-    );
-    assert!(o.ok, "{}", o.output);
-    assert!(
-        o.output.contains("→ across lines 1–8"),
-        "no span for a batch: {}",
-        o.output
-    );
     fs::remove_dir_all(&dir).ok();
 }
 
@@ -1016,56 +968,11 @@ fn edit_non_unique_fails_atomically() {
 }
 
 #[test]
-fn multi_edit_is_atomic_on_failure() {
-    let (mut ctx, dir) = proj();
-    execute(&mut ctx, "read", &json!({"file_path": "src/main.rs"}));
-    let o = execute(
-        &mut ctx,
-        "multi_edit",
-        &json!({
-            "file_path": "src/main.rs",
-            "edits": [
-                {"old_string": "main", "new_string": "start"},
-                {"old_string": "NOT-PRESENT", "new_string": "?"}
-            ]
-        }),
-    );
-    assert!(!o.ok, "second edit missing -> whole call fails");
-    assert!(
-        fs::read_to_string(dir.join("src/main.rs"))
-            .unwrap()
-            .contains("fn main()"),
-        "file must stay untouched"
-    );
-
-    // all-good case applies both
-    let o = execute(
-        &mut ctx,
-        "multi_edit",
-        &json!({
-            "file_path": "src/main.rs",
-            "edits": [
-                {"old_string": "main", "new_string": "start"},
-                {"old_string": "TODO", "new_string": "DONE"}
-            ]
-        }),
-    );
-    assert!(o.ok, "{}", o.output);
-    assert_eq!(
-        fs::read_to_string(dir.join("src/main.rs")).unwrap(),
-        "fn start() {}\n// DONE\n"
-    );
-}
-
-#[test]
-fn git_status_diff_and_patch_work_in_project_root() {
+fn git_status_and_diff_work_in_project_root() {
     let (mut ctx, dir) = proj();
     let status = execute(&mut ctx, "git_status", &json!({}));
     assert!(status.ok, "{}", status.output);
     assert!(status.output.contains("##") || status.output.contains("No commits"));
-
-    let diff = execute(&mut ctx, "git_diff", &json!({}));
-    assert!(diff.ok, "{}", diff.output);
 
     std::process::Command::new("git")
         .current_dir(&dir)
@@ -1078,16 +985,20 @@ fn git_status_diff_and_patch_work_in_project_root() {
         .status()
         .unwrap();
 
-    let patch = "diff --git a/README.md b/README.md\nindex 9daeafb..f3b0735 100644\n--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n-# demo\n+# patched\n";
-    let applied = execute(&mut ctx, "patch", &json!({"patch": patch}));
-    assert!(applied.ok, "{}", applied.output);
-    let readme = fs::read_to_string(dir.join("README.md")).unwrap();
-    assert_eq!(readme.trim_end(), "# patched");
+    let edit = execute(
+        &mut ctx,
+        "edit",
+        &json!({"file_path": "README.md", "old_string": "# demo", "new_string": "# patched"}),
+    );
+    assert!(edit.ok, "{}", edit.output);
 
-    let rejected = execute(&mut ctx, "patch", &json!({"patch": "not a patch"}));
-    assert!(!rejected.ok);
-    let readme = fs::read_to_string(dir.join("README.md")).unwrap();
-    assert_eq!(readme.trim_end(), "# patched");
+    let diff = execute(&mut ctx, "git_diff", &json!({}));
+    assert!(diff.ok, "{}", diff.output);
+    assert!(
+        diff.output.contains("# patched"),
+        "the diff should show the edit: {}",
+        diff.output
+    );
 }
 
 #[test]
@@ -2537,18 +2448,14 @@ fn a_utf8_bom_is_hidden_from_the_model_and_kept_on_disk() {
 
     // and so does multi_edit
     fs::write(dir.join("three.ps1"), format!("{bom}a\nb\nc\n")).unwrap();
-    let m = execute(
-        &mut ctx,
-        "multi_edit",
-        &json!({
-            "file_path": "three.ps1",
-            "edits": [
-                {"old_string": "a", "new_string": "x"},
-                {"old_string": "c", "new_string": "z"},
-            ],
-        }),
-    );
-    assert!(m.ok, "{}", m.output);
+    for (old, new) in [("a", "x"), ("c", "z")] {
+        let m = execute(
+            &mut ctx,
+            "edit",
+            &json!({"file_path": "three.ps1", "old_string": old, "new_string": new}),
+        );
+        assert!(m.ok, "{}", m.output);
+    }
     let on_disk = fs::read_to_string(dir.join("three.ps1")).unwrap();
     assert!(on_disk.starts_with(bom), "{on_disk:?}");
     assert!(

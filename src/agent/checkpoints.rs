@@ -93,7 +93,7 @@ pub fn snapshot_session(
 }
 
 /// Obtain a checkpoint id before a known-file mutation (`write`, `edit`,
-/// `multi_edit`, `patch`):
+/// `edit`):
 /// 1. When Layer 2 (`Shadow`) is active, snapshots the worktree. If the
 ///    worktree was already identical to `head_of(session_id)` (e.g. right
 ///    after a `step_N_start` / `step_N_finish` boundary commit), returns that
@@ -430,7 +430,7 @@ pub fn finalize_redo_images(
 ///
 /// This is what means by "the constraint 'undo unavailable outside git
 /// repositories' is lifted": every file the host wrote through
-/// `write | edit | multi_edit | patch` has its pre-image in the store, keyed
+/// `write | edit` has its pre-image in the store, keyed
 /// from the event log, so putting it back is a copy.
 ///
 /// The same outside-edit rule as the git path applies: a file whose current

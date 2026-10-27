@@ -164,8 +164,6 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
             name,
             "write"
                 | "edit"
-                | "multi_edit"
-                | "patch"
                 | "bash"
                 | "plan"
         )
@@ -178,7 +176,7 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
     // In-process dispatch must not add writes under it (a second sqwai
     // instance is already covered by the read-only guard above).
     if crate::agent::undo_guard::restore_active()
-        && matches!(name, "write" | "edit" | "multi_edit" | "patch" | "bash")
+        && matches!(name, "write" | "edit" | "bash")
     {
         return Outcome::err(
             serde_json::json!({
@@ -192,7 +190,7 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
     // A subagent mutating after its step was reopened (or its plan retired)
     // would attach stale work to a fresh epoch. Refuse instead.
     if let Some(inherited) = ctx.subagent_step.clone()
-        && matches!(name, "write" | "edit" | "multi_edit" | "patch" | "bash")
+        && matches!(name, "write" | "edit" | "bash")
         && !step_epoch_current(&ctx.root, &inherited)
     {
         return Outcome::err(
@@ -214,8 +212,8 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
     if ctx.subagent_step.is_some()
         && let Some(allowed) = ctx.subagent_write_paths.as_ref()
     {
-        if matches!(name, "write" | "edit" | "multi_edit" | "patch") {
-            let outside = mutation_target_paths(ctx, name, args)
+        if matches!(name, "write" | "edit") {
+            let outside = mutation_target_paths(ctx, args)
                 .into_iter()
                 .find(|target| !in_write_scope(target, allowed));
             if let Some(path) = outside {
@@ -270,23 +268,6 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
             args["new_string"].as_str().unwrap_or_default(),
             args["replace_all"].as_bool().unwrap_or(false),
         ),
-        "multi_edit" => {
-            let edits: Vec<(String, String, bool)> = args["edits"]
-                .as_array()
-                .map(|a| {
-                    a.iter()
-                        .map(|e| {
-                            (
-                                e["old_string"].as_str().unwrap_or_default().to_string(),
-                                e["new_string"].as_str().unwrap_or_default().to_string(),
-                                e["replace_all"].as_bool().unwrap_or(false),
-                            )
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            fs::multi_edit(ctx, args["file_path"].as_str().unwrap_or_default(), &edits)
-        }
         "ls" => fs::ls(ctx, args["path"].as_str().unwrap_or(".")),
         "glob" => fs::glob(
             ctx,
@@ -302,7 +283,6 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
         ),
         "git_status" => with_authorship(ctx, git::status(ctx, args)),
         "git_diff" => with_authorship(ctx, git::diff(ctx, args)),
-        "patch" => git::patch(ctx, args),
         "outline" => outline::outline(ctx, args),
         "webfetch" | "websearch" => Outcome::err("web tools must run through the async dispatcher"),
         "bash" => exec::bash_with_workdir(

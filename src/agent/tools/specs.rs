@@ -138,32 +138,6 @@ mismatch); replace_all needs one. Never edit on a stale read — the host refuse
             }),
         },
         ToolDef {
-            name: "multi_edit",
-            kind: Kind::Mutating,
-            description: "Apply multiple exact replacements to one file atomically. Prefer this \
-over sequential `edit` calls. Single exact matches check freshness; `replace_all` entries need a \
-prior `read`.",
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "file_path": {"type": "string"},
-                    "edits": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "old_string": {"type": "string"},
-                                "new_string": {"type": "string"},
-                                "replace_all": {"type": "boolean"}
-                            },
-                            "required": ["old_string", "new_string"]
-                        }
-                    }
-                },
-                "required": ["file_path", "edits"]
-            }),
-        },
-        ToolDef {
             name: "ls",
             kind: Kind::ReadOnly,
             description: "List one directory's entries (name, type, size). First move in an unfamiliar tree, and the check on what a write actually created.",
@@ -283,12 +257,6 @@ bash_output(id, wait_secs) for background jobs.",
             kind: Kind::ReadOnly,
             description: "Show the unstaged diff, optionally one path. Read your own edits back before reporting them.",
             parameters: json!({"type":"object","properties":{"target":{"type":"string"}}}),
-        },
-        ToolDef {
-            name: "patch",
-            kind: Kind::Mutating,
-            description: "Validate and apply a unified Git patch to the project.",
-            parameters: json!({"type":"object","properties":{"patch":{"type":"string"}},"required":["patch"]}),
         },
         ToolDef {
             name: "websearch",
@@ -567,7 +535,7 @@ pub fn is_mutating_call(name: &str, _args: &Value) -> bool {
 
 pub fn call_path(name: &str, args: &Value) -> Option<String> {
     let key = match name {
-        "read" | "write" | "edit" | "multi_edit" => "file_path",
+        "read" | "write" | "edit" => "file_path",
         "ls" | "outline" => "path",
         _ => return None,
     };
@@ -620,7 +588,7 @@ fn call_summary_raw(name: &str, args: &Value) -> String {
                 _ => path,
             }
         }
-        "write" | "edit" | "multi_edit" => s("file_path"),
+        "write" | "edit" => s("file_path"),
         "bash" => s("command"),
         "bash_output" => {
             // wait_secs/from_start visible right in the row: no need to
@@ -653,10 +621,6 @@ fn call_summary_raw(name: &str, args: &Value) -> String {
             }
         }
         "git_diff" => s("target"),
-        "patch" => format!(
-            "{} bytes",
-            args["patch"].as_str().map(str::len).unwrap_or(0)
-        ),
         "webfetch" => s("url"),
         "websearch" => s("query"),
         "subagent" => args["tasks"]
@@ -1077,7 +1041,7 @@ fn tool_specs_wire_weight() {
 /// was `patch` changing files while the gate knew only three names.
 #[test]
 fn every_mutating_tool_reports_its_paths() {
-    const REPORTS_A_PATH: &[&str] = &["write", "edit", "multi_edit", "patch"];
+    const REPORTS_A_PATH: &[&str] = &["write", "edit"];
     const NO_PER_CALL_PATH: &[&str] = &[
         "bash", // targets unknown in advance; attributed via the shadow head (H4)
         "plan", // host state under .sqwai/, not a source file

@@ -995,7 +995,7 @@ pub(crate) fn build_subagent_tail(
             "<subagent_contract>\n\
              Role: READ-ONLY EXPLORER SUBAGENT\n\
              - You are running in an isolated child context to investigate and report back to the parent agent.\n\
-             - Do NOT call mutating tools (`write`, `edit`, `multi_edit`, `patch`), `plan`, `subagent`, or `ask_user`.\n\
+             - Do NOT call mutating tools (`write`, `edit`), `plan`, `subagent`, or `ask_user`.\n\
              - Emit independent `grep`, `glob`, `outline`, and `read(offset, limit)` calls in parallel batches.\n\
              - Structure your final report concisely for the parent agent:\n\
                1. **Findings:** Verified facts with exact `path:line` references and symbol names.\n\

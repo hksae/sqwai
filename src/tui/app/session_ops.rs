@@ -57,7 +57,7 @@ impl App {
                             candidates.extend(paths.iter().filter_map(|p| p.as_str()));
                         }
                     }
-                    "write" | "edit" | "multi_edit" | "outline" => {
+                    "write" | "edit" | "outline" => {
                         if let Some(path) = call.args["file_path"]
                             .as_str()
                             .or_else(|| call.args["path"].as_str())

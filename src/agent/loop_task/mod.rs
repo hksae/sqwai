@@ -2095,7 +2095,7 @@ async fn run_agent(
                 if outcome.ok
                     && matches!(
                         call.name.as_str(),
-                        "edit" | "multi_edit" | "write" | "patch"
+                        "edit" | "write"
                     )
                 {
                     edited_since_green_bash = true;

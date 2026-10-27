@@ -330,6 +330,8 @@ mod tests {
             "git_commit",
             "git_stage",
             "git_branch",
+            "multi_edit",
+            "patch",
         ];
         let retired_words = [
             "acceptance",
