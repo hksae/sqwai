@@ -12,6 +12,38 @@ use crate::config::EffortLevel;
 use crate::providers::{self, Message as PMessage, Role};
 use crate::session::Session;
 
+/// The plan the surfaces should show: the one attached to the session while it
+/// is still open, otherwise this session's active plan. A finished plan stays
+/// attached so the user can read what just closed — but it must not outlive the
+/// agent starting a new one. A live session kept rendering a completed research
+/// plan while the model was two steps into the next, because the pointer was
+/// only ever filled when empty.
+pub(super) fn adopt_plan_pointer(
+    root: &std::path::Path,
+    session_id: &str,
+    attached: &mut Option<String>,
+) {
+    let active = crate::plan::open_active_for_session(root, Some(session_id))
+        .ok()
+        .flatten()
+        .map(|plan| plan.id);
+    if let Some(id) = attached.as_deref() {
+        match crate::plan::open(root, id) {
+            // Still the plan this session is working: nothing to move.
+            Ok(plan) if plan.status == crate::plan::PlanStatus::Active => return,
+            // Finished, and no successor yet: keep showing what just closed.
+            Ok(_) => {
+                if let Some(id) = active {
+                    *attached = Some(id);
+                }
+                return;
+            }
+            Err(e) => crate::tui::event_log::log("PLAN", format!("plan {id} unreadable: {e}")),
+        }
+    }
+    *attached = active;
+}
+
 impl App {
     /// Write the in-memory pinned skill names back to the session record.
     pub(super) fn sync_active_skills_to_session(&mut self) {
@@ -499,24 +531,11 @@ impl App {
         crate::providers::set_conversation_id(&self.session.id.to_string());
         self.pending_queue.clear();
         self.reset_image_draft();
-        if let Some(ref plan_id) = self.session.plan_id
-            && crate::plan::open(&self.project_root, plan_id).is_err()
-        {
-            crate::tui::event_log::log(
-                "PLAN",
-                format!("plan {plan_id} not found or corrupted; resetting plan_id to None"),
-            );
-            self.session.plan_id = None;
-        }
-        if self.session.plan_id.is_none() {
-            self.session.plan_id = crate::plan::open_active_for_session(
-                &self.project_root,
-                Some(&self.session.id.to_string()),
-            )
-            .ok()
-            .flatten()
-            .map(|plan| plan.id);
-        }
+        adopt_plan_pointer(
+            &self.project_root,
+            &self.session.id.to_string(),
+            &mut self.session.plan_id,
+        );
         self.session.strip_system_messages();
         self.clear_segments();
         self.seg_cache.clear();

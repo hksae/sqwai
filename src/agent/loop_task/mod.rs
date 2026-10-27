@@ -184,9 +184,14 @@ pub enum AgentEvent {
     },
     /// the session's current plan step changed; `None` means idle.
     /// The TUI persists it on the session; the loop itself tracks it in
-    /// `current_step` and never waits for this round-trip.
+    /// `current_step` and never waits for this round-trip. `plan` names the
+    /// session's active plan when it has one: a `close` leaves the finished plan
+    /// attached so the surface can still show it, and the next `create` must
+    /// move that pointer, or the TUI keeps rendering the dead plan the agent
+    /// stopped working on.
     StepCurrent {
         step: Option<String>,
+        plan: Option<String>,
     },
     /// a command or mutating tool call needs approval; decide via
     /// ControlMsg. `subject` is what the user reads (the shell command
@@ -1997,9 +2002,14 @@ async fn run_agent(
                             let held_before = ctx.current_step.clone();
                             ctx.current_step = adopt_in_progress_step(&root, &ctx.session_id);
                             if ctx.current_step != held_before {
+                                let plan_id = plan::open_active_for_session(&root, Some(&ctx.session_id))
+                                    .ok()
+                                    .flatten()
+                                    .map(|p| p.id);
                                 let _ = tx
                                     .send(AgentEvent::StepCurrent {
                                         step: ctx.current_step.clone(),
+                                        plan: plan_id,
                                     })
                                     .await;
                             }
@@ -2200,10 +2210,15 @@ async fn run_agent(
                             .flatten();
                         let plan_id = active.as_ref().map(|p| p.id.clone());
                         let current = adopt_in_progress_step(&root, &session_id);
-                        writer.set_attribution(current.clone(), plan_id, &events_agent);
+                        writer.set_attribution(current.clone(), plan_id.clone(), &events_agent);
                         ctx.current_step = current.clone();
                         if subagent_depth == 0 {
-                            let _ = tx.send(AgentEvent::StepCurrent { step: current }).await;
+                            let _ = tx
+                                .send(AgentEvent::StepCurrent {
+                                    step: current,
+                                    plan: plan_id,
+                                })
+                                .await;
                         }
                     }
                 }

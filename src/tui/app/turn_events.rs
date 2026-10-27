@@ -372,8 +372,13 @@ impl App {
             } => {
                 self.open_ask(&call_id, id, questions);
             }
-            AgentEvent::StepCurrent { step } => {
+            AgentEvent::StepCurrent { step, plan } => {
                 self.session.current_step_id = step;
+                // Only a live plan moves the pointer: with nothing active the
+                // surface keeps showing the plan that just closed.
+                if let Some(id) = plan {
+                    self.session.plan_id = Some(id);
+                }
                 self.session.save().ok();
             }
             AgentEvent::Approval {

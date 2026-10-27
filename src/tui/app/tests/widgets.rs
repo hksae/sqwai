@@ -2091,6 +2091,83 @@ fn undo_turn_reverts_only_latest_turn_and_keeps_aborted_turn_checkpoints() {
     assert_eq!(app.session.checkpoints[0].0, "blob:turn1");
 }
 
+fn stored_plan(
+    root: &std::path::Path,
+    goal: &str,
+    session: &str,
+    finished: bool,
+) -> crate::plan::Plan {
+    let mut plan = crate::plan::create(
+        goal.to_string(),
+        Vec::new(),
+        Vec::new(),
+        vec![crate::plan::NewStep {
+            title: "step one".into(),
+            check: None,
+        }],
+        &crate::plan::Limits::default(),
+    )
+    .expect("plan creates");
+    plan.sessions = vec![session.to_string()];
+    if finished {
+        plan.status = crate::plan::PlanStatus::Completed;
+    }
+    crate::plan::store(root, &plan).expect("plan stores");
+    plan
+}
+
+/// A finished plan holds the pointer only until the agent starts another one.
+/// It used to survive, so the surface rendered the dead plan while the model was
+/// two steps into the new one.
+#[test]
+fn a_finished_plan_loses_the_pointer_to_the_active_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let finished = stored_plan(root, "research", "sess-1", true);
+    let mut attached = Some(finished.id.clone());
+    super::super::session_ops::adopt_plan_pointer(root, "sess-1", &mut attached);
+    assert_eq!(
+        attached.as_deref(),
+        Some(finished.id.as_str()),
+        "with nothing active the finished plan stays visible"
+    );
+
+    let live = stored_plan(root, "build the game", "sess-1", false);
+    super::super::session_ops::adopt_plan_pointer(root, "sess-1", &mut attached);
+    assert_eq!(
+        attached.as_deref(),
+        Some(live.id.as_str()),
+        "the active plan owns the pointer once one exists"
+    );
+}
+
+/// The plan surface follows the agent, not the last plan it finished. `close`
+/// leaves the finished plan attached so it can still be shown, but the next
+/// `create` has to move the pointer — a live session kept rendering a completed
+/// research plan while the agent was two steps into a new one.
+#[test]
+fn a_new_plan_moves_the_sessions_plan_pointer() {
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.session.plan_id = Some("01FINISHED".into());
+    app.handle_agent_event(crate::agent::loop_task::AgentEvent::StepCurrent {
+        step: Some("2".into()),
+        plan: Some("01NEW".into()),
+    });
+    assert_eq!(
+        app.session.plan_id.as_deref(),
+        Some("01NEW"),
+        "the active plan owns the pointer"
+    );
+    assert_eq!(app.session.current_step_id.as_deref(), Some("2"));
+
+    // Closing reports no active plan: the surface keeps showing what just ended.
+    app.handle_agent_event(crate::agent::loop_task::AgentEvent::StepCurrent {
+        step: None,
+        plan: None,
+    });
+    assert_eq!(app.session.plan_id.as_deref(), Some("01NEW"));
+    assert_eq!(app.session.current_step_id, None);
+}
 #[test]
 fn undo_list_command_opens_checkpoint_menu() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());

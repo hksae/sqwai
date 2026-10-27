@@ -926,24 +926,11 @@ impl App {
         if !startup {
             app.load_history_segments();
         }
-        if let Some(ref plan_id) = app.session.plan_id
-            && crate::plan::open(&app.project_root, plan_id).is_err()
-        {
-            crate::tui::event_log::log(
-                "PLAN",
-                format!("plan {plan_id} not found or corrupted; resetting plan_id to None"),
-            );
-            app.session.plan_id = None;
-        }
-        if app.session.plan_id.is_none() {
-            app.session.plan_id = crate::plan::open_active_for_session(
-                &app.project_root,
-                Some(&app.session.id.to_string()),
-            )
-            .ok()
-            .flatten()
-            .map(|plan| plan.id);
-        }
+        session_ops::adopt_plan_pointer(
+            &app.project_root,
+            &app.session.id.to_string(),
+            &mut app.session.plan_id,
+        );
         app.refresh_skills();
         app.stable_parts = app.stable_parts();
         app.rebuild_session_environment();
