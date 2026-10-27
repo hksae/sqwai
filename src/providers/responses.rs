@@ -262,13 +262,14 @@ impl ResponsesProvider {
 impl Provider for ResponsesProvider {
     fn capabilities(&self) -> super::ProviderCapabilities {
         super::ProviderCapabilities {
-            // Console Go answers Responses calls statelessly: it retains
-            // nothing server-side, so a previous_response_id always 400s
-            // ("referenced response not found or expired"). Never offer
-            // continuation there — the loop then resends the full
-            // transcript in `input`, which loses nothing. Other hosts
-            // keep the documented behavior.
-            previous_response: !self.url.contains("opencode.ai"),
+            // No Responses host may be trusted with the chain from the wire
+            // format alone. A live session on a Responses gateway that accepts
+            // `previous_response_id` and answers from the single message we sent
+            // it lost 335 turns of work silently: the call succeeded, the model
+            // simply had no memory, and the host had no way to know.
+            // Continuation is therefore off until a host is documented to keep
+            // its chain — which is a capability decision, not a URL guess.
+            previous_response: false,
             ..Default::default()
         }
     }
