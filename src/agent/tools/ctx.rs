@@ -58,6 +58,12 @@ pub struct ToolCtx {
     /// content hash, so an edit or a `bash` write puts the file back on the
     /// fresh path.
     pub read_windows: HashMap<PathBuf, Served>,
+    /// Sections of a fetched page the model has already been shown, per
+    /// canonical URL. A repeat projection of the same page is answered with
+    /// what is new: a live session fetched one wiki page 44 times and paid
+    /// 1.17 MB of context for it, because the page cache made every fetch look
+    /// free — the network was skipped, the transcript was not.
+    pub web_pages: HashMap<String, ServedPage>,
     /// What each file looked like when the model last saw it whole, plus its
     /// own edits since. This lives in the session, not the run: a live GTA
     /// session's two full re-reads of `main.js` both happened on the first
@@ -166,6 +172,7 @@ impl ToolCtx {
             checkpoint_session: None,
             files_read: HashMap::new(),
             read_windows: HashMap::new(),
+            web_pages: HashMap::new(),
             read_ledger: ReadLedger::default(),
             visible_calls: None,
             checkpoints: Vec::new(),
@@ -514,6 +521,8 @@ impl ToolCtx {
     /// Evict read windows whose `tool_result` is no longer visible on the wire
     /// (either cleared by `tool_output::trim_for_wire` or dropped by compaction),
     /// so `fs::read` never claims "see above" for output the model cannot see.
+    /// Web page ledgers follow the same rule: a section whose result was cleared
+    /// is not "already served".
     pub(crate) fn retain_visible_read_windows(&mut self, visible_call_ids: &HashSet<String>) {
         self.visible_calls = Some(visible_call_ids.clone());
         for served in self.read_windows.values_mut() {
@@ -526,6 +535,40 @@ impl ToolCtx {
                 served.rebuild_ranges();
             }
         }
+        for page in self.web_pages.values_mut() {
+            page.items
+                .retain(|(_, cid)| cid.as_ref().is_none_or(|id| visible_call_ids.contains(id)));
+        }
+        self.web_pages.retain(|_, page| !page.items.is_empty());
+    }
+
+    /// Sections of `url` the model is already looking at.
+    pub(crate) fn web_seen(&self, url: &str) -> HashSet<usize> {
+        self.web_pages
+            .get(url)
+            .map(|page| page.items.iter().map(|(index, _)| *index).collect())
+            .unwrap_or_default()
+    }
+
+    /// Note the sections a projection just put in front of the model, tagged
+    /// with the result that carried them.
+    pub(crate) fn note_web_sections(&mut self, url: &str, sections: &[usize]) {
+        if sections.is_empty() {
+            return;
+        }
+        let call_id = self.current_call_id.clone();
+        let page = self.web_pages.entry(url.to_string()).or_default();
+        for index in sections {
+            if !page.items.iter().any(|(seen, _)| seen == index) {
+                page.items.push((*index, call_id.clone()));
+            }
+        }
+    }
+
+    /// A page fetched again is a page the model has not seen yet: its section
+    /// numbering belongs to the new document.
+    pub(crate) fn reset_web_page(&mut self, url: &str) {
+        self.web_pages.remove(url);
     }
 
     /// How many windows of this file the model has been served from identical
@@ -559,8 +602,24 @@ impl ToolCtx {
             }
         }
         self.read_ledger.merge(child.read_ledger);
+        for (url, page) in child.web_pages {
+            let slot = self.web_pages.entry(url).or_default();
+            for item in page.items {
+                if !slot.items.contains(&item) {
+                    slot.items.push(item);
+                }
+            }
+        }
         self.activated_skills.extend(child.activated_skills);
     }
+}
+
+/// What `webfetch` has already put in front of the model from one cached page:
+/// the section indices shown and the tool result that carried them, so a cleared
+/// result stops counting as "already served".
+#[derive(Debug, Clone, Default)]
+pub struct ServedPage {
+    pub items: Vec<(usize, Option<String>)>,
 }
 
 /// What `read` has already served from one content version of a file: the hash

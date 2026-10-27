@@ -730,14 +730,17 @@ pub(crate) async fn execute_parallel_read_only_call(
     match c.name.as_str() {
         "webfetch" | "websearch" => {
             let mut out = if c.name == "webfetch" {
-                tools::web::fetch(&c.args, &allow_hosts, &child_ctx.tools).await
+                tools::web::fetch(&c.args, &mut child_ctx, &allow_hosts).await
             } else {
                 tools::web::search(&c.args, &child_ctx.tools).await
             };
             if out.ok {
                 out.output = crate::agent::trust::banner_wrap(&out.output);
             }
-            (idx, started.elapsed().as_millis(), out, None)
+            // The page ledger the worker built has to reach the session, or every
+            // parallel fetch of one page looks like the first.
+            child_ctx.current_call_id = None;
+            (idx, started.elapsed().as_millis(), out, Some(child_ctx))
         }
         _ => {
             let out = run_tool_blocking(&mut child_ctx, &c.name, &c.args).await;
@@ -1851,7 +1854,14 @@ async fn run_agent(
                         }
                         "webfetch" | "websearch" => {
                             let mut outcome = if call.name == "webfetch" {
-                                tools::web::fetch(&call.args, &web_allow_hosts, &tool_caps).await
+                                // The page ledger rides on the call id: a result
+                                // that later leaves the wire stops counting as
+                                // "already served".
+                                ctx.current_call_id = Some(call.id.clone());
+                                let out =
+                                    tools::web::fetch(&call.args, &mut ctx, &web_allow_hosts).await;
+                                ctx.current_call_id = None;
+                                out
                             } else {
                                 tools::web::search(&call.args, &tool_caps).await
                             };

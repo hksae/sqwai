@@ -383,9 +383,28 @@ pub fn build_outline(sections: &[PageSection]) -> String {
     lines.join("\n")
 }
 
-/// Render a page for `webfetch(url, query?, section?)`.
+/// What one projection of a page put in front of the model.
+pub struct Projection {
+    pub text: String,
+    /// The section indices now shown — the ledger records them so the next
+    /// projection of the same page can skip what the model has already read.
+    pub served: Vec<usize>,
+}
+
+/// Render a page for `webfetch(url, query?, section?)` with nothing held back.
 pub fn project_page(page: &CachedPage, query: Option<&str>, section: Option<&str>) -> String {
+    project_page_seen(page, query, section, &HashSet::new()).text
+}
+
+/// Render a page, skipping the sections in `seen`.
+pub fn project_page_seen(
+    page: &CachedPage,
+    query: Option<&str>,
+    section: Option<&str>,
+    seen: &HashSet<usize>,
+) -> Projection {
     let total_chars = page.markdown.chars().count();
+    let all: Vec<usize> = (0..page.sections.len()).collect();
     let section_filter = section.map(str::trim).filter(|s| !s.is_empty());
     let query_filter = query.map(str::trim).filter(|q| !q.is_empty());
 
@@ -405,6 +424,7 @@ pub fn project_page(page: &CachedPage, query: Option<&str>, section: Option<&str
                 MAX_PROJECTED_CHARS,
                 Some(&format!("Section match: '{sec_q}'")),
                 false,
+                seen,
             );
         }
 
@@ -418,6 +438,7 @@ pub fn project_page(page: &CachedPage, query: Option<&str>, section: Option<&str
                 "No exact heading matched '{sec_q}'; showing outline and closest sections"
             )),
             true,
+            seen,
         );
     }
 
@@ -425,7 +446,7 @@ pub fn project_page(page: &CachedPage, query: Option<&str>, section: Option<&str
     if let Some(q) = query_filter {
         let ranked = rank_sections(&page.sections, q);
         if ranked.is_empty() && total_chars <= FULL_PAGE_CHARS {
-            return page.markdown.clone();
+            return whole_page(page, &all, seen);
         }
         let best_score = ranked.first().map(|(_, s)| *s).unwrap_or(0.0);
         let score_threshold = best_score * 0.35;
@@ -464,12 +485,13 @@ pub fn project_page(page: &CachedPage, query: Option<&str>, section: Option<&str
             QUERY_PROJECTED_CHARS,
             Some(&format!("Focused on query: '{q}'")),
             page.sections.len() >= 3,
+            seen,
         );
     }
 
     // 3. No filter: return full page if it fits within budget.
     if total_chars <= FULL_PAGE_CHARS || page.sections.len() <= 1 {
-        return trim_middle(page.markdown.trim(), MAX_PROJECTED_CHARS);
+        return whole_page(page, &all, seen);
     }
 
     let mut selected: Vec<usize> = Vec::new();
@@ -492,7 +514,35 @@ pub fn project_page(page: &CachedPage, query: Option<&str>, section: Option<&str
             page.sections.len()
         )),
         true,
+        seen,
     )
+}
+
+/// The unfiltered whole-page answer, or the delta when it was already served.
+fn whole_page(page: &CachedPage, all: &[usize], seen: &HashSet<usize>) -> Projection {
+    if !all.is_empty() && all.iter().all(|idx| seen.contains(idx)) {
+        return Projection {
+            text: format!(
+                "Nothing new: the whole page was served earlier in this session ({}). \
+                 Pass `section` or `query` for a focused reading, or `refresh` to refetch.",
+                page.canonical_url
+            ),
+            served: Vec::new(),
+        };
+    }
+    let text = trim_middle(page.markdown.trim(), MAX_PROJECTED_CHARS);
+    // A page cut down to the budget did not show its tail: only the sections
+    // whose bytes are actually in the answer count as served.
+    let served: Vec<usize> = page
+        .sections
+        .iter()
+        .filter(|sec| {
+            let body = sec.body.trim();
+            !body.is_empty() && text.contains(body)
+        })
+        .map(|sec| sec.index)
+        .collect();
+    Projection { text, served }
 }
 
 fn match_sections_by_heading(sections: &[PageSection], sec_q: &str) -> Vec<usize> {
@@ -575,10 +625,49 @@ fn assemble_selected_sections(
     budget: usize,
     banner: Option<&str>,
     include_outline: bool,
-) -> String {
+    seen: &HashSet<usize>,
+) -> Projection {
+    // A repeat projection of a page the model is still reading must not re-emit
+    // the same sections: 44 fetches of one live page cost 1.17 MB of context
+    // while the page cache made them look free.
+    let fresh: Vec<usize> = indices.iter().copied().filter(|i| !seen.contains(i)).collect();
+    let skipped: Vec<&PageSection> = indices
+        .iter()
+        .filter(|i| seen.contains(i))
+        .filter_map(|i| page.sections.get(*i))
+        .collect();
+    if fresh.is_empty() {
+        let head = skipped
+            .iter()
+            .take(6)
+            .map(|s| s.breadcrumb.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Projection {
+            text: format!(
+                "Nothing new: {} section(s) of this page are already in your context above ({head}). \
+                 Ask for a different `section` or `query`, or `refresh` to refetch.",
+                skipped.len()
+            ),
+            served: Vec::new(),
+        };
+    }
+
     let mut out = String::new();
     if let Some(b) = banner {
         out.push_str(&format!("> [{b}]\n\n"));
+    }
+    if !skipped.is_empty() {
+        let head = skipped
+            .iter()
+            .take(6)
+            .map(|s| s.breadcrumb.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        out.push_str(&format!(
+            "> [{} section(s) already served earlier in this session, not repeated: {head}]\n\n",
+            skipped.len()
+        ));
     }
     if include_outline && page.sections.len() >= 2 {
         out.push_str("## Document Outline\n");
@@ -587,12 +676,12 @@ fn assemble_selected_sections(
     }
 
     let mut used = out.chars().count();
-    let mut omitted = page.sections.len().saturating_sub(indices.len());
-    for &idx in indices {
+    let mut omitted = page.sections.len().saturating_sub(fresh.len());
+    for &idx in &fresh {
         let Some(sec) = page.sections.get(idx) else {
             continue;
         };
-        if used + sec.char_len > budget && !out.is_empty() && indices.len() > 1 {
+        if used + sec.char_len > budget && !out.is_empty() && fresh.len() > 1 {
             omitted += 1;
             continue;
         }
@@ -612,7 +701,10 @@ fn assemble_selected_sections(
         ));
     }
 
-    trim_middle(out.trim(), MAX_PROJECTED_CHARS)
+    Projection {
+        text: trim_middle(out.trim(), MAX_PROJECTED_CHARS),
+        served: fresh,
+    }
 }
 
 /// Global cross-page BM25 pool ranker for `websearch(deep=true)`:

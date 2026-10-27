@@ -89,15 +89,13 @@ fn redirect_policy(allow_hosts: Vec<String>) -> reqwest::redirect::Policy {
     })
 }
 
-pub async fn fetch(
-    args: &Value,
-    allow_hosts: &[String],
-    tools: &crate::config::ToolsConfig,
-) -> Outcome {
+pub async fn fetch(args: &Value, ctx: &mut super::ToolCtx, allow_hosts: &[String]) -> Outcome {
+    let tools = ctx.tools.clone();
     let url = match url_arg(args, allow_hosts) {
         Ok(url) => url,
         Err(error) => return Outcome::err(error),
     };
+    let canonical = ranker::canonicalize_url(url.as_str());
     let selector = args
         .get("selector")
         .and_then(Value::as_str)
@@ -125,7 +123,7 @@ pub async fn fetch(
         && !force_refresh
         && let Some(cached) = ranker::get_cached_page(url.as_str())
     {
-        return Outcome::ok(ranker::project_page(&cached, query, section));
+        return Outcome::ok(project_page(ctx, &cached, &canonical, query, section));
     }
 
     // Coalesce concurrent requests to the same canonical URL in a parallel batch:
@@ -144,7 +142,7 @@ pub async fn fetch(
         && !force_refresh
         && let Some(cached) = ranker::get_cached_page(url.as_str())
     {
-        return Outcome::ok(ranker::project_page(&cached, query, section));
+        return Outcome::ok(project_page(ctx, &cached, &canonical, query, section));
     }
 
     let timeout = args
@@ -175,7 +173,26 @@ pub async fn fetch(
     }
 
     let cached = ranker::put_cached_page(url.as_str(), doc.title, doc.markdown);
-    Outcome::ok(ranker::project_page(&cached, query, section))
+    // Fresh bytes: the section numbering of the previous document is gone, and
+    // with it any claim that the model has already read this page.
+    ctx.reset_web_page(&canonical);
+    Outcome::ok(project_page(ctx, &cached, &canonical, query, section))
+}
+
+/// Project a cached page and record what the model was shown, so the next
+/// projection of the same page answers with what is new instead of the same
+/// bytes again.
+fn project_page(
+    ctx: &mut super::ToolCtx,
+    page: &ranker::CachedPage,
+    canonical: &str,
+    query: Option<&str>,
+    section: Option<&str>,
+) -> String {
+    let seen = ctx.web_seen(canonical);
+    let projection = ranker::project_page_seen(page, query, section, &seen);
+    ctx.note_web_sections(canonical, &projection.served);
+    projection.text
 }
 
 /// Extract the structured Markdown/text of every element matching a CSS selector,
@@ -583,6 +600,51 @@ Configure connection and request timeouts with `Duration::from_secs`.
         assert!(!sec_proj.contains("Cargo.toml"));
     }
 
+    /// A repeat projection of a page the model is still reading answers with what
+    /// is new. The page cache made 44 fetches of one live wiki page look free;
+    /// each of them still cost ~12 KB of context.
+    #[test]
+    fn a_refetch_of_one_page_returns_only_sections_the_model_has_not_seen() {
+        let md = "# Overview\n\nIntroductory paragraph.\n\n## Install\n\nAdd reqwest to Cargo.toml.\n\n## Timeouts\n\nConfigure with Duration::from_secs.\n";
+        let page = ranker::put_cached_page(
+            "https://example.com/delta-ledger",
+            Some("Ledger Docs".into()),
+            md.into(),
+        );
+        let mut ctx = crate::agent::tools::ToolCtx::new(std::env::temp_dir());
+        ctx.current_call_id = Some("call_1".into());
+        let url = page.canonical_url.clone();
+
+        let first = ranker::project_page_seen(&page, None, Some("Install"), &ctx.web_seen(&url));
+        assert!(first.text.contains("Add reqwest"), "{}", first.text);
+        ctx.note_web_sections(&url, &first.served);
+        assert!(!first.served.is_empty(), "the ledger needs what was shown");
+
+        let repeat = ranker::project_page_seen(&page, None, Some("Install"), &ctx.web_seen(&url));
+        assert!(
+            !repeat.text.contains("Add reqwest") && repeat.text.contains("Nothing new"),
+            "a section already on the wire is not paid for twice: {}",
+            repeat.text
+        );
+        assert!(repeat.served.is_empty(), "nothing new was shown");
+
+        let next = ranker::project_page_seen(&page, None, Some("Timeouts"), &ctx.web_seen(&url));
+        assert!(
+            next.text.contains("Duration::from_secs"),
+            "another section of the same page still arrives: {}",
+            next.text
+        );
+
+        // The result that carried the first section leaving the wire puts it back
+        // on the table: the model cannot be told "already above" about bytes that
+        // were cleared.
+        ctx.retain_visible_read_windows(&std::collections::HashSet::new());
+        assert!(
+            ctx.web_seen(&url).is_empty(),
+            "every ledger entry rode a result that is gone"
+        );
+    }
+
     #[test]
     fn router_classifies_developer_urls_accurately() {
         let gh_blob = Url::parse("https://github.com/tokio-rs/tokio/blob/master/tokio/src/lib.rs").unwrap();
@@ -867,8 +929,8 @@ let y = 2;</pre></td>
                 "url": "https://tokio.rs/tokio/tutorial/spawning",
                 "query": "JoinHandle await"
             }),
+            &mut crate::agent::tools::ToolCtx::new(std::env::temp_dir()),
             &[],
-            &crate::config::ToolsConfig::default(),
         )
         .await;
         assert!(fetch_out.ok, "fetch failed: {}", fetch_out.output);
