@@ -929,6 +929,11 @@ pub fn classify_body(body: &str) -> Option<ErrorClass> {
         "bad gateway",
         "gateway timeout",
         "internal error",
+        // A relay that loses the model mid-stream says so in prose, with an
+        // invitation to retry. Nothing was rejected: the answer simply stopped,
+        // so this is the upstream failing, not the request.
+        "stream was interrupted",
+        "interrupted before completion",
     ]) {
         return Some(ErrorClass::Server);
     }
@@ -1705,6 +1710,10 @@ mod error_class_tests {
                 Some(ErrorClass::BadRequest),
             ),
             ("server overloaded, try later", Some(ErrorClass::Server)),
+            (
+                "Upstream stream was interrupted before completion, please retry the request",
+                Some(ErrorClass::Server),
+            ),
             ("something strange happened", None),
             ("error 4290 in module x", None),
         ] {
@@ -1718,5 +1727,10 @@ mod error_class_tests {
         assert!(!class_of(&quota).unwrap().retryable());
         let vague = event_error("something strange happened");
         assert_eq!(class_of(&vague), None);
+        // An interrupted stream is the upstream failing: the log records it as
+        // that, and a configured fallback can take the turn.
+        let dropped = event_error("Upstream stream was interrupted before completion");
+        assert_eq!(class_of(&dropped), Some(ErrorClass::Server));
+        assert!(class_of(&dropped).unwrap().retryable());
     }
 }
