@@ -595,7 +595,7 @@ Configure connection and request timeouts with `Duration::from_secs`.
         let cached = ranker::get_cached_page("https://www.example.com/docs/reqwest/").unwrap();
         assert_eq!(cached.canonical_url, "https://example.com/docs/reqwest");
 
-        let sec_proj = ranker::project_page(&page, None, Some("Timeouts"));
+        let sec_proj = ranker::project_page_seen(&page, None, Some("Timeouts"), &std::collections::HashSet::new()).text;
         assert!(sec_proj.contains("Duration::from_secs"));
         assert!(!sec_proj.contains("Cargo.toml"));
     }
@@ -893,7 +893,7 @@ let y = 2;</pre></td>
             Some("tokio-util".into()),
             "# Crate tokio-util\n\nOverview.\n\n## Cargo Features\n\n- `rt`\n- `codec`\n\n## README\n\nSome readme.".into(),
         );
-        let feat_proj = ranker::project_page(&crate_page, None, Some("Feature flags"));
+        let feat_proj = ranker::project_page_seen(&crate_page, None, Some("Feature flags"), &std::collections::HashSet::new()).text;
         assert!(
             feat_proj.contains("> [Section match: 'Feature flags']"),
             "Feature flags should fuzzy-match Cargo Features:\n{feat_proj}"

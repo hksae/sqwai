@@ -12,7 +12,7 @@ const CACHE_CAP: usize = 32;
 const CACHE_TTL: Duration = Duration::from_secs(15 * 60);
 /// Pages at or below this size are returned in full when no `query`/`section` filter is set.
 pub const FULL_PAGE_CHARS: usize = 22_000;
-/// Maximum characters returned from `project_page`.
+/// Maximum characters returned from `project_page_seen`.
 pub const MAX_PROJECTED_CHARS: usize = 28_000;
 /// Focused character budget when `query` is passed to `webfetch`.
 const QUERY_PROJECTED_CHARS: usize = 14_000;
@@ -389,11 +389,6 @@ pub struct Projection {
     /// The section indices now shown — the ledger records them so the next
     /// projection of the same page can skip what the model has already read.
     pub served: Vec<usize>,
-}
-
-/// Render a page for `webfetch(url, query?, section?)` with nothing held back.
-pub fn project_page(page: &CachedPage, query: Option<&str>, section: Option<&str>) -> String {
-    project_page_seen(page, query, section, &HashSet::new()).text
 }
 
 /// Render a page, skipping the sections in `seen`.
