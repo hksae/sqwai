@@ -390,8 +390,8 @@ fn repeat_verdict_and_read_windows_ignore_outputs_cleared_from_wire() {
         );
         messages.push(Message::tool_result(id, "y".repeat(8 * 1024), false));
     }
-    assert!(crate::agent::tool_output::is_cleared(&messages, "old_1"));
-    assert!(crate::agent::tool_output::is_cleared(&messages, "old_2"));
+    assert!(crate::agent::tool_output::is_cleared(&messages, "old_1", &crate::agent::tool_output::Wire::default()));
+    assert!(crate::agent::tool_output::is_cleared(&messages, "old_2", &crate::agent::tool_output::Wire::default()));
     assert!(
         matches!(
             repeat_verdict(&messages, &diff("new_1"), &big),
@@ -409,7 +409,7 @@ fn repeat_verdict_and_read_windows_ignore_outputs_cleared_from_wire() {
     ctx.current_call_id = None;
     assert_eq!(ctx.read_range_served(&path, "hash1", 1, 50), Some((1, 100)));
 
-    let cleared = crate::agent::tool_output::cleared_indices(&messages);
+    let cleared = crate::agent::tool_output::cleared_indices(&messages, &crate::agent::tool_output::Wire::default());
     let visible: std::collections::HashSet<String> = messages
         .iter()
         .enumerate()

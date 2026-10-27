@@ -17,7 +17,7 @@ fn image_tokens_count_toward_estimated_and_wire_pressure() {
     let stored = estimated_tokens(std::slice::from_ref(&with_image))
         - estimated_tokens(std::slice::from_ref(&plain));
     assert_eq!(stored, expected);
-    let wire = wire_estimated_tokens(&[with_image], 0, 4) - wire_estimated_tokens(&[plain], 0, 4);
+    let wire = wire_estimated_tokens(&[with_image], &crate::agent::tool_output::Wire::default()) - wire_estimated_tokens(&[plain], &crate::agent::tool_output::Wire::default());
     assert_eq!(wire, expected);
 }
 
@@ -30,7 +30,7 @@ fn document_pages_count_toward_estimated_and_wire_pressure() {
     let stored = estimated_tokens(std::slice::from_ref(&with_document))
         - estimated_tokens(std::slice::from_ref(&plain));
     assert_eq!(stored, expected);
-    let wire = wire_estimated_tokens(&[with_document], 0, 4) - wire_estimated_tokens(&[plain], 0, 4);
+    let wire = wire_estimated_tokens(&[with_document], &crate::agent::tool_output::Wire::default()) - wire_estimated_tokens(&[plain], &crate::agent::tool_output::Wire::default());
     assert_eq!(wire, expected);
 }
 
@@ -444,7 +444,7 @@ fn wire_estimated_tokens_counts_cleared_results_as_stubs() {
         ));
     }
     let raw = estimated_tokens(&messages);
-    let wire = wire_estimated_tokens(&messages, 0, 4);
+    let wire = wire_estimated_tokens(&messages, &crate::agent::tool_output::Wire::default());
     assert!(wire < raw, "wire {wire} must be below raw {raw}");
     assert!(
         wire < raw / 4,

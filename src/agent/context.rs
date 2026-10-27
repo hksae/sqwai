@@ -502,15 +502,11 @@ fn media_tokens(message: &Message) -> u64 {
 /// approximated (the exact bytes depend on the tool name, which the caller
 /// would have to build anyway); only the magnitude matters for the pressure
 /// decision, and it is bounded by the real stub.
-pub fn wire_estimated_tokens(messages: &[Message], context_limit: u64, bytes_per_token: u64) -> u64 {
+pub fn wire_estimated_tokens(messages: &[Message], wire: &crate::agent::tool_output::Wire) -> u64 {
     let cleared: std::collections::HashSet<usize> =
-        crate::agent::tool_output::cleared_indices_with_limit(
-            messages,
-            context_limit,
-            bytes_per_token,
-        )
-        .into_iter()
-        .collect();
+        crate::agent::tool_output::cleared_indices(messages, wire)
+            .into_iter()
+            .collect();
     messages
         .iter()
         .enumerate()

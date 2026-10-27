@@ -177,9 +177,15 @@ pub(crate) async fn compact_history(
     // Pressure is judged on the WIRE size, not the raw store: aged-out tool
     // results are already stubs on the request, so counting stored bytes keeps
     // firing compaction long after the request stopped growing.
-    let wire_measured = |m: &[Message]| {
-        context::wire_estimated_tokens(m, policy.context_limit, policy.bytes_per_token)
+    let wire = crate::agent::tool_output::Wire {
+        context_limit: policy.context_limit,
+        bytes_per_token: policy.bytes_per_token,
+        // The run's clear floor is not passed down: compaction judges pressure,
+        // and pricing the wire as if nothing had been cleared yet estimates it
+        // larger than it is — which triggers earlier, never later.
+        cleared_floor: 0,
     };
+    let wire_measured = |m: &[Message]| context::wire_estimated_tokens(m, &wire);
     let before = measured(messages);
 
     // No per-turn pruning by design (Codex shape): what the model read
@@ -203,11 +209,7 @@ pub(crate) async fn compact_history(
     let mut summarized = false;
     if !older.is_empty() {
         let mut wire_history = messages.clone();
-        crate::agent::tool_output::trim_for_wire_with_limit(
-            &mut wire_history,
-            policy.context_limit,
-            policy.bytes_per_token,
-        );
+        crate::agent::tool_output::trim_for_wire(&mut wire_history, &wire);
         let wire_older = &wire_history[..older.len().min(wire_history.len())];
         let (request, cache_aware) = compaction_request(
             prefix,

@@ -71,6 +71,17 @@ pub fn observe_bytes_per_token(total_bytes: u64, prompt_tokens: u64) -> Option<u
 /// share fell from 99.9% to 6.7% on exactly that step.
 pub const FIXED_BUCKET_BYTES: usize = 128 * 1024;
 
+/// What the wire may carry, as one value: the model's window, the provider's own
+/// bytes-per-token, and how many results this run has already cleared.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Wire {
+    pub context_limit: u64,
+    pub bytes_per_token: u64,
+    /// Results the request has already replaced with stubs in this run. The
+    /// cleared set is a prefix of the pool, so a count is enough to pin it.
+    pub cleared_floor: usize,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WireBudget {
     pub trigger_bytes: usize,
@@ -126,8 +137,12 @@ impl WireBudget {
     }
 
     /// Budget for a request whose only content is the transcript in `messages`.
-    pub fn for_messages(context_limit: u64, messages: &[Message], bytes_per_token: u64) -> Self {
-        Self::for_request(context_limit, nonclearable_bytes(messages), bytes_per_token)
+    pub fn for_messages(wire: &Wire, messages: &[Message]) -> Self {
+        Self::for_request(
+            wire.context_limit,
+            nonclearable_bytes(messages),
+            wire.bytes_per_token,
+        )
     }
 }
 
@@ -302,20 +317,10 @@ fn clearable(message: &Message) -> bool {
     message.role == Role::Tool && !message.is_error && !is_stub(&message.content)
 }
 
-/// Indices of the tool results to replace, oldest first.
-#[cfg(test)]
-pub fn cleared_indices(messages: &[Message]) -> Vec<usize> {
-    cleared_indices_with_limit(messages, 0, DEFAULT_BYTES_PER_TOKEN)
-}
-
-/// Indices of the tool results to replace, scaled to the space `context_limit`
-/// leaves after the request's immovable bytes.
-pub fn cleared_indices_with_limit(
-    messages: &[Message],
-    context_limit: u64,
-    bytes_per_token: u64,
-) -> Vec<usize> {
-    let budget = WireBudget::for_messages(context_limit, messages, bytes_per_token);
+/// Indices of the tool results to replace: what the budget says the pool cannot
+/// afford, and never fewer than [`Wire::cleared_floor`].
+pub fn cleared_indices(messages: &[Message], wire: &Wire) -> Vec<usize> {
+    let budget = WireBudget::for_messages(wire, messages);
     let pool: Vec<(usize, usize)> = messages
         .iter()
         .enumerate()
@@ -323,54 +328,52 @@ pub fn cleared_indices_with_limit(
         .map(|(i, m)| (i, m.content.len() + media_wire_bytes(m)))
         .collect();
     let total: usize = pool.iter().map(|(_, bytes)| bytes).sum();
-    if total <= budget.trigger_bytes {
-        return Vec::new();
-    }
-    // walk back from the newest until the fresh window is full
-    let mut kept = 0usize;
-    let mut keep_from = pool.len();
-    for k in (0..pool.len()).rev() {
-        kept += pool[k].1;
-        keep_from = k;
-        if kept >= budget.keep_bytes {
-            break;
-        }
-    }
-    // Quantize the clear boundary in steps of `min_clear_bytes` from the front
-    // of `pool`: because `messages` in the session store is never mutated by
-    // `trim_for_wire`, advancing `keep_from` by one tool result on every turn
-    // would rewrite a message at the boundary and re-key the cached history
-    // behind it on every single tool call. Stepping only when at least
-    // `min_clear_bytes` more can be freed keeps the boundary frozen between steps.
     let mut committed = 0usize;
-    let mut step_bytes = 0usize;
-    for (idx, &(_, bytes)) in pool[..keep_from].iter().enumerate() {
-        step_bytes += bytes;
-        if step_bytes >= budget.min_clear_bytes {
-            committed = idx + 1;
-            step_bytes = 0;
+    if total > budget.trigger_bytes {
+        // walk back from the newest until the fresh window is full
+        let mut kept = 0usize;
+        let mut keep_from = pool.len();
+        for k in (0..pool.len()).rev() {
+            kept += pool[k].1;
+            keep_from = k;
+            if kept >= budget.keep_bytes {
+                break;
+            }
+        }
+        // Quantize the clear boundary in steps of `min_clear_bytes` from the front
+        // of `pool`: because `messages` in the session store is never mutated by
+        // `trim_for_wire`, advancing `keep_from` by one tool result on every turn
+        // would rewrite a message at the boundary and re-key the cached history
+        // behind it on every single tool call. Stepping only when at least
+        // `min_clear_bytes` more can be freed keeps the boundary frozen between steps.
+        let mut step_bytes = 0usize;
+        for (idx, &(_, bytes)) in pool[..keep_from].iter().enumerate() {
+            step_bytes += bytes;
+            if step_bytes >= budget.min_clear_bytes {
+                committed = idx + 1;
+                step_bytes = 0;
+            }
         }
     }
+    // The boundary only ever moves forward. A large new result fills the fresh
+    // window sooner, which would otherwise hand back results the model was told
+    // were removed — live session: `cleared` 205 → 191 → 208 → 193 in a minute,
+    // each move rewriting the head of the transcript and costing the whole prefix
+    // cache (99.9% → 6.7% hits).
+    // The newest result always stays: the floor is a count of the past, and a
+    // stale one (after compaction the transcript it counted is gone) must never
+    // swallow the answer the model is working on.
+    let ceiling = pool.len().saturating_sub(1);
+    committed = committed.max(wire.cleared_floor.min(pool.len())).min(ceiling);
     if committed == 0 {
         return Vec::new();
     }
     pool[..committed].iter().map(|(i, _)| *i).collect()
 }
 
-/// Replace the old results with stubs, in place.
-#[cfg(test)]
-pub fn trim_for_wire(messages: &mut [Message]) {
-    trim_for_wire_with_limit(messages, 0, DEFAULT_BYTES_PER_TOKEN);
-}
-
-/// Replace the old results with stubs, scaled to `context_limit` tokens at
-/// `bytes_per_token`.
-pub fn trim_for_wire_with_limit(
-    messages: &mut [Message],
-    context_limit: u64,
-    bytes_per_token: u64,
-) {
-    let indices = cleared_indices_with_limit(messages, context_limit, bytes_per_token);
+/// Replace the old results with stubs, honouring the wire's budget and floor.
+pub fn trim_for_wire(messages: &mut [Message], wire: &Wire) {
+    let indices = cleared_indices(messages, wire);
     if indices.is_empty() {
         return;
     }
@@ -423,18 +426,8 @@ fn media_wire_bytes(message: &Message) -> usize {
 /// over the stored transcript and anything it does not name is still visible —
 /// and `recall_result` must not pretend otherwise, or it becomes a way to double the
 /// context the model already has.
-#[cfg(test)]
-pub fn is_cleared(messages: &[Message], call_id: &str) -> bool {
-    is_cleared_with_limit(messages, call_id, 0, DEFAULT_BYTES_PER_TOKEN)
-}
-
-pub fn is_cleared_with_limit(
-    messages: &[Message],
-    call_id: &str,
-    context_limit: u64,
-    bytes_per_token: u64,
-) -> bool {
-    cleared_indices_with_limit(messages, context_limit, bytes_per_token)
+pub fn is_cleared(messages: &[Message], call_id: &str, wire: &Wire) -> bool {
+    cleared_indices(messages, wire)
         .iter()
         .any(|i| {
             messages
@@ -452,28 +445,13 @@ pub fn is_cleared_with_limit(
 /// told which session file is currently true.
 #[cfg(test)]
 pub fn recall(messages: &[Message], call_id: &str) -> crate::agent::tools::Outcome {
-    recall_with_limit(messages, call_id, 0)
+    recall_args(messages, &serde_json::json!({ "call_id": call_id }), &Wire::default())
 }
 
-#[cfg(test)]
-pub fn recall_with_limit(
-    messages: &[Message],
-    call_id: &str,
-    context_limit: u64,
-) -> crate::agent::tools::Outcome {
-    recall_args_with_limit(
-        messages,
-        &serde_json::json!({ "call_id": call_id }),
-        context_limit,
-        DEFAULT_BYTES_PER_TOKEN,
-    )
-}
-
-pub fn recall_args_with_limit(
+pub fn recall_args(
     messages: &[Message],
     args: &serde_json::Value,
-    context_limit: u64,
-    bytes_per_token: u64,
+    wire: &Wire,
 ) -> crate::agent::tools::Outcome {
     use crate::agent::tools::Outcome;
     let call_id = args["call_id"].as_str().unwrap_or_default().trim();
@@ -489,7 +467,7 @@ pub fn recall_args_with_limit(
              or it belongs to another session"
         ));
     };
-    if !is_cleared_with_limit(messages, call_id, context_limit, bytes_per_token) {
+    if !is_cleared(messages, call_id, wire) {
         return Outcome::err(format!(
             "{call_id} is still in your context above — recall_result answers only for output \
              that was cleared from the request"
@@ -582,6 +560,24 @@ mod tests {
     use crate::providers::{Message, Role, ToolCallReq};
     use serde_json::json;
 
+    /// A wire with this token window and nothing cleared yet.
+    fn wire(context_limit: u64) -> Wire {
+        Wire {
+            context_limit,
+            bytes_per_token: DEFAULT_BYTES_PER_TOKEN,
+            cleared_floor: 0,
+        }
+    }
+
+    /// Recall with no projection args, as the tool is most often called.
+    fn recall_whole(messages: &[Message], call_id: &str) -> crate::agent::tools::Outcome {
+        recall_args(
+            messages,
+            &json!({ "call_id": call_id }),
+            &Wire::default(),
+        )
+    }
+
     fn exchange<S: AsRef<str>>(results: &[S]) -> Vec<Message> {
         let mut out = Vec::new();
         for (i, body) in results.iter().enumerate() {
@@ -628,7 +624,7 @@ mod tests {
     #[test]
     fn clearing_a_result_drops_its_pixels_from_the_wire() {
         let mut messages = image_exchange();
-        trim_for_wire_with_limit(&mut messages, 0, DEFAULT_BYTES_PER_TOKEN);
+        trim_for_wire(&mut messages, &Wire::default());
         assert!(is_stub(&messages[1].content));
         assert!(
             messages[1].images.is_empty(),
@@ -639,7 +635,7 @@ mod tests {
     #[test]
     fn recall_reattaches_pixels_of_a_cleared_image_result() {
         let messages = image_exchange();
-        let out = recall_with_limit(&messages, "old", 0);
+        let out = recall_whole(&messages, "old");
         assert!(out.ok, "{}", out.output);
         assert_eq!(out.images.len(), 1, "recall must return the pixels it names");
     }
@@ -671,7 +667,7 @@ mod tests {
     #[test]
     fn clearing_a_result_drops_its_documents_from_the_wire() {
         let mut messages = document_exchange();
-        trim_for_wire_with_limit(&mut messages, 0, DEFAULT_BYTES_PER_TOKEN);
+        trim_for_wire(&mut messages, &Wire::default());
         assert!(is_stub(&messages[1].content));
         assert!(
             messages[1].documents.is_empty(),
@@ -682,7 +678,7 @@ mod tests {
     #[test]
     fn recall_reattaches_documents_of_a_cleared_document_result() {
         let messages = document_exchange();
-        let out = recall_with_limit(&messages, "old", 0);
+        let out = recall_whole(&messages, "old");
         assert!(out.ok, "{}", out.output);
         assert_eq!(
             out.documents.len(),
@@ -702,7 +698,7 @@ mod tests {
         let body = "x".repeat(4 * 1024);
         let mut messages = exchange(&[&body, &body, &body]);
         let before = contents(&messages);
-        trim_for_wire(&mut messages);
+        trim_for_wire(&mut messages, &Wire::default());
         assert_eq!(before, contents(&messages), "12 KB must not be trimmed");
     }
 
@@ -712,7 +708,7 @@ mod tests {
         let body = "y".repeat(8 * 1024);
         let many: Vec<String> = (0..40).map(|_| body.clone()).collect();
         let mut messages = exchange(&many);
-        trim_for_wire(&mut messages);
+        trim_for_wire(&mut messages, &Wire::default());
         let stubs: Vec<&Message> = messages.iter().filter(|m| is_stub(&m.content)).collect();
         assert!(
             stubs.len() >= 30 && stubs.len() <= 36,
@@ -735,9 +731,9 @@ mod tests {
         let body = "z".repeat(8 * 1024);
         let many: Vec<String> = (0..40).map(|_| body.clone()).collect();
         let mut messages = exchange(&many);
-        trim_for_wire(&mut messages);
+        trim_for_wire(&mut messages, &Wire::default());
         let once = contents(&messages);
-        trim_for_wire(&mut messages);
+        trim_for_wire(&mut messages, &Wire::default());
         assert_eq!(once, contents(&messages));
     }
 
@@ -745,12 +741,12 @@ mod tests {
     fn clear_boundary_is_quantized_to_preserve_prefix_cache() {
         let body = "q".repeat(8 * 1024);
         let mut many: Vec<String> = (0..38).map(|_| body.clone()).collect();
-        let base = cleared_indices(&exchange(&many));
+        let base = cleared_indices(&exchange(&many), &Wire::default());
         assert!(!base.is_empty());
         // Adding one more 8 KB result (< MIN_CLEAR_BYTES = 20 KB) must not
         // advance the clear boundary and re-key the last 40 KB of history.
         many.push(body);
-        let next = cleared_indices(&exchange(&many));
+        let next = cleared_indices(&exchange(&many), &Wire::default());
         assert_eq!(
             base, next,
             "clear boundary must stay frozen until a full MIN_CLEAR_BYTES step accumulates"
@@ -768,7 +764,7 @@ mod tests {
                 message.is_error = true;
             }
         }
-        trim_for_wire(&mut messages);
+        trim_for_wire(&mut messages, &Wire::default());
         assert!(
             messages.iter().all(|m| !is_stub(&m.content)),
             "every result errored, so nothing is clearable"
@@ -781,11 +777,11 @@ mod tests {
         let many: Vec<String> = (0..40).map(|_| body.clone()).collect();
         let messages = exchange(&many);
         assert!(
-            is_cleared(&messages, "call_0"),
+            is_cleared(&messages, "call_0", &Wire::default()),
             "the oldest result is clearable at this size"
         );
         assert!(
-            !is_cleared(&messages, "call_39"),
+            !is_cleared(&messages, "call_39", &Wire::default()),
             "the newest result is still in front of the model"
         );
 
@@ -825,18 +821,17 @@ mod tests {
         let body = "w".repeat(8 * 1024);
         let many: Vec<String> = (0..40).map(|_| body.clone()).collect();
         let messages = exchange(&many);
-        assert!(cleared_indices_with_limit(&messages, 1_000_000, DEFAULT_BYTES_PER_TOKEN).is_empty());
-        assert!(cleared_indices_with_limit(&messages, 200_000, DEFAULT_BYTES_PER_TOKEN).is_empty());
+        assert!(cleared_indices(&messages, &wire(1_000_000)).is_empty());
+        assert!(cleared_indices(&messages, &wire(200_000)).is_empty());
 
-        // recall_args_with_limit supports query filtering
+        // recall_args answers a query against the stored bytes
         let mut searchable = many;
         searchable[0] = "line 1\nneedle_token_xyz\nline 3\n".to_string() + &body;
         let messages = exchange(&searchable);
-        let filtered = recall_args_with_limit(
+        let filtered = recall_args(
             &messages,
             &json!({"call_id": "call_0", "query": "needle_token_xyz"}),
-            0,
-            DEFAULT_BYTES_PER_TOKEN,
+            &Wire::default(),
         );
         assert!(filtered.ok, "{}", filtered.output);
         assert!(filtered.output.contains("2: needle_token_xyz"));
@@ -871,7 +866,7 @@ mod tests {
         let many: Vec<String> = (0..25).map(|_| body.clone()).collect();
         let messages = exchange(&many);
         assert!(
-            cleared_indices_with_limit(&messages, 256_000, DEFAULT_BYTES_PER_TOKEN).is_empty(),
+            cleared_indices(&messages, &wire(256_000)).is_empty(),
             "200 KB of output is comfortably inside an unencumbered request"
         );
 
@@ -879,7 +874,7 @@ mod tests {
         // on conversation the host cannot clear.
         let mut crowded = vec![Message::new(Role::User, "c".repeat(880_000))];
         crowded.extend(messages);
-        let cleared = cleared_indices_with_limit(&crowded, 256_000, DEFAULT_BYTES_PER_TOKEN);
+        let cleared = cleared_indices(&crowded, &wire(256_000));
         assert!(
             !cleared.is_empty(),
             "880 KB of history must cost the oldest results their place"
@@ -952,6 +947,44 @@ mod tests {
             "a full bucket of growth moves the window: {:?} vs {:?}",
             crossed.trigger_bytes,
             after.trigger_bytes
+        );
+    }
+
+    /// Results the model was already told were removed do not come back because
+    /// the pool briefly fits. Live session: `cleared` 205 → 191 → 208 → 193 in
+    /// under a minute, each move rewriting the head of the transcript and
+    /// forfeiting the provider's prefix cache behind it (99.9% → 6.7% hits).
+    #[test]
+    fn the_cleared_floor_holds_when_the_budget_would_let_go() {
+        let body = "w".repeat(2 * 1024);
+        let results: Vec<String> = (0..6).map(|_| body.clone()).collect();
+        let messages = exchange(&results);
+        let roomy = wire(1_000_000);
+        assert!(
+            cleared_indices(&messages, &roomy).is_empty(),
+            "6 KB of output asks for nothing against a 1M window"
+        );
+
+        let floored = Wire {
+            cleared_floor: 3,
+            ..roomy
+        };
+        let cleared = cleared_indices(&messages, &floored);
+        assert_eq!(cleared.len(), 3, "what was hidden stays hidden");
+        assert_eq!(
+            cleared,
+            cleared_indices(&messages, &floored),
+            "and it is always the same oldest prefix"
+        );
+        // Trimming honours it too: the same three results become stubs.
+        let mut wire_history = messages.clone();
+        trim_for_wire(&mut wire_history, &floored);
+        assert_eq!(
+            wire_history
+                .iter()
+                .filter(|m| m.role == Role::Tool && is_stub(&m.content))
+                .count(),
+            3
         );
     }
 

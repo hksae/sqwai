@@ -27,7 +27,7 @@ use loop_compact::{
 use loop_subagent::{
     SUBAGENT_TIMEOUT_SECS, adopt_in_progress_step, run_subagent, run_subagent_batch,
 };
-use loop_turn::{request_messages_with_limit, run_turn_with_prefetch, turn_transport};
+use loop_turn::{request_messages_for_wire, run_turn_with_prefetch, turn_transport};
 
 mod loop_ask;
 mod loop_compact;
@@ -452,13 +452,13 @@ enum RepeatVerdict {
 /// not a brake, the bytes are the fuel. Withholding them ends the loop on the
 /// third look no matter how degenerately the model decodes.
 #[cfg(test)]
+#[cfg(test)]
 fn repeat_verdict(messages: &[Message], call: &ToolCallReq, output: &str) -> RepeatVerdict {
     repeat_verdict_with_limit(
         messages,
         call,
         output,
-        0,
-        crate::agent::tool_output::DEFAULT_BYTES_PER_TOKEN,
+        &crate::agent::tool_output::Wire::default(),
     )
 }
 
@@ -466,8 +466,7 @@ fn repeat_verdict_with_limit(
     messages: &[Message],
     call: &ToolCallReq,
     output: &str,
-    context_limit: u64,
-    bytes_per_token: u64,
+    wire: &crate::agent::tool_output::Wire,
 ) -> RepeatVerdict {
     // Repeating is the mechanism here: polling a job and waiting are supposed
     // to be called again.
@@ -479,7 +478,7 @@ fn repeat_verdict_with_limit(
         return RepeatVerdict::Fresh;
     }
     // Collect matching tool call ids first (filtering by tool name before
-    // serializing arguments) so we only compute `cleared_indices_with_limit`
+    // serializing arguments) so we only compute `cleared_indices`
     // and scan tool outputs when a prior identical call actually exists.
     let mut matching_ids: Vec<&str> = Vec::new();
     for message in messages {
@@ -498,8 +497,7 @@ fn repeat_verdict_with_limit(
     if matching_ids.is_empty() {
         return RepeatVerdict::Fresh;
     }
-    let cleared =
-        crate::agent::tool_output::cleared_indices_with_limit(messages, context_limit, bytes_per_token);
+    let cleared = crate::agent::tool_output::cleared_indices(messages, wire);
     // (call key, output) pairs in order; the current call has no result yet,
     // so everything collected here is older. Only results still visible on the
     // wire count: never tell the model "see above" for output that was cleared.
@@ -649,11 +647,10 @@ fn call_key_ref(call: &ToolCallReq) -> Option<String> {
 fn refresh_visible_media(
     ctx: &mut ToolCtx,
     messages: &[Message],
-    context_limit: u64,
-    bytes_per_token: u64,
+    wire: &crate::agent::tool_output::Wire,
 ) {
     let cleared =
-        crate::agent::tool_output::cleared_indices_with_limit(messages, context_limit, bytes_per_token);
+        crate::agent::tool_output::cleared_indices(messages, wire);
     let mut images = std::collections::HashSet::new();
     let mut documents = std::collections::HashSet::new();
     for (index, message) in messages.iter().enumerate() {
@@ -1243,6 +1240,9 @@ async fn run_agent(
                 summarized,
                 summary.as_deref().unwrap_or(""),
             );
+            // The transcript the clear floor was counting against is gone:
+            // keeping it would stub results by position, not by history.
+            ctx.cleared_floor = 0;
             // Same rule as the overflow retry below: the transcript the host
             // owns has changed, so the provider's copy of it is no longer the
             // context this turn is about.
@@ -1275,8 +1275,12 @@ async fn run_agent(
             &messages,
             continuation_usable,
         );
-        let request_messages =
-            request_messages_with_limit(&messages, transport, context_limit, policy.bytes_per_token);
+        let mut wire = crate::agent::tool_output::Wire {
+            context_limit,
+            bytes_per_token: policy.bytes_per_token,
+            cleared_floor: ctx.cleared_floor,
+        };
+        let request_messages = request_messages_for_wire(&messages, transport, &wire);
         // Counted here because the request owns the messages from the next line
         // on, and the record below has to say what actually went out.
         let wire_messages = request_messages.len();
@@ -1284,6 +1288,13 @@ async fn run_agent(
             .iter()
             .filter(|m| m.role == Role::Tool && crate::agent::tool_output::is_stub(&m.content))
             .count();
+        // Whatever this request hid stays hidden for the run: a boundary that
+        // moves back rewrites the head of the transcript and forfeits the
+        // provider's prefix cache behind it.
+        if wire_cleared > ctx.cleared_floor {
+            ctx.cleared_floor = wire_cleared;
+            wire.cleared_floor = wire_cleared;
+        }
         let chat_req = ChatRequest {
             model_id: model_id.clone(),
             system: turn_system.clone(),
@@ -1301,11 +1312,7 @@ async fn run_agent(
         // Refresh visible read windows before the turn streams so any eager
         // mid-stream `read` prefetch sees accurate window coverage.
         {
-            let cleared = crate::agent::tool_output::cleared_indices_with_limit(
-                &messages,
-                context_limit,
-                policy.bytes_per_token,
-            );
+            let cleared = crate::agent::tool_output::cleared_indices(&messages, &wire);
             let visible_ids: std::collections::HashSet<String> = messages
                 .iter()
                 .enumerate()
@@ -1410,6 +1417,7 @@ async fn run_agent(
                             summarized,
                             summary.as_deref().unwrap_or(""),
                         );
+                        ctx.cleared_floor = 0;
                         // The transcript this turn resends is not the one the
                         // provider holds any more, so the reference cannot be
                         // reused for the retry either.
@@ -1658,7 +1666,7 @@ async fn run_agent(
                 .await;
             }
         } else {
-            refresh_visible_media(&mut ctx, &messages, context_limit, policy.bytes_per_token);
+            refresh_visible_media(&mut ctx, &messages, &wire);
             let mut parallel_outcomes: std::collections::HashMap<
                 usize,
                 (u128, tools::Outcome, Option<ToolCtx>),
@@ -1777,11 +1785,8 @@ async fn run_agent(
                             .iter()
                             .any(|c| c.name == "read")
                         {
-                            let cleared = crate::agent::tool_output::cleared_indices_with_limit(
-                                &messages,
-                                context_limit,
-                                policy.bytes_per_token,
-                            );
+                            let cleared =
+                                crate::agent::tool_output::cleared_indices(&messages, &wire);
                             let visible_ids: std::collections::HashSet<String> = messages
                                 .iter()
                                 .enumerate()
@@ -2001,12 +2006,9 @@ async fn run_agent(
                             outcome
                         }
                         "subagent" => tools::Outcome::err("nested subagents are not allowed"),
-                        "recall_result" => crate::agent::tool_output::recall_args_with_limit(
-                            &messages,
-                            &call.args,
-                            context_limit,
-                            policy.bytes_per_token,
-                        ),
+                        "recall_result" => {
+                            crate::agent::tool_output::recall_args(&messages, &call.args, &wire)
+                        }
                         "plan" => {
                             let mut args = call.args.clone();
                             args["context_limit"] = serde_json::json!(context_limit);
@@ -2052,11 +2054,7 @@ async fn run_agent(
                         other => {
                             if other == "read" {
                                 let cleared =
-                                    crate::agent::tool_output::cleared_indices_with_limit(
-                                        &messages,
-                                        context_limit,
-                                        policy.bytes_per_token,
-                                    );
+                                    crate::agent::tool_output::cleared_indices(&messages, &wire);
                                 let visible_ids: std::collections::HashSet<String> = messages
                                     .iter()
                                     .enumerate()
@@ -2353,13 +2351,7 @@ async fn run_agent(
                 // exempt: their attachment is the delivery, and a cleared
                 // earlier copy makes the duplicate check meaningless.
                 if outcome.ok && outcome.images.is_empty() && outcome.documents.is_empty() {
-                    match repeat_verdict_with_limit(
-                        &messages,
-                        call,
-                        &outcome.output,
-                        context_limit,
-                        policy.bytes_per_token,
-                    )
+                    match repeat_verdict_with_limit(&messages, call, &outcome.output, &wire)
                     {
                         RepeatVerdict::Fresh => {}
                         RepeatVerdict::Note(note) => outcome.output.push_str(&note),
