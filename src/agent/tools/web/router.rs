@@ -316,7 +316,23 @@ async fn fetch_standard_http(
         .header(reqwest::header::ACCEPT_LANGUAGE, "en-US,en;q=0.9")
         .send()
         .await
-        .map_err(|e| format!("webfetch request failed: {e}"))?;
+        .map_err(|e| {
+            // reqwest's own line stops at "error sending request for url (...)",
+            // which tells the model nothing about whether to retry: the cause
+            // (DNS, refused, TLS, closed) is one level down the chain.
+            use std::error::Error as _;
+            let cause = e
+                .source()
+                .and_then(|src| src.source())
+                .or_else(|| e.source())
+                .map(|src| src.to_string())
+                .unwrap_or_default();
+            if cause.is_empty() {
+                format!("webfetch request failed: {e}")
+            } else {
+                format!("webfetch request failed: {e}: {cause}")
+            }
+        })?;
 
     let status = response.status();
     if !status.is_success() {

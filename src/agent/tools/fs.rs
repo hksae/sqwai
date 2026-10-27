@@ -1101,7 +1101,9 @@ pub(super) fn apply_one(
         return err("old_string must not be empty");
     }
     if old == new {
-        return err("old_string and new_string are identical — no changes to apply");
+        return err(
+            "old_string and new_string are identical — nothing to change; put the added or edited lines inside new_string",
+        );
     }
     let (target_old, target_new) = if content.matches(old).count() > 0 {
         (
