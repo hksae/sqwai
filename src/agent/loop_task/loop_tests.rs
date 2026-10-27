@@ -1871,3 +1871,123 @@ async fn a_turn_starts_where_the_session_left_the_clear_boundary() {
         "the run must hand back the boundary it was given"
     );
 }
+
+/// A closed plan used to be the end of the run: the model wrote "Готово." with
+/// its own list of undone work underneath and stopped, and in a live session it
+/// resumed only after the user typed again — three times in a row. The host now
+/// asks once, at the moment the turn would end with no plan open.
+#[tokio::test]
+async fn closing_a_plan_does_not_end_the_run_by_itself() {
+    let root = std::env::temp_dir().join(format!("sqwai-test-postclose-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::create_dir_all(&root);
+    let session_id = "test-postclose-sess";
+
+    let mut plan = crate::plan::create(
+        "build the thing".into(),
+        vec![],
+        vec![],
+        vec![crate::plan::NewStep {
+            title: "implement it".into(),
+            check: None,
+        }],
+        &crate::plan::Limits::default(),
+    )
+    .unwrap();
+    plan.sessions = vec![session_id.to_string()];
+    plan.steps[0].status = crate::plan::StepStatus::Done;
+    crate::plan::store(&root, &plan).unwrap();
+
+    let provider = std::sync::Arc::new(MockTestProvider {
+        events: std::sync::Mutex::new(vec![
+            vec![Ok(crate::providers::StreamEvent::ToolCall(
+                crate::providers::ToolCallReq::new(
+                    "p1",
+                    "plan",
+                    serde_json::json!({"op": "close", "summary": "goal met by the step above"}),
+                ),
+            ))],
+            vec![Ok(crate::providers::StreamEvent::Text(
+                "Готово. Мобы и loot tables ещё не реализованы.".into(),
+            ))],
+            vec![Ok(crate::providers::StreamEvent::Text(
+                "then the request is delivered".into(),
+            ))],
+        ]),
+    });
+
+    let input = AgentInput {
+        provider,
+        model_id: "m".into(),
+        model_key: "primary".into(),
+        effort: None,
+        effort_support: crate::config::EffortSupport::default(),
+        max_tokens: None,
+        system: vec![],
+        messages: vec![Message::new(Role::User, "build the thing")],
+        root: root.clone(),
+        session_id: session_id.into(),
+        blocked_patterns: vec![],
+        approval_mode: Default::default(),
+        approval_grants: Default::default(),
+        web_allow_hosts: vec![],
+        plan_mode: false,
+        context_limit: 10000,
+        vision: true,
+        pdf: true,
+        tools: Default::default(),
+        limits: Default::default(),
+        active_skills: vec![],
+        read_ledger: Default::default(),
+        cleared_floor: 0,
+        enable_tools: true,
+        background_baselines: false,
+        read_only: false,
+        previous_response_id: None,
+        summary: None,
+        mcp: Default::default(),
+        skills: Default::default(),
+        compact_only: false,
+        compact_focus: String::new(),
+        compaction: Default::default(),
+        plan_limits: Default::default(),
+        shadow_store: crate::config::ShadowStore::Off,
+        subagent_depth: 0,
+        parent_step: None,
+        parent_session: None,
+        fallback_chain: vec![],
+    };
+
+    let mut handle = spawn_agent(input);
+    let mut outcome = None;
+    while let Some(ev) = handle.rx.recv().await {
+        match ev {
+            AgentEvent::Completed(Ok(done)) => {
+                outcome = Some(done);
+                break;
+            }
+            AgentEvent::Completed(Err(e)) => panic!("unexpected agent error: {e}"),
+            _ => {}
+        }
+    }
+    let _ = std::fs::remove_dir_all(&root);
+
+    let messages = outcome.expect("run completed").messages;
+    let asked = messages
+        .iter()
+        .filter(|m| m.content.starts_with("[host: the plan you closed"))
+        .count();
+    assert_eq!(asked, 1, "the host asks exactly once after a close");
+    let note = messages
+        .iter()
+        .position(|m| m.content.starts_with("[host: the plan you closed"))
+        .expect("host note present");
+    let final_answer = messages
+        .iter()
+        .rposition(|m| m.content == "then the request is delivered")
+        .expect("the model got to answer again");
+    assert!(
+        note < final_answer,
+        "the note rides before the answer that ends the turn"
+    );
+}

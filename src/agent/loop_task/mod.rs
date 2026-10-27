@@ -1134,6 +1134,12 @@ async fn run_agent(
     let mut plan_nudged;
     // "no plan at all" nudge, once per run: one reminder per user submit
     let mut no_plan_nudged = false;
+    // A `close` this run, and whether the turn-end prompt that follows it has
+    // been used. Live run: the agent closed its third plan, listed the work it
+    // had deliberately not done yet, wrote "Готово." and stopped — three times
+    // in one session it only resumed after the user typed again.
+    let mut plan_closed_this_run = false;
+    let mut post_close_nudged = false;
     let mut next_id: u64 = 0;
     // prompt size of the last request, as reported by the provider
     let mut prompt_size: u64 = 0;
@@ -1609,6 +1615,28 @@ async fn run_agent(
                     .with_provider_state(turn.provider_state)
                     .with_thinking(turn.reasoning_text, turn.reasoning_ms),
             );
+            // A turn that ends right after closing a plan, with no plan open,
+            // is where autonomous work dies: the closed plan was the only
+            // carrier of the goal, so nothing in the context says "continue".
+            // One host note, once per run, and it names both exits — the model
+            // is allowed to decide the request is delivered and stop.
+            if plan_closed_this_run
+                && !post_close_nudged
+                && subagent_depth == 0
+                && plan::open_active_for_session(&root, Some(&session_id))
+                    .map(|open| open.is_none())
+                    .unwrap_or(false)
+            {
+                post_close_nudged = true;
+                plan_closed_this_run = false;
+                messages.push(Message::new(
+                    Role::User,
+                    "[host: the plan you closed is finished and no plan is open. If the request \
+                     still has work you named as undone, create the next plan now and continue in \
+                     this turn; if the request is delivered, say so and stop.]",
+                ));
+                continue;
+            }
             break;
         }
 
@@ -2277,6 +2305,16 @@ async fn run_agent(
                         if let Some(nudge) = failure_loop_nudge(consecutive_edit_bash_failures) {
                             outcome.output.push_str(nudge);
                         }
+                    }
+                }
+                // A closed plan is the fact the turn-end prompt below waits
+                // for; only an accepted `close` counts, and a later `create`
+                // clears it because the run then has an open goal again.
+                if outcome.ok && call.name == "plan" {
+                    match call.args.get("op").and_then(|v| v.as_str()) {
+                        Some("close") => plan_closed_this_run = true,
+                        Some("create") => plan_closed_this_run = false,
+                        _ => {}
                     }
                 }
                 // Plan nudge: present tense, ready-made call, at most one
