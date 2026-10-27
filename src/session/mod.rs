@@ -221,6 +221,19 @@ pub struct Session {
         skip_serializing_if = "crate::agent::tools::ReadLedger::is_empty"
     )]
     pub read_ledger: crate::agent::tools::ReadLedger,
+    /// How many tool results this session's requests have already hidden from
+    /// the wire. The cleared set is a prefix of the pool, so a count is enough
+    /// — but it has to outlive the turn: `ToolCtx` is rebuilt per user submit,
+    /// and a floor that starts at zero each turn lets results the model was told
+    /// were cleared come back in full, which both rewrites the cached head and
+    /// inflates the request (+20k tokens measured on a 27-character message).
+    /// Reset when compaction replaces the transcript it counted.
+    #[serde(default, skip_serializing_if = "usize_is_zero")]
+    pub cleared_floor: usize,
+}
+
+fn usize_is_zero(value: &usize) -> bool {
+    *value == 0
 }
 
 impl Session {
@@ -257,6 +270,7 @@ impl Session {
             project: None,
             active_skills: Vec::new(),
             read_ledger: Default::default(),
+            cleared_floor: 0,
         }
     }
 
@@ -865,6 +879,28 @@ mod tests {
         let back = Session::load_from(&path).unwrap();
         assert!(!back.read_ledger.is_empty());
         assert_eq!(back.read_ledger, s.read_ledger);
+    }
+
+    /// The cleared prefix has to survive the turn that made it. A live session
+    /// lost 41 hidden results back onto the wire at one 27-character message
+    /// (prompt 176,344 -> 196,610) because the count died with its `ToolCtx`.
+    #[test]
+    fn the_cleared_floor_round_trips_with_the_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("floor-session.json");
+        let mut s = Session::new("m".into(), 1000);
+        s.push(Role::User, "work");
+        assert_eq!(s.cleared_floor, 0, "a fresh session has hidden nothing");
+        s.save_to(&path).unwrap();
+        assert!(
+            !std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("cleared_floor"),
+            "the default must not be written"
+        );
+        s.cleared_floor = 225;
+        s.save_to(&path).unwrap();
+        assert_eq!(Session::load_from(&path).unwrap().cleared_floor, 225);
     }
 
     #[test]

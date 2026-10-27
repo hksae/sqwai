@@ -583,6 +583,7 @@ fn cancelled_tool_turn_does_not_backfill_prior_answer() {
         checkpoints: Vec::new(),
         approval_grants: Default::default(),
         read_ledger: Default::default(),
+        cleared_floor: 0,
     });
 
     assert!(!app.streaming);
@@ -647,6 +648,7 @@ fn cancelled_tool_turn_keeps_streamed_partial() {
         checkpoints: Vec::new(),
         approval_grants: Default::default(),
         read_ledger: Default::default(),
+        cleared_floor: 0,
     });
 
     let answers: Vec<&str> = app
@@ -692,6 +694,7 @@ fn finish_turn_ok_rebases_notes_after_compaction() {
         checkpoints: Vec::new(),
         approval_grants: Default::default(),
         read_ledger: Default::default(),
+        cleared_floor: 0,
     });
     let notes: Vec<usize> = app
         .session

@@ -113,6 +113,9 @@ pub struct AgentOutcome {
     pub approval_grants: SessionGrants,
     /// delta-read state, updated by this run's reads and edits
     pub read_ledger: crate::agent::tools::ReadLedger,
+    /// how many results this session's requests have already hidden; the run
+    /// may only raise it, never reset it (compaction does)
+    pub cleared_floor: usize,
 }
 
 #[derive(Debug)]
@@ -350,6 +353,8 @@ pub struct AgentInput {
     pub active_skills: Vec<String>,
     /// Session-persisted delta-read state carried across per-turn runs.
     pub read_ledger: crate::agent::tools::ReadLedger,
+    /// Session-persisted count of results already cleared from the wire.
+    pub cleared_floor: usize,
     /// Whether this request may use agent tools.
     pub enable_tools: bool,
     /// Slow baseline capture runs in the background instead of blocking
@@ -814,6 +819,7 @@ async fn run_agent(
         limits,
         active_skills,
         read_ledger,
+        cleared_floor,
         enable_tools,
         background_baselines,
         read_only,
@@ -997,6 +1003,7 @@ async fn run_agent(
                 // ledger pass through exactly as they arrived
                 approval_grants,
                 read_ledger,
+                cleared_floor,
             })))
             .await;
         return;
@@ -1019,6 +1026,7 @@ async fn run_agent(
     ctx.limits = limits.clone();
     ctx.activated_skills.extend(active_skills.iter().cloned());
     ctx.read_ledger = read_ledger;
+    ctx.cleared_floor = cleared_floor;
     crate::agent::tools::web::router::set_max_body_bytes(tool_caps.web.fetch_bytes.max(1024));
     // slow baseline capture defers to the background worker on interactive
     // turns; everywhere else the tool call captures synchronously
@@ -2152,6 +2160,7 @@ async fn run_agent(
                                 "path": tools::call_path(&call.name, &call.args),
                                 "paths": call.args.get("paths").cloned().unwrap_or(serde_json::Value::Null),
                                 "args_digest": tools::call_summary(&call.name, &call.args),
+                                "args_fp": tools::args_fingerprint(&call.args),
                                 "code": if outcome.cancelled { Some("cancelled") } else { None },
                             }),
                         )
@@ -2184,6 +2193,7 @@ async fn run_agent(
                                 "path": tools::call_path(&call.name, &call.args),
                                 "paths": call.args.get("paths").cloned().unwrap_or(serde_json::Value::Null),
                                 "args_digest": tools::call_summary(&call.name, &call.args),
+                                "args_fp": tools::args_fingerprint(&call.args),
                                 // distinct from an ordinary failure, so the
                                 // events can say the user stopped this rather
                                 // than that it went wrong on its own
@@ -2448,6 +2458,7 @@ async fn run_agent(
                 dirs: std::mem::take(&mut ctx.outside_granted),
             },
             read_ledger: ctx.read_ledger,
+            cleared_floor: ctx.cleared_floor,
         })))
         .await;
 }

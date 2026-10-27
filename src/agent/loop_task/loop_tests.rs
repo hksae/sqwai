@@ -73,6 +73,7 @@ async fn test_provider_fallback_chain_switch_on_failure() {
         limits: Default::default(),
         active_skills: vec![],
         read_ledger: Default::default(),
+        cleared_floor: 0,
         enable_tools: false,
         background_baselines: false,
         read_only: false,
@@ -169,6 +170,7 @@ async fn partial_stream_failure_does_not_fall_back() {
         limits: Default::default(),
         active_skills: vec![],
         read_ledger: Default::default(),
+        cleared_floor: 0,
         enable_tools: false,
         background_baselines: false,
         read_only: false,
@@ -1191,6 +1193,7 @@ async fn esc_between_tool_calls_stops_the_batch() {
         limits: Default::default(),
         active_skills: vec![],
         read_ledger: Default::default(),
+        cleared_floor: 0,
         enable_tools: true,
         background_baselines: false,
         read_only: false,
@@ -1634,6 +1637,7 @@ async fn same_turn_subagent_calls_overlap() {
         limits: Default::default(),
         active_skills: vec![],
         read_ledger: Default::default(),
+        cleared_floor: 0,
         enable_tools: true,
         background_baselines: false,
         read_only: false,
@@ -1750,6 +1754,7 @@ async fn parallel_read_only_batch_merges_read_state_before_following_mutation() 
         limits: Default::default(),
         active_skills: vec![],
         read_ledger: Default::default(),
+        cleared_floor: 0,
         enable_tools: true,
         background_baselines: false,
         read_only: false,
@@ -1789,5 +1794,80 @@ async fn parallel_read_only_batch_merges_read_state_before_following_mutation() 
     assert_eq!(
         std::fs::read_to_string(root.join("a.txt")).unwrap(),
         "new a\n"
+    );
+}
+
+/// The cleared prefix is a session fact, not a run fact: `ToolCtx` is rebuilt
+/// per user submit, so a floor that only lived there restarted at zero on every
+/// message and let 41 already-hidden results return to the wire in a live run
+/// (+20k tokens for a 27-character message). A run may raise the floor, never
+/// quietly lower it.
+#[tokio::test]
+async fn a_turn_starts_where_the_session_left_the_clear_boundary() {
+    let provider = std::sync::Arc::new(MockTestProvider {
+        events: std::sync::Mutex::new(vec![vec![Ok(crate::providers::StreamEvent::Text(
+            "done".into(),
+        ))]]),
+    });
+    let temp_dir = std::env::temp_dir().join(format!("sqwai-test-floor-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&temp_dir);
+    let input = AgentInput {
+        provider,
+        model_id: "m".into(),
+        model_key: "primary".into(),
+        effort: None,
+        effort_support: crate::config::EffortSupport::default(),
+        max_tokens: None,
+        system: vec![],
+        messages: vec![Message::new(Role::User, "go")],
+        root: temp_dir.clone(),
+        session_id: "test-floor-sess".into(),
+        blocked_patterns: vec![],
+        approval_mode: Default::default(),
+        approval_grants: Default::default(),
+        web_allow_hosts: vec![],
+        plan_mode: false,
+        context_limit: 10000,
+        vision: true,
+        pdf: true,
+        tools: Default::default(),
+        limits: Default::default(),
+        active_skills: vec![],
+        read_ledger: Default::default(),
+        cleared_floor: 225,
+        enable_tools: false,
+        background_baselines: false,
+        read_only: false,
+        previous_response_id: None,
+        summary: None,
+        mcp: Default::default(),
+        skills: Default::default(),
+        compact_only: false,
+        compact_focus: String::new(),
+        compaction: Default::default(),
+        plan_limits: Default::default(),
+        shadow_store: crate::config::ShadowStore::Off,
+        subagent_depth: 0,
+        parent_step: None,
+        parent_session: None,
+        fallback_chain: vec![],
+    };
+
+    let mut handle = spawn_agent(input);
+    let mut carried = None;
+    while let Some(ev) = handle.rx.recv().await {
+        if let AgentEvent::Completed(Ok(outcome)) = ev {
+            carried = Some(outcome.cleared_floor);
+            break;
+        }
+        if let AgentEvent::Completed(Err(e)) = ev {
+            panic!("unexpected agent error: {e}");
+        }
+    }
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    assert_eq!(
+        carried,
+        Some(225),
+        "the run must hand back the boundary it was given"
     );
 }

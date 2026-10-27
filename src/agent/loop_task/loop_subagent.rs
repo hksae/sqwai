@@ -352,6 +352,7 @@ pub(crate) async fn run_subagent_batch(
                         "path": tools::call_path(&call.name, &call.args),
                         "paths": call.args.get("paths").cloned().unwrap_or(serde_json::Value::Null),
                         "args_digest": tools::call_summary(&call.name, &call.args),
+                                "args_fp": tools::args_fingerprint(&call.args),
                         "code": if outcome.cancelled { Some("cancelled") } else { None },
                     }),
                 )
@@ -394,6 +395,7 @@ pub(crate) async fn run_subagent_batch(
                         "path": tools::call_path(&call.name, &call.args),
                         "paths": call.args.get("paths").cloned().unwrap_or(serde_json::Value::Null),
                         "args_digest": tools::call_summary(&call.name, &call.args),
+                                "args_fp": tools::args_fingerprint(&call.args),
                         "code": Some("cancelled"),
                     }),
                 )
@@ -644,6 +646,8 @@ pub(crate) async fn run_subagent(
         } else {
             active_skills.to_vec()
         },
+        // a child has its own transcript, so the parent's cleared prefix means nothing here
+        cleared_floor: 0,
         read_ledger: Default::default(),
         enable_tools: true,
         // subagent baselines stay synchronous: short tasks, and progress

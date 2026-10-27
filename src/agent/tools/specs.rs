@@ -552,6 +552,19 @@ pub fn call_path(name: &str, args: &Value) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+/// Short content fingerprint of a call's arguments, for the event log.
+/// [`call_summary`] is the human-readable row, and for `edit`/`read` it is just
+/// the file path — so a log built from it cannot answer the first question any
+/// session analysis asks: was this the same call again?
+pub fn args_fingerprint(args: &Value) -> String {
+    blake3::hash(args.to_string().as_bytes())
+        .to_hex()
+        .to_string()
+        .chars()
+        .take(12)
+        .collect()
+}
+
 /// one-line description of a call's arguments for the live TUI row
 pub fn call_summary(name: &str, args: &Value) -> String {
     let raw = call_summary_raw(name, args);
