@@ -138,6 +138,61 @@ async fn a_mutation_runs_without_any_plan() {
     std::fs::remove_dir_all(&temp_dir).ok();
 }
 
+/// The cache question is answerable only after the fact if every request records
+/// what the provider said it read next to what the host put on the wire: a
+/// session keeps one `last_usage`, and a prefix that broke at request 12 looks
+/// identical at request 40.
+#[tokio::test]
+async fn every_request_records_usage_and_wire_shape() {
+    let provider: SharedProvider = std::sync::Arc::new(MockTestProvider {
+        events: std::sync::Mutex::new(vec![vec![
+            Ok(crate::providers::StreamEvent::Usage(
+                crate::providers::Usage {
+                    prompt_tokens: 40_000,
+                    completion_tokens: 7,
+                    cached_tokens: Some(31_000),
+                    cache_write_tokens: Some(9_000),
+                    reasoning_tokens: Some(3),
+                },
+            )),
+            Ok(crate::providers::StreamEvent::Text("done".into())),
+        ]]),
+    });
+
+    let temp_dir = std::env::temp_dir().join(format!("sqwai-request-log-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let input = plain_input(provider, temp_dir.clone(), "request-log-sess", "say done");
+
+    let mut handle = spawn_agent(input);
+    while let Some(ev) = handle.rx.recv().await {
+        if matches!(ev, AgentEvent::Completed(_)) {
+            break;
+        }
+    }
+
+    let records = crate::agent::events::EventLog::records_for(&temp_dir, "request-log-sess")
+        .unwrap_or_default();
+    let request = records
+        .iter()
+        .find(|r| r.kind == "request")
+        .expect("one request is one record");
+    for (key, want) in [
+        ("prompt", serde_json::json!(40_000)),
+        ("cached", serde_json::json!(31_000)),
+        ("written", serde_json::json!(9_000)),
+        ("transport", serde_json::json!("stateless")),
+        ("cleared", serde_json::json!(0)),
+    ] {
+        assert_eq!(
+            request.fields.get(key),
+            Some(&want),
+            "`request.{key}` must be recorded"
+        );
+    }
+    std::fs::remove_dir_all(&temp_dir).ok();
+}
+
 #[tokio::test]
 async fn read_only_bash_does_not_nudge_for_a_plan() {
     let provider: SharedProvider = std::sync::Arc::new(MockTestProvider {

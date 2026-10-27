@@ -1262,6 +1262,13 @@ async fn run_agent(
             continuation_usable,
         );
         let request_messages = request_messages_with_limit(&messages, transport, context_limit);
+        // Counted here because the request owns the messages from the next line
+        // on, and the record below has to say what actually went out.
+        let wire_messages = request_messages.len();
+        let wire_cleared = request_messages
+            .iter()
+            .filter(|m| m.role == Role::Tool && crate::agent::tool_output::is_stub(&m.content))
+            .count();
         let chat_req = ChatRequest {
             model_id: model_id.clone(),
             system: turn_system.clone(),
@@ -1475,6 +1482,39 @@ async fn run_agent(
             turn_tokens_used = turn_tokens_used
                 .saturating_add(usage.prompt_tokens)
                 .saturating_add(usage.completion_tokens);
+            // One record per request: what the provider said it read, against
+            // what the host actually put on the wire. Prefix caching breaks at
+            // the first changed byte, and the only change the host makes to old
+            // messages is clearing tool output — so `cached` falling where
+            // `cleared` jumped is the whole question, and it cannot be answered
+            // after the fact from a session that keeps one `last_usage`.
+            if let Some(writer) = events.as_mut() {
+                let _ = writer.append(
+                    "request",
+                    serde_json::json!({
+                        "prompt": usage.prompt_tokens,
+                        "completion": usage.completion_tokens,
+                        "cached": usage.cached_tokens,
+                        "written": usage.cache_write_tokens,
+                        "transport": match transport {
+                            crate::providers::ContextTransport::Stateless => "stateless",
+                            crate::providers::ContextTransport::PreviousResponse => {
+                                "previous_response"
+                            }
+                            crate::providers::ContextTransport::ServerConversation => {
+                                "server_conversation"
+                            }
+                        },
+                        "cleared": wire_cleared,
+                        "on_wire": wire_messages,
+                        "system": breakdown.system_bytes,
+                        "history": breakdown.history_bytes,
+                        "tool_output": breakdown.tool_output_bytes,
+                        "reasoning": breakdown.reasoning_bytes,
+                        "total": breakdown.total_bytes,
+                    }),
+                );
+            }
         }
         let token_limit_hit =
             limits.max_tokens_per_turn > 0 && turn_tokens_used >= limits.max_tokens_per_turn;
