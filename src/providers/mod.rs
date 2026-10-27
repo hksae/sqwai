@@ -58,7 +58,7 @@ pub fn stream_http_client() -> reqwest::Client {
 /// allocating multi-hundred-KB temporary `String`s on every turn just to
 /// measure `provider_state`, `extra_content`, `call.args`, and tool schemas.
 #[inline]
-fn json_byte_len(val: &serde_json::Value) -> u64 {
+pub(crate) fn json_byte_len(val: &serde_json::Value) -> u64 {
     struct ByteCounter(u64);
     impl std::io::Write for ByteCounter {
         #[inline]
@@ -627,6 +627,67 @@ impl RequestBreakdown {
         out.host_tokens = tok(out.host_bytes);
         out.reasoning_tokens = tok(out.reasoning_bytes);
         out
+    }
+
+    /// Re-express the token rows in the provider's own count for this request.
+    ///
+    /// The rows are bytes over four — a fair proxy for prose, a poor one for the
+    /// base64 ciphertext and JSON that fill an agent request: a live
+    /// 1,189,643-byte request was billed as 144,424 prompt tokens, not the
+    /// 297,410 the counter predicts. The provider is the only true meter, so the
+    /// rows keep their shares of the request and take its total. Idempotent:
+    /// rescaling a request that already matches changes nothing.
+    pub fn rescale_to_prompt_tokens(&mut self, prompt_tokens: u64) {
+        if prompt_tokens == 0 || self.total_bytes == 0 {
+            return;
+        }
+        let current = [
+            self.system_tokens,
+            self.skills_tokens,
+            self.history_tokens,
+            self.tool_output_tokens,
+            self.host_tokens,
+            self.reasoning_tokens,
+        ];
+        // Scale against what the rows actually say, so re-running the rescale on
+        // an already-priced request is a no-op.
+        let est = current.iter().sum::<u64>();
+        if est == 0 {
+            return;
+        }
+        let shares: Vec<u64> = current
+            .iter()
+            .map(|value| (*value as u128 * prompt_tokens as u128 / est as u128) as u64)
+            .collect();
+        // The largest row absorbs the rounding so the rows add up to the number
+        // the provider billed, not to a number close to it.
+        let widest = shares
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, value)| *value)
+            .map(|(index, _)| index)
+            .unwrap_or(0);
+        let rest: u64 = shares
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| *index != widest)
+            .map(|(_, value)| *value)
+            .sum();
+        let mut rows = [
+            &mut self.system_tokens,
+            &mut self.skills_tokens,
+            &mut self.history_tokens,
+            &mut self.tool_output_tokens,
+            &mut self.host_tokens,
+            &mut self.reasoning_tokens,
+        ];
+        for (index, row) in rows.iter_mut().enumerate() {
+            **row = if index == widest {
+                prompt_tokens.saturating_sub(rest)
+            } else {
+                shares[index]
+            };
+        }
     }
 }
 
@@ -1452,6 +1513,51 @@ mod system_layout_tests {
                 + b.host_bytes
                 + b.reasoning_bytes
         );
+    }
+
+    /// The live request that made this necessary: 1,189,643 bytes the counter
+    /// read as 297,410 tokens and the provider billed as 144,424.
+    #[test]
+    fn breakdown_rows_take_the_providers_token_count() {
+        let mut b = RequestBreakdown {
+            system_bytes: 25_471,
+            system_tokens: 6_368,
+            skills_bytes: 1_837,
+            skills_tokens: 460,
+            history_bytes: 59_871,
+            history_tokens: 14_968,
+            tool_output_bytes: 443_108,
+            tool_output_tokens: 110_777,
+            host_bytes: 936,
+            host_tokens: 234,
+            reasoning_bytes: 658_420,
+            reasoning_tokens: 164_605,
+            total_bytes: 1_189_643,
+        };
+        assert_eq!(b.reasoning_tokens, 164_605, "bytes over four, as built");
+
+        b.rescale_to_prompt_tokens(144_424);
+        let rows = [
+            b.system_tokens,
+            b.skills_tokens,
+            b.history_tokens,
+            b.tool_output_tokens,
+            b.host_tokens,
+            b.reasoning_tokens,
+        ];
+        assert_eq!(
+            rows.iter().sum::<u64>(),
+            144_424,
+            "the rows add up to what the provider billed, not to a number near it"
+        );
+        assert!(
+            b.reasoning_tokens > b.tool_output_tokens && b.reasoning_tokens < 90_000,
+            "shares survive the rescale: {:?}",
+            b.reasoning_tokens
+        );
+        let once = b;
+        b.rescale_to_prompt_tokens(144_424);
+        assert_eq!(b, once, "rescaling the same request twice changes nothing");
     }
 
     /// The regression in one request: a side call (compaction, narrator,

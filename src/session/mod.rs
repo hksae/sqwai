@@ -448,6 +448,12 @@ impl Session {
         // keep the prompt size of the request that actually reported one.
         if u.prompt_tokens > 0 {
             self.last_usage = Some(*u);
+            // The breakdown was built before the request left, from bytes over
+            // four. This is the moment both numbers for the same request are in
+            // hand, so the rows are re-expressed in what the provider billed.
+            if let Some(breakdown) = self.last_breakdown.as_mut() {
+                breakdown.rescale_to_prompt_tokens(u.prompt_tokens);
+            }
         } else if let Some(prev) = self.last_usage.as_mut() {
             prev.completion_tokens += u.completion_tokens;
         }
@@ -1092,6 +1098,37 @@ mod tests {
         });
         assert_eq!(s.usage.cached_tokens, Some(180));
         assert_eq!(s.usage.cache_write_tokens, Some(20));
+    }
+
+    /// The breakdown is priced before the request leaves; the usage event is the
+    /// first moment both numbers for the same request are in hand.
+    #[test]
+    fn usage_event_re_prices_the_breakdown_rows() {
+        let mut s = Session::new("m".into(), 1000);
+        s.last_breakdown = Some(crate::providers::RequestBreakdown {
+            history_bytes: 400,
+            history_tokens: 100,
+            reasoning_bytes: 3_600,
+            reasoning_tokens: 900,
+            total_bytes: 4_000,
+            ..Default::default()
+        });
+        s.add_usage(&Usage {
+            prompt_tokens: 500,
+            completion_tokens: 1,
+            ..Default::default()
+        });
+        let b = s.last_breakdown.expect("breakdown stays");
+        assert_eq!(
+            b.history_tokens + b.reasoning_tokens,
+            500,
+            "the rows take the provider's count"
+        );
+        assert!(
+            b.reasoning_tokens > b.history_tokens,
+            "and keep their shares of it"
+        );
+        assert_eq!(b.history_bytes, 400, "raw bytes are never rewritten");
     }
 
     #[test]

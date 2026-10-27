@@ -22,8 +22,6 @@ pub const KEEP_BYTES: usize = 40 * 1024;
 /// Fallback minimum clear step when `context_limit` is unset (`0`).
 pub const MIN_CLEAR_BYTES: usize = 20 * 1024;
 
-/// Minimum trigger floor (96k tokens ≈ 384 KB) when scaling from a model's context window.
-pub const WINDOW_TRIGGER_FLOOR_BYTES: usize = 384 * 1024;
 /// Maximum trigger ceiling (192k tokens ≈ 768 KB) so 1M-context models do not drag megabytes of stale tool output on every turn.
 pub const WINDOW_TRIGGER_CAP_BYTES: usize = 768 * 1024;
 /// Minimum fresh-window floor (56k tokens ≈ 224 KB) when scaling from a model's context window.
@@ -43,14 +41,21 @@ pub struct WireBudget {
 }
 
 impl WireBudget {
-    /// Derive byte thresholds from the model's context window (at ~4 bytes/token),
-    /// clamped between floor and ceiling so large-window models stay fast and
-    /// resistant to context rot:
-    /// - trigger: 60% of window (384 KB ..= 768 KB)
-    /// - keep:    35% of window (224 KB ..= 384 KB)
-    /// - step:    10% of window (64 KB  ..= 128 KB)
-    /// When `context_limit == 0`, falls back to the baseline constants.
-    pub fn for_context_limit(context_limit: u64) -> Self {
+    /// Derive byte thresholds from the space the tool-output pool actually has.
+    ///
+    /// The request carries more than tool results, and most of it cannot be
+    /// cleared: the conversation, tool call arguments, replayed provider
+    /// reasoning, errored results. In a live run those immovable parts were
+    /// 744 KB of a 1,024 KB window while the pool still claimed a 350 KB fresh
+    /// window, so the two governors on the same window disagreed and
+    /// compaction — the only one that saw the whole request — ate the
+    /// conversation. Budget the pool against `window − fixed` instead.
+    ///
+    /// Caps survive so a 1M-window model never drags megabytes of stale output;
+    /// the floors survive as *minimums* only while the window can afford them,
+    /// because keeping one recent result is never negotiable. When
+    /// `context_limit == 0`, falls back to the baseline constants.
+    pub fn for_request(context_limit: u64, fixed_bytes: usize) -> Self {
         if context_limit == 0 {
             return Self {
                 trigger_bytes: TRIGGER_BYTES,
@@ -59,13 +64,167 @@ impl WireBudget {
             };
         }
         let window_bytes = (context_limit as usize).saturating_mul(4);
+        let free = window_bytes.saturating_sub(fixed_bytes);
+        // The same 60/35/10 split the window used to get whole, now taken from
+        // only what the pool may occupy. Floors apply while the free space can
+        // afford them: a model whose request is already full must still keep
+        // one recent result, never less than half of what is left.
+        let keep_floor = WINDOW_KEEP_FLOOR_BYTES.min(free / 2);
+        let step_floor = WINDOW_STEP_FLOOR_BYTES.min(keep_floor.max(1) / 2);
         Self {
-            trigger_bytes: (window_bytes * 60 / 100)
-                .clamp(WINDOW_TRIGGER_FLOOR_BYTES, WINDOW_TRIGGER_CAP_BYTES),
-            keep_bytes: (window_bytes * 35 / 100)
-                .clamp(WINDOW_KEEP_FLOOR_BYTES, WINDOW_KEEP_CAP_BYTES),
-            min_clear_bytes: (window_bytes * 10 / 100)
-                .clamp(WINDOW_STEP_FLOOR_BYTES, WINDOW_STEP_CAP_BYTES),
+            trigger_bytes: (free * 60 / 100).min(WINDOW_TRIGGER_CAP_BYTES).max(1),
+            keep_bytes: (free * 35 / 100)
+                .clamp(keep_floor, WINDOW_KEEP_CAP_BYTES.min(free.max(1)))
+                .max(1),
+            min_clear_bytes: (free * 10 / 100)
+                .clamp(step_floor, WINDOW_STEP_CAP_BYTES)
+                .max(1),
+        }
+    }
+
+    /// Budget for a request whose only content is the transcript in `messages`.
+    pub fn for_messages(context_limit: u64, messages: &[Message]) -> Self {
+        Self::for_request(context_limit, nonclearable_bytes(messages))
+    }
+}
+
+/// How many recent assistant turns keep their replayed reasoning on the wire.
+///
+/// One: the turn the model is answering right now. Older ciphertext repeats work
+/// the transcript already shows in plain text — the model's own assistant text
+/// and tool calls travel with the request anyway — and the encrypted items are
+/// the largest single thing on it: in a live session 658 KB of a 1,189 KB
+/// request was reasoning the host can neither read, summarize, nor compact.
+pub const WIRE_REASONING_TURNS: usize = 1;
+
+/// The provider-state keys that hold replayed chain-of-thought.
+const REASONING_KEYS: [&str; 2] = ["reasoning_items", "thinking_blocks"];
+
+fn reasoning_state(state: &serde_json::Value) -> bool {
+    state
+        .as_object()
+        .is_some_and(|obj| REASONING_KEYS.iter().any(|key| obj.contains_key(*key)))
+}
+
+/// The assistant turns whose replayed reasoning still rides the wire: the most
+/// recent [`WIRE_REASONING_TURNS`] that carry any.
+fn carried_reasoning(messages: &[Message]) -> std::collections::HashSet<usize> {
+    let mut keep = std::collections::HashSet::new();
+    for (index, message) in messages.iter().enumerate().rev() {
+        if message.role != Role::Assistant
+            || !message
+                .provider_state
+                .as_ref()
+                .is_some_and(reasoning_state)
+        {
+            continue;
+        }
+        if keep.len() >= WIRE_REASONING_TURNS {
+            break;
+        }
+        keep.insert(index);
+    }
+    keep
+}
+
+/// What provider state costs the wire once [`prune_wire_reasoning`] has had it:
+/// the reasoning keys are gone, everything else in the object still rides.
+fn wire_state_bytes(state: &serde_json::Value) -> usize {
+    let Some(map) = state.as_object() else {
+        return crate::providers::json_byte_len(state) as usize;
+    };
+    if !REASONING_KEYS.iter().any(|key| map.contains_key(*key)) {
+        return crate::providers::json_byte_len(state) as usize;
+    }
+    let mut rest = map.clone();
+    for key in REASONING_KEYS {
+        rest.remove(key);
+    }
+    if rest.is_empty() {
+        return 0;
+    }
+    crate::providers::json_byte_len(&serde_json::Value::Object(rest)) as usize
+}
+
+/// Bytes of the request the pool cannot use: every message that `clearable`
+/// refuses to clear, plus the conversation around it. Reasoning is counted as
+/// [`prune_wire_reasoning`] will send it, so the budget and the request agree
+/// about what rides. The instruction surface (system parts and tool schemas) is
+/// deliberately absent — it is the same few tens of kilobytes on every request,
+/// and the stubs clearing leaves behind cost about as much.
+pub fn nonclearable_bytes(messages: &[Message]) -> usize {
+    let carried = carried_reasoning(messages);
+    messages
+        .iter()
+        .enumerate()
+        .map(|(index, message)| {
+            let body = if clearable(message) {
+                0
+            } else {
+                message.content.len() + media_wire_bytes(message)
+            };
+            let state = message
+                .provider_state
+                .as_ref()
+                .map(|state| {
+                    if carried.contains(&index) {
+                        crate::providers::json_byte_len(state) as usize
+                    } else {
+                        wire_state_bytes(state)
+                    }
+                })
+                .unwrap_or(0);
+            let calls = message
+                .tool_calls
+                .iter()
+                .map(|call| {
+                    call.name.len()
+                        + crate::providers::json_byte_len(&call.args) as usize
+                        + call.extra_content
+                            .as_ref()
+                            .map(|extra| crate::providers::json_byte_len(extra) as usize)
+                            .unwrap_or(0)
+                })
+                .sum::<usize>();
+            body + state + calls
+        })
+        .sum()
+}
+
+/// Strip replayed chain-of-thought from every assistant turn but the most recent
+/// [`WIRE_REASONING_TURNS`] that carry it.
+///
+/// Providers replay opaque reasoning per assistant turn: Responses keeps
+/// `encrypted_content`, Anthropic keeps signed `thinking_blocks`. Continuation
+/// needs the turn being answered, not the whole chain, so everything older is
+/// dropped here — on the way to the wire, never in the session, which keeps the
+/// transcript whole for a resumed turn. Gemini is untouched: its signatures ride
+/// per tool call in `extra_content` and belong to the call they authorised.
+pub fn prune_wire_reasoning(messages: &mut [Message]) {
+    let mut carried = 0usize;
+    for message in messages.iter_mut().rev() {
+        if message.role != Role::Assistant {
+            continue;
+        }
+        let Some(obj) = message
+            .provider_state
+            .as_mut()
+            .and_then(|state| state.as_object_mut())
+        else {
+            continue;
+        };
+        if !REASONING_KEYS.iter().any(|key| obj.contains_key(*key)) {
+            continue;
+        }
+        if carried < WIRE_REASONING_TURNS {
+            carried += 1;
+            continue;
+        }
+        for key in REASONING_KEYS {
+            obj.remove(key);
+        }
+        if obj.is_empty() {
+            message.provider_state = None;
         }
     }
 }
@@ -106,9 +265,10 @@ pub fn cleared_indices(messages: &[Message]) -> Vec<usize> {
     cleared_indices_with_limit(messages, 0)
 }
 
-/// Indices of the tool results to replace, scaled to `context_limit` tokens.
+/// Indices of the tool results to replace, scaled to the space `context_limit`
+/// leaves after the request's immovable bytes.
 pub fn cleared_indices_with_limit(messages: &[Message], context_limit: u64) -> Vec<usize> {
-    let budget = WireBudget::for_context_limit(context_limit);
+    let budget = WireBudget::for_messages(context_limit, messages);
     let pool: Vec<(usize, usize)> = messages
         .iter()
         .enumerate()
@@ -590,13 +750,13 @@ mod tests {
 
     #[test]
     fn wire_budget_scales_and_clamps_to_ceiling() {
-        let b1m = WireBudget::for_context_limit(1_000_000);
+        let b1m = WireBudget::for_request(1_000_000, 0);
         // 1M tokens clamps to ceiling (768 KB / 384 KB / 128 KB)
         assert_eq!(b1m.trigger_bytes, WINDOW_TRIGGER_CAP_BYTES);
         assert_eq!(b1m.keep_bytes, WINDOW_KEEP_CAP_BYTES);
         assert_eq!(b1m.min_clear_bytes, WINDOW_STEP_CAP_BYTES);
 
-        let b200k = WireBudget::for_context_limit(200_000);
+        let b200k = WireBudget::for_request(200_000, 0);
         // 200k tokens * 4 bytes = 800,000 bytes: 60% = 480 KB, 35% = 280 KB, 10% = 80 KB
         assert_eq!(b200k.trigger_bytes, 480_000);
         assert_eq!(b200k.keep_bytes, 280_000);
@@ -620,5 +780,119 @@ mod tests {
         );
         assert!(filtered.ok, "{}", filtered.output);
         assert!(filtered.output.contains("2: needle_token_xyz"));
+    }
+
+    /// The live session that forced this change: a 256k window whose request was
+    /// 744 KB of conversation and replayed reasoning, while the tool-output pool
+    /// still claimed the fresh window it would have had with nothing else there.
+    #[test]
+    fn wire_budget_shrinks_with_the_bytes_it_cannot_clear() {
+        assert_eq!(
+            (
+                WireBudget::for_request(256_000, 0).trigger_bytes,
+                WireBudget::for_request(256_000, 0).keep_bytes,
+                WireBudget::for_request(256_000, 0).min_clear_bytes,
+            ),
+            (614_400, 358_400, 102_400),
+            "an empty request keeps the old window split"
+        );
+        let full = WireBudget::for_request(256_000, 744_000);
+        assert_eq!(
+            (
+                full.trigger_bytes,
+                full.keep_bytes,
+                full.min_clear_bytes
+            ),
+            (168_000, 140_000, 65_536),
+            "a nearly full request leaves the pool a quarter of the window"
+        );
+
+        let body = "w".repeat(8 * 1024);
+        let many: Vec<String> = (0..25).map(|_| body.clone()).collect();
+        let messages = exchange(&many);
+        assert!(
+            cleared_indices_with_limit(&messages, 256_000).is_empty(),
+            "200 KB of output is comfortably inside an unencumbered request"
+        );
+
+        // The same pool against a request whose window is already mostly spent
+        // on conversation the host cannot clear.
+        let mut crowded = vec![Message::new(Role::User, "c".repeat(760_000))];
+        crowded.extend(messages);
+        let cleared = cleared_indices_with_limit(&crowded, 256_000);
+        assert!(
+            !cleared.is_empty(),
+            "760 KB of history must cost the oldest results their place"
+        );
+        assert!(
+            cleared
+                .iter()
+                .all(|index| crowded[*index].role == Role::Tool),
+            "only results the pool may clear are named: {cleared:?}"
+        );
+        assert!(
+            !cleared.contains(&(crowded.len() - 1)),
+            "the newest result always keeps its place: {cleared:?}"
+        );
+    }
+
+    /// Replayed chain-of-thought is priced exactly as it is sent: one turn's
+    /// worth. Live session before the rule: 658 KB of reasoning in a 1,189 KB
+    /// request, untrimmable and unreadable by the host.
+    #[test]
+    fn only_the_newest_turns_reasoning_rides_the_wire() {
+        let blob = "A".repeat(30_000);
+        let body = "w".repeat(100);
+        let many: Vec<String> = (0..4).map(|_| body.clone()).collect();
+        let mut messages = exchange(&many);
+        for message in &mut messages {
+            if message.role == Role::Assistant {
+                message.provider_state = Some(json!({
+                    "reasoning_items": [{"type": "reasoning", "encrypted_content": blob}],
+                    "phase": "commentary"
+                }));
+            }
+        }
+        let mut wire = messages.clone();
+        prune_wire_reasoning(&mut wire);
+
+        let carried: Vec<&Message> = wire
+            .iter()
+            .filter(|m| {
+                m.provider_state
+                    .as_ref()
+                    .is_some_and(|s| s.get("reasoning_items").is_some())
+            })
+            .collect();
+        assert_eq!(
+            carried.len(),
+            WIRE_REASONING_TURNS,
+            "one turn's ciphertext survives, the rest is dropped"
+        );
+        let survivor = carried[0]
+            .provider_state
+            .as_ref()
+            .expect("carried turn");
+        assert_eq!(
+            survivor.get("phase").and_then(|v| v.as_str()),
+            Some("commentary"),
+            "only the reasoning keys are stripped, other provider state rides on"
+        );
+        assert_eq!(
+            nonclearable_bytes(&messages),
+            nonclearable_bytes(&wire),
+            "the budget prices the request as the wire will carry it"
+        );
+        let one_turn = blob.len() + 200;
+        let four_turns = blob.len() * 4;
+        assert!(
+            nonclearable_bytes(&messages) < four_turns,
+            "all four turns were counted: {}",
+            nonclearable_bytes(&messages)
+        );
+        assert!(
+            nonclearable_bytes(&messages) > one_turn,
+            "the carried turn's ciphertext was not counted at all"
+        );
     }
 }
