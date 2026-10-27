@@ -2023,13 +2023,14 @@ impl App {
     }
 
     /// Whether this provider may be asked to continue from its own copy of the
-    /// conversation. Off means the transcript is resent every request, which
-    /// is what and assume: the host owns the context.
+    /// conversation. Off means the transcript is resent every request, which is
+    /// the default and the safe side: the host owns the context. A provider that
+    /// is not in the config at all cannot claim anything, so it is off too.
     pub(super) fn continuation_enabled(&self) -> bool {
         self.cfg
             .providers
             .get(&self.model_cfg.provider)
-            .is_none_or(|p| p.continuation)
+            .is_some_and(|p| p.continuation)
     }
 
     /// What the current model does with the effort slider. The wire format is

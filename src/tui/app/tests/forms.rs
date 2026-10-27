@@ -1386,21 +1386,27 @@ fn undo_invalidates_the_continuation_reference() {
     );
 }
 
-/// The switch from #50: a provider whose endpoint does not really keep the
-/// conversation can be told to stop being asked.
+/// The surface must show the state the loop actually runs on: the flag is an
+/// opt-in from the provider's owner, and turning it off has to be visible.
 #[test]
-fn continuation_can_be_turned_off_per_provider() {
+fn continuation_shows_the_provider_declaration() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
-    assert!(app.continuation_enabled(), "default is on");
     let provider = app.model_cfg.provider.clone();
-    app.cfg
-        .providers
-        .get_mut(&provider)
-        .expect("the test provider exists")
-        .continuation = false;
-    assert!(!app.continuation_enabled());
+    let declare = |app: &mut super::super::App, on: bool| {
+        app.cfg
+            .providers
+            .get_mut(&provider)
+            .expect("the test provider exists")
+            .continuation = on;
+    };
+    declare(&mut app, true);
+    assert!(app.continuation_enabled(), "a declared host is believed");
+    declare(&mut app, false);
+    assert!(
+        !app.continuation_enabled(),
+        "and the surface follows the loop, not the other way round"
+    );
 }
-
 #[test]
 fn every_settings_section_opens_a_menu_with_rows() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
