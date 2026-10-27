@@ -224,7 +224,9 @@ pub async fn search(args: &Value, tools: &crate::config::ToolsConfig) -> Outcome
         .unwrap_or(tools.web.timeout_secs)
         .clamp(1, 60);
     let category = meta_search::SearchCategory::parse(args.get("category").and_then(Value::as_str));
-    let deep = args.get("deep").and_then(Value::as_bool).unwrap_or(true);
+    // Deep search fetches every top result: ~5 KB of transcript per hit, which
+    // is the most expensive thing an agent can do on a page it may never read.
+    let deep = args.get("deep").and_then(Value::as_bool).unwrap_or(false);
 
     match meta_search::run_meta_search(query, count, timeout, category, deep, &[]).await {
         Ok(output) => Outcome::ok(truncate(&output)),
