@@ -453,7 +453,13 @@ enum RepeatVerdict {
 /// third look no matter how degenerately the model decodes.
 #[cfg(test)]
 fn repeat_verdict(messages: &[Message], call: &ToolCallReq, output: &str) -> RepeatVerdict {
-    repeat_verdict_with_limit(messages, call, output, 0)
+    repeat_verdict_with_limit(
+        messages,
+        call,
+        output,
+        0,
+        crate::agent::tool_output::DEFAULT_BYTES_PER_TOKEN,
+    )
 }
 
 fn repeat_verdict_with_limit(
@@ -461,6 +467,7 @@ fn repeat_verdict_with_limit(
     call: &ToolCallReq,
     output: &str,
     context_limit: u64,
+    bytes_per_token: u64,
 ) -> RepeatVerdict {
     // Repeating is the mechanism here: polling a job and waiting are supposed
     // to be called again.
@@ -491,7 +498,8 @@ fn repeat_verdict_with_limit(
     if matching_ids.is_empty() {
         return RepeatVerdict::Fresh;
     }
-    let cleared = crate::agent::tool_output::cleared_indices_with_limit(messages, context_limit);
+    let cleared =
+        crate::agent::tool_output::cleared_indices_with_limit(messages, context_limit, bytes_per_token);
     // (call key, output) pairs in order; the current call has no result yet,
     // so everything collected here is older. Only results still visible on the
     // wire count: never tell the model "see above" for output that was cleared.
@@ -638,8 +646,14 @@ fn call_key_ref(call: &ToolCallReq) -> Option<String> {
 /// Media ids still visible on the wire, for `view_image`/`view_document`
 /// repeat suppression. Recomputed at a tool-batch boundary: results attached
 /// inside the batch are noted into `ctx` as they land.
-fn refresh_visible_media(ctx: &mut ToolCtx, messages: &[Message], context_limit: u64) {
-    let cleared = crate::agent::tool_output::cleared_indices_with_limit(messages, context_limit);
+fn refresh_visible_media(
+    ctx: &mut ToolCtx,
+    messages: &[Message],
+    context_limit: u64,
+    bytes_per_token: u64,
+) {
+    let cleared =
+        crate::agent::tool_output::cleared_indices_with_limit(messages, context_limit, bytes_per_token);
     let mut images = std::collections::HashSet::new();
     let mut documents = std::collections::HashSet::new();
     for (index, message) in messages.iter().enumerate() {
@@ -1261,7 +1275,8 @@ async fn run_agent(
             &messages,
             continuation_usable,
         );
-        let request_messages = request_messages_with_limit(&messages, transport, context_limit);
+        let request_messages =
+            request_messages_with_limit(&messages, transport, context_limit, policy.bytes_per_token);
         // Counted here because the request owns the messages from the next line
         // on, and the record below has to say what actually went out.
         let wire_messages = request_messages.len();
@@ -1286,8 +1301,11 @@ async fn run_agent(
         // Refresh visible read windows before the turn streams so any eager
         // mid-stream `read` prefetch sees accurate window coverage.
         {
-            let cleared =
-                crate::agent::tool_output::cleared_indices_with_limit(&messages, context_limit);
+            let cleared = crate::agent::tool_output::cleared_indices_with_limit(
+                &messages,
+                context_limit,
+                policy.bytes_per_token,
+            );
             let visible_ids: std::collections::HashSet<String> = messages
                 .iter()
                 .enumerate()
@@ -1488,6 +1506,19 @@ async fn run_agent(
             // messages is clearing tool output — so `cached` falling where
             // `cleared` jumped is the whole question, and it cannot be answered
             // after the fact from a session that keeps one `last_usage`.
+            // The window is counted in tokens and the host only measures bytes,
+            // so the conversion is taken from the provider instead of assumed:
+            // at the old flat 4, a 256k model was budgeted as a 1 MB request when
+            // its own accounting put 1,189,643 bytes at 144,424 tokens — results
+            // were thrown away at a third of the context.
+            if let Some(ratio) =
+                crate::agent::tool_output::observe_bytes_per_token(
+                    breakdown.total_bytes,
+                    usage.prompt_tokens,
+                )
+            {
+                policy.bytes_per_token = ratio;
+            }
             if let Some(writer) = events.as_mut() {
                 let _ = writer.append(
                     "request",
@@ -1512,6 +1543,7 @@ async fn run_agent(
                         "tool_output": breakdown.tool_output_bytes,
                         "reasoning": breakdown.reasoning_bytes,
                         "total": breakdown.total_bytes,
+                        "bpt": policy.bytes_per_token,
                     }),
                 );
             }
@@ -1621,7 +1653,7 @@ async fn run_agent(
                 .await;
             }
         } else {
-            refresh_visible_media(&mut ctx, &messages, context_limit);
+            refresh_visible_media(&mut ctx, &messages, context_limit, policy.bytes_per_token);
             let mut parallel_outcomes: std::collections::HashMap<
                 usize,
                 (u128, tools::Outcome, Option<ToolCtx>),
@@ -1743,6 +1775,7 @@ async fn run_agent(
                             let cleared = crate::agent::tool_output::cleared_indices_with_limit(
                                 &messages,
                                 context_limit,
+                                policy.bytes_per_token,
                             );
                             let visible_ids: std::collections::HashSet<String> = messages
                                 .iter()
@@ -1967,6 +2000,7 @@ async fn run_agent(
                             &messages,
                             &call.args,
                             context_limit,
+                            policy.bytes_per_token,
                         ),
                         "plan" => {
                             let mut args = call.args.clone();
@@ -2012,10 +2046,12 @@ async fn run_agent(
                         }
                         other => {
                             if other == "read" {
-                                let cleared = crate::agent::tool_output::cleared_indices_with_limit(
-                                    &messages,
-                                    context_limit,
-                                );
+                                let cleared =
+                                    crate::agent::tool_output::cleared_indices_with_limit(
+                                        &messages,
+                                        context_limit,
+                                        policy.bytes_per_token,
+                                    );
                                 let visible_ids: std::collections::HashSet<String> = messages
                                     .iter()
                                     .enumerate()
@@ -2312,7 +2348,13 @@ async fn run_agent(
                 // exempt: their attachment is the delivery, and a cleared
                 // earlier copy makes the duplicate check meaningless.
                 if outcome.ok && outcome.images.is_empty() && outcome.documents.is_empty() {
-                    match repeat_verdict_with_limit(&messages, call, &outcome.output, context_limit)
+                    match repeat_verdict_with_limit(
+                        &messages,
+                        call,
+                        &outcome.output,
+                        context_limit,
+                        policy.bytes_per_token,
+                    )
                     {
                         RepeatVerdict::Fresh => {}
                         RepeatVerdict::Note(note) => outcome.output.push_str(&note),

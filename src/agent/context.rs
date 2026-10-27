@@ -356,6 +356,10 @@ pub struct Policy {
     /// the trigger is whichever bites first, so a large reserve on a small
     /// model still leaves room for the answer.
     pub threshold: Option<f64>,
+    /// Bytes per token the provider's own accounting shows. The loop re-reads
+    /// it after every request ([`crate::agent::tool_output::observe_bytes_per_token`]);
+    /// until the first real sample it is the cold-start constant.
+    pub bytes_per_token: u64,
 }
 
 impl Policy {
@@ -366,6 +370,7 @@ impl Policy {
             anchor_ratio: None,
             keep_turns: None,
             threshold: None,
+            bytes_per_token: crate::agent::tool_output::DEFAULT_BYTES_PER_TOKEN,
         }
     }
 
@@ -380,6 +385,7 @@ impl Policy {
             anchor_ratio: Some(anchor_ratio),
             keep_turns: Some(keep_turns),
             threshold: Some(threshold),
+            bytes_per_token: crate::agent::tool_output::DEFAULT_BYTES_PER_TOKEN,
         }
     }
 
@@ -496,11 +502,15 @@ fn media_tokens(message: &Message) -> u64 {
 /// approximated (the exact bytes depend on the tool name, which the caller
 /// would have to build anyway); only the magnitude matters for the pressure
 /// decision, and it is bounded by the real stub.
-pub fn wire_estimated_tokens(messages: &[Message], context_limit: u64) -> u64 {
+pub fn wire_estimated_tokens(messages: &[Message], context_limit: u64, bytes_per_token: u64) -> u64 {
     let cleared: std::collections::HashSet<usize> =
-        crate::agent::tool_output::cleared_indices_with_limit(messages, context_limit)
-            .into_iter()
-            .collect();
+        crate::agent::tool_output::cleared_indices_with_limit(
+            messages,
+            context_limit,
+            bytes_per_token,
+        )
+        .into_iter()
+        .collect();
     messages
         .iter()
         .enumerate()

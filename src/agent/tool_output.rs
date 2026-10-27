@@ -33,6 +33,35 @@ pub const WINDOW_STEP_FLOOR_BYTES: usize = 64 * 1024;
 /// Maximum quantization step ceiling (32k tokens ≈ 128 KB).
 pub const WINDOW_STEP_CAP_BYTES: usize = 128 * 1024;
 
+/// Bytes per token until a provider says otherwise: the old constant, kept as
+/// the cold-start value.
+pub const DEFAULT_BYTES_PER_TOKEN: u64 = 4;
+/// Lower clamp. Prose sits near 4 and code/JSON a little under it; below this a
+/// request would have to be almost all short tokens.
+pub const MIN_BYTES_PER_TOKEN: u64 = 3;
+/// Upper clamp. Replayed ciphertext, HTML and escaped JSON measured 8.2 bytes
+/// per token in a live session; a runaway value would let the pool grow past the
+/// window the provider actually has.
+pub const MAX_BYTES_PER_TOKEN: u64 = 12;
+/// Smallest reported request whose ratio is trusted: a 10-token side call says
+/// nothing about the shape of the agent's requests.
+pub const RATIO_SAMPLE_TOKENS: u64 = 2_000;
+
+/// The provider's own bytes-per-token for a request, clamped, or `None` when the
+/// sample is too small to mean anything.
+///
+/// The context window is counted in tokens and the host only measures bytes, so
+/// the conversion is a guess — and the guess was the whole size of two bugs: at
+/// 4 bytes per token a 256k model got a 1 MB window while the provider billed its
+/// 1,189,643-byte request as 144,424 tokens, so the real window was ~2 MB and the
+/// pool started throwing away results at a third of the context.
+pub fn observe_bytes_per_token(total_bytes: u64, prompt_tokens: u64) -> Option<u64> {
+    if prompt_tokens < RATIO_SAMPLE_TOKENS || total_bytes == 0 {
+        return None;
+    }
+    Some((total_bytes / prompt_tokens).clamp(MIN_BYTES_PER_TOKEN, MAX_BYTES_PER_TOKEN))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WireBudget {
     pub trigger_bytes: usize,
@@ -51,11 +80,14 @@ impl WireBudget {
     /// compaction — the only one that saw the whole request — ate the
     /// conversation. Budget the pool against `window − fixed` instead.
     ///
-    /// Caps survive so a 1M-window model never drags megabytes of stale output;
-    /// the floors survive as *minimums* only while the window can afford them,
-    /// because keeping one recent result is never negotiable. When
+    /// `bytes_per_token` converts the model's token window into bytes: the
+    /// provider's own observed ratio when one is known
+    /// ([`observe_bytes_per_token`]), [`DEFAULT_BYTES_PER_TOKEN`] on a cold
+    /// start. Caps survive so a 1M-window model never drags megabytes of stale
+    /// output; the floors survive as *minimums* only while the window can afford
+    /// them, because keeping one recent result is never negotiable. When
     /// `context_limit == 0`, falls back to the baseline constants.
-    pub fn for_request(context_limit: u64, fixed_bytes: usize) -> Self {
+    pub fn for_request(context_limit: u64, fixed_bytes: usize, bytes_per_token: u64) -> Self {
         if context_limit == 0 {
             return Self {
                 trigger_bytes: TRIGGER_BYTES,
@@ -63,7 +95,8 @@ impl WireBudget {
                 min_clear_bytes: MIN_CLEAR_BYTES,
             };
         }
-        let window_bytes = (context_limit as usize).saturating_mul(4);
+        let bpt = bytes_per_token.clamp(MIN_BYTES_PER_TOKEN, MAX_BYTES_PER_TOKEN);
+        let window_bytes = (context_limit as usize).saturating_mul(bpt as usize);
         let free = window_bytes.saturating_sub(fixed_bytes);
         // The same 60/35/10 split the window used to get whole, now taken from
         // only what the pool may occupy. Floors apply while the free space can
@@ -83,8 +116,8 @@ impl WireBudget {
     }
 
     /// Budget for a request whose only content is the transcript in `messages`.
-    pub fn for_messages(context_limit: u64, messages: &[Message]) -> Self {
-        Self::for_request(context_limit, nonclearable_bytes(messages))
+    pub fn for_messages(context_limit: u64, messages: &[Message], bytes_per_token: u64) -> Self {
+        Self::for_request(context_limit, nonclearable_bytes(messages), bytes_per_token)
     }
 }
 
@@ -262,13 +295,17 @@ fn clearable(message: &Message) -> bool {
 /// Indices of the tool results to replace, oldest first.
 #[cfg(test)]
 pub fn cleared_indices(messages: &[Message]) -> Vec<usize> {
-    cleared_indices_with_limit(messages, 0)
+    cleared_indices_with_limit(messages, 0, DEFAULT_BYTES_PER_TOKEN)
 }
 
 /// Indices of the tool results to replace, scaled to the space `context_limit`
 /// leaves after the request's immovable bytes.
-pub fn cleared_indices_with_limit(messages: &[Message], context_limit: u64) -> Vec<usize> {
-    let budget = WireBudget::for_messages(context_limit, messages);
+pub fn cleared_indices_with_limit(
+    messages: &[Message],
+    context_limit: u64,
+    bytes_per_token: u64,
+) -> Vec<usize> {
+    let budget = WireBudget::for_messages(context_limit, messages, bytes_per_token);
     let pool: Vec<(usize, usize)> = messages
         .iter()
         .enumerate()
@@ -313,12 +350,17 @@ pub fn cleared_indices_with_limit(messages: &[Message], context_limit: u64) -> V
 /// Replace the old results with stubs, in place.
 #[cfg(test)]
 pub fn trim_for_wire(messages: &mut [Message]) {
-    trim_for_wire_with_limit(messages, 0);
+    trim_for_wire_with_limit(messages, 0, DEFAULT_BYTES_PER_TOKEN);
 }
 
-/// Replace the old results with stubs, scaled to `context_limit` tokens.
-pub fn trim_for_wire_with_limit(messages: &mut [Message], context_limit: u64) {
-    let indices = cleared_indices_with_limit(messages, context_limit);
+/// Replace the old results with stubs, scaled to `context_limit` tokens at
+/// `bytes_per_token`.
+pub fn trim_for_wire_with_limit(
+    messages: &mut [Message],
+    context_limit: u64,
+    bytes_per_token: u64,
+) {
+    let indices = cleared_indices_with_limit(messages, context_limit, bytes_per_token);
     if indices.is_empty() {
         return;
     }
@@ -373,11 +415,16 @@ fn media_wire_bytes(message: &Message) -> usize {
 /// context the model already has.
 #[cfg(test)]
 pub fn is_cleared(messages: &[Message], call_id: &str) -> bool {
-    is_cleared_with_limit(messages, call_id, 0)
+    is_cleared_with_limit(messages, call_id, 0, DEFAULT_BYTES_PER_TOKEN)
 }
 
-pub fn is_cleared_with_limit(messages: &[Message], call_id: &str, context_limit: u64) -> bool {
-    cleared_indices_with_limit(messages, context_limit)
+pub fn is_cleared_with_limit(
+    messages: &[Message],
+    call_id: &str,
+    context_limit: u64,
+    bytes_per_token: u64,
+) -> bool {
+    cleared_indices_with_limit(messages, context_limit, bytes_per_token)
         .iter()
         .any(|i| {
             messages
@@ -408,6 +455,7 @@ pub fn recall_with_limit(
         messages,
         &serde_json::json!({ "call_id": call_id }),
         context_limit,
+        DEFAULT_BYTES_PER_TOKEN,
     )
 }
 
@@ -415,6 +463,7 @@ pub fn recall_args_with_limit(
     messages: &[Message],
     args: &serde_json::Value,
     context_limit: u64,
+    bytes_per_token: u64,
 ) -> crate::agent::tools::Outcome {
     use crate::agent::tools::Outcome;
     let call_id = args["call_id"].as_str().unwrap_or_default().trim();
@@ -430,7 +479,7 @@ pub fn recall_args_with_limit(
              or it belongs to another session"
         ));
     };
-    if !is_cleared_with_limit(messages, call_id, context_limit) {
+    if !is_cleared_with_limit(messages, call_id, context_limit, bytes_per_token) {
         return Outcome::err(format!(
             "{call_id} is still in your context above — recall_result answers only for output \
              that was cleared from the request"
@@ -569,7 +618,7 @@ mod tests {
     #[test]
     fn clearing_a_result_drops_its_pixels_from_the_wire() {
         let mut messages = image_exchange();
-        trim_for_wire_with_limit(&mut messages, 0);
+        trim_for_wire_with_limit(&mut messages, 0, DEFAULT_BYTES_PER_TOKEN);
         assert!(is_stub(&messages[1].content));
         assert!(
             messages[1].images.is_empty(),
@@ -612,7 +661,7 @@ mod tests {
     #[test]
     fn clearing_a_result_drops_its_documents_from_the_wire() {
         let mut messages = document_exchange();
-        trim_for_wire_with_limit(&mut messages, 0);
+        trim_for_wire_with_limit(&mut messages, 0, DEFAULT_BYTES_PER_TOKEN);
         assert!(is_stub(&messages[1].content));
         assert!(
             messages[1].documents.is_empty(),
@@ -750,13 +799,13 @@ mod tests {
 
     #[test]
     fn wire_budget_scales_and_clamps_to_ceiling() {
-        let b1m = WireBudget::for_request(1_000_000, 0);
+        let b1m = WireBudget::for_request(1_000_000, 0, DEFAULT_BYTES_PER_TOKEN);
         // 1M tokens clamps to ceiling (768 KB / 384 KB / 128 KB)
         assert_eq!(b1m.trigger_bytes, WINDOW_TRIGGER_CAP_BYTES);
         assert_eq!(b1m.keep_bytes, WINDOW_KEEP_CAP_BYTES);
         assert_eq!(b1m.min_clear_bytes, WINDOW_STEP_CAP_BYTES);
 
-        let b200k = WireBudget::for_request(200_000, 0);
+        let b200k = WireBudget::for_request(200_000, 0, DEFAULT_BYTES_PER_TOKEN);
         // 200k tokens * 4 bytes = 800,000 bytes: 60% = 480 KB, 35% = 280 KB, 10% = 80 KB
         assert_eq!(b200k.trigger_bytes, 480_000);
         assert_eq!(b200k.keep_bytes, 280_000);
@@ -766,8 +815,8 @@ mod tests {
         let body = "w".repeat(8 * 1024);
         let many: Vec<String> = (0..40).map(|_| body.clone()).collect();
         let messages = exchange(&many);
-        assert!(cleared_indices_with_limit(&messages, 1_000_000).is_empty());
-        assert!(cleared_indices_with_limit(&messages, 200_000).is_empty());
+        assert!(cleared_indices_with_limit(&messages, 1_000_000, DEFAULT_BYTES_PER_TOKEN).is_empty());
+        assert!(cleared_indices_with_limit(&messages, 200_000, DEFAULT_BYTES_PER_TOKEN).is_empty());
 
         // recall_args_with_limit supports query filtering
         let mut searchable = many;
@@ -777,6 +826,7 @@ mod tests {
             &messages,
             &json!({"call_id": "call_0", "query": "needle_token_xyz"}),
             0,
+            DEFAULT_BYTES_PER_TOKEN,
         );
         assert!(filtered.ok, "{}", filtered.output);
         assert!(filtered.output.contains("2: needle_token_xyz"));
@@ -789,14 +839,14 @@ mod tests {
     fn wire_budget_shrinks_with_the_bytes_it_cannot_clear() {
         assert_eq!(
             (
-                WireBudget::for_request(256_000, 0).trigger_bytes,
-                WireBudget::for_request(256_000, 0).keep_bytes,
-                WireBudget::for_request(256_000, 0).min_clear_bytes,
+                WireBudget::for_request(256_000, 0, DEFAULT_BYTES_PER_TOKEN).trigger_bytes,
+                WireBudget::for_request(256_000, 0, DEFAULT_BYTES_PER_TOKEN).keep_bytes,
+                WireBudget::for_request(256_000, 0, DEFAULT_BYTES_PER_TOKEN).min_clear_bytes,
             ),
             (614_400, 358_400, 102_400),
             "an empty request keeps the old window split"
         );
-        let full = WireBudget::for_request(256_000, 744_000);
+        let full = WireBudget::for_request(256_000, 744_000, DEFAULT_BYTES_PER_TOKEN);
         assert_eq!(
             (
                 full.trigger_bytes,
@@ -811,7 +861,7 @@ mod tests {
         let many: Vec<String> = (0..25).map(|_| body.clone()).collect();
         let messages = exchange(&many);
         assert!(
-            cleared_indices_with_limit(&messages, 256_000).is_empty(),
+            cleared_indices_with_limit(&messages, 256_000, DEFAULT_BYTES_PER_TOKEN).is_empty(),
             "200 KB of output is comfortably inside an unencumbered request"
         );
 
@@ -819,7 +869,7 @@ mod tests {
         // on conversation the host cannot clear.
         let mut crowded = vec![Message::new(Role::User, "c".repeat(760_000))];
         crowded.extend(messages);
-        let cleared = cleared_indices_with_limit(&crowded, 256_000);
+        let cleared = cleared_indices_with_limit(&crowded, 256_000, DEFAULT_BYTES_PER_TOKEN);
         assert!(
             !cleared.is_empty(),
             "760 KB of history must cost the oldest results their place"
@@ -833,6 +883,46 @@ mod tests {
         assert!(
             !cleared.contains(&(crowded.len() - 1)),
             "the newest result always keeps its place: {cleared:?}"
+        );
+    }
+
+    /// The window is counted in tokens and the host only measures bytes, so the
+    /// conversion decides when results get thrown away. At the flat 4 a live 256k
+    /// model was budgeted as a 1 MB request while its provider billed
+    /// 1,189,643 bytes as 144,424 tokens — a ~2 MB window. Same request, and the
+    /// pool was being cleared at a third of the space it actually had.
+    #[test]
+    fn the_byte_window_follows_the_providers_ratio() {
+        assert_eq!(observe_bytes_per_token(1_189_643, 144_424), Some(8));
+        assert_eq!(
+            observe_bytes_per_token(23_472, 10),
+            None,
+            "a 10-token side call says nothing about the shape of an agent request"
+        );
+        assert_eq!(
+            observe_bytes_per_token(1_189_643, 2_000),
+            Some(MAX_BYTES_PER_TOKEN),
+            "a runaway ratio is clamped, not believed"
+        );
+
+        let assumed = WireBudget::for_request(256_000, 744_000, DEFAULT_BYTES_PER_TOKEN);
+        let observed = WireBudget::for_request(256_000, 744_000, 8);
+        assert_eq!(
+            (
+                assumed.trigger_bytes,
+                assumed.keep_bytes,
+                assumed.min_clear_bytes
+            ),
+            (168_000, 140_000, 65_536)
+        );
+        assert_eq!(
+            (
+                observed.trigger_bytes,
+                observed.keep_bytes,
+                observed.min_clear_bytes
+            ),
+            (782_400, 393_216, 130_400),
+            "at the real ratio the same request is nowhere near full"
         );
     }
 
