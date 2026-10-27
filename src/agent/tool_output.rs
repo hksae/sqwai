@@ -71,8 +71,22 @@ pub fn observe_bytes_per_token(total_bytes: u64, prompt_tokens: u64) -> Option<u
 /// share fell from 99.9% to 6.7% on exactly that step.
 pub const FIXED_BUCKET_BYTES: usize = 128 * 1024;
 
+/// What the provider billed for one request, next to the bytes the host put on
+/// it. The pair is the only honest meter of the next request: tokenizers price
+/// base64 ciphertext and escaped JSON nothing like the prose the byte counter
+/// assumes, so an estimate made from bytes alone drifts away from the window the
+/// provider actually runs out of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WireAnchor {
+    /// prompt tokens the provider reported for the anchored request
+    pub tokens: u64,
+    /// [`wire_message_bytes`] of that same request
+    pub bytes: u64,
+}
+
 /// What the wire may carry, as one value: the model's window, the provider's own
-/// bytes-per-token, and how many results this run has already cleared.
+/// bytes-per-token, how many results this run has already cleared, and the last
+/// request the provider metered.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Wire {
     pub context_limit: u64,
@@ -80,6 +94,11 @@ pub struct Wire {
     /// Results the request has already replaced with stubs in this run. The
     /// cleared set is a prefix of the pool, so a count is enough to pin it.
     pub cleared_floor: usize,
+    /// The provider's own count for a request that carried this whole
+    /// transcript, when one has been made. Only a whole-transcript request can
+    /// anchor: a continuation sends a tail and bills a context the host never
+    /// counted, so its `prompt_tokens` have no byte counterpart.
+    pub measured: Option<WireAnchor>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -202,6 +221,69 @@ fn wire_state_bytes(state: &serde_json::Value) -> usize {
         return 0;
     }
     crate::providers::json_byte_len(&serde_json::Value::Object(rest)) as usize
+}
+
+/// Bytes per token to convert with: the provider's observed ratio, clamped, or
+/// the cold-start constant when nothing has been observed (`Wire::default()`).
+pub fn token_ratio(wire: &Wire) -> u64 {
+    if wire.bytes_per_token == 0 {
+        return DEFAULT_BYTES_PER_TOKEN;
+    }
+    wire.bytes_per_token
+        .clamp(MIN_BYTES_PER_TOKEN, MAX_BYTES_PER_TOKEN)
+}
+
+/// What the messages of a request cost it, in bytes: turn text, call arguments,
+/// the id a result answers, replayed provider state, and media priced through
+/// the same ratio the caller converts with. Everything the token window is
+/// spent on except the instruction prefix, which is the same on every request.
+///
+/// Media arrives as tokens over four ([`media_wire_bytes`]) and is re-priced at
+/// `bytes_per_token`, so a screenshot is worth the same tokens whichever way the
+/// window is measured.
+pub fn wire_message_bytes(messages: &[Message], bytes_per_token: u64) -> u64 {
+    let ratio = if bytes_per_token == 0 {
+        DEFAULT_BYTES_PER_TOKEN
+    } else {
+        bytes_per_token
+    };
+    messages
+        .iter()
+        .map(|message| {
+            message.content.len() as u64
+                + message.tool_call_id.as_deref().map_or(0, str::len) as u64
+                + message
+                    .tool_calls
+                    .iter()
+                    .map(|call| {
+                        call.name.len() as u64
+                            + crate::providers::json_byte_len(&call.args)
+                            + call
+                                .extra_content
+                                .as_ref()
+                                .map(crate::providers::json_byte_len)
+                                .unwrap_or(0)
+                    })
+                    .sum::<u64>()
+                + message
+                    .provider_state
+                    .as_ref()
+                    .map(crate::providers::json_byte_len)
+                    .unwrap_or(0)
+                + (media_wire_bytes(message) as u64 / 4).saturating_mul(ratio)
+        })
+        .sum()
+}
+
+/// What the transcript in `messages` would cost on the wire: shaped the way a
+/// request is shaped — replay pruned, aged output stubbed — then counted. Used
+/// both for the byte total of the request about to be sent and for the one that
+/// was already billed, so the two are comparable.
+pub fn wire_shaped_bytes(messages: &[Message], wire: &Wire) -> u64 {
+    let mut shaped = messages.to_vec();
+    prune_wire_reasoning(&mut shaped);
+    trim_for_wire(&mut shaped, wire);
+    wire_message_bytes(&shaped, token_ratio(wire))
 }
 
 /// Bytes of the request the pool cannot use: every message that `clearable`
@@ -566,6 +648,7 @@ mod tests {
             context_limit,
             bytes_per_token: DEFAULT_BYTES_PER_TOKEN,
             cleared_floor: 0,
+            measured: None,
         }
     }
 

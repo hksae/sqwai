@@ -360,6 +360,13 @@ pub struct Policy {
     /// it after every request ([`crate::agent::tool_output::observe_bytes_per_token`]);
     /// until the first real sample it is the cold-start constant.
     pub bytes_per_token: u64,
+    /// What the provider billed for the last request that carried the whole
+    /// transcript, against what the host counted on it. The compaction gate
+    /// measures from here rather than from a bytes-per-token guess alone,
+    /// because the guess was the whole size of the miss: a request the host read
+    /// as 184,209 tokens was billed as 209,553 and died on the overflow.
+    /// Reset whenever the transcript changes shape (compaction, fallback switch).
+    pub measured: Option<crate::agent::tool_output::WireAnchor>,
 }
 
 impl Policy {
@@ -371,6 +378,7 @@ impl Policy {
             keep_turns: None,
             threshold: None,
             bytes_per_token: crate::agent::tool_output::DEFAULT_BYTES_PER_TOKEN,
+            measured: None,
         }
     }
 
@@ -386,6 +394,7 @@ impl Policy {
             keep_turns: Some(keep_turns),
             threshold: Some(threshold),
             bytes_per_token: crate::agent::tool_output::DEFAULT_BYTES_PER_TOKEN,
+            measured: None,
         }
     }
 
@@ -498,39 +507,22 @@ fn media_tokens(message: &Message) -> u64 {
 
 /// Estimated tokens the history occupies on the WIRE. Aged-out tool results
 /// are already stubs there, so counting raw stored bytes would keep firing
-/// compaction long after the request stopped growing. The stub length is
-/// approximated (the exact bytes depend on the tool name, which the caller
-/// would have to build anyway); only the magnitude matters for the pressure
-/// decision, and it is bounded by the real stub.
+/// compaction long after the request stopped growing.
+///
+/// With an anchor the number is the provider's own, moved only by what the
+/// transcript gained or lost since that request: bytes over the observed ratio,
+/// which prices the ciphertext and JSON that a flat four-per-token guess reads
+/// as prose. Without one, the byte count over the same ratio is all the host has.
 pub fn wire_estimated_tokens(messages: &[Message], wire: &crate::agent::tool_output::Wire) -> u64 {
-    let cleared: std::collections::HashSet<usize> =
-        crate::agent::tool_output::cleared_indices(messages, wire)
-            .into_iter()
-            .collect();
-    messages
-        .iter()
-        .enumerate()
-        .map(|(i, m)| {
-            let content = if cleared.contains(&i) {
-                crate::agent::tool_output::STUB_MARK.len()
-                    + m.tool_call_id.as_deref().map_or(0, str::len)
-                    + 64
-            } else {
-                m.content.len()
-            };
-            (content as u64
-                + m.tool_calls
-                    .iter()
-                    .map(|c| c.name.len() as u64 + c.args.to_string().len() as u64)
-                    .sum::<u64>())
-            .div_ceil(4)
-                + if cleared.contains(&i) {
-                    0
-                } else {
-                    media_tokens(m)
-                }
-        })
-        .sum()
+    let bytes = crate::agent::tool_output::wire_shaped_bytes(messages, wire);
+    let ratio = crate::agent::tool_output::token_ratio(wire);
+    match wire.measured {
+        Some(anchor) => {
+            let delta = bytes as i64 - anchor.bytes as i64;
+            (anchor.tokens as i64 + delta / ratio as i64).max(0) as u64
+        }
+        None => bytes.div_ceil(ratio),
+    }
 }
 
 /// Stage 2: split the history into (to_summarize, keep_verbatim).
@@ -1020,7 +1012,7 @@ pub fn agent_state(model_key: &str, used: u64, policy: &Policy) -> String {
     format!(
         "<agent_state>
 Model: {model_key}
-Context: {} used of {} · ~{} free · history compacts at {}
+Context: {} used of {} · ~{} free · compacts at {}
 </agent_state>
 ",
         k_thousands(used),

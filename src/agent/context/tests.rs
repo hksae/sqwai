@@ -431,6 +431,70 @@ fn split_for_summary_adaptive_force_compacts_a_short_conversation() {
     assert!(older.is_empty());
 }
 
+/// The provider is the only true meter of its own window, and the byte guess is
+/// not close: a live request of 736,839 bytes came back billed as 209,553
+/// prompt tokens while bytes over four read it as 184,209 — under the 204,800
+/// gate — so the session rode one more request into an interrupted stream.
+#[test]
+fn the_gate_reads_the_providers_meter_not_the_byte_guess() {
+    let policy = Policy::new(100_000); // 80,000 tokens of history allowed
+    assert_eq!(policy.budget(), 80_000);
+    let messages = vec![user(&"y".repeat(200_000))];
+    let wire = crate::agent::tool_output::Wire {
+        context_limit: policy.context_limit,
+        bytes_per_token: 4,
+        ..Default::default()
+    };
+    assert_eq!(
+        policy.pressure(wire_estimated_tokens(&messages, &wire)),
+        Pressure::Ok,
+        "200 KB over four is 50k tokens: the guess sees no pressure"
+    );
+    let metered = crate::agent::tool_output::Wire {
+        measured: Some(crate::agent::tool_output::WireAnchor {
+            tokens: 90_000,
+            bytes: 200_000,
+        }),
+        ..wire
+    };
+    assert_eq!(
+        policy.pressure(wire_estimated_tokens(&messages, &metered)),
+        Pressure::Summarize,
+        "the same transcript billed at 90k tokens is over the gate"
+    );
+}
+
+/// The anchor is a starting point, not a freeze: what the transcript gains after
+/// the billed request is priced at the observed ratio, so the gate keeps up with
+/// a run that is still growing.
+#[test]
+fn the_anchored_gate_grows_with_the_transcript() {
+    let policy = Policy::new(100_000);
+    let anchor = crate::agent::tool_output::WireAnchor {
+        tokens: 70_000,
+        bytes: 200_000,
+    };
+    let metered = crate::agent::tool_output::Wire {
+        context_limit: policy.context_limit,
+        bytes_per_token: 4,
+        measured: Some(anchor),
+        ..Default::default()
+    };
+    let at_anchor = vec![user(&"y".repeat(200_000))];
+    assert_eq!(wire_estimated_tokens(&at_anchor, &metered), 70_000);
+    let mut grown = at_anchor.clone();
+    grown.push(user(&"z".repeat(60_000)));
+    assert_eq!(
+        wire_estimated_tokens(&grown, &metered),
+        85_000,
+        "60 KB more at four bytes per token is 15k tokens"
+    );
+    assert_eq!(
+        policy.pressure(wire_estimated_tokens(&grown, &metered)),
+        Pressure::Summarize
+    );
+}
+
 #[test]
 fn wire_estimated_tokens_counts_cleared_results_as_stubs() {
     // Aged-out tool output is already a stub on the wire; counting raw stored

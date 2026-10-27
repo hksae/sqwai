@@ -3,21 +3,6 @@ use crate::providers::{
     ChatRequest, ContextTransport, Message, Role, SharedProvider, StreamEvent, SystemPart,
 };
 
-/// Run the compaction policy, cheapest stage first.
-///
-/// 1. prune aged-out tool output (no LLM);
-/// 2. summarize the oldest turns through the model;
-/// 3. if the summary could not be obtained, summarize locally;
-/// 4. hard-trim if the history still does not fit.
-///
-/// Returns `(before, after, summarized_by_the_model)` when something changed.
-/// A failure never propagates: stage 4 always leaves a usable transcript.
-///
-/// All stages measure the HISTORY estimate, never the provider's full
-/// request size: the system prefix and tool schemas are fixed costs no
-/// compaction can remove, and gating on them fires futile compactions
-/// every turn (history already fits, trim no-ops, `after == before`).
-/// Real overflows still force-compact via the overflow path.
 /// Preformatted durable-plan block for the restricted summary:
 /// the summarizer can only exclude what it can see. Empty when no plan is
 /// active — then every user ask counts as uncovered.
@@ -161,6 +146,25 @@ pub(crate) fn compaction_request(
     )
 }
 
+/// Run the compaction policy, cheapest stage first.
+///
+/// 1. prune aged-out tool output (no LLM);
+/// 2. summarize the oldest turns through the model;
+/// 3. if the summary could not be obtained, summarize locally;
+/// 4. hard-trim if the history still does not fit.
+///
+/// Returns `(before, after, summarized_by_the_model)` when something changed.
+/// A failure never propagates: stage 4 always leaves a usable transcript.
+///
+/// Pressure is judged on the WIRE, not the raw store: aged-out tool results are
+/// stubs on the request, so stored bytes would keep firing compaction after the
+/// request stopped growing. Once the provider has metered a whole-transcript
+/// request, its token count anchors the measure and only the bytes gained or
+/// lost since are estimated (`context::wire_estimated_tokens`) — which makes the
+/// threshold mean the provider's window, prefix included, instead of a
+/// history-only guess. The instruction prefix is a few tens of kilobytes against
+/// a 204,800-token gate, so pricing it cannot make compaction fire for nothing.
+/// Real overflows still force-compact via the overflow path.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn compact_history(
     provider: &SharedProvider,
@@ -174,18 +178,20 @@ pub(crate) async fn compact_history(
     prefix: Option<&CompactionPrefix<'_>>,
 ) -> Option<(u64, u64, bool)> {
     let measured = |m: &[Message]| context::estimated_tokens(m);
-    // Pressure is judged on the WIRE size, not the raw store: aged-out tool
-    // results are already stubs on the request, so counting stored bytes keeps
-    // firing compaction long after the request stopped growing.
-    let wire = crate::agent::tool_output::Wire {
+    let mut wire = crate::agent::tool_output::Wire {
         context_limit: policy.context_limit,
         bytes_per_token: policy.bytes_per_token,
         // The run's clear floor is not passed down: compaction judges pressure,
         // and pricing the wire as if nothing had been cleared yet estimates it
         // larger than it is — which triggers earlier, never later.
         cleared_floor: 0,
+        measured: policy.measured,
     };
-    let wire_measured = |m: &[Message]| context::wire_estimated_tokens(m, &wire);
+    // Takes the wire as an argument: the gate below re-prices the transcript
+    // after the anchor has been dropped, and a closure holding `&wire` would
+    // freeze it.
+    let wire_measured =
+        |m: &[Message], w: &crate::agent::tool_output::Wire| context::wire_estimated_tokens(m, w);
     let before = measured(messages);
 
     // No per-turn pruning by design (Codex shape): what the model read
@@ -193,7 +199,7 @@ pub(crate) async fn compact_history(
     // output taught the model to re-read the same files in circles —
     // the prune note even instructed it to. History shrinks only below,
     // on pressure, via summary or hard trim.
-    if !force && policy.pressure(wire_measured(messages)) == context::Pressure::Ok {
+    if !force && policy.pressure(wire_measured(messages, &wire)) == context::Pressure::Ok {
         // Pressure is fine: history is untouched, report nothing.
         return None;
     }
@@ -263,10 +269,13 @@ pub(crate) async fn compact_history(
         *messages = context::apply_summary(&text, &keep);
         *summary = Some(text);
         summarized = true;
+        // The billed anchor described the transcript that was just replaced.
+        // What the check below prices is new, so it is priced from bytes.
+        wire.measured = None;
     }
 
     // stage 4: still too big — drop the oldest turns outright
-    if policy.pressure(wire_measured(messages)) != context::Pressure::Ok {
+    if policy.pressure(wire_measured(messages, &wire)) != context::Pressure::Ok {
         let budget = policy.budget();
         *messages = context::hard_trim(messages, budget);
     }

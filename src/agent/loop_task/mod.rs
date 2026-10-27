@@ -1248,6 +1248,9 @@ async fn run_agent(
             // The transcript the clear floor was counting against is gone:
             // keeping it would stub results by position, not by history.
             ctx.cleared_floor = 0;
+            // Neither is the request the provider billed, so its token count
+            // anchors nothing.
+            policy.measured = None;
             // Same rule as the overflow retry below: the transcript the host
             // owns has changed, so the provider's copy of it is no longer the
             // context this turn is about.
@@ -1284,6 +1287,7 @@ async fn run_agent(
             context_limit,
             bytes_per_token: policy.bytes_per_token,
             cleared_floor: ctx.cleared_floor,
+            measured: policy.measured,
         };
         let request_messages = request_messages_for_wire(&messages, transport, &wire);
         // Counted here because the request owns the messages from the next line
@@ -1293,6 +1297,13 @@ async fn run_agent(
             .iter()
             .filter(|m| m.role == Role::Tool && crate::agent::tool_output::is_stub(&m.content))
             .count();
+        // The same bytes the compaction gate will count next iteration, taken
+        // off the request as it leaves: the pair (this, the provider's token
+        // count for it) is what the gate anchors on.
+        let wire_bytes = crate::agent::tool_output::wire_message_bytes(
+            &request_messages,
+            crate::agent::tool_output::token_ratio(&wire),
+        );
         // Whatever this request hid stays hidden for the run: a boundary that
         // moves back rewrites the head of the transcript and forfeits the
         // provider's prefix cache behind it.
@@ -1423,6 +1434,7 @@ async fn run_agent(
                             summary.as_deref().unwrap_or(""),
                         );
                         ctx.cleared_floor = 0;
+                        policy.measured = None;
                         // The transcript this turn resends is not the one the
                         // provider holds any more, so the reference cannot be
                         // reused for the retry either.
@@ -1536,6 +1548,16 @@ async fn run_agent(
                 )
             {
                 policy.bytes_per_token = ratio;
+            }
+            // The provider's meter, pinned to the bytes that produced it. Only a
+            // request that carried the whole transcript can anchor: a
+            // continuation sends a tail and bills a context the host never
+            // counted, so its token total has no byte counterpart to grow from.
+            if transport == crate::providers::ContextTransport::Stateless {
+                policy.measured = Some(crate::agent::tool_output::WireAnchor {
+                    tokens: usage.prompt_tokens,
+                    bytes: wire_bytes,
+                });
             }
             if let Some(writer) = events.as_mut() {
                 let _ = writer.append(
