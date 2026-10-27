@@ -721,6 +721,10 @@ pub fn truncate_summary(text: &str) -> String {
 /// where the conversation lives — rendered inline below (standalone
 /// request) or travelling as the request's own messages above (cache-aware
 /// request, where repeating it would pay twice).
+///
+/// The section order is a truncation rule, not a style choice: an over-long
+/// answer is cut at the END by [`truncate_summary`], so what the next request
+/// needs most — where the work stands — goes first.
 fn summary_head(
     previous: Option<&str>,
     plan_hint: &str,
@@ -735,10 +739,10 @@ fn summary_head(
          constraints, and decisions; re-listing them wastes the budget this \
          summary exists to save.\n\n\
          Structure the summary concisely around:\n\
+         - Current state & next step at the cut\n\
          - User intent, constraints & preferences (uncovered by `<durable-plan>`)\n\
          - Key findings, root causes & code locations discovered\n\
-         - Work completed, verified, or rejected\n\
-         - Current state & next step at the cut\n\n<durable-plan>\n",
+         - Work completed, verified, or rejected\n\n<durable-plan>\n",
     );
     let plan_part = plan_hint.trim();
     if plan_part.is_empty() {
@@ -768,8 +772,9 @@ fn summary_tail(retry: bool) -> String {
     let mut out = String::from(
         "Rules: no preamble, no questions, no instructions \
          to the reader, no invented facts, no tool calls — respond with text \
-         only. Keep it under 2,800 characters. If something is unknown, say it \
-         is unknown.",
+         only. Keep paths, identifiers, versions and numbers from the tool \
+         output verbatim; the summary is all that survives of it. Keep it under \
+         2,800 characters. If something is unknown, say it is unknown.",
     );
     if retry {
         out.push_str(&format!(
@@ -844,8 +849,10 @@ fn summary_message(summary: &str) -> String {
     format!(
         "<conversation-summary>\n{summary}\n</conversation-summary>\n\
          This is the summarized earlier part of our conversation. Continue the \
-         task from here. The durable project plan is in your system block; \
-         re-read a file before editing it."
+         task from here. The durable project plan is in your system block, and \
+         tool results covered by this summary are cleared from the request — \
+         recall_result returns what this session still holds, without \
+         re-running the tool."
     )
 }
 

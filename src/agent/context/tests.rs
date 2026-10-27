@@ -673,6 +673,30 @@ fn summary_short_prompt_points_at_messages_above() {
     assert!(retry.contains("no durable plan"));
 }
 
+/// The summary is all that survives of the tool output a compaction clears from
+/// the request, so it opens with where the work stands (the host truncates the
+/// END of an over-long answer) and keeps the identifiers verbatim. The tail line
+/// used to send the model to re-read files whose bytes `recall_result` still
+/// holds — that is the promise the cleared wire now depends on.
+#[test]
+fn the_summary_leads_with_the_state_and_keeps_the_numbers() {
+    let input = summary_short_input(&[user("do it")], None, "", None, false);
+    let state = input
+        .find("Current state")
+        .expect("no current-state section in the structure");
+    let intent = input.find("User intent").expect("no intent section");
+    assert!(
+        state < intent,
+        "the section the next request needs must come first: {input}"
+    );
+    assert!(input.contains("verbatim"), "{input}");
+
+    let applied = apply_summary("facts", &[user("next")]);
+    let text = &applied[0].content;
+    assert!(!text.contains("re-read a file"), "{text}");
+    assert!(text.contains("recall_result"), "{text}");
+}
+
 #[test]
 fn summary_short_input_restricts_to_uncovered_asks() {
     let older = vec![user("do not touch btree"), user("fix the bug")];

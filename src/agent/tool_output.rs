@@ -399,6 +399,30 @@ fn clearable(message: &Message) -> bool {
     message.role == Role::Tool && !message.is_error && !is_stub(&message.content)
 }
 
+/// Tool results a kept tail keeps on the wire right after a compaction wrote a
+/// summary. Everything older is stubbed on the spot.
+///
+/// The summary is now the record of what those results said, and the bytes stay
+/// in the store for `recall_result`, so carrying them on the request buys a
+/// second copy of information the transcript has already replaced. The usual
+/// budget would free them gradually, in quantized steps, because every moved
+/// boundary re-keys the provider's prefix cache — but a compaction has just
+/// rewritten the whole transcript, so the cache behind it is forfeited anyway
+/// and this is the one moment a large clear costs nothing.
+pub const POST_COMPACTION_KEEP_RESULTS: usize = 3;
+
+/// How many results the run has already hidden after a compaction: the whole
+/// kept tail except the newest few, and never the batch the model is answering.
+pub fn post_compaction_floor(messages: &[Message]) -> usize {
+    let pool = messages.iter().filter(|m| clearable(m)).count();
+    let in_flight = messages
+        .iter()
+        .rposition(|m| m.role == Role::Assistant && !m.tool_calls.is_empty())
+        .map(|step| messages[step + 1..].iter().filter(|m| clearable(m)).count())
+        .unwrap_or(0);
+    pool.saturating_sub(POST_COMPACTION_KEEP_RESULTS.max(in_flight))
+}
+
 /// Indices of the tool results to replace: what the budget says the pool cannot
 /// afford, and never fewer than [`Wire::cleared_floor`].
 pub fn cleared_indices(messages: &[Message], wire: &Wire) -> Vec<usize> {
@@ -650,6 +674,56 @@ mod tests {
             cleared_floor: 0,
             measured: None,
         }
+    }
+
+    /// A compaction has just replaced the older turns with a summary, so the
+    /// results that summary covered are the one thing on the wire with a second
+    /// copy of itself — and this is the one moment the boundary may move by
+    /// hundreds, because the rewrite already forfeited the provider's cache.
+    #[test]
+    fn a_compaction_hides_what_the_summary_already_covers() {
+        let results: Vec<String> = (0..10).map(|i| format!("r{i}")).collect();
+        let messages = exchange(&results);
+        assert_eq!(
+            post_compaction_floor(&messages),
+            7,
+            "ten results, the newest three stay readable"
+        );
+        assert_eq!(
+            post_compaction_floor(&exchange(&results[..2])),
+            0,
+            "a short tail has nothing to hide"
+        );
+
+        // The batch the model is answering is never parted: it asked for those
+        // bytes one step ago, and a stub would answer a question it just put.
+        let mut batched = exchange(&results[..6]);
+        batched.push(Message::new(Role::Assistant, "").with_tool_calls(vec![
+            ToolCallReq::new("b1", "read", json!({"file_path": "a.rs"})),
+            ToolCallReq::new("b2", "read", json!({"file_path": "b.rs"})),
+            ToolCallReq::new("b3", "read", json!({"file_path": "c.rs"})),
+            ToolCallReq::new("b4", "read", json!({"file_path": "d.rs"})),
+        ]));
+        for id in ["b1", "b2", "b3", "b4"] {
+            batched.push(Message::tool_result(id, "b", false));
+        }
+        assert_eq!(
+            post_compaction_floor(&batched),
+            6,
+            "four in flight outrank the three"
+        );
+
+        // And the floor does what the budget alone refuses: on a window that can
+        // afford every byte, the cleared set still holds.
+        let floored = Wire {
+            cleared_floor: post_compaction_floor(&messages),
+            ..wire(1_000_000)
+        };
+        assert_eq!(
+            cleared_indices(&messages, &floored).len(),
+            7,
+            "the compaction clear survives the roomy window"
+        );
     }
 
     /// Recall with no projection args, as the tool is most often called.

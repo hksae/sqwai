@@ -1245,9 +1245,10 @@ async fn run_agent(
                 summarized,
                 summary.as_deref().unwrap_or(""),
             );
-            // The transcript the clear floor was counting against is gone:
-            // keeping it would stub results by position, not by history.
-            ctx.cleared_floor = 0;
+            // The transcript the clear floor was counting against is gone, but
+            // the summary that replaced it covers the older results: hide them
+            // now instead of re-serving them and clearing them again one by one.
+            ctx.cleared_floor = crate::agent::tool_output::post_compaction_floor(&messages);
             // Neither is the request the provider billed, so its token count
             // anchors nothing.
             policy.measured = None;
@@ -1433,7 +1434,8 @@ async fn run_agent(
                             summarized,
                             summary.as_deref().unwrap_or(""),
                         );
-                        ctx.cleared_floor = 0;
+                        ctx.cleared_floor =
+                            crate::agent::tool_output::post_compaction_floor(&messages);
                         policy.measured = None;
                         // The transcript this turn resends is not the one the
                         // provider holds any more, so the reference cannot be
