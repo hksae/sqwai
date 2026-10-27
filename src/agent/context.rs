@@ -122,7 +122,7 @@ pub fn anchor(root: &std::path::Path, session_id: &str) -> String {
                 .fields
                 .get("tool")
                 .and_then(|value| value.as_str())
-                .is_some_and(|tool| matches!(tool, "bash" | "git_diff" | "git_commit"))
+                .is_some_and(|tool| matches!(tool, "bash" | "git_diff"))
             && record.fields.get("ok").and_then(|value| value.as_bool()) == Some(true)
         {
             last_verification = Some(record.seq);

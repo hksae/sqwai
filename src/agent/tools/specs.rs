@@ -285,60 +285,6 @@ bash_output(id, wait_secs) for background jobs.",
             parameters: json!({"type":"object","properties":{"target":{"type":"string"}}}),
         },
         ToolDef {
-            name: "git_log",
-            kind: Kind::ReadOnly,
-            description: "Show recent commits. Use it to find where a behavior came from before blaming the tree.",
-            parameters: json!({"type":"object","properties":{"count":{"type":"integer","minimum":1,"maximum":100},"format":{"type":"string"}}}),
-        },
-        ToolDef {
-            name: "git_show",
-            kind: Kind::ReadOnly,
-            description: "Show what a commit changed, or what a file looked like at a revision. With path: the file's content at the revision. Without: the commit message, diff stat and patch.",
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "commit": {"type": "string", "description": "revision (sha, branch, HEAD~N); default HEAD"},
-                    "path": {"type": "string", "description": "repo-relative file path (forward slashes)"}
-                }
-            }),
-        },
-        ToolDef {
-            name: "git_commit",
-            kind: Kind::Mutating,
-            description: "Create a commit from staged changes, or from all tracked changes when `all` is true. Use only when requested by the user or required by project instructions (AGENTS.md / SQWAI.md).",
-            parameters: json!({"type":"object","properties":{"message":{"type":"string"},"all":{"type":"boolean"}},"required":["message"]}),
-        },
-        ToolDef {
-            name: "git_stage",
-            kind: Kind::Mutating,
-            description: "Stage or unstage file changes in the Git index (including untracked files).",
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "action": {
-                        "type": "string",
-                        "enum": ["add", "reset"],
-                        "description": "'add' to stage changes, 'reset' to unstage (default 'add')"
-                    },
-                    "paths": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Repo-relative file paths or glob patterns"
-                    },
-                    "all": {
-                        "type": "boolean",
-                        "description": "Stage or reset all files (equivalent to git add -A / git reset)"
-                    }
-                }
-            }),
-        },
-        ToolDef {
-            name: "git_branch",
-            kind: Kind::ReadOnly,
-            description: "List branches or create/switch to a local branch.",
-            parameters: json!({"type":"object","properties":{"action":{"type":"string","enum":["list","current","create","switch"]},"name":{"type":"string"}}}),
-        },
-        ToolDef {
             name: "patch",
             kind: Kind::Mutating,
             description: "Validate and apply a unified Git patch to the project.",
@@ -614,12 +560,8 @@ pub fn is_mutating(name: &str) -> bool {
     matches!(kind_of(name), Some(Kind::Mutating))
 }
 
-/// Whether this particular call mutates state. `git_branch` contains both
-/// read-only inspection and Act-only branch changes, so its action matters.
-pub fn is_mutating_call(name: &str, args: &Value) -> bool {
-    if name == "git_branch" {
-        return matches!(args["action"].as_str(), Some("create" | "switch"));
-    }
+/// Whether this particular call mutates state.
+pub fn is_mutating_call(name: &str, _args: &Value) -> bool {
     is_mutating(name)
 }
 
@@ -701,21 +643,6 @@ fn call_summary_raw(name: &str, args: &Value) -> String {
         }
         "bash_kill" => format!("job {}", args["id"].as_u64().unwrap_or(0)),
         "sleep" => format!("{}s", args["seconds"].as_u64().unwrap_or(0)),
-        "git_show" => {
-            let commit = s("commit");
-            let path = s("path");
-            if path.is_empty() {
-                if commit.is_empty() {
-                    "HEAD".to_string()
-                } else {
-                    commit
-                }
-            } else if commit.is_empty() {
-                format!("HEAD:{path}")
-            } else {
-                format!("{commit}:{path}")
-            }
-        }
         "glob" | "grep" => s("pattern"),
         "outline" => {
             let path = s("path");
@@ -726,27 +653,6 @@ fn call_summary_raw(name: &str, args: &Value) -> String {
             }
         }
         "git_diff" => s("target"),
-        "git_commit" => s("message"),
-        "git_stage" => {
-            let action = match args["action"].as_str() {
-                Some("reset") => "reset",
-                _ => "add",
-            };
-            if args["all"].as_bool().unwrap_or(false) {
-                format!("{action} all")
-            } else if let Some(arr) = args["paths"].as_array() {
-                format!("{action} {} paths", arr.len())
-            } else if let Some(p) = args["path"].as_str() {
-                format!("{action} {p}")
-            } else {
-                action.to_string()
-            }
-        }
-        "git_branch" => {
-            let action = s("action");
-            let name = s("name");
-            format!("{action} {name}").trim().to_string()
-        }
         "patch" => format!(
             "{} bytes",
             args["patch"].as_str().map(str::len).unwrap_or(0)
@@ -1173,10 +1079,8 @@ fn tool_specs_wire_weight() {
 fn every_mutating_tool_reports_its_paths() {
     const REPORTS_A_PATH: &[&str] = &["write", "edit", "multi_edit", "patch"];
     const NO_PER_CALL_PATH: &[&str] = &[
-        "bash",       // targets unknown in advance; attributed via the shadow head (H4)
-        "git_commit", // records the tree, does not edit it
-        "git_stage",  // touches the index, not file bytes
-        "plan",       // host state under .sqwai/, not a source file
+        "bash", // targets unknown in advance; attributed via the shadow head (H4)
+        "plan", // host state under .sqwai/, not a source file
     ];
 
     let mut classified = 0usize;

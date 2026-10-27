@@ -35,29 +35,6 @@ pub(crate) fn mutation_target_paths(ctx: &ToolCtx, name: &str, args: &Value) -> 
             return Vec::new();
         }
         git::extract_patch_files(ctx, patch)
-    } else if name == "git_stage" {
-        // `paths` (array or string) plus the singular `path` alias, the
-        // same set git::stage stages. `all: true` has no bounded target
-        // list — the gate refuses it separately instead of guessing.
-        let mut paths = Vec::new();
-        if let Some(arr) = args.get("paths").and_then(Value::as_array) {
-            for v in arr {
-                if let Some(s) = v.as_str().filter(|s| !s.trim().is_empty()) {
-                    paths.push(s.to_string());
-                }
-            }
-        } else if let Some(s) = args.get("paths").and_then(Value::as_str)
-            && !s.trim().is_empty()
-        {
-            paths.push(s.to_string());
-        }
-        if let Some(s) = args.get("path").and_then(Value::as_str)
-            && !s.trim().is_empty()
-            && !paths.iter().any(|p| p == s.trim())
-        {
-            paths.push(s.trim().to_string());
-        }
-        paths
     } else {
         let raw = args["file_path"].as_str().unwrap_or_default();
         if raw.trim().is_empty() {

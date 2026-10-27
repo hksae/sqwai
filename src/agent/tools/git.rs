@@ -106,10 +106,6 @@ fn host_owned_path(p: &str) -> bool {
 
 /// Git parses a leading `--` in any value position as a flag; ref names and
 /// revisions arriving from the model must never start with one (audit H20).
-fn flag_shaped(name: &str) -> bool {
-    name.starts_with('-')
-}
-
 fn run_git(ctx: &ToolCtx, args: &[&str]) -> Outcome {
     let mut child = match Command::new("git")
         .current_dir(&ctx.root)
@@ -219,222 +215,6 @@ pub fn diff(ctx: &ToolCtx, args: &Value) -> Outcome {
         Outcome::err(".sqwai is host-owned state and cannot be read with git_diff")
     } else {
         run_git(ctx, &["diff", "--", target])
-    }
-}
-
-pub fn log(ctx: &ToolCtx, args: &Value) -> Outcome {
-    let count = args
-        .get("count")
-        .and_then(Value::as_u64)
-        .unwrap_or(10)
-        .clamp(1, 100);
-    let format = arg(args, "format");
-    let format = if format.is_empty() {
-        "%h %s (%an, %ad)"
-    } else {
-        format
-    };
-    let count_arg = format!("-{count}");
-    run_git(
-        ctx,
-        &[
-            "log",
-            &count_arg,
-            "--date=short",
-            &format!("--format={format}"),
-        ],
-    )
-}
-
-/// `git_show`: what a commit changed, or what a file looked like at a commit.
-/// Read-only mirror of `git show` for the agent: a commit shows the message,
-/// the diff stat and the patch; a `path` shows that file's content at the
-/// revision (`git show <rev>:<path>`).
-pub fn show(ctx: &ToolCtx, args: &Value) -> Outcome {
-    let commit = arg(args, "commit");
-    let commit = if commit.trim().is_empty() {
-        "HEAD"
-    } else {
-        commit.trim()
-    };
-    let path = arg(args, "path").trim();
-    if flag_shaped(commit) {
-        return Outcome::err(format!("bad revision '{commit}'"));
-    }
-    if path.is_empty() {
-        // git's `<rev>:<path>` syntax reaches any tracked blob with no
-        // `path` arg at all — gate the path half of the revision too
-        // (audit C4)
-        if let Some((_, rev_path)) = commit.split_once(':')
-            && host_owned_path(rev_path)
-        {
-            return Outcome::err(".sqwai is host-owned state and cannot be read with git_show");
-        }
-        return run_git(ctx, &["show", commit, "--stat=200", "--patch"]);
-    }
-    // git paths are forward-slashed relative to the repo root; host-owned
-    // state is not readable through other tools and not through this one
-    let path = path.replace('\\', "/");
-    if host_owned_path(&path) {
-        return Outcome::err(".sqwai is host-owned state and cannot be read with git_show");
-    }
-    if path.starts_with('/') || path.contains("..") {
-        return Outcome::err(format!("bad path '{path}': use a repo-relative path"));
-    }
-    run_git(ctx, &["show", &format!("{commit}:{path}")])
-}
-
-pub fn commit(ctx: &mut ToolCtx, args: &Value) -> Outcome {
-    let message = arg(args, "message").trim();
-    if message.is_empty() {
-        return Outcome::err("git_commit requires a non-empty message");
-    }
-    if message.len() > 2000 {
-        return Outcome::err("git_commit message is too long (maximum 2000 bytes)");
-    }
-    let all = args.get("all").and_then(Value::as_bool).unwrap_or(false);
-    if let Ok(Some(sha)) = crate::agent::checkpoints::snapshot_session(
-        &ctx.root,
-        ctx.shadow_store,
-        ctx.checkpoint_chain(),
-        "git_commit",
-    ) {
-        ctx.checkpoints.push((sha, "git_commit".to_string()));
-    }
-    if all {
-        run_git(ctx, &["commit", "-am", message])
-    } else {
-        run_git(ctx, &["commit", "-m", message])
-    }
-}
-
-pub fn stage(ctx: &ToolCtx, args: &Value) -> Outcome {
-    let action = arg(args, "action");
-    let action = if action.trim().is_empty() {
-        "add"
-    } else {
-        action.trim()
-    };
-    if !matches!(action, "add" | "reset") {
-        return Outcome::err("git_stage action must be add or reset");
-    }
-
-    let all = args.get("all").and_then(Value::as_bool).unwrap_or(false);
-
-    let mut raw_paths = Vec::new();
-    if let Some(arr) = args.get("paths").and_then(Value::as_array) {
-        for v in arr {
-            if let Some(s) = v.as_str() {
-                let trimmed = s.trim();
-                if !trimmed.is_empty() {
-                    raw_paths.push(trimmed.to_string());
-                }
-            }
-        }
-    } else if let Some(s) = args.get("paths").and_then(Value::as_str) {
-        let trimmed = s.trim();
-        if !trimmed.is_empty() {
-            raw_paths.push(trimmed.to_string());
-        }
-    }
-    if let Some(s) = args.get("path").and_then(Value::as_str) {
-        let trimmed = s.trim();
-        if !trimmed.is_empty() && !raw_paths.contains(&trimmed.to_string()) {
-            raw_paths.push(trimmed.to_string());
-        }
-    }
-
-    if !all && raw_paths.is_empty() {
-        return Outcome::err("git_stage requires either all: true or non-empty paths");
-    }
-
-    if all {
-        if action == "add" {
-            // audit C5: a bare `git add -A` stages `.sqwai/` whenever it is
-            // not gitignored (and the design never writes a gitignore).
-            // The exclude pathspec makes host state unstaged by
-            // construction, not by segment-check luck.
-            run_git(ctx, &["add", "-A", "--", ".", ":(exclude).sqwai"])
-        } else {
-            run_git(ctx, &["reset"])
-        }
-    } else {
-        let mut clean_paths = Vec::new();
-        for p in &raw_paths {
-            let p_norm = p.replace('\\', "/");
-            if host_owned_path(&p_norm) {
-                return Outcome::err(format!("cannot stage host-owned state in path '{p}'"));
-            }
-            if p_norm.starts_with('/') || p_norm.contains("..") {
-                return Outcome::err(format!("bad path '{p}': use a repo-relative path"));
-            }
-            match ctx.resolve(p) {
-                Ok(_) => clean_paths.push(p_norm),
-                Err(e) => return Outcome::err(format!("forbidden path '{p}': {e}")),
-            }
-        }
-
-        let mut git_args: Vec<&str> = Vec::with_capacity(3 + clean_paths.len());
-        if action == "add" {
-            git_args.push("add");
-        } else {
-            git_args.push("reset");
-        }
-        git_args.push("--");
-        for p in &clean_paths {
-            git_args.push(p.as_str());
-        }
-        if action == "add" {
-            // audit C6: `paths: ["."]` resolves to the root and would stage
-            // everything including `.sqwai/`; exclude at the git level
-            git_args.push(":(exclude).sqwai");
-        }
-        run_git(ctx, &git_args)
-    }
-}
-
-pub fn branch(ctx: &mut ToolCtx, args: &Value) -> Outcome {
-    let action = arg(args, "action");
-    let name = arg(args, "name").trim();
-    // audit H20: git parses a `--`-prefixed value as a flag —
-    // `switch --detach` detaches HEAD, `create --list` lists branches
-    if flag_shaped(name) {
-        return Outcome::err(format!("bad branch name '{name}': must not start with '-'"));
-    }
-    match action {
-        "list" | "" => run_git(ctx, &["branch", "--list"]),
-        "current" => run_git(ctx, &["branch", "--show-current"]),
-        "create" => {
-            if name.is_empty() {
-                Outcome::err("git_branch create requires a name")
-            } else {
-                if let Ok(Some(sha)) = crate::agent::checkpoints::snapshot_session(
-                    &ctx.root,
-                    ctx.shadow_store,
-                    ctx.checkpoint_chain(),
-                    "git_branch create",
-                ) {
-                    ctx.checkpoints.push((sha, "git_branch create".to_string()));
-                }
-                run_git(ctx, &["branch", name])
-            }
-        }
-        "switch" => {
-            if name.is_empty() {
-                Outcome::err("git_branch switch requires a name")
-            } else {
-                if let Ok(Some(sha)) = crate::agent::checkpoints::snapshot_session(
-                    &ctx.root,
-                    ctx.shadow_store,
-                    ctx.checkpoint_chain(),
-                    "git_branch switch",
-                ) {
-                    ctx.checkpoints.push((sha, "git_branch switch".to_string()));
-                }
-                run_git(ctx, &["switch", name])
-            }
-        }
-        _ => Outcome::err("git_branch action must be list, current, create, or switch"),
     }
 }
 
@@ -1349,7 +1129,7 @@ mod tests {
     /// committed `.sqwai/` themselves here (no gitignore writer by design);
     /// the tools must still refuse to read host state back.
     #[test]
-    fn git_read_tools_refuse_host_owned_state() {
+    fn git_diff_refuses_to_leak_host_owned_state() {
         let dir = tempfile::tempdir().unwrap();
         init_repo(dir.path());
         std::fs::create_dir_all(dir.path().join(".sqwai/events")).unwrap();
@@ -1368,89 +1148,11 @@ mod tests {
         .unwrap();
 
         let ctx = ToolCtx::new(dir.path());
-        let shown = show(&ctx, &json!({"commit": "HEAD:.sqwai/events/active.json"}));
-        assert!(
-            !shown.ok,
-            "git_show leaked host state via rev:path: {}",
-            shown.output
-        );
-        assert!(
-            !shown.output.contains("TOP-SECRET-PLAN"),
-            "{}",
-            shown.output
-        );
-
         let d = diff(&ctx, &json!({"target": ".sqwai/events/active.json"}));
         assert!(
             !d.output.contains("TOP-SECRET-PLAN"),
             "git_diff leaked host state: {}",
             d.output
-        );
-    }
-
-    /// Audit C5/C6: `all:true` runs a bare `git add -A` and `paths=["."]`
-    /// passes the segment check — both stage `.sqwai/` when it is not
-    /// gitignored, so the user's next commit ships host-owned state.
-    #[test]
-    fn git_stage_never_stages_host_owned_state() {
-        let dir = tempfile::tempdir().unwrap();
-        init_repo(dir.path());
-        std::fs::create_dir_all(dir.path().join(".sqwai/plans")).unwrap();
-        std::fs::write(dir.path().join(".sqwai/plans/p.json"), "{}").unwrap();
-        std::fs::write(dir.path().join("src.txt"), "x\n").unwrap();
-        // initial commit of an unrelated file: src.txt and .sqwai/ stay
-        // untracked so the stage calls below have something to pick up
-        std::fs::write(dir.path().join("init.txt"), "i\n").unwrap();
-        git_out(dir.path(), &["add", "init.txt"]);
-        git_out(dir.path(), &["commit", "-m", "init"]);
-
-        let ctx = ToolCtx::new(dir.path());
-        let out = stage(&ctx, &json!({"action": "add", "all": true}));
-        assert!(out.ok, "{}", out.output);
-        let staged = git_out(dir.path(), &["diff", "--cached", "--name-only"]);
-        assert!(staged.contains("src.txt"), "real work must still stage");
-        assert!(
-            !staged.contains(".sqwai"),
-            "git_stage all:true staged host state: {staged}"
-        );
-
-        let out = stage(&ctx, &json!({"action": "add", "paths": ["."]}));
-        assert!(out.ok, "{}", out.output);
-        let staged = git_out(dir.path(), &["diff", "--cached", "--name-only"]);
-        assert!(
-            !staged.contains(".sqwai"),
-            "git_stage paths=[\".\"] staged host state: {staged}"
-        );
-    }
-
-    /// Audit H20: a `--`-prefixed name is parsed as a git flag —
-    /// `switch --detach` detaches HEAD, `create --list` lists branches.
-    #[test]
-    fn git_branch_refuses_flag_shaped_names() {
-        let dir = tempfile::tempdir().unwrap();
-        init_repo(dir.path());
-        std::fs::write(dir.path().join("f.txt"), "x").unwrap();
-        git_out(dir.path(), &["add", "f.txt"]);
-        git_out(dir.path(), &["commit", "-m", "init"]);
-
-        let mut ctx = ToolCtx::new(dir.path());
-        let out = branch(&mut ctx, &json!({"action": "switch", "name": "--detach"}));
-        assert!(
-            !out.ok,
-            "switch --detach must be refused, got: {}",
-            out.output
-        );
-        let cur = git_out(dir.path(), &["branch", "--show-current"]);
-        assert!(
-            !cur.trim().is_empty(),
-            "HEAD was detached by a flag-shaped name"
-        );
-
-        let out = branch(&mut ctx, &json!({"action": "create", "name": "--list"}));
-        assert!(
-            !out.ok,
-            "create --list must be refused, got: {}",
-            out.output
         );
     }
 

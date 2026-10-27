@@ -165,9 +165,6 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
             "write"
                 | "edit"
                 | "multi_edit"
-                | "git_commit"
-                | "git_stage"
-                | "git_branch"
                 | "patch"
                 | "bash"
                 | "plan"
@@ -217,35 +214,7 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
     if ctx.subagent_step.is_some()
         && let Some(allowed) = ctx.subagent_write_paths.as_ref()
     {
-        // `commit -a` / `git add -A` stage the whole tree: unbounded by
-        // construction, so a scoped child never runs them. Plain `commit`
-        // only seals what is already staged.
-        if name == "git_commit" && args.get("all").and_then(Value::as_bool).unwrap_or(false) {
-            return Outcome::err(
-                serde_json::json!({
-                    "ok": false,
-                    "code": "subagent_scope",
-                    "reason": "git_commit all:true stages and commits the whole tree, outside this subagent's declared write scope",
-                    "hint": "stage scoped paths instead, or spawn with wider paths",
-                })
-                .to_string(),
-            );
-        }
-        if name == "git_stage" && args.get("all").and_then(Value::as_bool).unwrap_or(false) {
-            return Outcome::err(
-                serde_json::json!({
-                    "ok": false,
-                    "code": "subagent_scope",
-                    "reason": "git_stage all:true stages the whole tree, outside this subagent's declared write scope",
-                    "hint": "stage scoped paths instead, or spawn with wider paths",
-                })
-                .to_string(),
-            );
-        }
-        if matches!(
-            name,
-            "write" | "edit" | "multi_edit" | "patch" | "git_stage"
-        ) {
+        if matches!(name, "write" | "edit" | "multi_edit" | "patch") {
             let outside = mutation_target_paths(ctx, name, args)
                 .into_iter()
                 .find(|target| !in_write_scope(target, allowed));
@@ -333,11 +302,6 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
         ),
         "git_status" => with_authorship(ctx, git::status(ctx, args)),
         "git_diff" => with_authorship(ctx, git::diff(ctx, args)),
-        "git_log" => git::log(ctx, args),
-        "git_show" => git::show(ctx, args),
-        "git_commit" => git::commit(ctx, args),
-        "git_stage" => git::stage(ctx, args),
-        "git_branch" => git::branch(ctx, args),
         "patch" => git::patch(ctx, args),
         "outline" => outline::outline(ctx, args),
         "webfetch" | "websearch" => Outcome::err("web tools must run through the async dispatcher"),

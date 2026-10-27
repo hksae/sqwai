@@ -668,8 +668,6 @@ fn is_parallel_read_only_call(call: &ToolCallReq) -> bool {
             | "ls"
             | "git_status"
             | "git_diff"
-            | "git_log"
-            | "git_show"
             | "webfetch"
             | "websearch"
     )

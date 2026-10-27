@@ -325,6 +325,11 @@ mod tests {
             "ast_grep",
             "test_impact",
             "think",
+            "git_log",
+            "git_show",
+            "git_commit",
+            "git_stage",
+            "git_branch",
         ];
         let retired_words = [
             "acceptance",

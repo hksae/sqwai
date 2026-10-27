@@ -153,12 +153,11 @@ fn subagent_write_scope_confines_file_mutations() {
     fs::remove_dir_all(&dir).ok();
 }
 
-/// The scope gate is a boundary, not a suggestion: bash redirects,
-/// `git_stage` paths and unbounded `all:true` commits obey it too.
-/// Pre-fix only write/edit/multi_edit/patch were confined — a scoped
-/// child wrote anywhere through `echo x > ../outside`.
+/// The scope gate is a boundary, not a suggestion: bash redirects obey
+/// it too. Pre-fix only write/edit/multi_edit/patch were confined — a
+/// scoped child wrote anywhere through `echo x > ../outside`.
 #[test]
-fn subagent_write_scope_confines_bash_git_and_commit_all() {
+fn subagent_write_scope_confines_bash_redirects() {
     let (mut ctx, dir) = proj();
     let created = plan_op(
         &mut ctx,
@@ -208,44 +207,6 @@ fn subagent_write_scope_confines_bash_git_and_commit_all() {
     let narrated = execute(&mut ctx, "bash", &json!({"command": "echo \"a > b\""}));
     assert!(narrated.ok, "{}", narrated.output);
 
-    // git_stage paths obey the scope; all:true is unbounded, refused.
-    // (`..` escapes die in the tool's own jail — also refused, other code.)
-    let stage_out = execute(&mut ctx, "git_stage", &json!({"paths": ["notes.txt"]}));
-    assert!(!stage_out.ok, "{}", stage_out.output);
-    assert!(
-        stage_out.output.contains("subagent_scope"),
-        "{}",
-        stage_out.output
-    );
-    let stage_escape = execute(&mut ctx, "git_stage", &json!({"paths": ["../outside.txt"]}));
-    assert!(!stage_escape.ok, "{}", stage_escape.output);
-    let stage_all = execute(&mut ctx, "git_stage", &json!({"all": true}));
-    assert!(!stage_all.ok, "{}", stage_all.output);
-    assert!(
-        stage_all.output.contains("subagent_scope"),
-        "{}",
-        stage_all.output
-    );
-
-    // git_commit all:true sweeps the whole tree, refused; a plain
-    // commit only seals the (gated) stage, so it passes the gate
-    let commit_all = execute(
-        &mut ctx,
-        "git_commit",
-        &json!({"message": "sweep", "all": true}),
-    );
-    assert!(!commit_all.ok, "{}", commit_all.output);
-    assert!(
-        commit_all.output.contains("subagent_scope"),
-        "{}",
-        commit_all.output
-    );
-    let commit_plain = execute(&mut ctx, "git_commit", &json!({"message": "seal"}));
-    assert!(
-        !commit_plain.output.contains("subagent_scope"),
-        "{}",
-        commit_plain.output
-    );
     fs::remove_dir_all(&dir).ok();
 }
 
@@ -1097,43 +1058,7 @@ fn multi_edit_is_atomic_on_failure() {
 }
 
 #[test]
-fn git_show_shows_commit_and_file_at_revision() {
-    let (mut ctx, dir) = proj();
-    std::process::Command::new("git")
-        .current_dir(&dir)
-        .args(["add", "."])
-        .status()
-        .unwrap();
-    let first = execute(&mut ctx, "git_commit", &json!({"message": "init"}));
-    assert!(first.ok, "{}", first.output);
-    fs::write(dir.join("README.md"), "# changed\n").unwrap();
-    std::process::Command::new("git")
-        .current_dir(&dir)
-        .args(["add", "."])
-        .status()
-        .unwrap();
-    let second = execute(&mut ctx, "git_commit", &json!({"message": "second"}));
-    assert!(second.ok, "{}", second.output);
-
-    // a commit: message, stat and patch
-    let show = execute(&mut ctx, "git_show", &json!({"commit": "HEAD~1"}));
-    assert!(show.ok, "{}", show.output);
-    assert!(show.output.contains("init"), "{}", show.output);
-    // a file at a revision
-    let file = execute(
-        &mut ctx,
-        "git_show",
-        &json!({"commit": "HEAD~1", "path": "README.md"}),
-    );
-    assert!(file.ok, "{}", file.output);
-    assert!(file.output.contains("# demo"), "{}", file.output);
-    // host-owned state is not readable through git either
-    let blocked = execute(&mut ctx, "git_show", &json!({"path": ".sqwai/plan.json"}));
-    assert!(!blocked.ok, "{}", blocked.output);
-}
-
-#[test]
-fn git_tools_and_patch_work_in_project_root() {
+fn git_status_diff_and_patch_work_in_project_root() {
     let (mut ctx, dir) = proj();
     let status = execute(&mut ctx, "git_status", &json!({}));
     assert!(status.ok, "{}", status.output);
@@ -1142,127 +1067,29 @@ fn git_tools_and_patch_work_in_project_root() {
     let diff = execute(&mut ctx, "git_diff", &json!({}));
     assert!(diff.ok, "{}", diff.output);
 
-    let log = execute(&mut ctx, "git_log", &json!({"count": 1}));
-    assert!(!log.ok);
-    assert!(
-        log.output.contains("does not have any commits"),
-        "{}",
-        log.output
-    );
-
-    let branches = execute(&mut ctx, "git_branch", &json!({"action": "current"}));
-    assert!(branches.ok, "{}", branches.output);
-
     std::process::Command::new("git")
         .current_dir(&dir)
         .args(["add", "."])
         .status()
         .unwrap();
-    let commit = execute(&mut ctx, "git_commit", &json!({"message": "init"}));
-    assert!(commit.ok, "{}", commit.output);
+    std::process::Command::new("git")
+        .current_dir(&dir)
+        .args(["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "init"])
+        .status()
+        .unwrap();
 
-    let log = execute(&mut ctx, "git_log", &json!({"count": 1}));
-    assert!(log.ok, "{}", log.output);
-    assert!(log.output.contains("init"), "{}", log.output);
     let patch = "diff --git a/README.md b/README.md\nindex 9daeafb..f3b0735 100644\n--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n-# demo\n+# patched\n";
     let applied = execute(&mut ctx, "patch", &json!({"patch": patch}));
     assert!(applied.ok, "{}", applied.output);
-    assert_eq!(
-        fs::read_to_string(dir.join("README.md"))
-            .unwrap()
-            .replace("\r\n", "\n"),
-        "# patched\n"
-    );
+    let readme = fs::read_to_string(dir.join("README.md")).unwrap();
+    assert_eq!(readme.trim_end(), "# patched");
 
     let rejected = execute(&mut ctx, "patch", &json!({"patch": "not a patch"}));
     assert!(!rejected.ok);
-    assert_eq!(
-        fs::read_to_string(dir.join("README.md"))
-            .unwrap()
-            .replace("\r\n", "\n"),
-        "# patched\n"
-    );
+    let readme = fs::read_to_string(dir.join("README.md")).unwrap();
+    assert_eq!(readme.trim_end(), "# patched");
 }
 
-#[test]
-fn git_commit_requires_message() {
-    let (mut ctx, _dir) = proj();
-    let result = execute(&mut ctx, "git_commit", &json!({}));
-    assert!(!result.ok);
-    assert!(result.output.contains("non-empty message"));
-}
-
-#[test]
-fn git_stage_stages_untracked_files_and_supports_reset() {
-    let (mut ctx, dir) = proj();
-    // Initially clean initial commit
-    let stage_init = execute(&mut ctx, "git_stage", &json!({"all": true}));
-    assert!(stage_init.ok, "{}", stage_init.output);
-    let commit_init = execute(&mut ctx, "git_commit", &json!({"message": "init"}));
-    assert!(commit_init.ok, "{}", commit_init.output);
-
-    // 1. Create untracked file and stage via paths
-    fs::write(dir.join("created.txt"), "hello untracked\n").unwrap();
-    let status_before = execute(&mut ctx, "git_status", &json!({}));
-    assert!(status_before.output.contains("?? created.txt"));
-
-    let stage_file = execute(&mut ctx, "git_stage", &json!({"paths": ["created.txt"]}));
-    assert!(stage_file.ok, "{}", stage_file.output);
-    let status_staged = execute(&mut ctx, "git_status", &json!({}));
-    assert!(status_staged.output.contains("A  created.txt"));
-
-    // 2. Unstage via reset
-    let unstage = execute(
-        &mut ctx,
-        "git_stage",
-        &json!({"action": "reset", "paths": ["created.txt"]}),
-    );
-    assert!(unstage.ok, "{}", unstage.output);
-    let status_unstaged = execute(&mut ctx, "git_status", &json!({}));
-    assert!(status_unstaged.output.contains("?? created.txt"));
-
-    // 3. Stage via all: true
-    let stage_all = execute(&mut ctx, "git_stage", &json!({"all": true}));
-    assert!(stage_all.ok, "{}", stage_all.output);
-    let commit = execute(
-        &mut ctx,
-        "git_commit",
-        &json!({"message": "commit created"}),
-    );
-    assert!(commit.ok, "{}", commit.output);
-
-    let status_clean = execute(&mut ctx, "git_status", &json!({}));
-    assert!(!status_clean.output.contains("created.txt"));
-
-    // 4. Validation errors
-    let bad_action = execute(
-        &mut ctx,
-        "git_stage",
-        &json!({"action": "invalid", "all": true}),
-    );
-    assert!(!bad_action.ok);
-    assert!(bad_action.output.contains("action must be add or reset"));
-
-    let no_args = execute(&mut ctx, "git_stage", &json!({}));
-    assert!(!no_args.ok);
-    assert!(
-        no_args
-            .output
-            .contains("requires either all: true or non-empty paths")
-    );
-
-    let forbidden_sqwai = execute(
-        &mut ctx,
-        "git_stage",
-        &json!({"paths": [".sqwai/something"]}),
-    );
-    assert!(!forbidden_sqwai.ok);
-    assert!(forbidden_sqwai.output.contains("host-owned state"));
-
-    let bad_path = execute(&mut ctx, "git_stage", &json!({"paths": ["../outside"]}));
-    assert!(!bad_path.ok);
-    assert!(bad_path.output.contains("bad path"));
-}
 #[test]
 fn tool_specs_are_stably_sorted() {
     let names: Vec<String> = tool_specs(false).iter().map(|t| t.name.clone()).collect();
@@ -1369,34 +1196,6 @@ fn max_steps_comes_from_the_config() {
     fs::remove_dir_all(&dir).ok();
 }
 
-/// `git_branch` advertises every action in every mode; mutating ones
-/// are refused at dispatch. Cache-stable schemas beat saving the model
-/// a refusal turn.
-#[test]
-fn git_branch_actions_are_identical_across_modes() {
-    let actions = |plan_mode: bool| {
-        tool_specs(plan_mode)
-            .into_iter()
-            .find(|spec| spec.name == "git_branch")
-            .expect("git_branch stays available for inspection")
-            .parameters["properties"]["action"]["enum"]
-            .clone()
-    };
-    assert_eq!(
-        actions(true),
-        json!(["list", "current", "create", "switch"])
-    );
-    assert_eq!(
-        actions(false),
-        json!(["list", "current", "create", "switch"])
-    );
-    assert!(is_mutating_call("git_branch", &json!({"action": "create"})));
-    assert!(!is_mutating_call("git_branch", &json!({"action": "list"})));
-}
-
-/// the guard is hash-tracked, so a file changed by `bash` since the
-/// last read has to be read again. With paths alone the model could edit
-/// content that was already gone.
 #[test]
 fn a_file_changed_after_reading_it_must_be_read_again() {
     let (mut ctx, dir) = proj();
