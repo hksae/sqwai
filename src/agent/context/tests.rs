@@ -900,3 +900,49 @@ fn agent_state_names_the_model_and_the_compaction_point() {
         "no window known"
     );
 }
+
+/// A run that starts hours after the last recorded action says so. Staleness
+/// of the tree is caught at edit time by hashes; staleness of *reading* is
+/// something only the model can undo, and it can only do that knowingly.
+#[test]
+fn anchor_says_when_the_session_was_idle() {
+    let root = temp_root("idle");
+    let stamp_session = |name: &str, offset_hours: i64| {
+        let mut events = crate::agent::events::EventLog::open(&root, name).unwrap();
+        events
+            .append("user_msg", serde_json::json!({"chars": 2}))
+            .unwrap();
+        let path = root
+            .join(".sqwai")
+            .join("events")
+            .join(format!("{name}.jsonl"));
+        let ts = (chrono::Local::now() - chrono::Duration::hours(offset_hours)).to_rfc3339();
+        let lines: Vec<String> = std::fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .map(|line| {
+                let mut record: serde_json::Value = serde_json::from_str(line).unwrap();
+                record["ts"] = serde_json::Value::String(ts.clone());
+                record.to_string()
+            })
+            .collect();
+        std::fs::write(&path, lines.join("
+") + "
+").unwrap();
+    };
+
+    stamp_session("idle-session", 30);
+    let rendered = anchor(&root, "idle-session");
+    assert!(
+        rendered.contains("resumed after 30h of silence"),
+        "{rendered}"
+    );
+
+    stamp_session("fresh-session", 0);
+    assert!(
+        !anchor(&root, "fresh-session").contains("resumed after"),
+        "a session with no pause claims nothing about time"
+    );
+    std::fs::remove_dir_all(root).ok();
+}
+

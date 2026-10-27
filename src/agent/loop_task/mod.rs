@@ -1128,6 +1128,17 @@ async fn run_agent(
             }
         };
 
+    // The turn block is built once per session; only its clock line may not
+    // freeze, or a run that crosses midnight keeps reporting yesterday.
+    let refresh_turn_date = |ts: &mut [SystemPart]| {
+        if let Some(part) = ts
+            .iter_mut()
+            .find(|p| p.text.starts_with("<turn_environment>"))
+        {
+            crate::prompts::env::refresh_date(&mut part.text);
+        }
+    };
+
     // The model's own runtime facts, refreshed on every request: a fallback
     // switch and a growing transcript both have to show up before the next
     // decision, not at the start of the turn.
@@ -1182,6 +1193,7 @@ async fn run_agent(
         // request: every result carrying it waters the next one down
         plan_nudged = false;
         refresh_agent_state(&mut turn_system, &current_model_key, prompt_size, &policy);
+        refresh_turn_date(&mut turn_system);
         // Compaction gate. History only: the provider's full request size
         // is observed here, but the gate must use
         // what compaction can actually remove — otherwise a big fixed

@@ -97,6 +97,30 @@ pub fn turn_facts(root: &Path) -> String {
     out
 }
 
+/// Rewrite the date line of a turn block. The block is built once per session
+/// and lives until the run ends, so a session that outlives midnight would go
+/// on asserting yesterday's date to the model.
+pub fn refresh_date(block: &mut String) {
+    let today = format!(
+        "Date: {}",
+        chrono::Local::now().format("%Y-%m-%d (%A)")
+    );
+    let mut lines: Vec<String> = block.lines().map(str::to_string).collect();
+    let mut changed = false;
+    for line in lines.iter_mut() {
+        if line.starts_with("Date: ") && *line != today {
+            *line = today.clone();
+            changed = true;
+            break;
+        }
+    }
+    if changed {
+        *block = lines.join("
+") + "
+";
+    }
+}
+
 /// Per-turn environment context is intentionally empty. A changing block
 /// before conversation history defeats provider prefix caches.
 pub fn runtime_context() -> String {
@@ -885,6 +909,24 @@ fn capture_inner(
 
 #[cfg(test)]
 mod tests {
+
+    /// The clock line of a turn block must not freeze with the block: a run
+    /// that crosses midnight reports today, and a fresh block is untouched.
+    #[test]
+    fn refresh_date_replaces_a_frozen_clock_line() {
+        let mut block = "<turn_environment>
+Date: 2000-01-01 (Saturday)
+Git: clean
+</turn_environment>
+".to_string();
+        super::refresh_date(&mut block);
+        let today = format!("Date: {}", chrono::Local::now().format("%Y-%m-%d (%A)"));
+        assert!(block.contains(&today), "{block}");
+        assert!(block.contains("Git: clean"), "{block}");
+        let settled = block.clone();
+        super::refresh_date(&mut block);
+        assert_eq!(block, settled, "a current date is not rewritten");
+    }
     use super::*;
 
     /// The dirty list names files, because a count without names was deleted

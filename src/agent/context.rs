@@ -143,6 +143,12 @@ pub fn anchor(root: &std::path::Path, session_id: &str) -> String {
             decisions.push(text.to_string());
         }
     }
+    if let Some(idle) = idle_since(&records) {
+        out.push_str(&format!(
+            "resumed after {idle} of silence: anything read before the pause may be stale
+"
+        ));
+    }
     changed.sort();
     changed.dedup();
     if changed.is_empty() {
@@ -1016,6 +1022,35 @@ Context: {} used of {} · ~{} free · history compacts at {}
         k_thousands(limit.saturating_sub(used)),
         k_thousands(policy.budget())
     )
+}
+
+/// How long the session slept before this run, when the last recorded event
+/// is hours away. Nothing in the transcript says "the tree moved on while you
+/// were gone", and a stale read is the failure that costs the most: the host
+/// catches it at edit time, but the agent can only re-check knowingly.
+fn idle_since(records: &[crate::agent::events::Record]) -> Option<String> {
+    const MIN_IDLE: chrono::Duration = chrono::Duration::hours(2);
+    let last = records
+        .iter()
+        .filter_map(|r| chrono::DateTime::parse_from_rfc3339(&r.ts).ok())
+        .max()?;
+    let gap = chrono::Local::now().signed_duration_since(last);
+    if gap < MIN_IDLE {
+        return None;
+    }
+    let hours = gap.num_hours();
+    let minutes = gap.num_minutes() % 60;
+    Some(if hours >= 48 {
+        format!("{}d", hours / 24)
+    } else if hours >= 1 {
+        if minutes == 0 {
+            format!("{hours}h")
+        } else {
+            format!("{hours}h{minutes}m")
+        }
+    } else {
+        format!("{minutes}m")
+    })
 }
 
 fn k_thousands(tokens: u64) -> String {
