@@ -1317,7 +1317,8 @@ fn plan_criteria_are_visible_and_non_blocking() {
     );
     assert_eq!(
         plan::open(&dir, &plan_id).unwrap().status,
-        plan::PlanStatus::Completed
+        plan::PlanStatus::Active,
+        "closing the last step must not end the plan"
     );
     fs::remove_dir_all(&dir).ok();
 }
@@ -1418,7 +1419,7 @@ fn soft_finish_closes_on_summary_alone() {
     assert!(done.ok, "{}", done.output);
     let finished_plan = plan::open(&dir, &plan_id).unwrap();
     assert_eq!(finished_plan.steps[0].status, plan::StepStatus::Done);
-    assert_eq!(finished_plan.status, plan::PlanStatus::Completed);
+    assert_eq!(finished_plan.status, plan::PlanStatus::Active);
     fs::remove_dir_all(&dir).ok();
 }
 

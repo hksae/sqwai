@@ -96,6 +96,13 @@ pub enum Op {
         #[serde(default)]
         reason: String,
     },
+    /// Declare the goal met. The only operation that ends a plan: closing the
+    /// last step leaves the plan open, because a finished list of steps is not
+    /// a finished task. `summary` must name what proves the goal done.
+    #[serde(alias = "complete")]
+    Close {
+        summary: String,
+    },
     /// Abandon the whole plan when the direction has changed or the
     /// specification is contradictory. `reason` must explain why (empty/thin
     /// reasons refused). The old plan stays on disk as `Abandoned` (history is
@@ -252,7 +259,7 @@ pub fn create(
         return Err(Rejection::new(
             "no_steps",
             "a plan needs at least one step",
-            "break the work into 3-6 steps",
+            "one step per unit of work you can see now; add the rest as the horizon opens",
         ));
     }
     if steps.iter().any(|s| s.title.trim().is_empty()) {
@@ -270,7 +277,7 @@ pub fn create(
                 steps.len(),
                 limits.max_steps
             ),
-            "merge steps, or ask the user to raise [plan].max_steps in the config",
+            "work in the steps you have and `add` later ones as they become clear; ask the user to raise [plan].max_steps only for a genuinely larger plan",
         ));
     }
 
@@ -347,6 +354,7 @@ pub fn apply(plan: &mut Plan, op: Op, limits: &Limits) -> Result<Applied, Reject
         ),
         Op::Finish { id, ids, summary } => finish(plan, &id, &ids, summary),
         Op::Cancel { id, reason } => cancel(plan, id.as_deref(), reason),
+        Op::Close { summary } => close(plan, summary),
         Op::Abandon { reason } => {
             let quoted = validate_surrender_reason(&reason, "abandoning a plan")?;
             abandon(plan);
@@ -483,19 +491,22 @@ fn finish(
     }
 
     let closed_label = targets.join(", ");
-    let all_closed = plan
-        .steps
-        .iter()
-        .all(|s| matches!(s.status, StepStatus::Done | StepStatus::Cancelled));
+    let all_closed = !plan.steps.is_empty()
+        && plan
+            .steps
+            .iter()
+            .all(|s| matches!(s.status, StepStatus::Done | StepStatus::Cancelled));
     if all_closed {
-        plan.status = PlanStatus::Completed;
-        plan.revision += 1;
-        return Ok(Applied::Completed {
-            message: format!(
-                "step {closed_label} done — all steps closed, plan {} completed",
+        // The plan stays open on purpose. A list of steps running out is not
+        // the goal being met: the two decisions have different consequences,
+        // and merging them is what made big tasks finish small.
+        return accept(
+            plan,
+            format!(
+                "step {closed_label} done — every step of plan {} is closed and nothing is open.                  Keep working with plan(op=\"add\", …), or end it with plan(op=\"close\",                  summary=\"what proves the goal met\")",
                 plan.id
             ),
-        });
+        );
     }
 
     let next_hint = match plan
@@ -517,6 +528,40 @@ fn finish(
              evidence do not"
         ),
     )
+}
+
+/// End the plan: every step must already be closed, and the summary must say
+/// what proves the goal met. Refusing an open step is the point — `close` is
+/// not an escape hatch out of unfinished work.
+fn close(plan: &mut Plan, summary: String) -> Result<Applied, Rejection> {
+    let summary = summary.trim().to_string();
+    if summary.is_empty() {
+        return reject(
+            plan,
+            "empty_summary",
+            "closing a plan needs a summary of what proves the goal met",
+            "one line: the check or artifact that shows the goal is done",
+        );
+    }
+    let open: Vec<String> = plan
+        .steps
+        .iter()
+        .filter(|s| !matches!(s.status, StepStatus::Done | StepStatus::Cancelled))
+        .map(|s| format!("{} \"{}\" [{}]", s.id, s.title, s.status.as_str()))
+        .collect();
+    if !open.is_empty() {
+        return reject(
+            plan,
+            "steps_open",
+            format!("steps still open: {}", open.join("; ")),
+            "keep working, or finish/cancel the open steps first — close is for a met goal",
+        );
+    }
+    plan.status = PlanStatus::Completed;
+    plan.revision += 1;
+    Ok(Applied::Completed {
+        message: format!("plan {} closed: {summary}", plan.id),
+    })
 }
 
 fn cancel(plan: &mut Plan, id: Option<&str>, reason: String) -> Result<Applied, Rejection> {
@@ -560,19 +605,19 @@ fn cancel(plan: &mut Plan, id: Option<&str>, reason: String) -> Result<Applied, 
 
     auto_advance(plan);
 
-    let all_closed = plan
-        .steps
-        .iter()
-        .all(|s| matches!(s.status, StepStatus::Done | StepStatus::Cancelled));
+    let all_closed = !plan.steps.is_empty()
+        && plan
+            .steps
+            .iter()
+            .all(|s| matches!(s.status, StepStatus::Done | StepStatus::Cancelled));
     if all_closed {
-        plan.status = PlanStatus::Completed;
-        plan.revision += 1;
-        return Ok(Applied::Completed {
-            message: format!(
-                "step {id} cancelled — all steps closed, plan {} completed",
+        return accept(
+            plan,
+            format!(
+                "step {id} cancelled — every step of plan {} is closed and nothing is open.                  Keep working with plan(op=\"add\", …), or end it with plan(op=\"close\",                  summary=\"what proves the goal met\")",
                 plan.id
             ),
-        });
+        );
     }
 
     let next_hint = match plan
@@ -613,7 +658,7 @@ fn add(
                 "adding a step would exceed the limit of {}",
                 limits.max_steps
             ),
-            "merge or cancel steps first, or ask the user to raise [plan].max_steps in the config",
+            "finish or cancel closed-enough steps first, or ask the user to raise [plan].max_steps",
         );
     }
     let index = match after.map(str::trim).filter(|s| !s.is_empty()) {

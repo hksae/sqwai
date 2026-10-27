@@ -198,7 +198,7 @@ fn undo_rejects_unknown_step() {
 }
 
 #[test]
-fn create_starts_first_step_and_finish_advances_then_completes() {
+fn create_starts_first_step_and_finish_advances_then_stays_open() {
     let mut plan = new_plan();
     assert_eq!(plan.step("1").unwrap().status, StepStatus::InProgress);
     assert_eq!(plan.step("2").unwrap().status, StepStatus::Pending);
@@ -228,10 +228,77 @@ fn create_starts_first_step_and_finish_advances_then_completes() {
             },
             &Limits::default(),
         ),
-        Ok(Applied::Completed { .. })
+        Ok(Applied::Updated { .. })
     ));
     assert_eq!(plan.step("2").unwrap().status, StepStatus::Done);
+    // the list has run out and the plan has not: closing the last step is not
+    // the goal being met
+    assert_eq!(plan.status, PlanStatus::Active);
+
+    assert!(matches!(
+        apply(
+            &mut plan,
+            Op::Close {
+                summary: "both halves run inside one binary".into()
+            },
+            &Limits::default(),
+        ),
+        Ok(Applied::Completed { .. })
+    ));
     assert_eq!(plan.status, PlanStatus::Completed);
+}
+
+/// `close` is a claim about the goal, not an exit: open steps refuse it, an
+/// empty summary refuses it, and until then an exhausted list stays open.
+#[test]
+fn close_demands_closed_steps_and_evidence() {
+    let mut plan = new_plan();
+    let err = apply(
+        &mut plan,
+        Op::Close {
+            summary: "done".into(),
+        },
+        &Limits::default(),
+    )
+    .unwrap_err();
+    assert_eq!(err.code, "steps_open");
+
+    for id in ["1", "2"] {
+        apply(
+            &mut plan,
+            Op::Finish {
+                id: id.into(),
+                ids: Vec::new(),
+                summary: format!("step {id} done"),
+            },
+            &Limits::default(),
+        )
+        .unwrap();
+    }
+    let empty = apply(
+        &mut plan,
+        Op::Close {
+            summary: "   ".into(),
+        },
+        &Limits::default(),
+    )
+    .unwrap_err();
+    assert_eq!(empty.code, "empty_summary");
+
+    assert!(matches!(
+        apply(
+            &mut plan,
+            Op::Add {
+                after: None,
+                title: "package the binary".into(),
+                check: None,
+            },
+            &Limits::default(),
+        ),
+        Ok(Applied::Updated { .. })
+    ));
+    assert_eq!(plan.steps.len(), 3);
+    assert_eq!(plan.status, PlanStatus::Active);
 }
 
 #[test]

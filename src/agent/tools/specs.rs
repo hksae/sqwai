@@ -396,20 +396,22 @@ stub. Optional `query` or `offset`/`limit` for part of a large result.",
         ToolDef {
             name: "plan",
             kind: Kind::Mutating,
-            description: "Manage the host plan for multi-step work. `create` sets goal and \
-3–6 steps (step 1 starts); constraints and criteria are optional notes. `op` may be omitted for \
-create when goal and steps are supplied. Criteria/constraints accept a string or an array; a step \
-may be a title string or {title, check}; XML-like tags in criteria/constraints are stripped. \
-Criteria are your done-notes and each step should carry a `check` — what proves it done. The host \
-runs nothing and enforces nothing. `finish` closes the current step and advances; `add` inserts \
-scope; `cancel` skips a step; `abandon` retires a plan whose direction changed. Use the live step \
+            description: "Manage the host plan for multi-step work. `create` sets the goal plus \
+the steps you can see now (step 1 starts); constraints and criteria are optional notes. `op` may \
+be omitted for create when goal and steps are supplied. Criteria/constraints accept a string or an \
+array; a step may be a title string or {title, check}; XML-like tags in criteria/constraints are \
+stripped. Criteria are your done-notes and each step should carry a `check` — what proves it done. \
+The host runs nothing and enforces nothing. `finish` closes the current step and advances; `add` \
+extends the plan as the horizon opens; `cancel` skips a step; `close` is the only thing that ends a \
+plan — it needs every step closed and a summary naming what proves the goal met; `abandon` retires \
+a plan whose direction changed. Keep one step in progress while work remains. Use the live step \
 ids; never re-read the plan through tools.",
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "op": {"type": "string", "enum": [
-                        "create", "finish", "add", "cancel", "abandon"
-                    ], "description": "create (default when goal and steps are supplied), finish, add, cancel, abandon"},
+                        "create", "finish", "add", "cancel", "close", "abandon"
+                    ], "description": "create (default when goal and steps are supplied), finish, add, cancel, close, abandon"},
                     "id": {"type": "string", "description": "finish / cancel: step number ('1', '2', '3', ...), NEVER the plan ULID. Optional for finish (defaults to the current in_progress step)"},
                     "ids": {
                         "type": "array",
@@ -433,7 +435,7 @@ ids; never re-read the plan through tools.",
                     },
                     "steps": {
                         "type": "array",
-                        "description": "create: initial high-level steps (3-6); each is a title string or {title, check}",
+                        "description": "create: the steps visible now, as high-level as you can keep them; extend later with add",
                         "items": {
                             "oneOf": [
                                 {"type": "string"},

@@ -462,18 +462,10 @@ fn apply_record(plan: &mut Plan, record: &crate::agent::events::Record) -> Resul
                 }
             }
             super::ops::auto_advance(plan);
-            if plan.steps.iter().all(|s| {
-                matches!(
-                    s.status,
-                    super::StepStatus::Done | super::StepStatus::Cancelled
-                )
-            }) {
-                plan.status = PlanStatus::Completed;
-            }
             plan.revision = plan.revision.saturating_add(1);
             Ok(true)
         }
-        Some("finish" | "cancel" | "add" | "join" | "abandon" | "propose_reset" | "block_plan") => {
+        Some("finish" | "cancel" | "add" | "join" | "close" | "abandon" | "propose_reset" | "block_plan") => {
             let op: Op = serde_json::from_value(serde_json::Value::Object(fields.clone()))
                 .map_err(|_| Rejection::new("replay_shape", "unparsable op intent", ""))?;
             apply(plan, op, &Limits::default()).map(|_| true)

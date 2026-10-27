@@ -526,28 +526,6 @@ pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
         }
         return Outcome::err("no active plan: create one with op=create first");
     }
-    if raw_op == "complete" {
-        if let Ok(Some(active)) = plan::open_active_for_session(&ctx.root, Some(&ctx.session_id)) {
-            let open: Vec<String> = active
-                .steps
-                .iter()
-                .filter(|s| {
-                    !matches!(
-                        s.status,
-                        plan::StepStatus::Done | plan::StepStatus::Cancelled
-                    )
-                })
-                .map(|s| s.id.clone())
-                .collect();
-            if !open.is_empty() {
-                return Outcome::err(format!(
-                    "steps still open ({}) — finish or cancel them; the plan completes automatically when the last step closes",
-                    open.join(", ")
-                ));
-            }
-        }
-        return Outcome::ok("all steps are closed and the plan is completed");
-    }
     let op: plan::Op = match serde_json::from_value(args.clone()) {
         Ok(op) => op,
         Err(e) => {

@@ -29,6 +29,16 @@ pub fn render_status(plan: &Plan) -> String {
     let c = plan.counts();
     let mut out = String::new();
     out.push_str(&format!("status: {}\n", status_word(plan.status)));
+    if plan.status == PlanStatus::Active
+        && !plan.steps.is_empty()
+        && c.in_progress == 0
+        && c.pending == 0
+        && c.reopened == 0
+    {
+        // The step list is empty and the plan is not: say so in the block the
+        // model reads every turn, instead of letting silence read as a finish.
+        out.push_str("no open steps: extend with plan(op=\"add\", …), or close the plan with plan(op=\"close\", summary=…) when the goal is met\n");
+    }
     out.push_str(&format!(
         "steps: {} done · {} in progress · {} pending · {} cancelled\n",
         c.done,
