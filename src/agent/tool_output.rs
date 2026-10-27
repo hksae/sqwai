@@ -62,6 +62,15 @@ pub fn observe_bytes_per_token(total_bytes: u64, prompt_tokens: u64) -> Option<u
     Some((total_bytes / prompt_tokens).clamp(MIN_BYTES_PER_TOKEN, MAX_BYTES_PER_TOKEN))
 }
 
+/// Granularity the immovable bytes are rounded down to before they shrink the
+/// pool's window. One assistant turn's replayed ciphertext is tens of kilobytes,
+/// and a threshold that wobbles by that much moves the clear boundary *backwards*
+/// — old stubs turn back into text, the head of the transcript is rewritten, and
+/// everything behind it stops matching the provider's prefix cache. In a live
+/// session the cleared count went 205 → 191 → 205 in 22 seconds and the cached
+/// share fell from 99.9% to 6.7% on exactly that step.
+pub const FIXED_BUCKET_BYTES: usize = 128 * 1024;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WireBudget {
     pub trigger_bytes: usize,
@@ -97,7 +106,8 @@ impl WireBudget {
         }
         let bpt = bytes_per_token.clamp(MIN_BYTES_PER_TOKEN, MAX_BYTES_PER_TOKEN);
         let window_bytes = (context_limit as usize).saturating_mul(bpt as usize);
-        let free = window_bytes.saturating_sub(fixed_bytes);
+        let fixed = fixed_bytes.saturating_sub(fixed_bytes % FIXED_BUCKET_BYTES);
+        let free = window_bytes.saturating_sub(fixed);
         // The same 60/35/10 split the window used to get whole, now taken from
         // only what the pool may occupy. Floors apply while the free space can
         // afford them: a model whose request is already full must still keep
@@ -853,7 +863,7 @@ mod tests {
                 full.keep_bytes,
                 full.min_clear_bytes
             ),
-            (168_000, 140_000, 65_536),
+            (221_184, 184_320, 65_536),
             "a nearly full request leaves the pool a quarter of the window"
         );
 
@@ -867,12 +877,12 @@ mod tests {
 
         // The same pool against a request whose window is already mostly spent
         // on conversation the host cannot clear.
-        let mut crowded = vec![Message::new(Role::User, "c".repeat(760_000))];
+        let mut crowded = vec![Message::new(Role::User, "c".repeat(880_000))];
         crowded.extend(messages);
         let cleared = cleared_indices_with_limit(&crowded, 256_000, DEFAULT_BYTES_PER_TOKEN);
         assert!(
             !cleared.is_empty(),
-            "760 KB of history must cost the oldest results their place"
+            "880 KB of history must cost the oldest results their place"
         );
         assert!(
             cleared
@@ -913,7 +923,7 @@ mod tests {
                 assumed.keep_bytes,
                 assumed.min_clear_bytes
             ),
-            (168_000, 140_000, 65_536)
+            (221_184, 184_320, 65_536)
         );
         assert_eq!(
             (
@@ -921,8 +931,27 @@ mod tests {
                 observed.keep_bytes,
                 observed.min_clear_bytes
             ),
-            (782_400, 393_216, 130_400),
+            (786_432, 393_216, 131_072),
             "at the real ratio the same request is nowhere near full"
+        );
+    }
+
+    /// A turn that adds one big ciphertext blob must not move the clear
+    /// boundary. Observed live: `reasoning` 5,707 → 35,800 changed the free space,
+    /// which changed the step, which un-did 14 already-cleared results — the head
+    /// of the transcript was rewritten and the cached share fell from 99.9% to
+    /// 6.7% inside 22 seconds.
+    #[test]
+    fn immovable_bytes_move_the_window_only_in_whole_buckets() {
+        let before = WireBudget::for_request(256_000, 700_000, DEFAULT_BYTES_PER_TOKEN);
+        let after = WireBudget::for_request(256_000, 780_000, DEFAULT_BYTES_PER_TOKEN);
+        assert_eq!(before, after, "one bucket of growth changes nothing");
+        let crossed = WireBudget::for_request(256_000, 800_000, DEFAULT_BYTES_PER_TOKEN);
+        assert!(
+            crossed.trigger_bytes < after.trigger_bytes,
+            "a full bucket of growth moves the window: {:?} vs {:?}",
+            crossed.trigger_bytes,
+            after.trigger_bytes
         );
     }
 

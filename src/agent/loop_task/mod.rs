@@ -1511,8 +1511,13 @@ async fn run_agent(
             // at the old flat 4, a 256k model was budgeted as a 1 MB request when
             // its own accounting put 1,189,643 bytes at 144,424 tokens — results
             // were thrown away at a third of the context.
-            if let Some(ratio) =
-                crate::agent::tool_output::observe_bytes_per_token(
+            //
+            // Learned once per run and then kept: the ratio depends on what the
+            // request happens to carry, so re-reading it each turn moved the clear
+            // threshold, and a threshold that moves backwards rewrites the head of
+            // the transcript and kills the provider's prefix cache.
+            if policy.bytes_per_token == crate::agent::tool_output::DEFAULT_BYTES_PER_TOKEN
+                && let Some(ratio) = crate::agent::tool_output::observe_bytes_per_token(
                     breakdown.total_bytes,
                     usage.prompt_tokens,
                 )
