@@ -39,7 +39,11 @@ pub(super) fn view(ctx: &mut ToolCtx, args: &Value) -> Outcome {
         Ok(bytes) => bytes,
         Err(e) => return Outcome::err(format!("cannot read {}: {e}", path.display())),
     };
-    let prepared = match media::prepare(&bytes, &path.to_string_lossy()) {
+    let edge = args["max_edge"]
+        .as_u64()
+        .map(|v| (v as u32).clamp(media::MIN_VIEW_EDGE, media::MAX_EDGE))
+        .unwrap_or(media::MAX_EDGE);
+    let prepared = match media::prepare_at(&bytes, &path.to_string_lossy(), edge) {
         Ok(prepared) => prepared,
         Err(e) => return Outcome::err(e),
     };
@@ -96,6 +100,28 @@ mod tests {
             out.output
         );
         assert!(crate::media::load(image).is_ok());
+    }
+
+    /// A cheap overview must not be mistaken for the full copy already in
+    /// context: the renditions differ, so both travel.
+    #[test]
+    fn a_small_edge_is_its_own_rendition() {
+        let dir = project();
+        std::fs::write(
+            dir.path().join("big.png"),
+            crate::media::test_png(1600, 900),
+        )
+        .unwrap();
+        let mut ctx = ToolCtx::new(dir.path());
+        let overview = view(&mut ctx, &json!({"path": "big.png", "max_edge": 400}));
+        assert!(overview.ok, "{}", overview.output);
+        assert_eq!((overview.images[0].width, overview.images[0].height), (400, 225));
+        ctx.note_visible_image(&overview.images[0].id);
+
+        let full = view(&mut ctx, &json!({"path": "big.png"}));
+        assert!(full.ok, "{}", full.output);
+        assert_eq!(full.images.len(), 1, "the full copy must still travel");
+        assert_eq!(full.images[0].width, 1568);
     }
 
     #[test]

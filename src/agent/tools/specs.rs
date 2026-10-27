@@ -85,7 +85,8 @@ format, size and cost.",
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "image path relative to the project root"}
+                    "path": {"type": "string", "description": "image path relative to the project root"},
+                    "max_edge": {"type": "integer", "minimum": 128, "maximum": 1568, "description": "long edge of the rendition, default 1568"}
                 },
                 "required": ["path"]
             }),

@@ -22,6 +22,9 @@ pub const MAX_SOURCE_PIXELS: u64 = 40_000_000;
 /// Long edge of the stored rendition. Fits Anthropic's standard tier and
 /// OpenAI's high-detail patch budget without server-side downscaling.
 pub const MAX_EDGE: u32 = 1568;
+/// Floor for a deliberately small rendition: below this a screenshot stops
+/// answering either question — layout or text.
+pub const MIN_VIEW_EDGE: u32 = 128;
 /// Stored-rendition cap; matches the strictest documented provider limit
 /// (5 MB base64 on Bedrock/Vertex) with headroom.
 pub const MAX_RENDITION_BYTES: usize = 5 * 1024 * 1024;
@@ -44,9 +47,16 @@ fn is_supported_format(format: ImageFormat) -> bool {
     )
 }
 
-/// Decode, orient, bound and re-encode one image. Re-encoding is also the
-/// metadata scrub: EXIF (including GPS) never survives into the rendition.
+/// Decode, orient, bound and re-encode one image at the full budget.
 pub fn prepare(source: &[u8], name: &str) -> Result<Prepared, String> {
+    prepare_at(source, name, MAX_EDGE)
+}
+
+/// The same, bounded to a requested long edge. Cost is quadratic in the edge,
+/// so a layout check at 392 px is ~16× cheaper than the full rendition; the
+/// request can only lower the cap, never raise it above `MAX_EDGE`.
+pub fn prepare_at(source: &[u8], name: &str, max_edge: u32) -> Result<Prepared, String> {
+    let max_edge = max_edge.clamp(MIN_VIEW_EDGE, MAX_EDGE);
     if source.is_empty() {
         return Err("image file is empty".to_string());
     }
@@ -76,7 +86,7 @@ pub fn prepare(source: &[u8], name: &str) -> Result<Prepared, String> {
     let mut img =
         DynamicImage::from_decoder(decoder).map_err(|e| format!("cannot decode image: {e}"))?;
     img.apply_orientation(orientation);
-    let img = bound_long_edge(img);
+    let img = bound_long_edge(img, max_edge);
     let (bytes, media_type) = encode(img, format)?;
     let attachment = ImageAttachment {
         id: hex_digest(&bytes),
@@ -104,13 +114,13 @@ pub fn prepare(source: &[u8], name: &str) -> Result<Prepared, String> {
     })
 }
 
-fn bound_long_edge(img: DynamicImage) -> DynamicImage {
+fn bound_long_edge(img: DynamicImage, max_edge: u32) -> DynamicImage {
     let (width, height) = (img.width(), img.height());
     let long = width.max(height);
-    if long <= MAX_EDGE {
+    if long <= max_edge {
         return img;
     }
-    let scale = f64::from(MAX_EDGE) / f64::from(long);
+    let scale = f64::from(max_edge) / f64::from(long);
     let width = ((f64::from(width) * scale).round() as u32).max(1);
     let height = ((f64::from(height) * scale).round() as u32).max(1);
     img.resize(width, height, image::imageops::FilterType::Lanczos3)
@@ -562,6 +572,22 @@ mod tests {
             .write_to(&mut Cursor::new(&mut out), ImageFormat::Png)
             .unwrap();
         out
+    }
+
+    /// The knob the model needs to spend less: the cap lowers, and a request
+    /// above the budget still lands on the budget rather than upscaling.
+    #[test]
+    fn prepare_at_lowers_the_cap_and_never_raises_it() {
+        let bytes = png(2000, 1000);
+        let small = prepare_at(&bytes, "wide.png", 400).unwrap();
+        assert_eq!((small.attachment.width, small.attachment.height), (400, 200));
+        assert_ne!(small.attachment.id, prepare(&bytes, "wide.png").unwrap().attachment.id);
+        assert!(small.bytes.len() < prepare(&bytes, "wide.png").unwrap().bytes.len());
+
+        let over = prepare_at(&bytes, "wide.png", 9000).unwrap();
+        assert_eq!(over.attachment.width, 1568);
+        let under = prepare_at(&bytes, "wide.png", 8).unwrap();
+        assert_eq!(under.attachment.width, 128);
     }
 
     #[test]
