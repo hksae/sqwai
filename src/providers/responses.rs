@@ -10,6 +10,9 @@ use crate::config::{EffortLevel, ResolvedProvider};
 
 #[derive(Clone)]
 pub struct ResponsesProvider {
+    /// Declared by the provider's owner, not inferred from the URL: see
+    /// `ProviderConfig::continuation`.
+    continuation: bool,
     http: reqwest::Client,
     url: String,
     api_key: Option<String>,
@@ -252,6 +255,7 @@ impl ResponsesProvider {
             format!("{base}/v1/responses")
         };
         Ok(Self {
+            continuation: p.continuation,
             http,
             url,
             api_key: p.api_key.clone(),
@@ -267,9 +271,9 @@ impl Provider for ResponsesProvider {
             // `previous_response_id` and answers from the single message we sent
             // it lost 335 turns of work silently: the call succeeded, the model
             // simply had no memory, and the host had no way to know.
-            // Continuation is therefore off until a host is documented to keep
-            // its chain — which is a capability decision, not a URL guess.
-            previous_response: false,
+            // Continuation is therefore off unless the provider's owner declares
+            // that this endpoint keeps its chain.
+            previous_response: self.continuation,
             ..Default::default()
         }
     }

@@ -115,6 +115,7 @@ async fn collect(url: String) -> Vec<StreamEvent> {
         format: crate::config::WireFormat::Openai,
         base_url: url,
         api_key: Some("k".into()),
+        continuation: false,
     })
     .unwrap();
     p.stream_chat(plain_request())
@@ -180,6 +181,7 @@ async fn the_body_carries_the_declared_level() {
             format: crate::config::WireFormat::Openai,
             base_url: url,
             api_key: Some("k".into()),
+            continuation: false,
         })
         .unwrap();
         let _: Vec<_> = {
@@ -460,6 +462,7 @@ fn sanitize_drops_fields_a_gateway_does_not_support() {
         format: crate::config::WireFormat::Openai,
         base_url: "http://localhost:11434/v1".into(),
         api_key: None,
+        continuation: false,
     })
     .unwrap();
     let mut req = ChatRequest {

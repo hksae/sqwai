@@ -1264,6 +1264,7 @@ mod connection_tests {
             format,
             base_url,
             api_key,
+            continuation: false,
         }
     }
 

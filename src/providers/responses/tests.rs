@@ -49,9 +49,9 @@ async fn collect(url: String) -> Vec<StreamEvent> {
         format: crate::config::WireFormat::Responses,
         base_url: url,
         api_key: Some("k".into()),
+        continuation: false,
     })
-    .unwrap();
-    let req = ChatRequest {
+    .unwrap();    let req = ChatRequest {
         model_id: "gpt-x".into(),
         system: vec![],
         messages: vec![Message::new(Role::User, "go")],
@@ -388,6 +388,7 @@ fn opencode_gateway_is_stateless_no_continuation_offered() {
         format: crate::config::WireFormat::Responses,
         base_url: "https://opencode.ai/zen/go/v1".into(),
         api_key: None,
+        continuation: false,
     })
     .unwrap();
     assert!(
@@ -442,6 +443,7 @@ async fn response_failed_event_yields_err() {
         format: crate::config::WireFormat::Responses,
         base_url: url,
         api_key: Some("k".into()),
+        continuation: false,
     })
     .unwrap();
     let req = ChatRequest {
@@ -478,6 +480,7 @@ async fn response_failed_event_carries_its_class() {
             format: crate::config::WireFormat::Responses,
             base_url: url,
             api_key: Some("k".into()),
+            continuation: false,
         })
         .unwrap();
         let req = ChatRequest {
@@ -869,5 +872,31 @@ fn tool_documents_use_the_function_call_output_array() {
             .as_str()
             .unwrap()
             .starts_with("data:application/pdf;base64,")
+    );
+}
+/// A Responses endpoint is not proof of a stored chain. A live gateway accepted
+/// `previous_response_id`, answered from the one message we sent it, and the
+/// session lost 335 turns with no error anywhere. The flag is the owner's
+/// declaration, and its absence means the transcript travels every request.
+#[test]
+fn continuation_is_a_declaration_not_a_url_guess() {
+    let for_base = |base: &str, continuation: bool| {
+        ResponsesProvider::new(&ResolvedProvider {
+            name: "p".into(),
+            format: crate::config::WireFormat::Responses,
+            base_url: base.into(),
+            api_key: Some("k".into()),
+            continuation,
+        })
+        .unwrap()
+        .capabilities()
+    };
+    assert!(
+        !for_base("https://api.pateway.ai/v1", false).previous_response,
+        "the default keeps the transcript in our hands"
+    );
+    assert!(
+        for_base("https://api.openai.com/v1", true).previous_response,
+        "a declared host gets its reference honoured"
     );
 }

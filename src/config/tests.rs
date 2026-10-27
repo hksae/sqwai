@@ -304,6 +304,32 @@ fn legacy_thinking_keys_still_load() {
     assert_eq!(m.effort, EffortLevel::High);
 }
 
+/// A provider that says nothing about continuation gets the safe answer. The
+/// field used to default to `true` and be read by nobody, which promised a
+/// saving and delivered none — and a host that accepts `previous_response_id`
+/// while storing nothing would have been trusted by default the day it was
+/// wired.
+#[test]
+fn continuation_defaults_to_off_and_is_only_what_the_owner_declares() {
+    let quiet: ProviderConfig = toml::from_str(
+        "format = \"responses\"
+base_url = \"https://api.pateway.ai/v1\"
+",
+    )
+    .unwrap();
+    assert!(!quiet.continuation, "no declaration means no chain");
+    let declared: ProviderConfig = toml::from_str(
+        "format = \"responses\"
+base_url = \"https://api.openai.com/v1\"
+continuation = true
+",
+    )
+    .unwrap();
+    assert!(
+        declared.continuation,
+        "an owner who checked the endpoint can turn it on"
+    );
+}
 #[test]
 fn config_roundtrip() {
     let cfg = Config::default();

@@ -511,6 +511,7 @@ async fn collect(url: String) -> Vec<StreamEvent> {
         format: crate::config::WireFormat::Anthropic,
         base_url: url,
         api_key: Some("k".into()),
+        continuation: false,
     })
     .unwrap();
     let req = ChatRequest {

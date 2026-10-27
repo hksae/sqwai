@@ -241,18 +241,19 @@ pub struct ProviderConfig {
     /// `<PROVIDER>_API_KEY` convention
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key_env: Option<String>,
-    /// Continue from the provider's copy of the conversation when the wire
-    /// format documents a reference for it, instead of resending the
-    /// transcript. Cheaper — a measured 92% prompt-cache hit — but it hands
-    /// the context to the provider, and `capabilities()` only knows what the
-    /// format documents, not what the endpoint behind it actually keeps.
-    /// Relays have been seen accepting the reference and storing nothing.
+    /// Continue from the provider's copy of the conversation instead of
+    /// resending the transcript. Off unless the owner says this endpoint really
+    /// keeps it: a live session on a Responses gateway that accepted
+    /// `previous_response_id` and stored nothing forgot 335 turns silently —
+    /// the call succeeded, so no error ever arrived to disable it. What is
+    /// cheaper about it is also what is handed over: the whole context, to the
+    /// provider's storage and its retention policy.
     #[serde(default = "default_continuation")]
     pub continuation: bool,
 }
 
 fn default_continuation() -> bool {
-    true
+    false
 }
 
 impl ProviderConfig {
@@ -1456,6 +1457,8 @@ pub struct ResolvedProvider {
     pub format: WireFormat,
     pub base_url: String,
     pub api_key: Option<String>,
+    /// Whether this endpoint was declared to keep the conversation server-side.
+    pub continuation: bool,
 }
 
 #[derive(Debug)]
@@ -1944,6 +1947,7 @@ impl Config {
             format: pc.format,
             base_url: pc.base_url.clone(),
             api_key: pc.effective_api_key(&m.provider),
+            continuation: pc.continuation,
         })
     }
 

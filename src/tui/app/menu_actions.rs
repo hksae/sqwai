@@ -345,6 +345,7 @@ impl App {
             format: pc.format,
             base_url: pc.base_url.clone(),
             api_key: pc.effective_api_key(&name),
+            continuation: pc.continuation,
         };
         let (tx, rx) = std::sync::mpsc::channel();
         self.provider_check_rx = Some((name.clone(), rx));
