@@ -57,7 +57,7 @@ fn tool_rows_read_as_flat_one_liners_with_live_tail() {
     // the live status row is the tail of the transcript itself, not a strip
     // above the input
     assert!(
-        text.contains("working · esc to interrupt"),
+        text.contains("working"),
         "the working row tails the transcript: {text}"
     );
     // clicking the done row expands its output instead of folding anything
@@ -750,7 +750,7 @@ fn live_turn_shows_tool_rows_and_working_tail() {
     // the live status lives in the row above the input, never in the
     // transcript: the working row sits under the live work it describes
     assert!(
-        text.contains("working · esc to interrupt"),
+        text.contains("working"),
         "working row in the transcript: {text}"
     );
 }
@@ -766,7 +766,7 @@ fn a_turn_with_nothing_visible_yet_still_shows_the_working_line() {
     app.rebuild_cache(80);
     let text = rendered(&app);
     assert!(
-        text.contains("working · 0s · esc to interrupt"),
+        text.contains("working · 0s"),
         "the transcript itself says what is happening: {text}"
     );
     // an empty live assistant row changes nothing: still waiting
@@ -776,7 +776,7 @@ fn a_turn_with_nothing_visible_yet_still_shows_the_working_line() {
     });
     app.rebuild_cache(80);
     assert!(
-        rendered(&app).contains("esc to interrupt"),
+        rendered(&app).contains("working"),
         "still one working row: {}",
         rendered(&app)
     );
@@ -794,7 +794,7 @@ fn a_turn_with_nothing_visible_yet_still_shows_the_working_line() {
     app.rebuild_cache(80);
     let frame = render_to_string(&mut app, 100, 30);
     assert_eq!(
-        frame.matches("esc to interrupt").count(),
+        frame.matches("working").count(),
         1,
         "one working row per frame: {frame}"
     );

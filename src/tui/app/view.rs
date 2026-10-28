@@ -2237,15 +2237,18 @@ pub(super) fn blank() -> Line<'static> {
     Line::from(vec![Span::styled(String::new(), Theme::base())])
 }
 
-/// The live tail row of the transcript: what the agent is doing right now,
-/// how long this turn has run, and how to stop it. The marker is the tool dot
-/// breathing in whites — the same glyph a finished row wears, so nothing moves
-/// when work closes. The paint stays static: the word already changes when the
-/// phase changes, so a wave over it would be decoration.
+/// The live tail row of the transcript: what the agent is doing right now and
+/// how long this turn has run. The marker cycles through the `sand` family (see
+/// `/test anim`); the paint stays static — the word already changes when the
+/// phase changes, so a wave over it would be decoration. No stop hint here: the
+/// row says what is happening, not how to intervene.
 pub(super) fn working_line(thinking: bool, elapsed_s: Option<u64>, tick: usize) -> Line<'static> {
     let brand = |c: (u8, u8, u8)| Style::new().fg(Color::Rgb(c.0, c.1, c.2));
     let mut spans = vec![
-        Span::styled("• ", working_dot_style(tick)),
+        Span::styled(
+            format!("{} ", crate::tui::anim::working_mark(tick)),
+            brand(crate::tui::art::CORAL_START),
+        ),
         Span::styled(
             if thinking { "thinking" } else { "working" },
             brand(crate::tui::art::CORAL_MUTED),
@@ -2254,7 +2257,6 @@ pub(super) fn working_line(thinking: bool, elapsed_s: Option<u64>, tick: usize) 
     if let Some(secs) = elapsed_s {
         spans.push(Span::styled(format!(" · {secs}s"), Theme::dim()));
     }
-    spans.push(Span::styled(" · esc to interrupt", Theme::dim()));
     Line::from(spans)
 }
 
