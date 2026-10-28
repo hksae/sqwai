@@ -41,7 +41,8 @@ fn bash_description() -> &'static str {
             "Run a shell command in the project directory. The shell here is {shell}: use its \
 syntax. Destructive or risky shapes need approval or are refused — never work around that. \
 Long output is truncated to a tail with the full log path. Use background=true for long jobs; \
-wait with bash_output."
+wait with bash_output. Files read or searched through the shell stay unregistered: `write` and \
+`edit` still require a `read` of the file first."
         )
     })
 }
@@ -52,7 +53,8 @@ fn defs() -> Vec<ToolDef> {
             name: "read",
             kind: Kind::ReadOnly,
             description: "Read one or more files. Modes: `file_path` with `offset`/`limit` \
-(200–500-line windows; a large file's first read carries its outline); `file_path` with \
+(200–500-line windows; a large file's first read carries its outline); `ranges` \
+(\"40-90,560-600\") for several windows of one file in one call; `file_path` with \
 `symbols`/`symbol` for exact AST bodies; `paths` (up to 16) to fuse reads. Required once \
 before `replace_all` edits and overwrites; repeat reads of unchanged windows return a pointer.",
             parameters: json!({
@@ -64,6 +66,7 @@ before `replace_all` edits and overwrites; repeat reads of unchanged windows ret
                         "items": {"type": "string"},
                         "description": "optional list of up to 16 file paths to read in a single fused call"
                     },
+                    "ranges": {"type": "string", "description": "optional 1-based inclusive windows of file_path, e.g. \"40-90,560-600\" (up to 8)"},
                     "symbol": {"type": "string", "description": "optional function/struct/method name to extract via tree-sitter AST"},
                     "symbols": {
                         "type": "array",
@@ -152,12 +155,18 @@ mismatch); replace_all needs one. Never edit on a stale read — the host refuse
         ToolDef {
             name: "glob",
             kind: Kind::ReadOnly,
-            description: "Find files by name when you know its shape but not its place: src/**/*.rs, **/*test*.py. Respects .gitignore.",
+            description: "Find files by name when you know its shape but not its place: \
+src/**/*.rs, **/*test*.py. Respects .gitignore. `sort` ranks the list (mtime newest first by \
+default, also lines, size, name, none) and `stats` adds the line and byte columns, so one call \
+answers which files in a tree are biggest, longest or most recently touched.",
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "pattern": {"type": "string"},
-                    "path": {"type": "string", "description": "base dir, default project root"}
+                    "path": {"type": "string", "description": "base dir, default project root"},
+                    "sort": {"type": "string", "enum": ["mtime", "lines", "size", "name", "none"], "description": "ranking of the list (default mtime, newest first)"},
+                    "limit": {"type": "integer", "description": "max files to return (default 300)"},
+                    "stats": {"type": "boolean", "description": "print the line and byte columns for each returned file"}
                 },
                 "required": ["pattern"]
             }),
@@ -166,14 +175,18 @@ mismatch); replace_all needs one. Never edit on a stale read — the host refuse
             name: "grep",
             kind: Kind::ReadOnly,
             description: "Regex search over file contents. Returns file:line: text matches. \
-Pass context:N for N surrounding lines per match (like grep -C) so a follow-up read is rarely needed.",
+Pass context:N for N surrounding lines per match (like grep -C) so a follow-up read is rarely needed. \
+`output_mode` narrows the answer to where, not what: files (one matching path per line) or count \
+(matches per file plus a total). `exclude` skips paths matching its glob patterns.",
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "pattern": {"type": "string"},
                     "path": {"type": "string", "description": "dir or file to search"},
                     "include": {"type": "string", "description": "filename glob filter, e.g. *.rs"},
-                    "context": {"type": "integer", "description": "surrounding lines per match, like grep -C (default 0)"}
+                    "exclude": {"type": "string", "description": "comma-separated glob patterns to skip, e.g. \"*.snap,target/**\""},
+                    "context": {"type": "integer", "description": "surrounding lines per match, like grep -C (default 0)"},
+                    "output_mode": {"type": "string", "enum": ["content", "files", "count"], "description": "content (default) shows matches; files lists matching paths only; count gives matches per file"}
                 },
                 "required": ["pattern"]
             }),
@@ -583,7 +596,10 @@ fn call_summary_raw(name: &str, args: &Value) -> String {
         "ls" => s("path"),
         "read" => {
             let base = s("file_path");
-            if !base.is_empty() {
+            let ranges = args["ranges"].as_str().unwrap_or_default();
+            if !base.is_empty() && !ranges.is_empty() {
+                format!("{base} · {ranges}")
+            } else if !base.is_empty() {
                 base
             } else if let Some(arr) = args["paths"].as_array() {
                 let names: Vec<&str> = arr.iter().filter_map(|v| v.as_str()).take(3).collect();
@@ -633,7 +649,20 @@ fn call_summary_raw(name: &str, args: &Value) -> String {
         }
         "bash_kill" => format!("job {}", args["id"].as_u64().unwrap_or(0)),
         "sleep" => format!("{}s", args["seconds"].as_u64().unwrap_or(0)),
-        "glob" | "grep" => s("pattern"),
+        "glob" => {
+            let base = s("pattern");
+            match args["sort"].as_str().filter(|sort| *sort != "mtime") {
+                Some(sort) => format!("{base} by {sort}"),
+                None => base,
+            }
+        }
+        "grep" => {
+            let base = s("pattern");
+            match args["output_mode"].as_str().filter(|mode| *mode != "content") {
+                Some(mode) => format!("{base} · {mode}"),
+                None => base,
+            }
+        }
         "outline" => {
             let path = s("path");
             if let Some(d) = args["max_depth"].as_u64() {

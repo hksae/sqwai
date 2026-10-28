@@ -185,6 +185,14 @@ pub(crate) fn diff_counts(diff: &str) -> (usize, usize) {
 }
 
 pub(super) fn read(ctx: &mut ToolCtx, raw: &str, args: &serde_json::Value) -> Outcome {
+    // Several exact windows of one file in a single call. Without this the
+    // model reached for `sed -n '40,90p;560,600p'`, and a shell read leaves no
+    // entry in the read ledger, so the write gate stayed shut afterwards.
+    if let Some(spec) = args.get("ranges").and_then(|v| v.as_str())
+        && !spec.trim().is_empty()
+    {
+        return read_ranges(ctx, raw, spec);
+    }
     // Fused multi-file read (`paths: ["src/a.rs", "src/b.rs", ...]`).
     if let Some(arr) = args.get("paths").and_then(|v| v.as_array()) {
         let mut path_list: Vec<String> = Vec::new();
@@ -228,6 +236,78 @@ pub(super) fn read(ctx: &mut ToolCtx, raw: &str, args: &serde_json::Value) -> Ou
     }
 
     read_single(ctx, raw, args)
+}
+
+/// `ranges: "40-90,560-600"` — each window goes through the same single-window
+/// path, so the read ledger, the repeat-read stub and the size caps all keep
+/// working exactly as they do for one `offset`/`limit` read.
+fn read_ranges(ctx: &mut ToolCtx, raw: &str, spec: &str) -> Outcome {
+    const MAX_RANGES: usize = 8;
+    let window = ctx.tools.read.window.clamp(1, 10_000);
+    let mut wanted: Vec<(usize, usize)> = Vec::new();
+    for part in spec.split([',', ' ', ';']).map(str::trim).filter(|s| !s.is_empty()) {
+        let parsed = match part.split_once('-') {
+            Some((a, b)) => (a.trim().parse::<usize>().ok(), b.trim().parse::<usize>().ok()),
+            None => (part.parse::<usize>().ok(), None),
+        };
+        match parsed {
+            (Some(a), Some(b)) if a >= 1 && b >= a => wanted.push((a, b)),
+            _ => {
+                return Outcome::err(format!(
+                    "bad range \"{part}\": use 1-based inclusive pairs like \"40-90,560-600\" \
+                     (up to {MAX_RANGES} per call)"
+                ));
+            }
+        }
+    }
+    if wanted.is_empty() {
+        return Outcome::err(
+            "ranges is empty: use 1-based inclusive pairs like \"40-90,560-600\"".to_string(),
+        );
+    }
+    if wanted.len() > MAX_RANGES {
+        return Outcome::err(format!(
+            "ranges accepts at most {MAX_RANGES} windows in one call ({} given)",
+            wanted.len()
+        ));
+    }
+    let mut parts: Vec<String> = Vec::new();
+    let mut budget = window;
+    let mut dropped = 0usize;
+    let mut any_ok = false;
+    for (i, (from, to)) in wanted.iter().enumerate() {
+        if budget == 0 {
+            dropped = wanted.len() - i;
+            break;
+        }
+        let lines = (to - from + 1).min(budget);
+        budget -= lines;
+        let args = serde_json::json!({ "offset": *from, "limit": lines });
+        let one = read_single(ctx, raw, &args);
+        if one.ok {
+            any_ok = true;
+            parts.push(format!(
+                "=== {raw} lines {from}-{to} ===\n{}",
+                one.output.trim_end()
+            ));
+        } else {
+            parts.push(format!(
+                "=== {raw} lines {from}-{to} [ERROR] ===\n{}",
+                one.output.trim_end()
+            ));
+        }
+    }
+    let mut body = parts.join("\n\n");
+    if dropped > 0 {
+        body.push_str(&format!(
+            "\n…({dropped} later ranges dropped: one call returns at most {window} lines)"
+        ));
+    }
+    if any_ok {
+        Outcome::ok(body)
+    } else {
+        Outcome::err(body)
+    }
 }
 
 fn extract_requested_symbols(args: &serde_json::Value) -> Vec<String> {
@@ -1369,7 +1449,12 @@ fn sanitize_search_path(path: Option<&str>) -> Option<&str> {
         .filter(|s| !s.is_empty() && *s != "undefined" && *s != "null")
 }
 
-pub(super) fn glob(ctx: &mut ToolCtx, pattern: &str, base: Option<&str>) -> Outcome {
+pub(super) fn glob(
+    ctx: &mut ToolCtx,
+    pattern: &str,
+    base: Option<&str>,
+    args: &serde_json::Value,
+) -> Outcome {
     use globset::{GlobBuilder, GlobSetBuilder};
     use ignore::WalkBuilder;
 
@@ -1408,7 +1493,7 @@ pub(super) fn glob(ctx: &mut ToolCtx, pattern: &str, base: Option<&str>) -> Outc
     } else {
         None
     };
-    let mut hits: Vec<(std::time::SystemTime, String)> = Vec::new();
+    let mut hits: Vec<GlobHit> = Vec::new();
     // host-owned state and .git internals are never listed, while dot-config
     // directories (.github/, .cargo/) remain visible.
     let host_owned = ctx.host_state_dir();
@@ -1437,20 +1522,87 @@ pub(super) fn glob(ctx: &mut ToolCtx, pattern: &str, base: Option<&str>) -> Outc
                     .is_some_and(|name| bg.is_match(Path::new(name)))
             });
         if matched {
-            let mtime = entry
-                .metadata()
-                .ok()
-                .and_then(|m| m.modified().ok())
-                .unwrap_or(std::time::UNIX_EPOCH);
-            hits.push((mtime, rel.to_string_lossy().replace('\\', "/")));
+            let Ok(meta) = entry.metadata() else {
+                continue;
+            };
+            hits.push(GlobHit {
+                mtime: meta.modified().unwrap_or(std::time::UNIX_EPOCH),
+                size: meta.len(),
+                rel: rel.to_string_lossy().replace('\\', "/"),
+                abs: path.to_path_buf(),
+                lines: None,
+            });
         }
     }
-    // Newest modified files first so active work surfaces before the 300-file cap.
-    hits.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-    let truncated = hits.len() > 300;
-    let mut out: Vec<String> = hits.into_iter().take(300).map(|(_, p)| p).collect();
-    if truncated {
-        out.push("…(more results truncated)".into());
+
+    let raw_sort = args["sort"]
+        .as_str()
+        .map(|s| s.trim().to_ascii_lowercase())
+        .unwrap_or_default();
+    let sort = match raw_sort.as_str() {
+        "" | "mtime" => "mtime",
+        "lines" | "size" | "name" | "none" => raw_sort.as_str(),
+        other => {
+            return Outcome::err(format!(
+                "bad sort \"{other}\": mtime (default, newest first) | lines | size | name | none"
+            ));
+        }
+    };
+    let limit = match args["limit"].as_u64() {
+        Some(n) if n > 0 => n as usize,
+        Some(_) => return Outcome::err("limit must be at least 1"),
+        None => DEFAULT_GLOB_LIMIT,
+    }
+    .min(MAX_GLOB_LIMIT);
+    let stats = args["stats"].as_bool().unwrap_or(false) || sort == "lines";
+    if sort == "lines" {
+        for hit in hits.iter_mut() {
+            hit.lines = line_count(&hit.abs).ok();
+        }
+    }
+    match sort {
+        // Files whose lines were too costly to count rank below counted ones,
+        // so a 900 MB log never presents itself as the biggest source file.
+        "lines" => hits.sort_by(|a, b| {
+            b.lines
+                .unwrap_or(0)
+                .cmp(&a.lines.unwrap_or(0))
+                .then_with(|| b.mtime.cmp(&a.mtime))
+                .then_with(|| a.rel.cmp(&b.rel))
+        }),
+        "size" => hits.sort_by(|a, b| b.size.cmp(&a.size).then_with(|| a.rel.cmp(&b.rel))),
+        "name" => hits.sort_by(|a, b| a.rel.cmp(&b.rel)),
+        "none" => {}
+        _ => hits.sort_by(|a, b| b.mtime.cmp(&a.mtime).then_with(|| a.rel.cmp(&b.rel))),
+    }
+    let truncated = hits.len().saturating_sub(limit);
+    let mut kept: Vec<GlobHit> = hits.into_iter().take(limit).collect();
+    // A stats column the ranking did not need is computed for the kept rows
+    // only, so a huge sweep still opens at most `limit` extra files.
+    if stats && sort != "lines" {
+        for hit in kept.iter_mut() {
+            hit.lines = line_count(&hit.abs).ok();
+        }
+    }
+    let mut out: Vec<String> = Vec::with_capacity(kept.len() + 2);
+    if stats && !kept.is_empty() {
+        out.push(" lines   size  path".into());
+    }
+    for hit in &kept {
+        let lines = match hit.lines {
+            Some(n) => n.to_string(),
+            None => "-".into(),
+        };
+        out.push(if stats {
+            format!("{lines:>6} {:>6}  {}", fmt_bytes(hit.size), hit.rel)
+        } else {
+            hit.rel.clone()
+        });
+    }
+    if truncated > 0 {
+        out.push(format!(
+            "…({truncated} not shown, limit {limit}, sorted by {sort} — raise the limit or narrow the pattern)"
+        ));
     }
     Outcome::ok(if out.is_empty() {
         "no matches".into()
@@ -1459,14 +1611,147 @@ pub(super) fn glob(ctx: &mut ToolCtx, pattern: &str, base: Option<&str>) -> Outc
     })
 }
 
+struct GlobHit {
+    mtime: std::time::SystemTime,
+    size: u64,
+    rel: String,
+    abs: std::path::PathBuf,
+    lines: Option<usize>,
+}
+
+const DEFAULT_GLOB_LIMIT: usize = 300;
+const MAX_GLOB_LIMIT: usize = 5_000;
+/// Above this size a file is too expensive to open just to count its lines.
+const GLOB_LINE_COUNT_MAX_BYTES: u64 = 8 * 1_024 * 1_024;
+
+/// Line count with the same rule `read` prints by: a newline ends a line, and
+/// a final line without one still counts.
+fn line_count(path: &std::path::Path) -> std::io::Result<usize> {
+    let meta = fs::metadata(path)?;
+    if meta.len() > GLOB_LINE_COUNT_MAX_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "file too large to count lines",
+        ));
+    }
+    let bytes = fs::read(path)?;
+    let mut n = 0usize;
+    let mut open_line = false;
+    for &b in &bytes {
+        if b == b'\n' {
+            n += 1;
+            open_line = false;
+        } else {
+            open_line = true;
+        }
+    }
+    if open_line {
+        n += 1;
+    }
+    Ok(n)
+}
+
+/// Compact size for a listing column: `45k`, `1.2m`.
+fn fmt_bytes(n: u64) -> String {
+    const K: f64 = 1_000.0;
+    const M: f64 = 1_000_000.0;
+    let v = n as f64;
+    if v >= M {
+        format!("{:.1}m", (v / M * 10.0).round() / 10.0)
+    } else if v >= K {
+        format!("{}k", (v / K * 10.0).round() / 10.0)
+    } else {
+        n.to_string()
+    }
+}
+
+/// One comma-separated glob list compiled into a matcher, used by both
+/// `include` and `exclude` so neither grows its own copy of the parsing.
+fn glob_set(raw: &str, label: &str) -> Result<globset::GlobSet, String> {
+    use globset::{GlobBuilder, GlobSetBuilder};
+    let mut builder = GlobSetBuilder::new();
+    for pat in split_glob_patterns(raw) {
+        let gb = GlobBuilder::new(pat)
+            .build()
+            .map_err(|e| format!("bad {label} glob pattern: {e}"))?;
+        builder.add(gb);
+    }
+    builder
+        .build()
+        .map_err(|e| format!("bad {label} glob pattern: {e}"))
+}
+
+/// `output_mode: files|count` answers "where does this appear" without
+/// carrying any file text over the wire.
+fn grep_tally(
+    mode: &str,
+    pattern: &str,
+    candidates: &[(std::time::SystemTime, String, std::path::PathBuf)],
+    re: &regex::Regex,
+    multiline_re: &Option<regex::Regex>,
+) -> Outcome {
+    const FILE_CAP: usize = 500;
+    let files_only = mode == "files";
+    let mut rows: Vec<(usize, &str)> = Vec::new();
+    for (_, shown, file_path) in candidates {
+        // Unreadable and binary-ish files are skipped, as in content mode.
+        let Ok(raw) = fs::read(file_path) else {
+            continue;
+        };
+        if raw.contains(&0) {
+            continue;
+        }
+        let text = String::from_utf8_lossy(&raw);
+        if let Some(mre) = multiline_re
+            && !mre.is_match(&text)
+        {
+            continue;
+        }
+        let hits = if files_only {
+            text.lines().any(|l| re.is_match(l)) as usize
+        } else {
+            text.lines().filter(|l| re.is_match(l)).count()
+        };
+        if hits == 0 {
+            continue;
+        }
+        rows.push((hits, shown));
+        if rows.len() >= FILE_CAP {
+            break;
+        }
+    }
+    if rows.is_empty() {
+        return Outcome::ok(json_out_no_matches(pattern));
+    }
+    let mut out = String::new();
+    let total: usize = rows.iter().map(|(n, _)| n).sum();
+    for (hits, shown) in &rows {
+        if files_only {
+            out.push_str(shown);
+        } else {
+            out.push_str(&format!("{hits:>5}  {shown}"));
+        }
+        out.push('\n');
+    }
+    if rows.len() >= FILE_CAP {
+        out.push_str(&format!(
+            "…(listing capped at {FILE_CAP} files — narrow the pattern or the path)\n"
+        ));
+    }
+    if !files_only {
+        out.push_str(&format!("{total} matches in {} files\n", rows.len()));
+    }
+    Outcome::ok(out)
+}
+
 pub(super) fn grep(
     ctx: &mut ToolCtx,
     pattern: &str,
     path: Option<&str>,
     include: Option<&str>,
     context: usize,
+    args: &serde_json::Value,
 ) -> Outcome {
-    use globset::{GlobBuilder, GlobSetBuilder};
     use ignore::WalkBuilder;
 
     let re = match regex::Regex::new(pattern) {
@@ -1485,22 +1770,35 @@ pub(super) fn grep(
         None => ctx.root.clone(),
     };
     let inc = match include.map(str::trim).filter(|s| !s.is_empty()) {
-        Some(g) => {
-            let mut builder = GlobSetBuilder::new();
-            for pat in split_glob_patterns(g) {
-                match GlobBuilder::new(pat).build() {
-                    Ok(gb) => {
-                        builder.add(gb);
-                    }
-                    Err(e) => return Outcome::err(format!("bad include glob pattern: {e}")),
-                }
-            }
-            match builder.build() {
-                Ok(set) => Some(set),
-                Err(e) => return Outcome::err(format!("bad include glob pattern: {e}")),
-            }
-        }
+        Some(g) => match glob_set(g, "include") {
+            Ok(set) => Some(set),
+            Err(e) => return Outcome::err(e),
+        },
         None => None,
+    };
+    let exc = match args["exclude"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(g) => match glob_set(g, "exclude") {
+            Ok(set) => Some(set),
+            Err(e) => return Outcome::err(e),
+        },
+        None => None,
+    };
+    let raw_mode = args["output_mode"]
+        .as_str()
+        .map(|s| s.trim().to_ascii_lowercase())
+        .unwrap_or_default();
+    let mode = match raw_mode.as_str() {
+        "" | "content" => "content",
+        "files" | "count" => raw_mode.as_str(),
+        other => {
+            return Outcome::err(format!(
+                "bad output_mode \"{other}\": content (default) | files | count"
+            ));
+        }
     };
 
     fn show_line(line: &str) -> String {
@@ -1554,6 +1852,16 @@ pub(super) fn grep(
                 continue;
             }
         }
+        // `exclude` overrides `include`: the pair spells "every *.rs except the
+        // snapshots", which no single include glob can express.
+        if let Some(x) = &exc
+            && (x.is_match(&shown)
+                || entry_path
+                    .file_name()
+                    .is_some_and(|n| x.is_match(Path::new(n))))
+        {
+            continue;
+        }
         let mtime = entry
             .metadata()
             .ok()
@@ -1563,6 +1871,10 @@ pub(super) fn grep(
     }
     // Search newest modified files first so active files surface before the 200-match cap.
     candidates.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+
+    if mode != "content" {
+        return grep_tally(mode, pattern, &candidates, &re, &multiline_re);
+    }
 
     const SHOWN_MATCH_CAP: usize = 200;
     const SPILL_MATCH_CAP: usize = 2_000;
@@ -1946,7 +2258,7 @@ mod tests {
     fn grep_invalid_include_glob_returns_error_instead_of_panicking() {
         let dir = tempfile::tempdir().unwrap();
         let mut ctx = ToolCtx::new(dir.path());
-        let outcome = grep(&mut ctx, "test", None, Some("[unclosed"), 0);
+        let outcome = grep(&mut ctx, "test", None, Some("[unclosed"), 0, &serde_json::Value::Null);
         assert!(!outcome.ok);
         assert!(outcome.output.contains("bad include glob pattern"));
     }
@@ -1968,7 +2280,7 @@ mod tests {
         std::fs::write(dir.path().join("bin.dat"), b"needle\x00after\n").unwrap();
         let mut ctx = ToolCtx::new(dir.path());
 
-        let hit = grep(&mut ctx, "needle", None, None, 0);
+        let hit = grep(&mut ctx, "needle", None, None, 0, &serde_json::Value::Null);
         assert!(hit.ok, "{}", hit.output);
         assert!(
             hit.output.contains("needle after the bad line"),
@@ -1977,7 +2289,7 @@ mod tests {
         );
 
         // the bad line itself stays reachable, shown lossily as context
-        let lossy = grep(&mut ctx, "after", None, None, 1);
+        let lossy = grep(&mut ctx, "after", None, None, 1, &serde_json::Value::Null);
         assert!(
             lossy.output.contains('\u{fffd}'),
             "invalid bytes should decode to the replacement character: {}",
@@ -1985,7 +2297,7 @@ mod tests {
         );
 
         // and a NUL still means binary: skipped, not scanned
-        let bin = grep(&mut ctx, "needle", None, Some("*.dat"), 0);
+        let bin = grep(&mut ctx, "needle", None, Some("*.dat"), 0, &serde_json::Value::Null);
         assert!(
             bin.output.contains("no matches"),
             "binary content must stay out of results: {}",
@@ -1999,7 +2311,7 @@ mod tests {
         let long_line = format!("match_{}", "a".repeat(3000));
         std::fs::write(dir.path().join("long.txt"), &long_line).unwrap();
         let mut ctx = ToolCtx::new(dir.path());
-        let outcome = grep(&mut ctx, "match_", None, None, 0);
+        let outcome = grep(&mut ctx, "match_", None, None, 0, &serde_json::Value::Null);
         assert!(outcome.ok);
         assert!(outcome.output.contains("…(line truncated)"));
         assert!(outcome.output.len() < 2000);
@@ -2014,7 +2326,7 @@ mod tests {
         )
         .unwrap();
         let mut ctx = ToolCtx::new(dir.path());
-        let outcome = grep(&mut ctx, "MATCH", None, None, 1);
+        let outcome = grep(&mut ctx, "MATCH", None, None, 1, &serde_json::Value::Null);
         assert!(outcome.ok);
         // match line with `:`, context lines with `-`
         assert!(
@@ -2025,7 +2337,7 @@ mod tests {
         assert!(outcome.output.contains("code.txt-2:"), "{}", outcome.output);
         assert!(outcome.output.contains("code.txt-4:"), "{}", outcome.output);
         // default stays context-free
-        let plain = grep(&mut ctx, "MATCH", None, None, 0);
+        let plain = grep(&mut ctx, "MATCH", None, None, 0, &serde_json::Value::Null);
         assert!(plain.ok);
         assert!(!plain.output.contains("code.txt-2:"), "{}", plain.output);
     }
@@ -2043,11 +2355,11 @@ mod tests {
         let mut ctx = ToolCtx::new(dir.path());
         // grep must not match inside host-owned state (pre-fix: leaked on
         // Windows where hidden(true) checks attributes, not dotfiles)
-        let outcome = grep(&mut ctx, "host_secret_marker_xyz", None, None, 0);
+        let outcome = grep(&mut ctx, "host_secret_marker_xyz", None, None, 0, &serde_json::Value::Null);
         assert!(outcome.ok);
         assert!(!outcome.output.contains(".sqwai"), "{}", outcome.output);
         // glob must not list host-owned files either
-        let listed = glob(&mut ctx, "**/*", None);
+        let listed = glob(&mut ctx, "**/*", None, &serde_json::Value::Null);
         assert!(listed.ok);
         assert!(!listed.output.contains(".sqwai"), "{}", listed.output);
         assert!(listed.output.contains("visible.txt"), "{}", listed.output);
@@ -2064,7 +2376,7 @@ mod tests {
         std::fs::write(spill.join("read-big.txt"), "spilled_marker_xyz\n").unwrap();
         let mut ctx = ToolCtx::new(dir.path());
 
-        let sweep = grep(&mut ctx, "spilled_marker_xyz", None, None, 0);
+        let sweep = grep(&mut ctx, "spilled_marker_xyz", None, None, 0, &serde_json::Value::Null);
         assert!(
             sweep.output.contains("no matches"),
             "a project-wide sweep must still not see the spill dir: {}",
@@ -2077,6 +2389,7 @@ mod tests {
             Some(".sqwai/spill/read-big.txt"),
             None,
             0,
+            &serde_json::Value::Null,
         );
         assert!(
             named.output.contains(":1: spilled_marker_xyz"),
@@ -2091,6 +2404,7 @@ mod tests {
             Some(".sqwai/spill"),
             None,
             0,
+            &serde_json::Value::Null,
         );
         assert!(!other.ok, "the spill dir itself stays closed");
     }
@@ -2185,7 +2499,7 @@ mod tests {
         std::fs::write(dir.path().join("many_hits.txt"), body).unwrap();
         let mut ctx = ToolCtx::new(dir.path());
 
-        let outcome = grep(&mut ctx, "hit_line_", None, None, 0);
+        let outcome = grep(&mut ctx, "hit_line_", None, None, 0, &serde_json::Value::Null);
         assert!(outcome.ok, "{}", outcome.output);
         assert!(
             outcome.output.contains("many_hits.txt:1: hit_line_1"),
@@ -2218,12 +2532,12 @@ mod tests {
         let mut ctx = ToolCtx::new(dir.path());
 
         // Bare filename glob `*.rs` finds nested `src/nested/mod.rs`
-        let g = glob(&mut ctx, "*.rs", None);
+        let g = glob(&mut ctx, "*.rs", None, &serde_json::Value::Null);
         assert!(g.ok);
         assert!(g.output.contains("src/nested/mod.rs"), "{}", g.output);
 
         // Dot-config `.github/workflows/ci.yml` is visible to glob and grep
-        let g_ci = glob(&mut ctx, "ci.yml", None);
+        let g_ci = glob(&mut ctx, "ci.yml", None, &serde_json::Value::Null);
         assert!(g_ci.ok);
         assert!(
             g_ci.output.contains(".github/workflows/ci.yml"),
@@ -2232,9 +2546,165 @@ mod tests {
         );
 
         // Path-based include in grep matches relative path
-        let gr = grep(&mut ctx, "CI_MARKER", None, Some(".github/**/*.yml"), 0);
+        let gr = grep(
+            &mut ctx,
+            "CI_MARKER",
+            None,
+            Some(".github/**/*.yml"),
+            0,
+            &serde_json::Value::Null,
+        );
         assert!(gr.ok);
         assert!(gr.output.contains("CI_MARKER"), "{}", gr.output);
+    }
+
+    #[test]
+    fn glob_ranks_by_lines_and_prints_stats_columns() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("small.rs"), "a\nb\n").unwrap();
+        std::fs::write(dir.path().join("mid.rs"), "a\nb\nc\n").unwrap();
+        std::fs::write(
+            dir.path().join("big.rs"),
+            (1..=40).map(|i| format!("line {i}\n")).collect::<String>(),
+        )
+        .unwrap();
+        let mut ctx = ToolCtx::new(dir.path());
+
+        let ranked = glob(
+            &mut ctx,
+            "*.rs",
+            None,
+            &json!({"sort": "lines", "limit": 2}),
+        );
+        assert!(ranked.ok, "{}", ranked.output);
+        let text = ranked.output;
+        assert!(
+            text.lines().next().unwrap().contains("lines"),
+            "a stats listing names its columns: {text}"
+        );
+        let i_big = text.find("big.rs").unwrap();
+        let i_mid = text.find("mid.rs").unwrap();
+        assert!(i_big < i_mid, "longest first: {text}");
+        let big_row = text.lines().find(|l| l.contains("big.rs")).unwrap();
+        assert!(
+            big_row.trim_start().starts_with("40"),
+            "the line column must be real: {big_row}"
+        );
+        assert!(
+            !text.contains("small.rs"),
+            "limit=2 keeps the short file out: {text}"
+        );
+        assert!(
+            text.contains("1 not shown, limit 2, sorted by lines"),
+            "a capped listing says how much it dropped: {text}"
+        );
+
+        // The default listing carries no columns and no ranking work.
+        let plain = glob(&mut ctx, "*.rs", None, &json!({"sort": "name"}));
+        assert!(plain.ok, "{}", plain.output);
+        assert!(
+            !plain.output.contains("size"),
+            "no stats unless asked: {}",
+            plain.output
+        );
+        let names: Vec<&str> = plain
+            .output
+            .lines()
+            .filter(|l| l.ends_with(".rs"))
+            .collect();
+        assert_eq!(names, ["big.rs", "mid.rs", "small.rs"], "{}", plain.output);
+
+        let bad = glob(&mut ctx, "*.rs", None, &json!({"sort": "lines-ish"}));
+        assert!(!bad.ok, "an unknown ranking must be refused, not ignored");
+    }
+
+    #[test]
+    fn grep_files_and_count_modes_answer_where_without_the_text() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.rs"), "needle\nx\nneedle\n").unwrap();
+        std::fs::write(dir.path().join("b.rs"), "needle\n").unwrap();
+        std::fs::write(dir.path().join("keep.snap"), "needle\n").unwrap();
+        let mut ctx = ToolCtx::new(dir.path());
+
+        let files = grep(
+            &mut ctx,
+            "needle",
+            None,
+            None,
+            0,
+            &json!({"output_mode": "files"}),
+        );
+        assert!(files.ok, "{}", files.output);
+        assert!(
+            !files.output.contains("needle"),
+            "the mode answers where, so it carries no match text: {}",
+            files.output
+        );
+        for name in ["a.rs", "b.rs", "keep.snap"] {
+            assert!(files.output.contains(name), "missing {name}: {}", files.output);
+        }
+
+        let counted = grep(
+            &mut ctx,
+            "needle",
+            None,
+            None,
+            0,
+            &json!({"output_mode": "count", "exclude": "*.snap"}),
+        );
+        assert!(counted.ok, "{}", counted.output);
+        assert!(counted.output.contains("2  a.rs"), "{}", counted.output);
+        assert!(
+            !counted.output.contains("keep.snap"),
+            "exclude must skip the snapshot: {}",
+            counted.output
+        );
+        assert!(
+            counted.output.contains("3 matches in 2 files"),
+            "the total closes the tally: {}",
+            counted.output
+        );
+
+        let bad = grep(
+            &mut ctx,
+            "needle",
+            None,
+            None,
+            0,
+            &json!({"output_mode": "everywhere"}),
+        );
+        assert!(!bad.ok, "an unknown output_mode must be refused");
+    }
+
+    #[test]
+    fn read_ranges_returns_several_labeled_windows_in_one_call() {
+        let dir = tempfile::tempdir().unwrap();
+        let body: String = (1..=300).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(dir.path().join("many.txt"), &body).unwrap();
+        let mut ctx = ToolCtx::new(dir.path());
+
+        let out = read(&mut ctx, "many.txt", &json!({"ranges": "10-12,200-201"}));
+        assert!(out.ok, "{}", out.output);
+        assert!(
+            out.output
+                .contains("=== many.txt lines 10-12 ===")
+                && out.output.contains("=== many.txt lines 200-201 ==="),
+            "each window says where it came from: {}",
+            out.output
+        );
+        assert!(
+            out.output.contains("line 11") && out.output.contains("line 200"),
+            "{}",
+            out.output
+        );
+        assert!(
+            !out.output.contains("line 150"),
+            "windows stay inside their bounds: {}",
+            out.output
+        );
+
+        let bad = read(&mut ctx, "many.txt", &json!({"ranges": "oops"}));
+        assert!(!bad.ok, "a malformed range must name the shape it wants");
     }
 
     #[test]
@@ -2383,6 +2853,7 @@ mod tests {
             Some("undefined"),
             Some("*.rs, *.toml"),
             0,
+            &serde_json::Value::Null,
         );
         assert!(outcome.ok, "{}", outcome.output);
         assert!(

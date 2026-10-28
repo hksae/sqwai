@@ -273,6 +273,7 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
             ctx,
             args["pattern"].as_str().unwrap_or_default(),
             args["path"].as_str(),
+            args,
         ),
         "grep" => fs::grep(
             ctx,
@@ -280,6 +281,7 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
             args["path"].as_str(),
             args["include"].as_str(),
             args["context"].as_u64().unwrap_or(0).min(10) as usize,
+            args,
         ),
         "git_status" => with_authorship(ctx, git::status(ctx, args)),
         "git_diff" => with_authorship(ctx, git::diff(ctx, args)),
