@@ -461,13 +461,7 @@ impl App {
                 let marker = match status.as_str() {
                     "completed" => ("• ".to_string(), tool_dot_style(true)),
                     "failed" => ("• ".to_string(), tool_dot_style(false)),
-                    _ => (
-                        format!(
-                            "{} ",
-                            WORKING_SPINNER[self.spinner_tick % WORKING_SPINNER.len()]
-                        ),
-                        Theme::spinner(),
-                    ),
+                    _ => ("• ".to_string(), working_dot_style(self.spinner_tick)),
                 };
                 let name = format!("subagent-{id}");
                 let summary_width = usize::from(w)
@@ -555,13 +549,7 @@ impl App {
                 ..
             } => {
                 let marker = match ok {
-                    None => (
-                        format!(
-                            "{} ",
-                            WORKING_SPINNER[self.spinner_tick % WORKING_SPINNER.len()]
-                        ),
-                        Theme::spinner(),
-                    ),
+                    None => ("• ".to_string(), working_dot_style(self.spinner_tick)),
                     Some(done) => ("• ".to_string(), tool_dot_style(*done)),
                 };
                 let marker_width = 2usize;

@@ -7,9 +7,9 @@ expression: s
    [CWD]
  › Run the tests.
 
- ◜ bash ({"cmd":"cargo test"})
+ • bash ({"cmd":"cargo test"})
 
- ⠁ working · esc to interrupt
+ • working · esc to interrupt
 
 
 

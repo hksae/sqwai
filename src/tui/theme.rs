@@ -266,23 +266,18 @@ impl Theme {
     pub fn mode_chip_full() -> Style {
         Style::new().fg(Self::ERR())
     }
-    /// Tool call head rows: calm white, so calls scan as one list. State
-    /// lives in the marker shape (✓/✗/spinner) and the finish wave —
-    /// not in the row color.
+    /// Tool call head rows: calm white, so calls scan as one list. State lives
+    /// in the dot's color — green done, red failed, breathing white running —
+    /// never in the row color.
     pub fn tool_head() -> Style {
         Style::new().fg(Color::White)
-    }
-    /// The running marker alone: a quiet white, so motion does not outshine
-    /// the name next to it. The tool row keeps `tool_head` for its text.
-    pub fn spinner() -> Style {
-        Style::new().fg(Color::Gray)
     }
     pub fn tool_head_bold() -> Style {
         Style::new().fg(Color::White).add_modifier(Modifier::BOLD)
     }
     /// Status carries no bold: on a pastel ground bold is just a brighter
     /// ground, which is the loudness this palette stopped having a use for.
-    /// The verdict lives in the marker's shape (✓/✗/spinner), as it always was.
+    /// The verdict lives in the dot's color, as it always did.
     pub fn ok() -> Style {
         Style::new().fg(Self::OK())
     }
@@ -327,7 +322,6 @@ impl Theme {
             ("MODE_AUTO", Self::mode_chip_auto()),
             ("MODE_FULL", Self::mode_chip_full()),
             ("TOOL_HEAD", Self::tool_head()),
-            ("SPINNER", Self::spinner()),
             ("FIELD_FOCUSED", Self::field_label_focused()),
             ("SELECTION", Self::selection()),
             (

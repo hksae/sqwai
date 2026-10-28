@@ -243,19 +243,17 @@ fn running_tool_name_shimmers_like_activity_header() {
 
 #[test]
 fn working_line_names_phase_and_hints_esc() {
-    use super::super::view::working_line;
+    use super::super::view::{working_dot_style, working_line};
     // the live tail row of the transcript: what is happening, how long, how to
     // stop. No aggregate, no click target, and the verb is one span in one
-    // static color — the shimmer is gone on purpose, only the marker moves.
+    // static color — the shimmer is gone on purpose, only the dot breathes.
     let work = working_line(false, Some(27), 0);
     let work_text: String = work.spans.iter().map(|s| s.content.as_ref()).collect();
     assert_eq!(
-        work_text,
-        format!(
-            "{} working · 27s · esc to interrupt",
-            crate::tui::anim::working_mark(0)
-        )
+        work_text, "• working · 27s · esc to interrupt",
+        "the running marker is the tool dot itself"
     );
+    assert_eq!(work.spans[0].style, working_dot_style(0));
     assert_eq!(
         work.spans.iter().filter(|s| s.content == "working").count(),
         1,
@@ -264,18 +262,11 @@ fn working_line_names_phase_and_hints_esc() {
     // a turn that has not started its clock yet still says how to stop it
     let think = working_line(true, None, 1);
     let think_text: String = think.spans.iter().map(|s| s.content.as_ref()).collect();
-    assert_eq!(
-        think_text,
-        format!(
-            "{} thinking · esc to interrupt",
-            crate::tui::anim::working_mark(1)
-        )
-    );
+    assert_eq!(think_text, "• thinking · esc to interrupt");
 }
 
-/// The bottom spinner stays removed: while streaming the status bar must show
-/// no spinner glyph anywhere. The running signal is the working row at the tail
-/// of the transcript, and `/test anim` is where its marker is picked.
+/// The running signal lives only at the tail of the transcript: while streaming
+/// the status bar must carry no marker glyph of any kind.
 #[test]
 fn no_bottom_spinner_while_streaming() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
@@ -286,13 +277,9 @@ fn no_bottom_spinner_while_streaming() {
     assert!(
         !spans.iter().any(|s| {
             let text = s.content.trim();
-            text.chars().count() == 1
-                && text
-                    .chars()
-                    .next()
-                    .is_some_and(|c| WORKING_SPINNER.contains(&c))
+            text == "•" || text.chars().any(|c| "◜◠◝◞◡◟⠁⠂⠄⣀".contains(c))
         }),
-        "status bar must not carry a spinner until the replacement lands"
+        "status bar must stay marker-free: {spans:?}"
     );
 }
 /// The provider menu carries a connection probe: dispatching it marks the

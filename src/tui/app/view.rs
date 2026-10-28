@@ -149,6 +149,19 @@ pub(super) fn tool_dot_style(done_ok: bool) -> Style {
     }
 }
 
+/// The running tool dot: the same `•` a finished row wears, in a white that
+/// breathes. Without truecolor the ladder cannot be painted, so the dot keeps
+/// the quiet gray it had as a spinner — never the name's own white, which would
+/// make a running row indistinguishable from a finished one.
+pub(super) fn working_dot_style(tick: usize) -> Style {
+    if crate::tui::shimmer::has_truecolor() {
+        let v = crate::tui::anim::pulse_white(tick);
+        Style::new().fg(Color::Rgb(v, v, v))
+    } else {
+        Style::new().fg(Color::Gray)
+    }
+}
+
 /// Fenced code blocks in assistant source text, in order.
 pub(super) fn code_blocks(text: &str) -> Vec<String> {
     let mut blocks = Vec::new();
@@ -2225,17 +2238,14 @@ pub(super) fn blank() -> Line<'static> {
 }
 
 /// The live tail row of the transcript: what the agent is doing right now,
-/// how long this turn has run, and how to stop it. The marker cycles through
-/// the `sand` family (see `/test anim`); the paint stays static — the word
-/// already changes when the phase changes, so a wave over it would be
-/// decoration.
+/// how long this turn has run, and how to stop it. The marker is the tool dot
+/// breathing in whites — the same glyph a finished row wears, so nothing moves
+/// when work closes. The paint stays static: the word already changes when the
+/// phase changes, so a wave over it would be decoration.
 pub(super) fn working_line(thinking: bool, elapsed_s: Option<u64>, tick: usize) -> Line<'static> {
     let brand = |c: (u8, u8, u8)| Style::new().fg(Color::Rgb(c.0, c.1, c.2));
     let mut spans = vec![
-        Span::styled(
-            format!("{} ", crate::tui::anim::working_mark(tick)),
-            brand(crate::tui::art::CORAL_START),
-        ),
+        Span::styled("• ", working_dot_style(tick)),
         Span::styled(
             if thinking { "thinking" } else { "working" },
             brand(crate::tui::art::CORAL_MUTED),

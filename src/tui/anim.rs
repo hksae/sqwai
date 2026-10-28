@@ -242,17 +242,16 @@ pub fn frame_at(set: &Anim, tick: usize) -> char {
         .expect("every set has at least one frame")
 }
 
-/// The live status marker cycles through the `sand` family of the gallery
-/// above. The strip is spelled out instead of looked up by name so the render
-/// path carries neither an Option nor a panic risk; the test below keeps it from
-/// drifting away from the row `/test anim` actually shows.
-pub const WORKING_MARK_FRAMES: &str = "⠁⠂⠄⡀⡈⡐⡠⣀⣁⣂⣄⣌⣔⣤⣥⣦⣮⣶⣷⣿⡿⠿⢟⠟⡛⠛⠫⢋⠋⠍⡉⠉⠑⠡⢁";
+/// The live marker is the tool dot, breathing: the glyph never changes, only
+/// its brightness, so a running row can neither shift the layout nor flicker.
+/// The ladder rises then falls in small steps, which reads as a pulse instead
+/// of a blink; `PULSE_STEPS` render ticks (50ms each) per brightness step.
+pub const PULSE: [u8; 8] = [110, 145, 180, 215, 245, 215, 180, 145];
+pub const PULSE_STEPS: usize = 4;
 
-/// Frame of the live status marker at a given tick.
-pub fn working_mark(tick: usize) -> char {
-    static FRAMES: std::sync::OnceLock<Vec<char>> = std::sync::OnceLock::new();
-    let frames = FRAMES.get_or_init(|| WORKING_MARK_FRAMES.chars().collect());
-    frames[tick % frames.len()]
+/// White level of the breathing dot at a given tick.
+pub fn pulse_white(tick: usize) -> u8 {
+    PULSE[(tick / PULSE_STEPS) % PULSE.len()]
 }
 
 #[cfg(test)]
@@ -271,20 +270,27 @@ mod tests {
     }
 
     #[test]
-    fn working_mark_is_the_sand_row_of_the_gallery() {
-        let sand = sets()
-            .iter()
-            .find(|s| s.name == "sand")
-            .expect("sand is in the gallery");
-        assert_eq!(WORKING_MARK_FRAMES, sand.frames);
+    fn pulse_rises_and_falls_gently() {
+        for w in PULSE.windows(2) {
+            assert!(w[1].abs_diff(w[0]) <= 40, "step too sharp: {w:?}");
+        }
+        assert!(
+            PULSE[..5].windows(2).all(|w| w[0] < w[1]),
+            "first half must rise"
+        );
+        assert!(
+            PULSE[4..].windows(2).all(|w| w[0] > w[1]),
+            "second half must fall"
+        );
+        let period = PULSE.len() * PULSE_STEPS;
+        assert_eq!(pulse_white(0), pulse_white(period), "the cycle must repeat");
+        assert_ne!(
+            pulse_white(0),
+            pulse_white(period / 2),
+            "the dot must actually breathe"
+        );
     }
 
-    #[test]
-    fn working_mark_cycles_and_stays_in_range() {
-        let n = WORKING_MARK_FRAMES.chars().count();
-        assert_eq!(working_mark(0), working_mark(n));
-        assert_ne!(working_mark(0), working_mark(1));
-    }
     #[test]
     fn names_are_unique() {
         let mut seen = std::collections::HashSet::new();

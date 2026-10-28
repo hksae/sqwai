@@ -1060,24 +1060,23 @@ fn spinner_tick_updates_live_chrome_without_rebuilding_transcript() {
     });
     app.streaming = true;
     terminal.draw(|frame| app.draw(frame)).unwrap();
-    let mark0 = crate::tui::anim::working_mark(app.spinner_tick);
+    let mark0 = crate::tui::anim::pulse_white(app.spinner_tick);
+    let tail = app.cache_lines.last().unwrap();
     assert!(
-        app.cache_lines
-            .last()
-            .unwrap()
-            .spans
+        tail.spans
             .first()
             .unwrap()
             .content
-            .starts_with(mark0)
+            .starts_with("• "),
+        "the live row breathes on the tool dot: {tail:?}"
     );
 
     app.test_renders = 0;
     crate::tui::markdown::reset_wrap_tagged_calls();
-    app.spinner_tick += 1;
+    app.spinner_tick += crate::tui::anim::PULSE_STEPS;
     terminal.draw(|frame| app.draw(frame)).unwrap();
-    let mark1 = crate::tui::anim::working_mark(app.spinner_tick);
-    assert_ne!(mark0, mark1);
+    let mark1 = crate::tui::anim::pulse_white(app.spinner_tick);
+    assert_ne!(mark0, mark1, "the dot must change level as ticks pass");
     assert_eq!(
         app.test_renders, 0,
         "spinner tick without running tools must not re-render segments"
@@ -1095,7 +1094,8 @@ fn spinner_tick_updates_live_chrome_without_rebuilding_transcript() {
             .first()
             .unwrap()
             .content
-            .starts_with(mark1),
+            .starts_with("• "),
+        "the glyph stays the dot while its level breathes"
     );
 }
 

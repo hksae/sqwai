@@ -212,8 +212,6 @@ impl crate::config::ApprovalMode {
     }
 }
 
-const WORKING_SPINNER: [char; 6] = ['◜', '◠', '◝', '◞', '◡', '◟'];
-
 /// Typewriter flush window: chars move from the reveal queue into the live
 /// answer at most once per interval. Each flush bumps the live segment's rev
 /// and a rev bump re-renders (wraps, highlights) the whole growing answer, so
