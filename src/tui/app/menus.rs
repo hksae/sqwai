@@ -905,11 +905,6 @@ impl App {
         self.dirty = true;
     }
 
-    pub(super) fn open_menu_replace(&mut self, menu: Menu) {
-        self.menu_stack.pop();
-        self.open_menu(menu);
-    }
-
     pub(super) fn menu_back(&mut self) {
         match self.cur_menu() {
             Some(Menu::AskUser { .. }) => {
@@ -941,7 +936,6 @@ impl App {
         self.form_fields.clear();
         self.form_focus = 0;
         self.prefill_form();
-        self.restore_form_text();
         self.build_menu_rows();
         if matches!(self.cur_menu(), Some(Menu::Settings)) {
             let pos = match popped {

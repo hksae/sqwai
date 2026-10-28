@@ -91,9 +91,6 @@ impl EffortLevel {
         EffortLevel::Xhigh,
         EffortLevel::Max,
     ];
-    /// Option strings for pick-one UI (model edit form, etc.): derived from
-    /// the same levels, so the UI can never lag behind a new level again.
-    pub const STRS: [&'static str; 6] = ["off", "low", "medium", "high", "xhigh", "max"];
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Off => "off",

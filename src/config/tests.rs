@@ -192,13 +192,6 @@ fn effort_accepts_string_and_legacy_bool() {
 }
 
 #[test]
-fn effort_strs_cover_every_level_in_order() {
-    // pick-one UI builds on this: a hardcoded copy once dropped xhigh
-    let from_all: Vec<&str> = EffortLevel::ALL.iter().map(|l| l.as_str()).collect();
-    assert_eq!(&EffortLevel::STRS[..], &from_all[..]);
-}
-
-#[test]
 fn effort_control_strs_cover_every_variant_in_order() {
     let from_all: Vec<&str> = EffortControl::ALL.iter().map(|c| c.as_str()).collect();
     assert_eq!(&EffortControl::STRS[..], &from_all[..]);

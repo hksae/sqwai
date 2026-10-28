@@ -80,7 +80,7 @@ fn form_popup_titles_have_no_parentheses_and_support_mouse_selection() {
     );
     assert!(title.contains("Edit provider: anthropic"));
 
-    app.open_menu_replace(Menu::EditModel {
+    app.open_menu(Menu::EditModel {
         provider: "anthropic".into(),
         key: Some("sonnet".into()),
     });
@@ -91,7 +91,14 @@ fn form_popup_titles_have_no_parentheses_and_support_mouse_selection() {
     );
     assert!(mtitle.contains("Model · anthropic"));
 
-    // Simulate form rect and mouse interaction
+    // The one live form is the single-field editor; drive it the way a click
+    // does and check the selection gestures, not a focus walk across fields
+    app.open_menu(crate::tui::app::menus::Menu::EditModelField {
+        provider: "anthropic".into(),
+        key: Some("sonnet".into()),
+        field: super::super::menus::ModelField::RequestId,
+    });
+    assert_eq!(app.form_fields.len(), 1);
     app.menu_rect = Rect {
         x: 10,
         y: 10,
@@ -100,24 +107,20 @@ fn form_popup_titles_have_no_parentheses_and_support_mouse_selection() {
     };
     assert_eq!(app.form_focus, 0);
 
-    // Click on row 13 (field index 1: request id — title row, then the
-    // air row, then the fields at rect.y + 2 + n)
-    app.form_mouse_down(13, 15);
-    assert_eq!(app.form_focus, 1);
-
-    // Click inside the text area of field 1
-    let text_x = app.menu_rect.x + 1 + app.form_label_w();
-    app.form_mouse_down(13, text_x + 2);
+    // surface fields sit past the top rule and the title row
+    let text_x = app.menu_rect.x + 2;
+    let field_row = app.menu_rect.y + 3;
+    app.form_mouse_down(field_row, text_x + 2);
     assert!(app.form_is_selecting());
 
-    // Drag to select text
-    app.form_mouse_drag(13, text_x + 5);
+    // Drag to extend the selection; release copies and leaves it standing
+    app.form_mouse_drag(field_row, text_x + 5);
     assert!(app.form_is_selecting());
     app.form_mouse_up();
 
-    // Click on field 2 (context)
-    app.form_mouse_down(14, 15);
-    assert_eq!(app.form_focus, 2);
+    // A click left of the text parks the cursor and drops the selection
+    app.form_mouse_down(field_row, app.menu_rect.x);
+    assert!(!app.form_is_selecting(), "label side must not select");
 }
 
 #[test]

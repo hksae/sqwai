@@ -1723,7 +1723,7 @@ fn effort_scoped_menu_missing_key_falls_back_to_session() {
     assert_eq!(star, Some(want), "star agrees with cursor on fallback");
 }
 
-/// Full path through the edit form: clicking the effort row opens the
+/// Full path through the edit surface: activating the effort row opens the
 /// menu scoped to the edited model, cursor and star on its level in both
 /// wide (slider) and narrow (list) paint.
 #[test]
@@ -1735,24 +1735,23 @@ fn effort_scoped_menu_via_form_click() {
     app.model_cfg.effort = EffortLevel::High;
     let mut other = app.cfg.models["p/m"].clone();
     other.effort = EffortLevel::Off;
-    app.cfg.models.insert("other".to_string(), other);
+    app.cfg.models.insert("p/other".to_string(), other);
     app.open_menu(crate::tui::app::menus::Menu::EditModel {
         provider: "p".into(),
-        key: Some("other".into()),
+        key: Some("p/other".into()),
     });
-    assert_eq!(app.form_fields.len(), 4);
+    assert_eq!(app.menu_rows.len(), 4);
     let area = Rect::new(0, 0, 100, 30);
     let mut buf = Buffer::empty(area);
     app.draw_menu(&mut buf, area);
-    // click the effort row (title + air row precede the fields)
-    let row = app.menu_rect.y + 2 + 3;
-    let col = app.menu_rect.x + app.menu_rect.width.saturating_sub(2);
-    app.form_mouse_down(row, col);
+    // the effort row, activated the way a click on a surface row is
+    app.menu_sel = 3;
+    app.menu_activate();
     assert!(
         matches!(
             app.cur_menu(),
             Some(crate::tui::app::menus::Menu::Effort { model: Some(k) })
-            if k.as_str() == "other"
+            if k.as_str() == "p/other"
         ),
         "must open scoped, got title {:?}",
         app.menu_title()
@@ -1761,7 +1760,7 @@ fn effort_scoped_menu_via_form_click() {
         .iter()
         .position(|l| *l == EffortLevel::Off)
         .unwrap();
-    assert_eq!(app.menu_sel, want, "cursor after form click");
+    assert_eq!(app.menu_sel, want, "cursor after the row opens");
     // wide draw keeps the cursor on the target level
     app.draw_effort_slider(&mut buf, Rect::new(0, 23, 100, 7), 0, 7);
     assert_eq!(app.menu_sel, want, "cursor after wide draw");

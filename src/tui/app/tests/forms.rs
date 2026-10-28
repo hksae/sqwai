@@ -158,18 +158,30 @@ fn expired_flash_key_matches_static_key() {
 }
 
 #[test]
-fn edit_model_form_keeps_xhigh_effort() {
-    // the providers-menu form once offered only five levels: an xhigh
-    // model showed `off`, and saving the untouched form clobbered it
+fn edit_model_surface_shows_the_stored_xhigh_effort() {
+    // the effort row once offered only five levels: an xhigh model showed
+    // `off`, and saving the form wrote that `off` back over the real level
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.cfg.models.get_mut("p/m").unwrap().effort = EffortLevel::Xhigh;
-    app.open_menu_replace(Menu::EditModel {
+    app.open_menu(Menu::EditModel {
         provider: "p".into(),
         key: Some("p/m".into()),
     });
-    assert_eq!(app.form_fields[3].trimmed(), "xhigh");
-    app.form_save();
-    assert_eq!(app.cfg.models.get("p/m").unwrap().effort, EffortLevel::Xhigh);
+    let row: String = app.menu_rows[3]
+        .0
+        .spans
+        .iter()
+        .map(|s| s.content.as_ref())
+        .collect();
+    assert!(row.contains("xhigh"), "effort row must show the level: {row}");
+    // editing another row must not touch the level
+    app.menu_sel = 1;
+    app.menu_activate();
+    app.form_fields[0] = super::super::forms::FormField::text("request id", "m-id".into());
+    app.menu_activate();
+    let m = &app.cfg.models["p/m"];
+    assert_eq!(m.effort, EffortLevel::Xhigh);
+    assert_eq!(m.id, "m-id");
 }
 
 #[test]
@@ -183,22 +195,24 @@ fn edit_model_form_options_match_control_cycle() {
 }
 
 #[test]
-fn edit_model_form_round_trips_effort_declarations() {
+fn edit_model_field_save_keeps_effort_declarations() {
     use crate::config::EffortControl;
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     let m = app.cfg.models.get_mut("p/m").unwrap();
     m.effort_control = Some(EffortControl::Budget);
     m.effort_always_on = true;
-    app.open_menu_replace(Menu::EditModel {
+    app.open_menu(Menu::EditModel {
         provider: "p".into(),
         key: Some("p/m".into()),
     });
-    // control/always_on are config-only now (auto by provider format):
-    // the form offers key, request id, context, effort — and must not
-    // clobber the stored declarations on save
-    assert_eq!(app.form_fields.len(), 4);
-    assert_eq!(app.form_fields[3].trimmed(), "off");
-    app.form_save();
+    // control/always_on are config-only now (auto by provider format): the
+    // surface offers name, request id, context and effort, and editing any of
+    // them must not clobber the stored declarations
+    assert_eq!(app.menu_rows.len(), 4);
+    app.menu_sel = 1;
+    app.menu_activate();
+    app.form_fields[0] = super::super::forms::FormField::text("request id", "kept".into());
+    app.menu_activate();
     let m = app.cfg.models.get("p/m").unwrap();
     assert_eq!(m.effort_control, Some(EffortControl::Budget));
     assert!(m.effort_always_on);
@@ -216,14 +230,18 @@ fn a_builtin_model_key_cannot_be_renamed() {
         .expect("catalog ships gemini models");
     app.cfg.models.insert(key.clone(), mc);
     let provider = app.cfg.models[&key].provider.clone();
-    app.open_menu_replace(Menu::EditModel {
-        provider,
+    app.open_menu(Menu::EditModel {
+        provider: provider.clone(),
         key: Some(key.clone()),
     });
+    // the name row, then the refused rename through the live field editor
+    app.menu_sel = 0;
+    app.menu_activate();
     app.form_fields[0] = super::super::forms::FormField::text("name", "renamed".into());
-    app.form_save();
+    app.menu_activate();
+    let renamed = crate::config::model_key(&provider, "renamed");
     assert!(
-        app.cfg.models.contains_key(&key) && !app.cfg.models.contains_key("renamed"),
+        app.cfg.models.contains_key(&key) && !app.cfg.models.contains_key(&renamed),
         "rename must be refused: {:?}",
         app.cfg.models.keys().collect::<Vec<_>>()
     );
@@ -340,117 +358,11 @@ fn plan_show_alias_is_gone() {
     assert!(matches!(app.cur_menu(), Some(Menu::Plan)));
 }
 
+/// The rule for a stored api key: bullets on the provider's row, the real
+/// value once its own form is open. No reveal chord — the editor is the reveal.
 #[test]
-fn provider_key_field_is_secret_and_masked() {
+fn provider_key_is_bullets_in_the_list_and_plain_in_its_form() {
     use super::super::forms::FormField;
-    let mut app = test_app("http://127.0.0.1:9/v1".into());
-    app.open_menu(Menu::EditProvider { name: None });
-    let key_idx = app
-        .form_fields
-        .iter()
-        .position(|f| f.label() == "api key")
-        .expect("api key field");
-    // masked from the start, real value intact underneath
-    assert!(
-        matches!(
-            &app.form_fields[key_idx],
-            FormField::Text {
-                secret: true,
-                revealed: false,
-                ..
-            }
-        ),
-        "key field must be a hidden secret"
-    );
-    // mask is 1:1 per char so cursor columns and layout never shift
-    assert_eq!(FormField::mask_value("sk-abc"), "••••••");
-    let f = FormField::secret("api key", "sk-abc".into());
-    assert_eq!(f.trimmed(), "sk-abc", "save reads the real value");
-    // toggle flips only the focused secret field
-    app.form_focus = key_idx;
-    assert!(app.focused_is_secret());
-    app.toggle_secret_reveal();
-    assert!(
-        matches!(
-            &app.form_fields[key_idx],
-            FormField::Text { revealed: true, .. }
-        ),
-        "toggle reveals"
-    );
-    app.toggle_secret_reveal();
-    assert!(
-        matches!(
-            &app.form_fields[key_idx],
-            FormField::Text {
-                revealed: false,
-                ..
-            }
-        ),
-        "toggle hides again"
-    );
-    // plain fields never react to the toggle
-    app.form_focus = 0;
-    assert!(!app.focused_is_secret());
-    app.toggle_secret_reveal();
-    assert!(
-        matches!(
-            &app.form_fields[0],
-            FormField::Text {
-                revealed: false,
-                ..
-            }
-        ),
-        "plain field untouched"
-    );
-}
-
-#[test]
-fn ctrl_t_reveals_the_key_in_the_provider_form() {
-    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
-    let mut app = test_app("http://127.0.0.1:9/v1".into());
-    app.open_menu(Menu::EditProviderField {
-        name: None,
-        field: super::super::menus::ProviderField::ApiKey,
-    });
-    app.form_fields = vec![super::super::forms::FormField::secret(
-        "api key",
-        "sk".into(),
-    )];
-    let key_idx = 0;
-    app.form_focus = key_idx;
-    fn press(app: &mut App, c: char) {
-        let (tx, rx) = std::sync::mpsc::channel();
-        tx.send(Event::Key(KeyEvent::new(
-            KeyCode::Char(c),
-            KeyModifiers::CONTROL,
-        )))
-        .unwrap();
-        app.poll_input(&rx).unwrap();
-    }
-    press(&mut app, 't');
-    assert!(
-        matches!(
-            &app.form_fields[key_idx],
-            super::super::forms::FormField::Text { revealed: true, .. }
-        ),
-        "ctrl+t reveals"
-    );
-    // cyrillic layout: same physical key (е) toggles back
-    press(&mut app, 'е');
-    assert!(
-        matches!(
-            &app.form_fields[key_idx],
-            super::super::forms::FormField::Text {
-                revealed: false,
-                ..
-            }
-        ),
-        "ctrl+е hides again"
-    );
-}
-
-#[test]
-fn provider_form_renders_key_as_bullets_until_revealed() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.cfg.providers.get_mut("p").unwrap().api_key = Some("sk-secret-value-12345".into());
     app.open_menu(Menu::EditProvider {
@@ -469,14 +381,23 @@ fn provider_form_renders_key_as_bullets_until_revealed() {
         !hidden.contains("sk-secret-value-12345"),
         "real key never painted on the list surface: {hidden}"
     );
-    // opening the api key row reveals the real key for editing
+    // mask is 1:1 per char so cursor columns and layout never shift
+    assert_eq!(FormField::mask_value("sk-abc"), "••••••");
+
+    // opening the key's own row shows it plain, ready to edit
     app.menu_sel = 3;
     app.menu_activate();
+    assert_eq!(
+        app.form_fields[0].trimmed(),
+        "sk-secret-value-12345",
+        "the editor holds the real value"
+    );
     let shown = render_to_string(&mut app, 100, 30);
     assert!(
         shown.contains("sk-secret-value-12345"),
         "revealed when opened for editing: {shown}"
     );
+    assert!(!shown.contains('•'), "no bullets inside the editor: {shown}");
 }
 
 #[test]

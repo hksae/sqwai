@@ -198,46 +198,27 @@ impl App {
                 let lstyle = Style::new().fg(Color::White);
                 let prefix = Span::styled(format!(" {:>inner_w$} : ", field.label()), lstyle);
                 let row_y = rect.y + 2 + n as u16;
-                match field {
-                    FormField::Text {
-                        ta,
-                        secret,
-                        revealed,
-                        ..
-                    } => {
-                        let shown = if *secret && !*revealed {
-                            FormField::mask_value(&ta.lines().join(""))
-                        } else {
-                            ta.lines().join("")
-                        };
-                        if focused {
-                            focused_field_rect = Some((
-                                n,
-                                Rect {
-                                    x: rect.x + 1 + label_w,
-                                    y: row_y,
-                                    width: rect.width.saturating_sub(label_w + 2),
-                                    height: 1,
-                                },
-                            ));
-                            rows.push(Line::from(prefix));
-                        } else {
-                            rows.push(Self::form_hover_band(
-                                Line::from(vec![prefix, Span::styled(shown, Theme::base())]),
-                                hovered,
-                                rect.width.saturating_sub(2) as usize,
-                            ));
-                        }
-                    }
-                    FormField::Choice { options, sel, .. } => {
-                        let val = options.get(*sel).copied().unwrap_or("");
-                        let spans = vec![prefix, Span::styled(val.to_string(), Theme::base())];
-                        rows.push(Self::form_hover_band(
-                            Line::from(spans),
-                            hovered,
-                            rect.width.saturating_sub(2) as usize,
-                        ));
-                    }
+                // a form field always shows its real value: an api key is bullets
+                // on the provider's row and plain text once its own form is open
+                let FormField::Text { ta, .. } = field;
+                let shown = ta.lines().join("");
+                if focused {
+                    focused_field_rect = Some((
+                        n,
+                        Rect {
+                            x: rect.x + 1 + label_w,
+                            y: row_y,
+                            width: rect.width.saturating_sub(label_w + 2),
+                            height: 1,
+                        },
+                    ));
+                    rows.push(Line::from(prefix));
+                } else {
+                    rows.push(Self::form_hover_band(
+                        Line::from(vec![prefix, Span::styled(shown, Theme::base())]),
+                        hovered,
+                        rect.width.saturating_sub(2) as usize,
+                    ));
                 }
             }
         } else {
@@ -402,39 +383,14 @@ impl App {
         }
 
         if let Some((idx, field_rect)) = focused_field_rect
-            && let Some(FormField::Text {
-                ta,
-                secret,
-                revealed,
-                ..
-            }) = self.form_fields.get_mut(idx)
+            && let Some(FormField::Text { ta, .. }) = self.form_fields.get_mut(idx)
         {
-            if *secret && !*revealed {
-                let masked = FormField::mask_value(&ta.lines().join(""));
-                let count = masked.chars().count();
-                let ccol = ta.cursor().1.min(count);
-                let mut plain = Style::new().fg(Theme::FG());
-                if Some(idx) == self.form_hover_row {
-                    plain = plain.bg(Theme::SELECTION_BG());
-                }
-                let cursor_style = Style::new().fg(Color::Black).bg(Color::White);
-                let mut spans = Vec::with_capacity(count + 1);
-                for (i, ch) in masked.chars().enumerate() {
-                    let st = if i == ccol { cursor_style } else { plain };
-                    spans.push(Span::styled(ch.to_string(), st));
-                }
-                if ccol == count {
-                    spans.push(Span::styled(" ".to_string(), cursor_style));
-                }
-                Paragraph::new(Line::from(spans)).render(field_rect, buf);
-            } else {
-                let mut style = Style::new().fg(Theme::FG());
-                if Some(idx) == self.form_hover_row {
-                    style = style.bg(Theme::SELECTION_BG());
-                }
-                ta.set_style(style);
-                ta.as_ref().render(field_rect, buf);
+            let mut style = Style::new().fg(Theme::FG());
+            if Some(idx) == self.form_hover_row {
+                style = style.bg(Theme::SELECTION_BG());
             }
+            ta.set_style(style);
+            ta.as_ref().render(field_rect, buf);
         }
     }
 
@@ -1066,32 +1022,14 @@ impl App {
                 area.width,
             );
             if is_field_surf {
-                if let Some(FormField::Text {
-                    ta,
-                    secret,
-                    revealed,
-                    ..
-                }) = slf.form_fields.first()
-                {
+                if let Some(FormField::Text { ta, .. }) = slf.form_fields.first() {
                     let field_rect = Rect {
                         x: area.x + 2,
                         y,
                         width: area.width.saturating_sub(2 + rail),
                         height: 1,
                     };
-                    if *secret && !*revealed {
-                        let masked = FormField::mask_value(&ta.lines().join(""));
-                        Paragraph::new(Line::from(Span::styled(masked, Theme::base())))
-                            .render(field_rect, buf);
-                        let col = (ta.cursor().1 as u16).min(field_rect.width.saturating_sub(1));
-                        if field_rect.width > 0
-                            && let Some(cell) = buf.cell_mut((field_rect.x + col, field_rect.y))
-                        {
-                            cell.set_style(Theme::cursor());
-                        }
-                    } else {
-                        ta.render(field_rect, buf);
-                    }
+                    ta.render(field_rect, buf);
                 }
             } else if matches!(action, MenuAction::FocusSearch) {
                 paint_field(slf, buf, area, y, rail);

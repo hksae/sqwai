@@ -578,10 +578,6 @@ pub struct App {
     effort_blend_sel: Option<usize>,
     form_fields: Vec<FormField>,
     form_focus: usize,
-    /// stashed text drafts surviving a submenu detour (e.g. form → Effort
-    /// menu → back): prefill rebuilds fields from config, which would eat
-    /// unsaved typing. Restored once on return, then cleared.
-    form_draft: Vec<(String, String)>,
     /// unsaved draft values for a brand-new model (`Menu::EditModel { key: None }`)
     /// until both `key` and `request id` have been filled in
     model_draft: menus::ModelDraft,
@@ -883,7 +879,6 @@ impl App {
             effort_blend_sel: None,
             form_fields: Vec::new(),
             form_focus: 0,
-            form_draft: Vec::new(),
             model_draft: menus::ModelDraft::default(),
             provider_draft: menus::ProviderDraft::default(),
             sessions: Vec::new(),

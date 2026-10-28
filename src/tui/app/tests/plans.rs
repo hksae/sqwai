@@ -390,7 +390,7 @@ fn builtin_providers_and_models_are_immutable_and_updateable() {
         ),
         "built-in model edit must open"
     );
-    assert_eq!(app.form_fields.len(), 4, "full model form for a built-in");
+    assert_eq!(app.menu_rows.len(), 4, "full model rows for a built-in");
     app.menu_home();
 
     // 4. the built-in catalog update flow triggers update status

@@ -20,11 +20,6 @@ use crate::session::Session;
 use crate::tui::markdown::{Highlighter, render, wrap_tagged};
 use crate::tui::theme::Theme;
 
-const FORMAT_OPTS: &[&str] = &["openai", "anthropic", "responses"];
-/// Per-model effort options: always the full level list — a hardcoded copy
-/// here once dropped `xhigh`, showing `off` for xhigh models and clobbering
-/// the level on save.
-const EFFORT_OPTS: &[&str] = &EffortLevel::STRS;
 /// Legacy option lists, kept for the config-file round-trip tests: effort
 /// control and always-on left the UI (auto by wire format), but stored
 /// values must survive edits. The `[1..]` tail must stay equal to
@@ -42,46 +37,25 @@ pub(super) const ALWAYS_OPTS: &[&str] = &["off", "on"];
 
 pub(super) enum FormField {
     /// free text edited through a real textarea (cursor, word jumps, paste).
-    /// `secret` masks the value on screen (the stored text is always real);
-    /// `revealed` flips it back while the user holds the toggle.
-    Text {
-        label: String,
-        ta: Box<TextArea<'static>>,
-        secret: bool,
-        revealed: bool,
-    },
-    /// pick-one value cycled with left/right
-    Choice {
-        label: String,
-        options: &'static [&'static str],
-        sel: usize,
-    },
+    /// What a field holds is always what it shows: an api key is bullets on the
+    /// provider's own row, and plain text once that row's form is open.
+    Text { label: String, ta: Box<TextArea<'static>> },
 }
 
 impl FormField {
+    /// Every field is opened to be edited, so the caret starts at the end of
+    /// the prefilled value instead of before it.
     pub(super) fn text(label: &str, value: String) -> Self {
         let mut ta = Box::new(TextArea::new(vec![value]));
         ta.set_style(Theme::base());
         ta.set_cursor_line_style(Style::new());
         ta.set_cursor_style(Theme::cursor());
         ta.set_selection_style(Theme::selection());
+        ta.move_cursor(tui_textarea::CursorMove::End);
         Self::Text {
             label: label.into(),
             ta,
-            secret: false,
-            revealed: false,
         }
-    }
-
-    /// a secret text field (api keys): masked with bullets unless revealed.
-    /// The textarea always holds the real value — masking is display-only,
-    /// so save/copy/paste never see bullets.
-    pub(super) fn secret(label: &str, value: String) -> Self {
-        let mut f = Self::text(label, value);
-        if let Self::Text { secret, .. } = &mut f {
-            *secret = true;
-        }
-        f
     }
 
     /// bullets, capped at 10 so a long key never stretches across the row
@@ -89,17 +63,9 @@ impl FormField {
         value.chars().take(10).map(|_| '•').collect()
     }
 
-    pub(super) fn choice(label: &str, options: &'static [&'static str], sel: usize) -> Self {
-        Self::Choice {
-            label: label.into(),
-            options,
-            sel,
-        }
-    }
-
     pub(super) fn label(&self) -> &str {
         match self {
-            Self::Text { label, .. } | Self::Choice { label, .. } => label,
+            Self::Text { label, .. } => label,
         }
     }
 
@@ -107,9 +73,6 @@ impl FormField {
         match self {
             // fields are single-line; guard against pasted newlines anyway
             Self::Text { ta, .. } => ta.lines().join(" "),
-            Self::Choice { options, sel, .. } => {
-                options.get(*sel).copied().unwrap_or("").to_string()
-            }
         }
     }
 
@@ -126,89 +89,6 @@ impl App {
     pub(super) fn prefill_form(&mut self) {
         self.form_fields.clear();
         match self.cur_menu() {
-            Some(Menu::EditProvider { name }) => {
-                let is_builtin = name
-                    .as_ref()
-                    .is_some_and(|n| self.cfg.is_builtin_provider(n));
-                match name.as_ref().and_then(|n| self.cfg.providers.get(n)) {
-                    Some(pc) => {
-                        if is_builtin {
-                            self.form_fields = vec![
-                                FormField::secret(
-                                    "api key",
-                                    pc.api_key.clone().unwrap_or_default(),
-                                ),
-                                FormField::text(
-                                    "key env var",
-                                    pc.api_key_env.clone().unwrap_or_default(),
-                                ),
-                            ];
-                        } else {
-                            let fmt_sel = FORMAT_OPTS
-                                .iter()
-                                .position(|s| *s == pc.format.as_str())
-                                .unwrap_or(0);
-                            self.form_fields = vec![
-                                FormField::text("name", name.clone().unwrap_or_default()),
-                                FormField::choice("format", FORMAT_OPTS, fmt_sel),
-                                FormField::text("base url", pc.base_url.clone()),
-                                FormField::secret(
-                                    "api key",
-                                    pc.api_key.clone().unwrap_or_default(),
-                                ),
-                                FormField::text(
-                                    "key env var",
-                                    pc.api_key_env.clone().unwrap_or_default(),
-                                ),
-                            ];
-                        }
-                    }
-                    _ => {
-                        self.form_fields = vec![
-                            FormField::text("name", String::new()),
-                            FormField::choice("format", FORMAT_OPTS, 0),
-                            FormField::text("base url", String::new()),
-                            FormField::secret("api key", String::new()),
-                            FormField::text("key env var", String::new()),
-                        ];
-                    }
-                }
-            }
-            Some(Menu::EditModel { key, .. }) => {
-                match key.as_ref().and_then(|k| self.cfg.models.get(k)) {
-                    Some(mc) => {
-                        let ef_sel = EFFORT_OPTS
-                            .iter()
-                            .position(|s| *s == mc.effort.as_str())
-                            .unwrap_or(0);
-                        self.form_fields = vec![
-                            FormField::text(
-                                "name",
-                                key.as_deref()
-                                    .map(key_name)
-                                    .unwrap_or_default()
-                                    .to_string(),
-                            ),
-                            FormField::text("request id", mc.id.clone()),
-                            FormField::text("context", mc.context.to_string()),
-                            FormField::choice("effort", EFFORT_OPTS, ef_sel),
-                        ];
-                    }
-                    _ => {
-                        // new models start at medium (the old global default)
-                        let ef_sel = EFFORT_OPTS
-                            .iter()
-                            .position(|s| *s == EffortLevel::Medium.as_str())
-                            .unwrap_or(0);
-                        self.form_fields = vec![
-                            FormField::text("name", String::new()),
-                            FormField::text("request id", String::new()),
-                            FormField::text("context", "128000".into()),
-                            FormField::choice("effort", EFFORT_OPTS, ef_sel),
-                        ];
-                    }
-                }
-            }
             Some(Menu::EditModelField { key, field, .. }) => {
                 use super::menus::ModelField;
                 let val = match key.as_ref().and_then(|k| self.cfg.models.get(k)) {
@@ -231,11 +111,7 @@ impl App {
                         ModelField::Context => self.model_draft.context.to_string(),
                     },
                 };
-                let mut f = FormField::text(field.label(), val);
-                if let FormField::Text { ta, .. } = &mut f {
-                    ta.move_cursor(tui_textarea::CursorMove::End);
-                }
-                self.form_fields = vec![f];
+                self.form_fields = vec![FormField::text(field.label(), val)];
             }
             Some(Menu::EditProviderField { name, field }) => {
                 use super::menus::ProviderField;
@@ -255,11 +131,7 @@ impl App {
                         ProviderField::KeyEnvVar => self.provider_draft.api_key_env.clone(),
                     },
                 };
-                let mut f = FormField::text(field.label(), val);
-                if let FormField::Text { ta, .. } = &mut f {
-                    ta.move_cursor(tui_textarea::CursorMove::End);
-                }
-                self.form_fields = vec![f];
+                self.form_fields = vec![FormField::text(field.label(), val)];
             }
             Some(Menu::EditSessionTitle { id }) => {
                 let title = self
@@ -268,17 +140,11 @@ impl App {
                     .find(|s| s.id.to_string() == *id)
                     .map(|s| s.title.clone())
                     .unwrap_or_default();
-                let mut f = FormField::text("title", title);
-                if let FormField::Text { ta, .. } = &mut f {
-                    ta.move_cursor(tui_textarea::CursorMove::End);
-                }
+                let f = FormField::text("title", title);
                 self.form_fields = vec![f];
             }
             Some(Menu::EditScalar(setting)) => {
-                let mut f = FormField::text(setting.label(), setting.edit_value(&self.cfg));
-                if let FormField::Text { ta, .. } = &mut f {
-                    ta.move_cursor(tui_textarea::CursorMove::End);
-                }
+                let f = FormField::text(setting.label(), setting.edit_value(&self.cfg));
                 self.form_fields = vec![f];
             }
             Some(Menu::AskFree { .. }) => {
@@ -286,13 +152,6 @@ impl App {
             }
             _ => {}
         }
-    }
-
-    pub(super) fn focused_is_choice(&self) -> bool {
-        matches!(
-            self.form_fields.get(self.form_focus),
-            Some(FormField::Choice { .. })
-        )
     }
 
     /// Label column width for the open form: fits the longest field label
@@ -320,51 +179,11 @@ impl App {
         }
     }
 
-    /// left/right/home/end: choices cycle their values, text fields move the cursor.
-    /// The effort row never cycles: it opens the Effort menu instead (arrows
-    /// would silently fight the menu as the source of truth).
+    /// left/right/home/end reach the textarea, which owns cursor movement.
+    /// Every choice in the UI is a menu row now, so no form field cycles values.
     pub(super) fn form_nav_key(&mut self, k: crossterm::event::KeyEvent) {
-        use crossterm::event::KeyCode;
-        if self.focused_is_choice() {
-            let is_effort =
-                matches!(
-                    self.form_fields.get(self.form_focus),
-                    Some(FormField::Choice { .. })
-                        if self.form_fields[self.form_focus].label() == "effort"
-                ) && matches!(self.cur_menu(), Some(Menu::EditModel { key: Some(_), .. }));
-            if !is_effort {
-                match k.code {
-                    KeyCode::Left => self.choice_cycle(-1),
-                    KeyCode::Right => self.choice_cycle(1),
-                    _ => {}
-                }
-            }
-            return;
-        }
         if let Some(FormField::Text { ta, .. }) = self.form_fields.get_mut(self.form_focus) {
             ta.input(k);
-            self.dirty = true;
-        }
-    }
-
-    /// true when the focused field is a masked secret (used by the
-    /// reveal-toggle keybinding, so plain text fields never react to it)
-    pub(super) fn focused_is_secret(&self) -> bool {
-        matches!(
-            self.form_fields.get(self.form_focus),
-            Some(FormField::Text { secret: true, .. })
-        )
-    }
-
-    /// flip the focused secret field between bullets and the real value
-    pub(super) fn toggle_secret_reveal(&mut self) {
-        if let Some(FormField::Text {
-            secret: true,
-            revealed,
-            ..
-        }) = self.form_fields.get_mut(self.form_focus)
-        {
-            *revealed = !*revealed;
             self.dirty = true;
         }
     }
@@ -376,9 +195,6 @@ impl App {
         if k.code == KeyCode::Enter {
             return; // fields stay single-line; enter saves via menu_activate
         }
-        if self.focused_is_choice() {
-            return;
-        }
         if let Some(FormField::Text { ta, .. }) = self.form_fields.get_mut(self.form_focus) {
             if handle_text_combo(ta, k) {
                 self.dirty = true;
@@ -389,56 +205,11 @@ impl App {
         }
     }
 
-    pub(super) fn choice_cycle(&mut self, dir: i32) {
-        if let Some(FormField::Choice { options, sel, .. }) =
-            self.form_fields.get_mut(self.form_focus)
-        {
-            let n = options.len();
-            *sel = if dir < 0 {
-                (*sel + n - 1) % n
-            } else {
-                (*sel + 1) % n
-            };
-            self.dirty = true;
-        }
-    }
-
     pub(super) fn form_is_selecting(&self) -> bool {
         match self.form_fields.get(self.form_focus) {
             Some(FormField::Text { ta, .. }) => ta.is_selecting(),
             _ => false,
         }
-    }
-
-    /// Stash text drafts before a submenu detour, restore them on return.
-    /// `prefill_form` rebuilds fields from config — without the stash an
-    /// Effort-menu detour would eat unsaved typing.
-    pub(super) fn stash_form_text(&mut self) {
-        self.form_draft = self
-            .form_fields
-            .iter()
-            .filter_map(|f| match f {
-                FormField::Text { .. } => Some((f.label().to_string(), f.trimmed())),
-                _ => None,
-            })
-            .collect();
-    }
-
-    pub(super) fn restore_form_text(&mut self) {
-        if self.form_draft.is_empty() {
-            return;
-        }
-        for (label, text) in std::mem::take(&mut self.form_draft) {
-            if let Some(FormField::Text { ta, .. }) =
-                self.form_fields.iter_mut().find(|f| f.label() == label)
-            {
-                // select-all + insert replaces the prefilled value in place:
-                // styles, secrecy and cursor setup survive the round trip
-                ta.select_all();
-                ta.insert_str(text);
-            }
-        }
-        self.dirty = true;
     }
 
     pub(super) fn form_mouse_down(&mut self, row: u16, col: u16) {
@@ -471,41 +242,15 @@ impl App {
                 } else {
                     self.menu_rect.x + 1 + label_w
                 };
-                // the effort row opens its menu instead of cycling (arrows
-                // would silently fight the menu as the source of truth).
-                // Decided before the field borrow below; new (unsaved)
-                // models have no menu target yet, so their row still
-                // cycles locally.
-                let effort_target: Option<String> = match self.cur_menu() {
-                    Some(Menu::EditModel { key: Some(k), .. }) => Some(k.clone()),
-                    _ => None,
-                };
-                let open_effort = matches!(
-                    self.form_fields.get(idx),
-                    Some(FormField::Choice { .. })
-                        if self.form_fields[idx].label() == "effort"
-                ) && effort_target.is_some();
-                match self.form_fields.get_mut(idx) {
-                    Some(FormField::Text { ta, .. }) => {
-                        if col >= text_x {
-                            let char_col = (col.saturating_sub(text_x)) as usize;
-                            ta.move_cursor(tui_textarea::CursorMove::Jump(0, char_col as u16));
-                            ta.start_selection();
-                        } else {
-                            ta.cancel_selection();
-                            ta.move_cursor(tui_textarea::CursorMove::End);
-                        }
+                if let Some(FormField::Text { ta, .. }) = self.form_fields.get_mut(idx) {
+                    if col >= text_x {
+                        let char_col = (col.saturating_sub(text_x)) as usize;
+                        ta.move_cursor(tui_textarea::CursorMove::Jump(0, char_col as u16));
+                        ta.start_selection();
+                    } else {
+                        ta.cancel_selection();
+                        ta.move_cursor(tui_textarea::CursorMove::End);
                     }
-                    Some(FormField::Choice { .. }) if open_effort => {
-                        self.stash_form_text();
-                        self.open_menu(Menu::Effort {
-                            model: effort_target,
-                        });
-                    }
-                    Some(FormField::Choice { .. }) if col >= text_x => {
-                        self.choice_cycle(1);
-                    }
-                    _ => {}
                 }
                 self.dirty = true;
             }
@@ -590,194 +335,6 @@ impl App {
                 } else {
                     self.status("session not found", StatusKind::Err);
                 }
-            }
-            Some(Menu::EditProvider { name }) => {
-                let is_builtin = name
-                    .as_ref()
-                    .is_some_and(|n| self.cfg.is_builtin_provider(n));
-                if is_builtin {
-                    let provider_name = name.clone().unwrap();
-                    let key = self
-                        .form_fields
-                        .first()
-                        .map(|f| f.trimmed())
-                        .unwrap_or_default();
-                    let key_env = self
-                        .form_fields
-                        .get(1)
-                        .map(|f| f.trimmed())
-                        .unwrap_or_default();
-                    if let Some(pc) = self.cfg.providers.get_mut(&provider_name) {
-                        pc.api_key = (!key.is_empty()).then_some(key);
-                        pc.api_key_env = (!key_env.is_empty()).then_some(key_env);
-                    }
-                    self.cfg.save().ok();
-                    self.open_menu_replace(Menu::Models {
-                        provider: provider_name,
-                    });
-                    return;
-                }
-                let vals: Vec<String> = self.form_fields.iter().map(|f| f.trimmed()).collect();
-                let (new_name, fmt, url, key, key_env) = (
-                    vals.first().cloned().unwrap_or_default(),
-                    vals.get(1).cloned().unwrap_or_default(),
-                    vals.get(2).cloned().unwrap_or_default(),
-                    vals.get(3).cloned().unwrap_or_default(),
-                    vals.get(4).cloned().unwrap_or_default(),
-                );
-                if new_name.is_empty() || url.is_empty() {
-                    self.status("name and base url are required", StatusKind::Err);
-                    return;
-                }
-                let format = FORMAT_OPTS
-                    .iter()
-                    .position(|f| *f == fmt)
-                    .and_then(|i| WireFormat::ALL.get(i))
-                    .copied()
-                    .unwrap_or(WireFormat::Openai);
-                // Uniqueness must hold against every other entry: on rename,
-                // the name being edited is excluded, but a collision with a
-                // different existing provider is a hard error — otherwise the
-                // insert below would silently destroy that provider.
-                if name.as_deref() != Some(new_name.as_str())
-                    && self.cfg.providers.contains_key(&new_name)
-                {
-                    self.status(
-                        &format!("provider '{new_name}' already exists"),
-                        StatusKind::Err,
-                    );
-                    return;
-                }
-                let pc = crate::config::ProviderConfig {
-                    format,
-                    base_url: url,
-                    api_key: (!key.is_empty()).then_some(key),
-                    api_key_env: (!key_env.is_empty()).then_some(key_env),
-                    // not shown in the form; preserve what the config says
-                    continuation: name
-                        .as_ref()
-                        .and_then(|n| self.cfg.providers.get(n))
-                        .or_else(|| self.cfg.providers.get(&new_name))
-                        .is_none_or(|p| p.continuation),
-                    // models are folded into cfg.models; this table fills at save
-                    models: Default::default(),
-                };
-                let mut skipped = 0usize;
-                if let Some(old) = &name
-                    && old != &new_name
-                {
-                    self.cfg.providers.remove(old);
-                    skipped = self.cfg.rename_provider_models(old, &new_name);
-                    if self.model_cfg.provider == *old {
-                        self.model_cfg.provider = new_name.clone();
-                    }
-                }
-                self.cfg.providers.insert(new_name.clone(), pc);
-                self.cfg.save().ok();
-                if skipped > 0 {
-                    self.status(
-                        &format!(
-                            "{skipped} model(s) kept their old key: '{new_name}' already serves \
-                             that name"
-                        ),
-                        StatusKind::Err,
-                    );
-                }
-                self.open_menu_replace(Menu::Models { provider: new_name });
-            }
-            Some(Menu::EditModel { provider, key }) => {
-                let vals: Vec<String> = self.form_fields.iter().map(|f| f.trimmed()).collect();
-                let (name, id, ctx) = (
-                    vals.first().cloned().unwrap_or_default(),
-                    vals.get(1).cloned().unwrap_or_default(),
-                    vals.get(2).cloned().unwrap_or_default(),
-                );
-                let new_key = model_key(&provider, &name);
-                if name.is_empty() || id.is_empty() {
-                    self.status("name and request id are required", StatusKind::Err);
-                    return;
-                }
-                let Ok(context) = ctx.parse::<u64>() else {
-                    self.status("context must be a number", StatusKind::Err);
-                    return;
-                };
-                if key.as_deref() != Some(new_key.as_str())
-                    && self.cfg.models.contains_key(&new_key)
-                {
-                    self.status(
-                        &format!("model '{}' already exists", model_display(&new_key)),
-                        StatusKind::Err,
-                    );
-                    return;
-                }
-                // A built-in key is its catalog identity: after a rename the
-                // catalog would re-seed the original key on the next load,
-                // leaving a duplicate. Edit `request id` instead.
-                if key.as_deref().is_some_and(|k| self.cfg.is_builtin_model(k))
-                    && key.as_deref() != Some(new_key.as_str())
-                {
-                    self.status(
-                        "built-in model name cannot be renamed — it is the catalog identity",
-                        StatusKind::Err,
-                    );
-                    return;
-                }
-                if let Some(old) = &key
-                    && old != &new_key
-                {
-                    self.cfg.models.remove(old);
-                    if self.session.model_key == *old {
-                        self.session.model_key = new_key.clone();
-                    }
-                }
-                // Fields the form does not show must survive an edit.
-                // Effort lives in the Effort menu now (current model); the
-                // form keeps identity only. New models take the row's choice.
-                let previous = key
-                    .as_ref()
-                    .and_then(|k| self.cfg.models.get(k))
-                    .cloned()
-                    .or_else(|| self.cfg.models.get(&new_key).cloned());
-                let form_effort = self
-                    .form_fields
-                    .iter()
-                    .filter_map(|f| match f {
-                        FormField::Choice { options, sel, .. } if f.label() == "effort" => {
-                            options.get(*sel).copied()
-                        }
-                        _ => None,
-                    })
-                    .next();
-                let effort = previous
-                    .as_ref()
-                    .map(|p| p.effort)
-                    .or_else(|| form_effort.and_then(crate::config::EffortLevel::from_str))
-                    .unwrap_or(crate::config::EffortLevel::Medium);
-                let updated = ModelConfig {
-                    provider: provider.clone(),
-                    id,
-                    context,
-                    effort,
-                    effort_control: previous.as_ref().and_then(|p| p.effort_control),
-                    effort_always_on: previous.as_ref().is_some_and(|p| p.effort_always_on),
-                    fallback: previous.as_ref().and_then(|p| p.fallback.clone()),
-                    status: previous
-                        .as_ref()
-                        .map(|p| p.status)
-                        .unwrap_or(ModelStatus::Active),
-                    vision: previous.as_ref().and_then(|p| p.vision),
-                    pdf: previous.as_ref().and_then(|p| p.pdf),
-                };
-                self.cfg.models.insert(new_key.clone(), updated.clone());
-                if self.session.model_key == new_key {
-                    self.model_cfg = updated;
-                    self.session.context_limit = context;
-                    self.session.last_response_id = None;
-                    self.session.last_response_model = None;
-                    self.rebuild_provider();
-                }
-                self.cfg.save().ok();
-                self.open_menu_replace(Menu::Models { provider });
             }
             Some(Menu::EditModelField {
                 provider,
