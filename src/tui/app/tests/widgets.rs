@@ -194,7 +194,7 @@ fn notice_row_fits_width_next_to_queue() {
     assert!(text.contains("boom"), "toast next: {text:?}");
 }
 #[test]
-fn running_tool_name_shimmers_like_activity_header() {
+fn running_tool_row_stays_calm_and_only_the_dot_moves() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.startup = false;
     app.push_segment(Segment::User("go".into()));
@@ -208,37 +208,50 @@ fn running_tool_name_shimmers_like_activity_header() {
         preview: Vec::new(),
         preview_total: 0,
         expanded: false,
-        flash: None,
         ask: None,
     });
-    // mid-sweep tick: the wave sits on the name, like the live header
-    app.spinner_tick = crate::tui::shimmer::SHIMMER_PERIOD_TICKS / 4;
-    app.rebuild_cache(80);
-    let row = app
-        .cache_lines
-        .iter()
-        .find(|l| {
-            l.spans
-                .iter()
-                .map(|s| s.content.as_ref())
-                .collect::<String>()
-                .contains("read")
-                && l.spans
-                    .iter()
-                    .map(|s| s.content.as_ref())
-                    .collect::<String>()
-                    .contains("a.rs")
-        })
-        .expect("running tool row");
-    let text: String = row.spans.iter().map(|s| s.content.as_ref()).collect();
-    assert!(text.contains("read"), "name intact: {text}");
-    // the wave splits the name into per-char spans on every path
-    // (static render keeps it one span); the summary "a.rs" rides one
-    // span, so a lone "r" can only come from the split name
-    assert!(
-        row.spans.iter().any(|s| s.content == "r"),
-        "running tool name must split into wave spans: {text}"
+    let find = |app: &mut App| {
+        app.rebuild_cache(80);
+        app.cache_lines
+            .iter()
+            .find(|l| {
+                let t: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
+                t.contains("read") && t.contains("a.rs")
+            })
+            .expect("running tool row")
+            .spans
+            .clone()
+    };
+
+    app.spinner_tick = crate::tui::anim::PULSE_STEPS * 3;
+    let row = find(&mut app);
+    let text: String = row.iter().map(|s| s.content.as_ref()).collect();
+    assert_eq!(
+        text, "• read (a.rs)",
+        "three spans, no wave splitting the name"
     );
+    assert_eq!(row[1].style, Theme::meta(), "the name stays calm");
+
+    // the running signal is the dot's level, and it moves with the ticks
+    let before = row[0].style;
+    let tick_before = app.spinner_tick;
+    app.spinner_tick += crate::tui::anim::PULSE_STEPS;
+    let later = find(&mut app);
+    assert_eq!(
+        before,
+        super::super::view::working_dot_style(tick_before),
+        "the row paints the pulse level for its tick"
+    );
+    assert_eq!(
+        later[0].style,
+        super::super::view::working_dot_style(app.spinner_tick)
+    );
+    assert_ne!(
+        crate::tui::anim::pulse_white(tick_before),
+        crate::tui::anim::pulse_white(app.spinner_tick),
+        "the level must actually change over that many ticks"
+    );
+    assert_eq!(row[1].style, later[1].style, "and the name must not");
 }
 
 #[test]
@@ -373,7 +386,6 @@ fn tool_running_reflects_whether_the_last_tool_row_is_still_open() {
         preview: Vec::new(),
         preview_total: 0,
         expanded: false,
-        flash: None,
         ask: None,
     });
     assert!(app.tool_running());
@@ -1045,13 +1057,8 @@ fn an_answered_ask_renders_identically_after_reload() {
             .iter()
             .position(|s| matches!(s, Segment::Tool { name, .. } if name == "ask_user"))
             .expect("the ask row");
-        if let Some(Segment::Tool {
-            expanded: e, flash, ..
-        }) = app.segments.get_mut(i)
-        {
+        if let Some(Segment::Tool { expanded: e, .. }) = app.segments.get_mut(i) {
             *e = expanded;
-            // the finish wave is an animation, not the settled row
-            *flash = None;
         }
         app.touch_segment(i);
         app.rebuild_cache(80);
@@ -1478,7 +1485,6 @@ fn structural_insert_preserves_other_segment_caches() {
             preview: Vec::new(),
             preview_total: 0,
             expanded: false,
-            flash: None,
             ask: None,
         },
     );
@@ -1683,7 +1689,6 @@ fn commentary_left_alignment_matches_tool_call() {
         preview: Vec::new(),
         preview_total: 0,
         expanded: false,
-        flash: None,
         ask: None,
     });
 

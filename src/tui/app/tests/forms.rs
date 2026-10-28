@@ -18,29 +18,6 @@ fn experimental_section_sits_above_debug_and_toggles() {
 }
 
 #[test]
-fn tool_notice_arms_the_finish_wave() {
-    let mut app = test_app("http://127.0.0.1:9/v1".into());
-    app.handle_tool_start("read".into(), "a.rs".into(), None);
-    app.handle_tool_notice("read".into(), "done".into(), true, None, None);
-    let seg = app
-        .segments
-        .iter()
-        .find(|s| matches!(s, Segment::Tool { .. }))
-        .expect("tool row");
-    assert!(
-        matches!(
-            seg,
-            Segment::Tool {
-                ok: Some(true),
-                flash: Some(_),
-                ..
-            }
-        ),
-        "notice resolves the row and arms the wave"
-    );
-}
-
-#[test]
 fn tool_notice_matches_call_id_not_position() {
     // two same-name rows open (parallel calls): the notice must
     // close its own row, not the last open one (rposition would)
@@ -93,9 +70,9 @@ fn tool_notice_matches_call_id_not_position() {
 }
 
 #[test]
-fn finish_wave_keeps_geometry_and_settles_static() {
-    // env-independent: geometry holds on both paths, and an expired
-    // wave renders exactly the static row
+fn finished_tool_row_is_the_plain_static_row() {
+    // one row shape for every state: head only, dot then calm name, no bold
+    // and no wave — the dot's color is the whole verdict
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.push_segment(Segment::Tool {
         call_id: None,
@@ -107,54 +84,63 @@ fn finish_wave_keeps_geometry_and_settles_static() {
         preview: Vec::new(),
         preview_total: 0,
         expanded: false,
-        flash: Some(std::time::Instant::now()),
         ask: None,
     });
     let rows = app.render_segment(&app.segments, 0, 80, true);
-    assert_eq!(rows.len(), 1, "head row only, like static");
+    assert_eq!(rows.len(), 1, "head row only");
     let text: String = rows[0].0.spans.iter().map(|s| s.content.as_ref()).collect();
     assert!(text.starts_with("• "), "{text:?}");
     assert!(text.contains("read"), "{text:?}");
-
-    // expired flash: byte-identical static row
-    if let Some(Segment::Tool { flash, .. }) = app.segments.get_mut(0) {
-        *flash = Some(std::time::Instant::now() - std::time::Duration::from_secs(5));
-    }
-    let rows = app.render_segment(&app.segments, 0, 80, true);
     assert_eq!(rows[0].0.spans[0].content.as_ref(), "• ");
     assert!(
         !rows[0].0.spans[0]
             .style
             .add_modifier
             .contains(ratatui::style::Modifier::BOLD),
-        "the settled dot carries no bold — the shape says done: {:?}",
+        "the settled dot carries no bold: {:?}",
         rows[0].0.spans[0].style
     );
     assert_eq!(rows[0].0.spans[1].content.as_ref(), "read");
 }
 
+/// A running row wears the same glyph and the same calm name: only the dot's
+/// color differs, so the transcript does not move when work closes.
 #[test]
-fn expired_flash_key_matches_static_key() {
-    // the live wave must not pin the cache: expiry returns the key to
-    // the static one, so the row repaints settled (no stuck wave frame)
-    let app = test_app("http://127.0.0.1:9/v1".into());
-    let mk = |flash| Segment::Tool {
-        call_id: None,
-        name: "read".into(),
-        args: "a.rs".into(),
-        ok: Some(true),
-        output: String::new(),
-        diff: None,
-        preview: Vec::new(),
-        preview_total: 0,
-        expanded: false,
-        flash,
-        ask: None,
+fn running_tool_row_matches_the_finished_row_except_its_dot() {
+    let head = |ok: Option<bool>| {
+        let mut app = test_app("http://127.0.0.1:9/v1".into());
+        app.push_segment(Segment::Tool {
+            call_id: None,
+            name: "read".into(),
+            args: "a.rs".into(),
+            ok,
+            output: String::new(),
+            diff: None,
+            preview: Vec::new(),
+            preview_total: 0,
+            expanded: false,
+            ask: None,
+        });
+        let spans = app.render_segment(&app.segments, 0, 80, true)[0]
+            .0
+            .spans
+            .clone();
+        (
+            spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<String>(),
+            spans[0].style,
+        )
     };
-    let expired = mk(Some(
-        std::time::Instant::now() - std::time::Duration::from_secs(5),
-    ));
-    assert_eq!(app.seg_key(&mk(None)), app.seg_key(&expired));
+    let (running, running_dot) = head(None);
+    let (done, done_dot) = head(Some(true));
+    assert_eq!(running, done, "same text, only the dot changes: {running:?} vs {done:?}");
+    assert!(running.starts_with("• read"), "{running:?}");
+    assert_ne!(
+        running_dot, done_dot,
+        "a running dot must not look settled"
+    );
 }
 
 #[test]
@@ -518,7 +504,6 @@ fn edit_row_shows_colored_change_counts() {
         preview: Vec::new(),
         preview_total: 0,
         expanded: false,
-        flash: None,
         ask: None,
     });
     let rows = app.render_segment(&app.segments, 0, 80, true);
@@ -545,7 +530,6 @@ fn expanded_tool_output_indents_and_truncates() {
         preview: Vec::new(),
         preview_total: 0,
         expanded: true,
-        flash: None,
         ask: None,
     });
     let rows = app.render_segment(&app.segments, 0, 18, true);
@@ -649,7 +633,6 @@ fn resized_terminal_rebuilds_tool_frames_at_chat_width() {
         preview: Vec::new(),
         preview_total: 0,
         expanded: true,
-        flash: None,
         ask: None,
     });
     app.startup = false;

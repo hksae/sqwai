@@ -54,19 +54,7 @@ pub(crate) fn char_cow(ch: char) -> Cow<'static, str> {
 /// Ticks per full sweep at the 50ms UI tick (2 seconds).
 pub const SHIMMER_PERIOD_TICKS: usize = 40;
 
-/// One-shot finish-wave lengths for tool rows: success reads fast,
-/// failure lingers — a failure must not be missable.
-pub const FLASH_OK_MS: u64 = 1200;
-pub const FLASH_ERR_MS: u64 = 1800;
-
-/// Finish-wave duration for a tool row by outcome.
-pub fn flash_ms(done_ok: bool) -> u64 {
-    if done_ok { FLASH_OK_MS } else { FLASH_ERR_MS }
-}
-
-/// Band base (outside the wave) and crest. Base sits high (180) so the
-/// trough reads bright, not muddy, on dark terminals; the crest still pops.
-const BASE_RGB: (u8, u8, u8) = (180, 180, 180);
+/// Crest of the traveling band: white, so it pops over any base it is given.
 const CREST_RGB: (u8, u8, u8) = (255, 255, 255);
 
 /// Linear blend between two RGB colors, like Codex `color::blend`.
@@ -144,16 +132,6 @@ fn wave_t(tick: usize, center: f64, total: f64) -> f64 {
     0.5 * (1.0 + (std::f64::consts::PI * dist).cos())
 }
 
-/// Render `text` with a moving brightness band for the given tick.
-/// Empty text renders to no spans.
-pub fn shimmer_spans(text: &str, tick: usize) -> Vec<Span<'static>> {
-    if has_truecolor() {
-        shimmer_rgb(text, tick)
-    } else {
-        shimmer_ansi(text, tick)
-    }
-}
-
 /// Render `text` in `Theme::WARN_RGB` with a bright white crest sweeping
 /// across it for the given tick (used on the approval command line).
 pub fn shimmer_warn_spans(text: &str, tick: usize) -> Vec<Span<'static>> {
@@ -193,11 +171,6 @@ pub fn shimmer_brand_spans(text: &str, tick: usize) -> Vec<Span<'static>> {
         }
         out
     }
-}
-
-/// Truecolor path: every char BOLD, fg blended gray → white by the wave.
-fn shimmer_rgb(text: &str, tick: usize) -> Vec<Span<'static>> {
-    shimmer_rgb_tint(text, tick, BASE_RGB, CREST_RGB)
 }
 
 /// Truecolor path with an arbitrary color transition: every char BOLD, fg
@@ -270,81 +243,25 @@ fn shimmer_ansi(text: &str, tick: usize) -> Vec<Span<'static>> {
     out
 }
 
-/// One-shot finish wave for a tool head row: a saturated green (ok) or
-/// muted red (failed) band sweeps from the marker across the name over
-/// `progress` 0.0..1.0, then the static row. Saturated by design — the old
-/// pastel whisper was invisible on white text; the sweep is brief, so it
-/// reads instead of shouting.
-/// The base is exactly the static row's styles (white marker + name),
-/// so the frozen end frame equals the normal render (no pop).
-/// Caller gates on [`has_truecolor`]; without RGB there is no wave, just
-/// the static row.
-pub fn flash_spans(marker: &str, name: &str, done_ok: bool, progress: f64) -> Vec<Span<'static>> {
-    const BAND: f64 = 6.0;
-    // the house green and red, so the wave sweeps in the same colors the row
-    // settles to; bold stays here alone because a wave that cannot be seen is
-    // not a wave, and it is gone the moment the row is
-    let target = if done_ok {
-        Theme::OK_RGB
-    } else {
-        Theme::ERR_RGB
-    };
-    let mut count = 0usize;
-    let mut marker_w = 0.0f64;
-    for c in marker.chars() {
-        count += 1;
-        marker_w += unicode_width::UnicodeWidthChar::width(c).unwrap_or(0) as f64;
-    }
-    let mut name_w = 0.0f64;
-    for c in name.chars() {
-        count += 1;
-        name_w += unicode_width::UnicodeWidthChar::width(c).unwrap_or(0) as f64;
-    }
-    let total = marker_w + name_w;
-    let frontier = progress.clamp(0.0, 1.0) * (total + BAND);
-    let mut out = Vec::with_capacity(count);
-    let mut column = 0.0;
-    let wave_style = Style::default()
-        .fg(Color::Rgb(target.0, target.1, target.2))
-        .add_modifier(Modifier::BOLD);
-    let head_bold = Theme::tool_head_bold();
-    let head_plain = Theme::tool_head();
-    for (part, ch) in marker
-        .chars()
-        .map(|ch| (true, ch))
-        .chain(name.chars().map(|ch| (false, ch)))
-    {
-        let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0) as f64;
-        let center = column + w / 2.0;
-        column += w;
-        // settled: exactly the static row's styles, no pop at either end
-        let settled = if part { head_bold } else { head_plain };
-        let style = if center <= frontier && center > frontier - BAND {
-            wave_style
-        } else {
-            settled
-        };
-        out.push(Span::styled(char_cow(ch), style));
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// The gray the removed plain-white shimmer used as its base: kept here so
+    /// the shared wave math is still tested against a real endpoint pair.
+    const GRAY: (u8, u8, u8) = (180, 180, 180);
+
     #[test]
     fn empty_text_renders_no_spans() {
-        assert!(shimmer_spans("", 0).is_empty());
+        assert!(shimmer_rgb_tint("", 0, GRAY, CREST_RGB).is_empty());
         assert!(shimmer_ansi("", 0).is_empty());
-        assert!(shimmer_rgb("", 0).is_empty());
     }
 
     #[test]
     fn same_tick_is_deterministic() {
         for tick in [0, 7, 20] {
-            let spans = shimmer_spans("Working", tick);
-            let again = shimmer_spans("Working", tick);
+            let spans = shimmer_rgb_tint("Working", tick, GRAY, CREST_RGB);
+            let again = shimmer_rgb_tint("Working", tick, GRAY, CREST_RGB);
             assert_eq!(spans, again);
         }
     }
@@ -366,27 +283,9 @@ mod tests {
     }
 
     #[test]
-    fn rgb_wave_travels_from_base_to_crest() {
-        let fg_at = |tick: usize| {
-            shimmer_rgb("Working", tick)
-                .iter()
-                .map(|s| s.style.fg)
-                .collect::<Vec<_>>()
-        };
+    fn rgb_path_boldens_every_char() {
         assert!(
-            fg_at(0)
-                .iter()
-                .all(|fg| *fg == Some(Color::Rgb(180, 180, 180))),
-            "band starts off the text: all base"
-        );
-        assert!(
-            fg_at(SHIMMER_PERIOD_TICKS / 4)
-                .iter()
-                .any(|fg| *fg != Some(Color::Rgb(180, 180, 180))),
-            "band must brighten the text mid-sweep"
-        );
-        assert!(
-            shimmer_rgb("Working", 13)
+            shimmer_rgb_tint("Working", 13, GRAY, CREST_RGB)
                 .iter()
                 .all(|s| s.style.add_modifier.contains(Modifier::BOLD)),
             "rgb path stays bold throughout, like Codex"
@@ -394,18 +293,9 @@ mod tests {
     }
 
     #[test]
-    fn text_survives_in_order() {
-        let text: String = shimmer_spans("Working", 13)
-            .iter()
-            .map(|s| s.content.as_ref())
-            .collect();
-        assert_eq!(text, "Working");
-    }
-
-    #[test]
     fn tint_wave_travels_between_colors() {
         // env-independent: the rgb core directly, past the truecolor gate
-        let base = BASE_RGB;
+        let base = GRAY;
         let at0 = shimmer_rgb_tint("Working", 0, base, CREST_RGB);
         assert!(
             at0.iter()
@@ -427,49 +317,4 @@ mod tests {
         assert_eq!(text, "Working");
     }
 
-    #[test]
-    fn flash_rides_static_without_gray() {
-        const GRAY: Option<Color> = Some(Color::Rgb(128, 128, 128));
-        // start: exactly the static row (white marker, white name)
-        let at0 = flash_spans("  ✓ ", "read", true, 0.0);
-        let text: String = at0.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(text, "  ✓ read");
-        assert_eq!(at0[0].style, Theme::tool_head_bold());
-        assert_eq!(at0[4].style, Theme::tool_head());
-        assert!(
-            at0.iter().all(|s| s.style.fg != GRAY),
-            "no gray phase at the start"
-        );
-        // mid-sweep: the house green band travels over the white name
-        let mid = flash_spans("  ✓ ", "read", true, 0.5);
-        assert!(
-            mid.iter().any(|s| s.style.fg
-                == Some(Color::Rgb(
-                    Theme::OK_RGB.0,
-                    Theme::OK_RGB.1,
-                    Theme::OK_RGB.2
-                ))),
-            "the house green band must ride mid-sweep"
-        );
-        let mid_err = flash_spans("  ✗ ", "bash", false, 0.5);
-        assert!(
-            mid_err.iter().any(|s| s.style.fg
-                == Some(Color::Rgb(
-                    Theme::ERR_RGB.0,
-                    Theme::ERR_RGB.1,
-                    Theme::ERR_RGB.2
-                ))),
-            "the house red band must ride mid-sweep"
-        );
-        assert!(
-            mid.iter().all(|s| s.style.fg != GRAY) && mid_err.iter().all(|s| s.style.fg != GRAY),
-            "no gray phase mid-sweep either"
-        );
-        // end: settled back to the static row, no pop
-        let end = flash_spans("  ✓ ", "read", true, 1.0);
-        assert_eq!(end[0].style, Theme::tool_head_bold());
-        assert_eq!(end[4].style, Theme::tool_head());
-        let end_err = flash_spans("  ✗ ", "bash", false, 1.0);
-        assert_eq!(end_err[0].style, Theme::tool_head_bold());
-    }
 }

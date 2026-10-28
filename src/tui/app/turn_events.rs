@@ -203,7 +203,6 @@ impl App {
                         preview: Vec::new(),
                         preview_total: 0,
                         expanded: false,
-                        flash: None,
                         ask: None,
                     },
                 );
@@ -223,7 +222,6 @@ impl App {
                         diff: current_diff,
                         preview,
                         preview_total,
-                        flash,
                         ..
                     }) = chat.iter_mut().rev().find(|segment| matches!(segment, Segment::Tool { name: current, ok: None, .. } if current == &name))
                 {
@@ -232,7 +230,6 @@ impl App {
                     *current_diff = diff;
                     (*preview, *preview_total) =
                         view::tool_preview(current_diff.as_deref(), output.as_str());
-                    *flash = Some(std::time::Instant::now());
                 }
                 self.sub_touch_all(id);
                 self.dirty = true;
@@ -590,7 +587,6 @@ impl App {
             preview: Vec::new(),
             preview_total: 0,
             expanded: false,
-            flash: None,
             ask: None,
         };
         let pos = self
@@ -684,7 +680,6 @@ impl App {
                     diff: dslot,
                     preview,
                     preview_total,
-                    flash,
                     ask,
                     expanded,
                     ..
@@ -695,7 +690,6 @@ impl App {
                     *dslot = diff;
                     (*preview, *preview_total) =
                         view::tool_preview(dslot.as_deref(), output.as_str());
-                    *flash = Some(std::time::Instant::now());
                     if ask.take().is_some() {
                         *expanded = false;
                     }
@@ -716,7 +710,6 @@ impl App {
                     preview,
                     preview_total,
                     expanded: false,
-                    flash: Some(std::time::Instant::now()),
                     ask: None,
                 };
                 let pos = self
@@ -830,16 +823,12 @@ impl App {
         let effort = self
             .effort_blend
             .is_some_and(|(_, t0)| t0.elapsed().as_millis() < MODE_BLEND_MS as u128);
-        let wave = self.segments.iter().any(|s| {
-            matches!(s, Segment::Tool { flash: Some(t0), ok: Some(done), .. } if t0.elapsed().as_millis() < crate::tui::shimmer::flash_ms(*done) as u128)
-        });
-        let animating = stream || tools || gallery || mode || effort || wave;
+        let animating = stream || tools || gallery || mode || effort;
         let why = (u32::from(stream)
             | (u32::from(tools) << 1)
             | (u32::from(gallery) << 2)
             | (u32::from(mode) << 3)
-            | (u32::from(effort) << 4)
-            | (u32::from(wave) << 5))
+            | (u32::from(effort) << 4))
             | if animating { 0 } else { 1 << 6 };
         (animating, why)
     }

@@ -56,7 +56,6 @@ fn ask_user_seg_key_changes_with_picked_options() {
         preview: Vec::new(),
         preview_total: 0,
         expanded: true,
-        flash: None,
         ask,
     };
     let seg1 = tool(Some(ask(vec![vec![true, false, false]])));
@@ -656,7 +655,6 @@ fn snap_chat_three_tool_calls_one_failed() {
         preview: Vec::new(),
         preview_total: 0,
         expanded: false,
-        flash: None,
         ask: None,
     });
     app.push_segment(Segment::Tool {
@@ -669,7 +667,6 @@ fn snap_chat_three_tool_calls_one_failed() {
         preview: Vec::new(),
         preview_total: 0,
         expanded: false,
-        flash: None,
         ask: None,
     });
     app.push_segment(Segment::Tool {
@@ -682,7 +679,6 @@ fn snap_chat_three_tool_calls_one_failed() {
         preview: Vec::new(),
         preview_total: 0,
         expanded: false,
-        flash: None,
         ask: None,
     });
     app.push_segment(Segment::Assistant {
@@ -714,7 +710,6 @@ fn snap_chat_twelve_successful_tool_calls() {
             preview: Vec::new(),
             preview_total: 0,
             expanded: false,
-            flash: None,
             ask: None,
         });
     }
@@ -743,7 +738,6 @@ fn snap_chat_bash_tool_still_running() {
         preview: Vec::new(),
         preview_total: 0,
         expanded: false,
-        flash: None,
         ask: None,
     });
     // production always holds the live answer slot while streaming; the
@@ -793,7 +787,6 @@ fn snap_chat_many_tools_flat() {
             preview: Vec::new(),
             preview_total: 0,
             expanded: false,
-            flash: None,
             ask: None,
         });
     }
@@ -807,7 +800,6 @@ fn snap_chat_many_tools_flat() {
         preview: Vec::new(),
         preview_total: 0,
         expanded: false,
-        flash: None,
         ask: None,
     });
     app.push_segment(Segment::Tool {
@@ -820,7 +812,6 @@ fn snap_chat_many_tools_flat() {
         preview: Vec::new(),
         preview_total: 0,
         expanded: false,
-        flash: None,
         ask: None,
     });
     app.push_segment(Segment::Assistant {

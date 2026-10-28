@@ -119,7 +119,6 @@ fn tool_row_name_is_quiet_gray_and_call_caps_at_half_width() {
         preview: Vec::new(),
         preview_total: 0,
         expanded: false,
-        flash: None,
         ask: None,
     });
     let rows = app.render_segment(&app.segments, 0, 80, true);
@@ -303,7 +302,6 @@ fn finished_turn(app: &mut App, ok: bool) {
         preview: Vec::new(),
         preview_total: 0,
         expanded: false,
-        flash: None,
         ask: None,
     });
     app.push_segment(Segment::Assistant {
@@ -387,7 +385,6 @@ fn abort_remaps_activity_group_ranges_past_dropped_rows() {
         preview: Vec::new(),
         preview_total: 0,
         expanded: false,
-        flash: None,
         ask: None,
     });
     app.push_segment(Segment::Thinking {
@@ -407,7 +404,6 @@ fn abort_remaps_activity_group_ranges_past_dropped_rows() {
         preview: Vec::new(),
         preview_total: 0,
         expanded: false,
-        flash: None,
         ask: None,
     });
     app.push_segment(Segment::Assistant {
@@ -453,7 +449,6 @@ fn subagent_row_joins_the_turn_activity_group() {
             preview: Vec::new(),
             preview_total: 0,
             expanded: false,
-            flash: None,
             ask: None,
         });
     }
@@ -555,7 +550,6 @@ fn abort_drops_subagent_rows_inside_a_group() {
         preview: Vec::new(),
         preview_total: 0,
         expanded: false,
-        flash: None,
         ask: None,
     });
     app.push_segment(Segment::Subagent {
@@ -675,7 +669,6 @@ fn failed_turn_without_an_answer_still_groups_its_tools() {
             preview: Vec::new(),
             preview_total: 0,
             expanded: false,
-            flash: None,
             ask: None,
         });
     }
@@ -712,7 +705,6 @@ fn activity_groups_never_overlap_previous_ranges() {
         preview: Vec::new(),
         preview_total: 0,
         expanded: false,
-        flash: None,
         ask: None,
     });
     app.finalize_activity_group();
@@ -814,7 +806,6 @@ fn finish_retires_unfinished_tool_and_subagent_rows() {
         preview: Vec::new(),
         preview_total: 0,
         expanded: false,
-        flash: None,
         ask: None,
     });
     app.push_segment(Segment::Subagent {

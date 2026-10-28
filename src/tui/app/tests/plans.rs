@@ -541,7 +541,6 @@ fn toggle_keeps_header_on_screen_row() {
         preview: Vec::new(),
         preview_total: 0,
         expanded: false,
-        flash: None,
         ask: None,
     });
     for i in 0..25 {
@@ -598,7 +597,6 @@ fn toggle_keeps_header_on_screen_row() {
         preview: Vec::new(),
         preview_total: 0,
         expanded: false,
-        flash: None,
         ask: None,
     });
     app.follow = true;
@@ -647,7 +645,6 @@ fn subagent_redraw_reuses_cache_and_switch_restores_whole() {
             preview: Vec::new(),
             preview_total: 0,
             expanded: false,
-            flash: None,
             ask: None,
         }],
     );
@@ -694,7 +691,6 @@ fn stale_click_target_ignored() {
             preview: Vec::new(),
             preview_total: 0,
             expanded: false,
-            flash: None,
             ask: None,
         });
     }
@@ -716,7 +712,6 @@ fn stale_click_target_ignored() {
             app.segments.first(),
             Some(Segment::Tool {
                 expanded: false,
-                flash: None,
                 ..
             })
         ),
@@ -885,7 +880,6 @@ fn toggled_tool_with_tabbed_output_leaves_no_control_cells() {
         preview: Vec::new(),
         preview_total: 0,
         expanded: false,
-        flash: None,
         ask: None,
     });
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
@@ -928,7 +922,6 @@ fn toggled_tool_with_tabbed_output_leaves_no_control_cells() {
         preview: Vec::new(),
         preview_total: 0,
         expanded: true,
-        flash: None,
         ask: None,
     };
     app.touch_segment(tool_idx);

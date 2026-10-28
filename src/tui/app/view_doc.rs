@@ -114,7 +114,6 @@ impl App {
                 output,
                 diff,
                 expanded,
-                flash,
                 ask,
                 ..
             } => {
@@ -155,13 +154,6 @@ impl App {
                     if self.ask_custom_focus.is_some() {
                         k = k.wrapping_add(5_000_021);
                     }
-                }
-                if let Some(t0) = flash
-                    && let Some(done) = ok
-                    && t0.elapsed().as_millis() < crate::tui::shimmer::flash_ms(*done) as u128
-                    && crate::tui::shimmer::has_truecolor()
-                {
-                    k = k.wrapping_add(1_000_000 + self.spinner_tick.wrapping_mul(13));
                 }
                 k
             }
@@ -544,7 +536,6 @@ impl App {
                 preview,
                 preview_total,
                 expanded,
-                flash,
                 ask,
                 ..
             } => {
@@ -577,44 +568,14 @@ impl App {
                 } else {
                     format!(" ({})", truncate_display_width(&clean_args, summary_width))
                 };
-                let wave = match (ok, flash) {
-                    (Some(done), Some(t0)) => {
-                        let el = t0.elapsed().as_millis();
-                        let span = crate::tui::shimmer::flash_ms(*done) as u128;
-                        if el < span && crate::tui::shimmer::has_truecolor() {
-                            Some(crate::tui::shimmer::flash_spans(
-                                &marker.0,
-                                &shown_name,
-                                *done,
-                                el as f64 / span as f64,
-                            ))
-                        } else {
-                            None
-                        }
-                    }
-                    _ => None,
-                };
-                let mut head_spans = match wave {
-                    Some(wave) => {
-                        let mut spans = wave;
-                        spans.push(Span::styled(summary, Theme::dim()));
-                        spans
-                    }
-                    None if ok.is_none() => {
-                        let mut spans = vec![Span::styled(marker.0, marker.1)];
-                        spans.extend(crate::tui::shimmer::shimmer_spans(
-                            &shown_name,
-                            self.spinner_tick,
-                        ));
-                        spans.push(Span::styled(summary, Theme::dim()));
-                        spans
-                    }
-                    None => vec![
-                        Span::styled(marker.0, marker.1),
-                        Span::styled(shown_name, Theme::meta()),
-                        Span::styled(summary, Theme::dim()),
-                    ],
-                };
+                // one row shape for every state: the dot carries the verdict
+                // (breathing white, green, red) and the name stays calm text.
+                // No finish wave, no traveling shimmer over the running name.
+                let mut head_spans = vec![
+                    Span::styled(marker.0, marker.1),
+                    Span::styled(shown_name, Theme::meta()),
+                    Span::styled(summary, Theme::dim()),
+                ];
                 if let Some((added, removed)) = edit_counts {
                     head_spans.push(Span::styled(format!("  +{added}"), Theme::ok()));
                     head_spans.push(Span::styled(format!(" -{removed}"), Theme::err()));
@@ -1081,15 +1042,6 @@ impl App {
                 .wrapping_mul(11)
                 .wrapping_add(2),
             Segment::Tool { ok: None, .. } => self.spinner_tick.wrapping_mul(7).wrapping_add(3),
-            Segment::Tool {
-                ok: Some(done),
-                flash: Some(t0),
-                ..
-            } if t0.elapsed().as_millis() < crate::tui::shimmer::flash_ms(*done) as u128
-                && crate::tui::shimmer::has_truecolor() =>
-            {
-                1_000_000usize.wrapping_add(self.spinner_tick.wrapping_mul(13))
-            }
             _ => 0,
         }
     }

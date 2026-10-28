@@ -272,9 +272,6 @@ impl Theme {
     pub fn tool_head() -> Style {
         Style::new().fg(Color::White)
     }
-    pub fn tool_head_bold() -> Style {
-        Style::new().fg(Color::White).add_modifier(Modifier::BOLD)
-    }
     /// Status carries no bold: on a pastel ground bold is just a brighter
     /// ground, which is the loudness this palette stopped having a use for.
     /// The verdict lives in the dot's color, as it always did.

@@ -291,9 +291,6 @@ pub(super) enum Segment {
         /// total source lines of the shown body, for the "… N more" row
         preview_total: usize,
         expanded: bool,
-        /// finish-wave start for the one-shot green/red sweep; None settles
-        /// to the static ✓/✗ row. Set when the ToolNotice lands.
-        flash: Option<std::time::Instant>,
         /// the live `ask_user` questionnaire, and nothing else. While it is
         /// `Some` the row is a tool call waiting on the user: its head is the
         /// ordinary tool head, its body is the question. The answer clears the
