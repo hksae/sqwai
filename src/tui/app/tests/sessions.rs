@@ -561,7 +561,7 @@ fn empty_mark_lines_cover_mcp_plan_and_plain_states() {
     assert_eq!(lines[1], "  ~/sqwai");
     assert!(
         app.empty_mark_lines()[0].spans.len() > 3,
-        "empty session shimmers sqwai character-by-character"
+        "the header shimmers sqwai character-by-character"
     );
 
     let _ = render_to_string(&mut app, 80, 24);
@@ -570,15 +570,16 @@ fn empty_mark_lines_cover_mcp_plan_and_plain_states() {
         "empty session with visible header animates"
     );
 
+    // the shimmer is the header's own: content does not silence it
     app.push_segment(Segment::User("hello".into()));
-    assert_eq!(
-        app.empty_mark_lines()[0].spans.len(),
-        3,
-        "non-empty session renders sqwai as a single static brand span"
+    assert!(
+        app.empty_mark_lines()[0].spans.len() > 3,
+        "a non-empty session still shimmers its header: {:?}",
+        app.empty_mark_lines()[0]
     );
     assert!(
-        !app.animating_terms().0,
-        "non-empty session stops shimmering sqwai"
+        app.animating_terms().0,
+        "header on screen means header animating"
     );
 
     // Fits narrow terminals without changing shape

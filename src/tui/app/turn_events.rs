@@ -803,9 +803,10 @@ impl App {
     pub(super) fn animating_terms(&self) -> (bool, u32) {
         let stream = self.streaming;
         let tools = self.tool_running();
+        // The header shimmers whenever it is on screen: not a reward for an
+        // empty transcript, and not worth repainting when scrolled past it.
         let brand = self.last_chat.height > 1
             && self.active_subagent.is_none()
-            && self.segments.is_empty()
             && self.chat_top(self.last_chat.height) <= 1;
         let gallery = brand
             || matches!(

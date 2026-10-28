@@ -1023,7 +1023,7 @@ fn subagent_rows_land_at_call_site_not_after_answer() {
     assert_eq!(kinds, vec!["user", "sub", "sub", "answer"]);
 }
 
-/// Advancing `spinner_tick` while streaming (or on the empty-screen brand
+/// Advancing `spinner_tick` while streaming (or under the header's brand
 /// shimmer) updates the live chrome rows in-place in O(1) without triggering
 /// a full `rebuild_cache` or `wrap_tagged` pass over the transcript.
 #[test]

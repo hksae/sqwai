@@ -1340,21 +1340,16 @@ impl App {
     }
 
     /// Transcript header at the top of the session history:
-    /// ` sqwai v<version>` (with brand shimmer on `sqwai` and dim version)
-    /// followed by ` <cwd>` in dim gray. Fits even the narrowest terminal.
+    /// ` sqwai v<version>` (brand shimmer on `sqwai`, dim version) followed by
+    /// ` <cwd>` in dim gray. The shimmer is the header's own, not an empty-screen
+    /// reward: it runs whenever the header is on screen. Fits even the narrowest
+    /// terminal.
     pub(super) fn empty_mark_lines(&self) -> Vec<Line<'static>> {
         let mut spans = vec![Span::styled(" ".to_string(), Theme::base())];
-        if self.segments.is_empty() {
-            spans.extend(crate::tui::shimmer::shimmer_brand_spans(
-                "sqwai",
-                self.spinner_tick,
-            ));
-        } else {
-            spans.push(Span::styled(
-                "sqwai".to_string(),
-                Theme::brand_ink().add_modifier(Modifier::BOLD),
-            ));
-        }
+        spans.extend(crate::tui::shimmer::shimmer_brand_spans(
+            "sqwai",
+            self.spinner_tick,
+        ));
         spans.push(Span::styled(
             format!(" v{}", env!("CARGO_PKG_VERSION")),
             Theme::dim(),
