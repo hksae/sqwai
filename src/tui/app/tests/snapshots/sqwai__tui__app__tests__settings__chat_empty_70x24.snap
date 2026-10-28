@@ -1,10 +1,9 @@
 ---
 source: src/tui/app/tests/settings.rs
-assertion_line: 620
 expression: s
 ---
 
   sqwai v0.1.0
    [CWD]
 ›
- ACT AUTO                                                0% (0) m off
+ ACT AUTO                                              0% (0) p/m off

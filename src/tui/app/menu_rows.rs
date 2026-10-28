@@ -7,7 +7,7 @@ use super::*;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
-use crate::config::{EffortLevel, WireFormat};
+use crate::config::{EffortLevel, WireFormat, key_name};
 use crate::providers::Role;
 use crate::tui::theme::Theme;
 
@@ -793,21 +793,29 @@ impl App {
     }
 
     fn build_edit_model_rows(&mut self, key: Option<String>) {
-        let (k_val, id_val, ctx_val, ef_val) =
-            match key.as_ref().and_then(|k| self.cfg.models.get(k)) {
-                Some(mc) => (
-                    key.clone().unwrap_or_default(),
-                    mc.id.clone(),
-                    mc.context.to_string(),
-                    mc.effort.as_str().to_string(),
-                ),
-                None => (
-                    key.clone().unwrap_or_else(|| self.model_draft.key.clone()),
-                    self.model_draft.id.clone(),
-                    self.model_draft.context.to_string(),
-                    self.model_draft.effort.as_str().to_string(),
-                ),
-            };
+        // the key row edits the model's name: its provider is the menu it was
+        // opened from, so showing the qualified key here would invite the user
+        // to type it back and nest it twice.
+        let name_val = key
+            .as_deref()
+            .map(key_name)
+            .unwrap_or(&self.model_draft.key)
+            .to_string();
+        let (k_val, id_val, ctx_val, ef_val) = match key.as_ref().and_then(|k| self.cfg.models.get(k))
+        {
+            Some(mc) => (
+                name_val,
+                mc.id.clone(),
+                mc.context.to_string(),
+                mc.effort.as_str().to_string(),
+            ),
+            None => (
+                name_val,
+                self.model_draft.id.clone(),
+                self.model_draft.context.to_string(),
+                self.model_draft.effort.as_str().to_string(),
+            ),
+        };
         let field_row = |label: &'static str, val: String, action: MenuAction| {
             let mut spans = vec![Span::styled(label, Style::new().fg(Theme::FG()))];
             if !val.is_empty() {

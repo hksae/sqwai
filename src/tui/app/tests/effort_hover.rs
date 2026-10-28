@@ -23,11 +23,12 @@ fn jitter_test_app() -> App {
             api_key: Some("test-key".into()),
             api_key_env: None,
             continuation: true,
+            models: Default::default(),
         },
     );
     let mut models = BTreeMap::new();
     models.insert(
-        "m".to_string(),
+"p/m".to_string(),
         ModelConfig {
             provider: "p".into(),
             id: "test-model".into(),
@@ -42,10 +43,11 @@ fn jitter_test_app() -> App {
         },
     );
     let cfg = Config {
-        last_model: "m".into(),
+        last_model: "p/m".into(),
         legacy_default_model: String::new(),
         providers,
         models,
+        unfiled_models: Default::default(),
         safety: Default::default(),
         web: Default::default(),
         ui: Default::default(),
@@ -59,7 +61,7 @@ fn jitter_test_app() -> App {
         secrets: Default::default(),
         undo: Default::default(),
     };
-    let session = Session::new("m".into(), 1000);
+    let session = Session::new("p/m".into(), 1000);
     App::new(cfg, session, false, false).unwrap()
 }
 
@@ -67,7 +69,7 @@ fn jitter_test_app() -> App {
 fn effort_keyboard_open_no_prior_mouse_keeps_selection() {
     use crossterm::event::MouseEventKind;
     let mut app = jitter_test_app();
-    app.cfg.models.get_mut("m").unwrap().effort = EffortLevel::High;
+    app.cfg.models.get_mut("p/m").unwrap().effort = EffortLevel::High;
     app.model_cfg.effort = EffortLevel::High;
     // fresh app: no mouse reports yet, so the open snapshots None
     assert!(app.last_mouse.is_none());

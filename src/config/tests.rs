@@ -129,9 +129,12 @@ effort = "off"
     .unwrap();
     assert_eq!(cfg.last_model, "");
     assert_eq!(cfg.legacy_default_model, "my-old");
+    cfg.fold_models();
     cfg.apply_builtins();
     cfg.migrate_last_model();
-    assert_eq!(cfg.last_model, "my-old");
+    // the stored bare name resolves to the nested identity of its provider
+    assert_eq!(cfg.last_model, "p/my-old");
+    assert!(cfg.models.contains_key("p/my-old"));
     assert!(cfg.legacy_default_model.is_empty());
 
     // dangling reference (model deleted since) falls back, not errors
@@ -358,6 +361,7 @@ fn api_key_resolves_from_env() {
         api_key: api_key.map(str::to_string),
         api_key_env: api_key_env.map(str::to_string),
         continuation: true,
+        models: Default::default(),
     };
     // explicit env variable
     assert_eq!(
@@ -605,7 +609,7 @@ fn customized_builtin_model_survives_save_strip_and_reapply() {
     // the hand-edit path: user overrides one field of a built-in model
     let mut cfg = Config::default();
     cfg.apply_builtins();
-    let key = "gemini-3.8-flash";
+    let key = "gemini/gemini-3.8-flash";
     assert!(cfg.is_builtin_model(key));
     let mut customized = cfg.models[key].clone();
     customized.effort = EffortLevel::High;
@@ -656,27 +660,27 @@ fn catalog_transition_updates_pristine_specs_and_drops_removed_builtins() {
     .unwrap();
 
     let mut cfg = Config {
-        last_model: "m-keep".into(),
+        last_model: "openai/m-keep".into(),
         legacy_default_model: String::new(),
         providers: old_cat.providers.clone(),
         models: old_cat.models.clone(),
         ..Config::default()
     };
     // User customized `m-custom` effort to Low
-    cfg.models.get_mut("m-custom").unwrap().effort = EffortLevel::Low;
+    cfg.models.get_mut("openai/m-custom").unwrap().effort = EffortLevel::Low;
 
     cfg.apply_catalog_transition(&old_cat, &new_cat);
 
     // Pristine `m-keep` updated its context and effort to `new_cat`
-    assert_eq!(cfg.models["m-keep"].context, 400000);
-    assert_eq!(cfg.models["m-keep"].effort, EffortLevel::High);
+    assert_eq!(cfg.models["openai/m-keep"].context, 400000);
+    assert_eq!(cfg.models["openai/m-keep"].effort, EffortLevel::High);
 
     // User-customized `m-custom` kept its user override
-    assert_eq!(cfg.models["m-custom"].context, 128000);
-    assert_eq!(cfg.models["m-custom"].effort, EffortLevel::Low);
+    assert_eq!(cfg.models["openai/m-custom"].context, 128000);
+    assert_eq!(cfg.models["openai/m-custom"].effort, EffortLevel::Low);
 
     // Pristine `m-retired` was removed and does not linger
-    assert!(!cfg.models.contains_key("m-retired"));
+    assert!(!cfg.models.contains_key("openai/m-retired"));
 }
 
 #[test]
@@ -762,9 +766,13 @@ fn test_model_config_fallback_deserialization() {
         context = 200000
         effort = "off"
     "#;
-    let cfg: Config = toml::from_str(toml_str).unwrap();
-    assert_eq!(cfg.models["primary"].fallback.as_deref(), Some("secondary"));
-    assert_eq!(cfg.models["secondary"].fallback, None);
+    let mut cfg: Config = toml::from_str(toml_str).unwrap();
+    cfg.fold_models();
+    assert_eq!(
+        cfg.models["openai/primary"].fallback.as_deref(),
+        Some("secondary")
+    );
+    assert_eq!(cfg.models["anthropic/secondary"].fallback, None);
 }
 
 #[test]
@@ -778,6 +786,7 @@ fn test_resolve_fallback_chain_handles_order_and_cycles() {
             api_key: Some("dummy".into()),
             api_key_env: None,
             continuation: true,
+            models: Default::default(),
         },
     );
     cfg.providers.insert(
@@ -788,6 +797,7 @@ fn test_resolve_fallback_chain_handles_order_and_cycles() {
             api_key: Some("dummy".into()),
             api_key_env: None,
             continuation: true,
+            models: Default::default(),
         },
     );
 
@@ -1045,3 +1055,220 @@ fn approval_mode_cycle_is_the_escalation_ladder() {
     );
     assert_eq!(ApprovalMode::from_str("nope"), None);
 }
+
+// ——— nested model identity ———
+
+fn model(provider: &str, id: &str, context: u64) -> ModelConfig {
+    ModelConfig {
+        provider: provider.into(),
+        id: id.into(),
+        context,
+        effort: EffortLevel::Medium,
+        effort_control: None,
+        effort_always_on: false,
+        fallback: None,
+        status: ModelStatus::Active,
+        vision: None,
+        pdf: None,
+    }
+}
+
+/// The reason the nesting exists: one name served by two endpoints is two
+/// models, not a collision to dodge with a fake key.
+#[test]
+fn nested_models_fold_under_their_provider_key() {
+    let mut cfg: Config = toml::from_str(
+        r#"
+[providers.pateway]
+format = "openai"
+base_url = "https://a.example/v1"
+[providers.pateway.models."gpt-6-luna"]
+id = "gpt-6-luna"
+context = 262144
+effort = "high"
+
+[providers.openrouter]
+format = "openai"
+base_url = "https://b.example/v1"
+[providers.openrouter.models."gpt-6-luna"]
+id = "openrouter/gpt-6"
+context = 131072
+effort = "low"
+"#,
+    )
+    .unwrap();
+    cfg.fold_models();
+    assert_eq!(cfg.models["pateway/gpt-6-luna"].context, 262144);
+    assert_eq!(cfg.models["openrouter/gpt-6-luna"].context, 131072);
+    // the provider half is recovered from the table, not typed per model
+    assert_eq!(cfg.models["openrouter/gpt-6-luna"].provider, "openrouter");
+    assert_eq!(model_display("pateway/gpt-6-luna"), "gpt-6-luna @ pateway");
+    // a model name may itself carry slashes: only the first segment is the provider
+    assert_eq!(key_provider("deepinfra/zai-org/GLM-5.3"), Some("deepinfra"));
+    assert_eq!(key_name("deepinfra/zai-org/GLM-5.3"), "zai-org/GLM-5.3");
+}
+
+#[test]
+fn legacy_flat_models_fold_by_their_provider_field() {
+    let mut cfg: Config = toml::from_str(
+        r#"
+[models."luna"]
+provider = "pateway"
+id = "luna"
+context = 1000
+effort = "off"
+
+[providers.pateway]
+format = "openai"
+base_url = "https://a.example/v1"
+[providers.pateway.models."luna"]
+id = "luna"
+context = 2000
+effort = "off"
+"#,
+    )
+    .unwrap();
+    cfg.fold_models();
+    // both halves of a half-migrated file land on the same key, and the table
+    // the editor writes wins over the section it replaced
+    assert_eq!(cfg.models.len(), 1);
+    assert_eq!(cfg.models["pateway/luna"].context, 2000);
+
+    // a flat model naming no provider keeps its bare key: unusable, but not lost
+    let mut orphan: Config = toml::from_str(
+        r#"
+[models."x"]
+id = "x"
+context = 1000
+effort = "off"
+"#,
+    )
+    .unwrap();
+    orphan.fold_models();
+    assert!(orphan.models.contains_key("x"));
+}
+
+#[test]
+fn bare_model_names_resolve_only_when_unambiguous() {
+    let mut cfg = Config::default();
+    cfg.models.clear();
+    cfg.models
+        .insert("pateway/luna".into(), model("pateway", "luna", 1));
+    cfg.models
+        .insert("openrouter/luna".into(), model("openrouter", "luna", 2));
+    cfg.models
+        .insert("openrouter/gpt-6-luna".into(), model("openrouter", "gpt-6", 3));
+    cfg.models.insert("solo".into(), model("pateway", "solo", 4));
+
+    assert_eq!(
+        cfg.resolve_model_key("pateway/luna"),
+        Some("pateway/luna")
+    );
+    // unique name, stored before nesting
+    assert_eq!(
+        cfg.resolve_model_key("gpt-6-luna"),
+        Some("openrouter/gpt-6-luna")
+    );
+    // a bare name two providers serve resolves to nothing rather than a guess
+    assert_eq!(cfg.resolve_model_key("luna"), None);
+    // an unqualified name that exists as-is wins without a second look
+    assert_eq!(cfg.resolve_model_key("solo"), Some("solo"));
+    assert_eq!(cfg.resolve_model_key("nope"), None);
+    assert_eq!(cfg.resolve_model_key(""), None);
+}
+
+/// What `save` writes must read back as the same set of models — including
+/// the one case that cannot nest: a model whose provider is not in the file.
+#[test]
+fn nested_save_shape_round_trips() {
+    let mut cfg = Config::default();
+    cfg.models.clear();
+    cfg.providers.clear();
+    cfg.models
+        .insert("pateway/luna".into(), model("pateway", "luna", 1000));
+    cfg.models
+        .insert("openrouter/luna".into(), model("openrouter", "luna", 2000));
+    cfg.models
+        .insert("ghost/model".into(), model("ghost", "model", 3000));
+    cfg.providers.insert(
+        "pateway".into(),
+        ProviderConfig {
+            format: WireFormat::Openai,
+            base_url: "https://a.example/v1".into(),
+            api_key: None,
+            api_key_env: None,
+            continuation: false,
+            models: Default::default(),
+        },
+    );
+    cfg.providers.insert(
+        "openrouter".into(),
+        ProviderConfig {
+            format: WireFormat::Openai,
+            base_url: "https://b.example/v1".into(),
+            api_key: None,
+            api_key_env: None,
+            continuation: false,
+            models: Default::default(),
+        },
+    );
+
+    let text = toml::to_string_pretty(&cfg.for_file()).unwrap();
+    assert!(
+        text.contains(r#"[providers.pateway.models.luna]"#),
+        "model must nest under its provider:\n{text}"
+    );
+    // the ghost provider holds no table, so its model keeps the flat section
+    assert!(text.contains(r#"[models."ghost/model"]"#), "orphan lost:\n{text}");
+
+    let mut back: Config = toml::from_str(&text).unwrap();
+    back.fold_models();
+    assert_eq!(back.models, cfg.models, "round trip changed the models");
+}
+
+#[test]
+fn provider_rename_moves_model_identity() {
+    let mut cfg = Config::default();
+    cfg.models.insert("old/luna".into(), model("old", "luna", 1));
+    cfg.models.insert("old/other".into(), model("old", "other", 2));
+    cfg.models.insert("new/other".into(), model("new", "other", 3));
+    cfg.last_model = "old/luna".into();
+
+    let skipped = cfg.rename_provider_models("old", "new");
+
+    assert_eq!(skipped, 1, "the clashing model is reported, not merged");
+    assert_eq!(cfg.models["new/luna"].provider, "new");
+    assert_eq!(cfg.last_model, "new/luna");
+    // the clash keeps both: nothing is deleted, the loser stays where it was
+    assert_eq!(cfg.models["new/other"].context, 3);
+    assert_eq!(cfg.models["old/other"].context, 2);
+}
+
+/// The catalog file stays flat (its generator writes it that way); what it
+/// deserializes into is the same `provider/name` identity the user file nests.
+#[test]
+fn builtin_catalog_keys_are_qualified() {
+    let catalog = BuiltinCatalog::from_toml_str(
+        "serial = 1\n\
+         [providers.zai]\nformat = \"openai\"\nbase_url = \"https://z.example/v1\"\n\
+         [providers.deepinfra]\nformat = \"openai\"\nbase_url = \"https://d.example/v1\"\n\
+         [models.\"glm-5.2\"]\nprovider = \"zai\"\nid = \"glm-5.2\"\ncontext = 100\neffort = \"off\"\n\
+         [models.\"zai-org/GLM-5.3\"]\nprovider = \"deepinfra\"\nid = \"GLM-5.3\"\ncontext = 200\neffort = \"off\"\n",
+    )
+    .unwrap();
+    assert!(catalog.models.contains_key("zai/glm-5.2"));
+    assert!(catalog.models.contains_key("deepinfra/zai-org/GLM-5.3"));
+    assert_eq!(catalog.models["zai/glm-5.2"].provider, "zai");
+    // menu order follows the file, in qualified keys
+    assert_eq!(
+        catalog.model_order,
+        vec!["zai/glm-5.2".to_string(), "deepinfra/zai-org/GLM-5.3".to_string()]
+    );
+    // the shipped catalog is qualified too, and no two of its keys collide
+    let shipped = BuiltinCatalog::current();
+    assert!(
+        shipped.models.keys().all(|k| k.contains('/')),
+        "catalog keys must name their provider"
+    );
+}
+

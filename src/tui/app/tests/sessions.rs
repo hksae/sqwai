@@ -45,7 +45,7 @@ fn enter_confirms_provider_deletion() {
     press_enter(&mut app);
     assert!(!app.cfg.providers.contains_key("p"), "provider not deleted");
     assert!(
-        !app.cfg.models.contains_key("m"),
+        !app.cfg.models.contains_key("p/m"),
         "models of provider left behind"
     );
 }
@@ -105,7 +105,7 @@ fn ctrl_d_on_model_opens_confirm_surface_directly() {
 
     // Enter on cancel (default) keeps the model and returns to Models
     press_enter(&mut app);
-    assert!(app.cfg.models.contains_key("m"));
+    assert!(app.cfg.models.contains_key("p/m"));
     assert!(matches!(app.cur_menu(), Some(Menu::Models { .. })));
 
     // Open confirm again, move down to delete, and press enter -> model is deleted
@@ -119,7 +119,7 @@ fn ctrl_d_on_model_opens_confirm_surface_directly() {
     app.menu_nav(1);
     assert_eq!(app.menu_sel, 3);
     press_enter(&mut app);
-    assert!(!app.cfg.models.contains_key("m"));
+    assert!(!app.cfg.models.contains_key("p/m"));
     assert!(matches!(app.cur_menu(), Some(Menu::Models { .. })));
 }
 
@@ -535,7 +535,7 @@ fn apply_session_from_startup_does_not_persist_empty_stub() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     assert!(app.session.messages.is_empty(), "startup session is empty");
     let start_id = app.session.id;
-    let mut s = Session::new("m".into(), 1000);
+    let mut s = Session::new("p/m".into(), 1000);
     s.push(Role::User, "existing conversation");
     app.apply_session(s);
     assert_ne!(app.session.id, start_id, "active session switched");
@@ -623,7 +623,7 @@ fn composer_band_fill_matches_input_background() {
 fn pin_from_menu_does_not_pollute_chat() {
     use crate::providers::Role;
     let mut app = test_app("http://127.0.0.1:9/v1".into());
-    let mut s = Session::new("m".into(), 1000);
+    let mut s = Session::new("p/m".into(), 1000);
     s.push(Role::User, "x");
     let id = s.id.to_string();
     app.sessions = vec![SessionHeader::from_session(&s)];
@@ -680,12 +680,12 @@ fn menu_scrollbar_yields_to_drawn_frames() {
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
     let mut app = test_app("http://127.0.0.1:9/v1".into());
-    let mut pinned = Session::new("m".into(), 1000);
+    let mut pinned = Session::new("p/m".into(), 1000);
     pinned.push(Role::User, "pinned one");
     pinned.pinned = true;
     app.sessions = vec![crate::session::SessionHeader::from_session(&pinned)];
     for i in 0..12 {
-        let mut s = Session::new("m".into(), 1000);
+        let mut s = Session::new("p/m".into(), 1000);
         s.push(Role::User, format!("filler session number {i}"));
         app.sessions
             .push(crate::session::SessionHeader::from_session(&s));
@@ -747,7 +747,7 @@ fn pinned_frame_resolves_against_real_card_not_stale_rect() {
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
     let mut app = test_app("http://127.0.0.1:9/v1".into());
-    let mut s = Session::new("m".into(), 1000);
+    let mut s = Session::new("p/m".into(), 1000);
     s.push(Role::User, "hi");
     s.pinned = true;
     app.sessions = vec![SessionHeader::from_session(&s)];
@@ -763,7 +763,7 @@ fn pinned_frame_resolves_against_real_card_not_stale_rect() {
         .expect("session row");
     let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
     assert!(
-        text.starts_with("hi (") && text.ends_with(" · m · 1)"),
+        text.starts_with("hi (") && text.ends_with(" · p/m · 1)"),
         "row wears Models-style parenthesized metadata: {text:?}"
     );
 }
@@ -773,7 +773,7 @@ fn pinned_sessions_frame_stays_dim() {
     use crate::tui::theme::Theme;
     use ratatui::style::Color;
     let mut app = test_app("http://127.0.0.1:9/v1".into());
-    let mut s = Session::new("m".into(), 1000);
+    let mut s = Session::new("p/m".into(), 1000);
     s.pinned = true;
     app.sessions = vec![crate::session::SessionHeader::from_session(&s)];
     app.open_menu(Menu::Sessions);
@@ -870,7 +870,7 @@ fn pinned_session_frame_aligns_columns_and_respects_narrow_terminal() {
 fn wide_card_table_fills_no_dead_margin() {
     use crate::providers::Role;
     let mut app = test_app("http://127.0.0.1:9/v1".into());
-    let mut s = Session::new("m".into(), 1000);
+    let mut s = Session::new("p/m".into(), 1000);
     s.push(Role::User, "hi");
     app.sessions = vec![SessionHeader::from_session(&s)];
     app.open_menu(Menu::Sessions);
@@ -887,9 +887,9 @@ fn wide_card_table_fills_no_dead_margin() {
 fn sessions_rows_share_date_model_token_columns() {
     use crate::providers::Role;
     let mut app = test_app("http://127.0.0.1:9/v1".into());
-    let mut a = Session::new("m".into(), 1000);
+    let mut a = Session::new("p/m".into(), 1000);
     a.push(Role::User, "hi");
-    let mut b = Session::new("m".into(), 1000);
+    let mut b = Session::new("p/m".into(), 1000);
     b.push(Role::User, "a medium length title!");
     app.sessions = vec![
         SessionHeader::from_session(&a),
@@ -911,7 +911,7 @@ fn sessions_rows_share_date_model_token_columns() {
 
 fn project_session(title: &str, project: Option<std::path::PathBuf>) -> Session {
     use crate::providers::Role;
-    let mut s = Session::new("m".into(), 1000);
+    let mut s = Session::new("p/m".into(), 1000);
     s.push(Role::User, title);
     s.project = project;
     s
@@ -960,7 +960,7 @@ fn sessions_menu_groups_rows_by_day_sections() {
         pinned: false,
         created_at: at,
         last_message_at: None,
-        model_key: "m".into(),
+        model_key: "p/m".into(),
         plan_id: None,
         context_tokens: 0,
         calls: 0,
@@ -1004,7 +1004,7 @@ fn session_day_sections_wear_h2_brand_flush_left() {
         pinned: false,
         created_at: at,
         last_message_at: None,
-        model_key: "m".into(),
+        model_key: "p/m".into(),
         plan_id: None,
         context_tokens: 0,
         calls: 0,
@@ -1079,7 +1079,7 @@ fn session_switch_drops_stale_notices() {
     app.last_checkpoint = Some("cp".into());
     app.prev_turn_ok = true;
     app.retry_notified = false;
-    app.apply_session(Session::new("m".into(), 1000));
+    app.apply_session(Session::new("p/m".into(), 1000));
     assert!(app.retry_line.is_none());
     assert!(app.last_checkpoint.is_none());
     assert!(!app.prev_turn_ok);
@@ -1175,11 +1175,11 @@ fn resume_notice_arms_once_and_disarms_on_use() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     assert!(!app.resume_notice_armed);
     // empty session: nothing to resume from
-    let empty = Session::new("m".into(), 1000);
+    let empty = Session::new("p/m".into(), 1000);
     app.apply_session(empty);
     assert!(!app.resume_notice_armed);
     // session with history: genuine restore, arm once
-    let mut loaded = Session::new("m".into(), 1000);
+    let mut loaded = Session::new("p/m".into(), 1000);
     loaded.push(crate::providers::Role::User, "earlier work");
     app.apply_session(loaded);
     assert!(app.resume_notice_armed);

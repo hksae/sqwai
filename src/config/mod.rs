@@ -250,6 +250,58 @@ pub struct ProviderConfig {
     /// provider's storage and its retention policy.
     #[serde(default = "default_continuation")]
     pub continuation: bool,
+    /// Models declared inside this provider's table. On disk the user config
+    /// keeps them here — `[providers.x.models."name"]` — because the table name
+    /// is what makes two endpoints offering the same model name distinguishable:
+    /// while every model lived in one flat top-level `[models.y]` map,
+    /// `gpt-6-luna` from pateway and from openrouter could not coexist, and the
+    /// workaround was a fake name (`luna2`) that then lied in every session
+    /// record and in `<agent_state>`. In memory they are folded into
+    /// [`Config::models`] under `provider/name`, so lookups have one home.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub models: BTreeMap<String, ModelConfig>,
+}
+
+/// The identity of one model, in memory and on disk: which endpoint serves it
+/// and what it is called there. The built-in catalog already used this shape for
+/// its own collisions (`zai/glm-5.2`, `deepinfra/openai/gpt-oss-120b`).
+pub fn model_key(provider: &str, name: &str) -> String {
+    format!("{provider}/{name}")
+}
+
+/// The provider half of a model key, or `None` for a legacy bare name.
+pub fn key_provider(key: &str) -> Option<&str> {
+    key.split_once('/').map(|(provider, _)| provider)
+}
+
+/// The name half of a key, with the provider prefix removed.
+pub fn key_name(key: &str) -> &str {
+    match key.split_once('/') {
+        Some((_, name)) => name,
+        None => key,
+    }
+}
+
+/// How a model is shown to the user and to the model itself. The endpoint rides
+/// along because `gpt-6-luna @ pateway` and `gpt-6-luna @ openrouter` are
+/// different answers to the same name.
+pub fn model_display(key: &str) -> String {
+    match key_provider(key) {
+        Some(provider) => format!("{} @ {provider}", key_name(key)),
+        None => key.to_string(),
+    }
+}
+
+/// The qualified key for a declaration: `provider` names the endpoint, `raw` is
+/// the declared name, which may itself contain slashes (`zai-org/GLM-5.3`).
+/// A declaration with neither a provider field nor a provider prefix keeps its
+/// name: it belongs to no endpoint and stays in the legacy table.
+fn qualified_model_key(raw: &str, provider: &str) -> String {
+    if provider.is_empty() {
+        raw.to_string()
+    } else {
+        model_key(provider, raw)
+    }
 }
 
 fn default_continuation() -> bool {
@@ -290,6 +342,11 @@ impl ProviderConfig {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModelConfig {
+    /// Which provider serves this model. Read from the file — the built-in
+    /// catalog and the legacy flat `[models.y]` shape both carry it — and never
+    /// written, because in the nested form the enclosing `[providers.x]` table
+    /// already says it, and a copy inside the model could contradict its table.
+    #[serde(default, skip_serializing)]
     pub provider: String,
     /// model id sent in requests
     pub id: String,
@@ -648,6 +705,7 @@ impl BuiltinCatalog {
     pub fn from_toml_str(text: &str) -> Result<Self> {
         let mut catalog: BuiltinCatalog =
             toml::from_str(text).context("parsing builtin providers TOML")?;
+        let mut declared: Vec<String> = Vec::new();
         for line in text.lines() {
             let trimmed = line.trim();
             if let Some(rest) = trimmed
@@ -664,11 +722,44 @@ impl BuiltinCatalog {
             {
                 let key = rest.trim_matches('"');
                 if catalog.models.contains_key(key) {
-                    catalog.model_order.push(key.to_string());
+                    declared.push(key.to_string());
                 }
             }
         }
+        catalog.qualify_models(&declared);
         Ok(catalog)
+    }
+
+    /// The catalog file declares models flat with a `provider` field; in memory
+    /// they carry the same `provider/name` identity the user file nests them
+    /// under, so a built-in and a hand-added model of the same name at two
+    /// endpoints never collide. `declared` is the file's section order, which
+    /// the UI sorts menus by.
+    fn qualify_models(&mut self, declared: &[String]) {
+        let flat = std::mem::take(&mut self.models);
+        let mut remap: BTreeMap<String, String> = BTreeMap::new();
+        let mut out: BTreeMap<String, ModelConfig> = BTreeMap::new();
+        for (raw, mut m) in flat {
+            let entry = qualified_model_key(&raw, &m.provider);
+            m.provider = key_provider(&entry).unwrap_or_default().to_string();
+            remap.insert(raw, entry.clone());
+            out.insert(entry, m);
+        }
+        // nested tables are the shape the user file writes; a catalog that ever
+        // arrives that way must fold the same way instead of being ignored
+        for (provider, pc) in &mut self.providers {
+            for (name, mut m) in std::mem::take(&mut pc.models) {
+                if m.provider.is_empty() {
+                    m.provider = provider.clone();
+                }
+                out.insert(model_key(provider, &name), m);
+            }
+        }
+        self.models = out;
+        self.model_order = declared
+            .iter()
+            .filter_map(|raw| remap.get(raw).cloned())
+            .collect();
     }
 
     pub fn current() -> Self {
@@ -1412,8 +1503,18 @@ pub struct Config {
     pub(crate) legacy_default_model: String,
     #[serde(default)]
     pub providers: BTreeMap<String, ProviderConfig>,
-    #[serde(default)]
+    /// Every model the config knows, keyed `provider/name`. This is the only
+    /// in-memory home: nested `[providers.x.models."y"]` tables and the legacy
+    /// flat `[models.y]` shape are both folded into it on load
+    /// ([`Config::fold_models`]) and split back out on save
+    /// ([`Config::for_file`]), so no lookup ever consults two places.
+    #[serde(skip)]
     pub models: BTreeMap<String, ModelConfig>,
+    /// The legacy top-level `[models]` table. Read on load; written back only for
+    /// entries that cannot be nested — a model whose `provider` matches no
+    /// provider. Dropping those would delete a user's text over a typo.
+    #[serde(default, rename = "models", skip_serializing_if = "BTreeMap::is_empty")]
+    pub unfiled_models: BTreeMap<String, ModelConfig>,
     #[serde(default)]
     pub safety: SafetyConfig,
     #[serde(default)]
@@ -1490,6 +1591,7 @@ impl Default for Config {
             legacy_default_model: String::new(),
             providers: catalog.providers,
             models: catalog.models,
+            unfiled_models: BTreeMap::new(),
             safety: SafetyConfig::default(),
             web: WebConfig::default(),
             ui: UiConfig::default(),
@@ -1593,6 +1695,105 @@ impl Config {
 }
 
 impl Config {
+    /// Fold every declaration into `models`, keyed `provider/name`.
+    ///
+    /// Three shapes can arrive: nested `[providers.x.models."y"]`, the legacy
+    /// flat `[models.y]` whose `provider` field says where it belongs, and the
+    /// catalog's own keys. Nested wins over flat for the same name, because the
+    /// editor writes nested and a file holding both is mid-migration.
+    pub fn fold_models(&mut self) {
+        let legacy = std::mem::take(&mut self.unfiled_models);
+        for (key, mut m) in legacy {
+            let entry = qualified_model_key(&key, &m.provider);
+            m.provider = key_provider(&entry).unwrap_or_default().to_string();
+            self.models.entry(entry).or_insert(m);
+        }
+        for (provider, pc) in &mut self.providers {
+            for (name, mut m) in std::mem::take(&mut pc.models) {
+                if m.provider.is_empty() {
+                    m.provider = provider.clone();
+                }
+                self.models.insert(model_key(provider, &name), m);
+            }
+        }
+    }
+
+    /// The writable copy: each model goes back under its provider's table under
+    /// just its name, and what no provider can hold stays in the legacy table.
+    fn for_file(&self) -> Self {
+        let mut out = self.clone();
+        out.models = BTreeMap::new();
+        out.unfiled_models = BTreeMap::new();
+        for (key, m) in &self.models {
+            let provider = key_provider(key).unwrap_or(&m.provider);
+            match out.providers.get_mut(provider) {
+                Some(pc) => {
+                    pc.models.insert(key_name(key).to_string(), m.clone());
+                }
+                None => {
+                    out.unfiled_models.insert(key.clone(), m.clone());
+                }
+            }
+        }
+        out
+    }
+
+    /// Move every model of `old` to `new` after a provider rename: the provider
+    /// is half of a model's identity, so the keys move with it. Returns how many
+    /// were left behind because `new` already serves that name — keeping both
+    /// and telling the user beats silently deleting one.
+    pub fn rename_provider_models(&mut self, old: &str, new: &str) -> usize {
+        let moved: Vec<String> = self
+            .models
+            .keys()
+            .filter(|key| key_provider(key) == Some(old))
+            .cloned()
+            .collect();
+        let mut skipped = 0usize;
+        for key in moved {
+            let target = model_key(new, key_name(&key));
+            if self.models.contains_key(&target) {
+                skipped += 1;
+                continue;
+            }
+            if let Some(mut m) = self.models.remove(&key) {
+                m.provider = new.to_string();
+                self.models.insert(target, m);
+            }
+        }
+        if key_provider(&self.last_model) == Some(old) {
+            let renamed = model_key(new, key_name(&self.last_model));
+            self.last_model = renamed;
+        }
+        skipped
+    }
+
+    /// Find a model by what someone typed, or by what an older session stored.
+    /// A bare name resolves when exactly one provider offers it; when two do, it
+    /// resolves to nothing and the caller shows both — guessing here is how a
+    /// session ends up talking to an endpoint nobody picked.
+    pub fn resolve_model_key(&self, raw: &str) -> Option<&str> {
+        if raw.is_empty() {
+            return None;
+        }
+        if let Some(key) = self.models.keys().find(|key| key.as_str() == raw) {
+            return Some(key.as_str());
+        }
+        if raw.contains('/') {
+            return None;
+        }
+        let mut found: Option<&String> = None;
+        for key in self.models.keys() {
+            if key_name(key) == raw {
+                if found.is_some() {
+                    return None;
+                }
+                found = Some(key);
+            }
+        }
+        found.map(|key| key.as_str())
+    }
+
     pub fn load() -> std::result::Result<Self, LoadError> {
         let path = config_path()?;
         if !path.exists() {
@@ -1600,6 +1801,7 @@ impl Config {
         }
         let raw = std::fs::read_to_string(&path).context("reading config")?;
         let mut cfg: Config = toml::from_str(&raw).map_err(|e| anyhow::anyhow!("{e}"))?;
+        cfg.fold_models();
         cfg.apply_builtins();
         cfg.migrate_last_model();
         Ok(cfg)
@@ -1608,17 +1810,18 @@ impl Config {
     /// Resolve which model new sessions open with: explicit `last_model`
     /// wins; legacy `default_model` migrates once; otherwise the first
     /// catalog model (first run). A dangling reference (model deleted
-    /// since) falls back the same way instead of failing the load.
+    /// since) falls back the same way instead of failing the load. Keys
+    /// stored before nesting (`gpt-6-luna`) resolve through
+    /// [`Self::resolve_model_key`], so an old session keeps its model
+    /// whenever exactly one provider serves that name.
     fn migrate_last_model(&mut self) {
-        if self.last_model.is_empty() || !self.models.contains_key(&self.last_model) {
-            if !self.legacy_default_model.is_empty()
-                && self.models.contains_key(&self.legacy_default_model)
-            {
-                self.last_model = std::mem::take(&mut self.legacy_default_model);
-            } else {
-                self.last_model = first_builtin_model();
-            }
+        let mut resolved = self.resolve_model_key(&self.last_model).map(str::to_string);
+        if resolved.is_none() {
+            resolved = self
+                .resolve_model_key(&self.legacy_default_model)
+                .map(str::to_string);
         }
+        self.last_model = resolved.unwrap_or_else(first_builtin_model);
         self.legacy_default_model.clear();
     }
 
@@ -1629,7 +1832,7 @@ impl Config {
         #[allow(unreachable_code)]
         {
             let path = config_path()?;
-            let save_cfg = self.without_pristine_builtins();
+            let save_cfg = self.without_pristine_builtins().for_file();
 
             atomic_write(
                 &path,
@@ -1649,9 +1852,18 @@ impl Config {
         save_cfg
             .models
             .retain(|k, m| builtin.models.get(k).is_none_or(|catalog_m| catalog_m != m));
+        // A provider survives if it holds a customized model even with no key of
+        // its own: dropping the table would strand that model in the legacy
+        // section, and the file it writes no longer looks like what it says.
+        let customized: std::collections::BTreeSet<String> = save_cfg
+            .models
+            .keys()
+            .filter_map(|key| key_provider(key))
+            .map(str::to_string)
+            .collect();
         save_cfg.providers.retain(|name, p| {
             if let Some(bp) = builtin.providers.get(name) {
-                p.api_key.is_some() || p.api_key_env != bp.api_key_env
+                customized.contains(name) || p.api_key.is_some() || p.api_key_env != bp.api_key_env
             } else {
                 true
             }
@@ -1963,18 +2175,21 @@ impl Config {
 
         let mut current_key = model_key.to_string();
         while let Some(mc) = self.models.get(&current_key) {
-            if let Some(ref next_key) = mc.fallback {
-                if !visited.insert(next_key.clone()) {
-                    // Cycle detected, break to prevent infinite fallback loop
-                    break;
-                }
-                if let Some(next_mc) = self.models.get(next_key)
-                    && let Ok(resolved) = self.resolve_provider(next_mc)
-                {
-                    chain.push((next_key.clone(), next_mc.clone(), resolved));
-                    current_key = next_key.clone();
-                    continue;
-                }
+            // A stored fallback may predate nesting and name its model bare.
+            let Some(next_key) = mc.fallback.as_deref().and_then(|k| self.resolve_model_key(k))
+            else {
+                break;
+            };
+            if !visited.insert(next_key.to_string()) {
+                // Cycle detected, break to prevent infinite fallback loop
+                break;
+            }
+            if let Some(next_mc) = self.models.get(next_key)
+                && let Ok(resolved) = self.resolve_provider(next_mc)
+            {
+                chain.push((next_key.to_string(), next_mc.clone(), resolved));
+                current_key = next_key.to_string();
+                continue;
             }
             break;
         }
@@ -2032,7 +2247,7 @@ pub fn write_template(path: &Path) -> Result<()> {
     cfg.models.retain(|k, _| !builtin.models.contains_key(k));
     cfg.providers
         .retain(|name, _| !builtin.providers.contains_key(name));
-    atomic_write(path, &toml::to_string_pretty(&cfg)?)?;
+    atomic_write(path, &toml::to_string_pretty(&cfg.for_file())?)?;
     Ok(())
 }
 

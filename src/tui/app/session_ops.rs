@@ -511,9 +511,15 @@ impl App {
             self.merge_host_events();
             self.session.save().ok();
         }
-        if !self.cfg.models.contains_key(&s.model_key) {
-            s.model_key = self.cfg.last_model.clone();
-        }
+        // Sessions stored before nesting name their model bare; resolve that
+        // name instead of dropping it, so the session keeps the model it was
+        // actually talking to whenever exactly one provider serves it.
+        let resolved = self
+            .cfg
+            .resolve_model_key(&s.model_key)
+            .unwrap_or(self.cfg.last_model.as_str())
+            .to_string();
+        s.model_key = resolved;
         if let Some(mc) = self.cfg.models.get(&s.model_key).cloned() {
             s.context_limit = mc.context;
             match self

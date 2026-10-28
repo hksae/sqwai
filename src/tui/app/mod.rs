@@ -693,8 +693,8 @@ impl App {
         let (image_jobs_tx, image_jobs_rx) = std::sync::mpsc::channel();
         let model_key = session.model_key.clone();
         let model_cfg = cfg
-            .models
-            .get(&model_key)
+            .resolve_model_key(&model_key)
+            .and_then(|key| cfg.models.get(key))
             .cloned()
             .unwrap_or_else(|| ModelConfig {
                 provider: String::new(),

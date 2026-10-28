@@ -433,12 +433,12 @@ fn empty_session_survives_menu_close() {
 fn session_switch_back_to_empty_session_marks_fresh() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.startup = true;
-    let mut s = Session::new("m".into(), 10_000);
+    let mut s = Session::new("p/m".into(), 10_000);
     s.push(Role::User, "hi");
     app.apply_session(s);
     assert!(!app.startup);
 
-    app.apply_session(Session::new("m".into(), 10_000));
+    app.apply_session(Session::new("p/m".into(), 10_000));
 
     assert!(app.startup, "empty session must stay fresh");
 }

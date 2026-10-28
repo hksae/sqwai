@@ -58,11 +58,12 @@ fn test_app(url: String) -> App {
             api_key: Some("test-key".into()),
             api_key_env: None,
             continuation: true,
+            models: Default::default(),
         },
     );
     let mut models = BTreeMap::new();
     models.insert(
-        "m".to_string(),
+"p/m".to_string(),
         ModelConfig {
             provider: "p".into(),
             id: "test-model".into(),
@@ -77,10 +78,11 @@ fn test_app(url: String) -> App {
         },
     );
     let cfg = Config {
-        last_model: "m".into(),
+        last_model: "p/m".into(),
         legacy_default_model: String::new(),
         providers,
         models,
+        unfiled_models: Default::default(),
         safety: Default::default(),
         web: Default::default(),
         ui: Default::default(),
@@ -94,7 +96,7 @@ fn test_app(url: String) -> App {
         secrets: Default::default(),
         undo: Default::default(),
     };
-    let session = Session::new("m".into(), 1000);
+    let session = Session::new("p/m".into(), 1000);
     App::new(cfg, session, false, false).unwrap()
 }
 
@@ -160,11 +162,12 @@ async fn real_zen_smoke() {
             api_key: std::env::var("SQWAI_API_KEY").ok(),
             api_key_env: None,
             continuation: true,
+            models: Default::default(),
         },
     );
     let mut models = BTreeMap::new();
     models.insert(
-        "m".to_string(),
+"p/m".to_string(),
         ModelConfig {
             provider: "zen".into(),
             id: "x-preview-f-free".into(),
@@ -179,10 +182,11 @@ async fn real_zen_smoke() {
         },
     );
     let cfg = Config {
-        last_model: "m".into(),
+        last_model: "p/m".into(),
         legacy_default_model: String::new(),
         providers,
         models,
+        unfiled_models: Default::default(),
         safety: Default::default(),
         web: Default::default(),
         ui: Default::default(),
@@ -196,7 +200,7 @@ async fn real_zen_smoke() {
         secrets: Default::default(),
         undo: Default::default(),
     };
-    let mut app = App::new(cfg, Session::new("m".into(), 1_000_000), false, false).unwrap();
+    let mut app = App::new(cfg, Session::new("p/m".into(), 1_000_000), false, false).unwrap();
     app.input = App::fresh_input("say hi in 3 words".into());
     app.submit();
     let mut waited = 0u32;

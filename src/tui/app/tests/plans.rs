@@ -363,7 +363,7 @@ fn builtin_providers_and_models_are_immutable_and_updateable() {
 
     // Built-in provider and model checks
     assert!(app.cfg.is_builtin_provider("gemini"));
-    assert!(app.cfg.is_builtin_model("gemini-3.8-flash"));
+    assert!(app.cfg.is_builtin_model("gemini/gemini-3.8-flash"));
 
     // 1. Trying to delete built-in provider is refused
     app.run_action(MenuAction::DeleteProvider("gemini".into()));
@@ -372,7 +372,7 @@ fn builtin_providers_and_models_are_immutable_and_updateable() {
     // 2. Trying to delete built-in model is refused
     app.run_action(MenuAction::DeleteModel(
         "gemini".into(),
-        "gemini-3.8-flash".into(),
+        "gemini/gemini-3.8-flash".into(),
     ));
     assert!(toast_text(&app).contains("cannot be deleted"));
 
@@ -381,12 +381,12 @@ fn builtin_providers_and_models_are_immutable_and_updateable() {
     // user-owned for everything but their identity
     app.run_action(MenuAction::EditModel(
         "gemini".into(),
-        "gemini-3.8-flash".into(),
+        "gemini/gemini-3.8-flash".into(),
     ));
     assert!(
         matches!(
             app.cur_menu(),
-            Some(Menu::EditModel { key: Some(k), .. }) if k == "gemini-3.8-flash"
+            Some(Menu::EditModel { key: Some(k), .. }) if k == "gemini/gemini-3.8-flash"
         ),
         "built-in model edit must open"
     );

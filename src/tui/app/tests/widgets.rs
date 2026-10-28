@@ -1831,7 +1831,7 @@ fn aborted_turn_during_tool_preserves_commentary_row() {
 
 #[test]
 fn session_recovery_with_deleted_or_broken_plan_id() {
-    let mut session = Session::new("m".into(), 1000);
+    let mut session = Session::new("p/m".into(), 1000);
     session.plan_id = Some("deleted_or_nonexistent_plan_99999".into());
 
     let mut providers = BTreeMap::new();
@@ -1843,11 +1843,12 @@ fn session_recovery_with_deleted_or_broken_plan_id() {
             api_key: Some("test-key".into()),
             api_key_env: None,
             continuation: true,
+            models: Default::default(),
         },
     );
     let mut models = BTreeMap::new();
     models.insert(
-        "m".to_string(),
+"p/m".to_string(),
         ModelConfig {
             provider: "p".into(),
             id: "test-model".into(),
@@ -1862,10 +1863,11 @@ fn session_recovery_with_deleted_or_broken_plan_id() {
         },
     );
     let cfg = Config {
-        last_model: "m".into(),
+        last_model: "p/m".into(),
         legacy_default_model: String::new(),
         providers,
         models,
+        unfiled_models: Default::default(),
         safety: Default::default(),
         web: Default::default(),
         ui: Default::default(),
@@ -1888,7 +1890,7 @@ fn session_recovery_with_deleted_or_broken_plan_id() {
     );
 
     // Switching to another session with a broken plan_id also clears the broken plan_id gracefully
-    let mut session2 = Session::new("m".into(), 1000);
+    let mut session2 = Session::new("p/m".into(), 1000);
     session2.plan_id = Some("another_corrupt_or_deleted_plan_88888".into());
     app.apply_session(session2);
     assert_ne!(

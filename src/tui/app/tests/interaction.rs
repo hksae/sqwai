@@ -1486,7 +1486,7 @@ fn submenu_open_jitter_does_not_move_effort_cursor() {
     // session model "m" sits on Off: the fresh card must open there
     app.open_menu(crate::tui::app::menus::Menu::EditModel {
         provider: "p".into(),
-        key: Some("m".into()),
+        key: Some("p/m".into()),
     });
     let area = Rect::new(0, 0, 100, 30);
     let mut buf = Buffer::empty(area);
@@ -1553,7 +1553,7 @@ fn keyboard_open_effort_ignores_resting_mouse_jitter() {
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
     let mut app = test_app("http://127.0.0.1:9/v1".into());
-    app.cfg.models.get_mut("m").unwrap().effort = EffortLevel::High;
+    app.cfg.models.get_mut("p/m").unwrap().effort = EffortLevel::High;
     app.model_cfg.effort = EffortLevel::High;
     let (tx, rx) = std::sync::mpsc::channel();
     let me = |kind: MouseEventKind, row: u16, col: u16| {
@@ -1660,9 +1660,9 @@ fn keyboard_open_effort_ignores_resting_mouse_jitter() {
 #[test]
 fn effort_scoped_menu_follows_target_model_not_session() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
-    app.cfg.models.get_mut("m").unwrap().effort = EffortLevel::High;
+    app.cfg.models.get_mut("p/m").unwrap().effort = EffortLevel::High;
     app.model_cfg.effort = EffortLevel::High;
-    let mut other = app.cfg.models["m"].clone();
+    let mut other = app.cfg.models["p/m"].clone();
     other.effort = EffortLevel::Off;
     app.cfg.models.insert("other".to_string(), other);
     app.open_menu(crate::tui::app::menus::Menu::Effort {
@@ -1693,7 +1693,7 @@ fn effort_scoped_menu_follows_target_model_not_session() {
         "write lands on the target"
     );
     assert_eq!(
-        app.cfg.models.get("m").unwrap().effort,
+        app.cfg.models.get("p/m").unwrap().effort,
         EffortLevel::High,
         "session model untouched"
     );
@@ -1705,7 +1705,7 @@ fn effort_scoped_menu_follows_target_model_not_session() {
 #[test]
 fn effort_scoped_menu_missing_key_falls_back_to_session() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
-    app.cfg.models.get_mut("m").unwrap().effort = EffortLevel::High;
+    app.cfg.models.get_mut("p/m").unwrap().effort = EffortLevel::High;
     app.model_cfg.effort = EffortLevel::High;
     app.open_menu(crate::tui::app::menus::Menu::Effort {
         model: Some("ghost".to_string()),
@@ -1731,9 +1731,9 @@ fn effort_scoped_menu_via_form_click() {
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
     let mut app = test_app("http://127.0.0.1:9/v1".into());
-    app.cfg.models.get_mut("m").unwrap().effort = EffortLevel::High;
+    app.cfg.models.get_mut("p/m").unwrap().effort = EffortLevel::High;
     app.model_cfg.effort = EffortLevel::High;
-    let mut other = app.cfg.models["m"].clone();
+    let mut other = app.cfg.models["p/m"].clone();
     other.effort = EffortLevel::Off;
     app.cfg.models.insert("other".to_string(), other);
     app.open_menu(crate::tui::app::menus::Menu::EditModel {
@@ -2163,7 +2163,7 @@ fn session_switch_drops_the_queue() {
     use crate::session::Session;
     let mut app = queue_test_app();
     app.pending_queue = vec!["stale".into()];
-    app.apply_session(Session::new("m".into(), 1000));
+    app.apply_session(Session::new("p/m".into(), 1000));
     assert!(app.pending_queue.is_empty());
     app.pending_queue = vec!["stale".into()];
     app.startup = false; // apply_session raised the startup screen

@@ -11,7 +11,10 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use tui_textarea::TextArea;
 
 use crate::agent::loop_task::AgentEvent;
-use crate::config::{Config, EffortControl, EffortLevel, ModelConfig, ModelStatus, WireFormat};
+use crate::config::{
+    Config, EffortControl, EffortLevel, ModelConfig, ModelStatus, WireFormat, key_name,
+    model_display, model_key,
+};
 use crate::providers::{self, ChatRequest, Message as PMessage, Role, SharedProvider};
 use crate::session::Session;
 use crate::tui::markdown::{Highlighter, render, wrap_tagged};
@@ -179,7 +182,13 @@ impl App {
                             .position(|s| *s == mc.effort.as_str())
                             .unwrap_or(0);
                         self.form_fields = vec![
-                            FormField::text("key", key.clone().unwrap_or_default()),
+                            FormField::text(
+                                "key",
+                                key.as_deref()
+                                    .map(key_name)
+                                    .unwrap_or_default()
+                                    .to_string(),
+                            ),
                             FormField::text("request id", mc.id.clone()),
                             FormField::text("context", mc.context.to_string()),
                             FormField::choice("effort", EFFORT_OPTS, ef_sel),
@@ -204,14 +213,20 @@ impl App {
                 use super::menus::ModelField;
                 let val = match key.as_ref().and_then(|k| self.cfg.models.get(k)) {
                     Some(mc) => match field {
-                        ModelField::Key => key.clone().unwrap_or_default(),
+                        ModelField::Key => key
+                            .as_deref()
+                            .map(key_name)
+                            .unwrap_or_default()
+                            .to_string(),
                         ModelField::RequestId => mc.id.clone(),
                         ModelField::Context => mc.context.to_string(),
                     },
                     None => match field {
                         ModelField::Key => key
-                            .clone()
-                            .unwrap_or_else(|| self.model_draft.key.clone()),
+                            .as_deref()
+                            .map(key_name)
+                            .unwrap_or(&self.model_draft.key)
+                            .to_string(),
                         ModelField::RequestId => self.model_draft.id.clone(),
                         ModelField::Context => self.model_draft.context.to_string(),
                     },
@@ -644,34 +659,41 @@ impl App {
                         .and_then(|n| self.cfg.providers.get(n))
                         .or_else(|| self.cfg.providers.get(&new_name))
                         .is_none_or(|p| p.continuation),
+                    // models are folded into cfg.models; this table fills at save
+                    models: Default::default(),
                 };
+                let mut skipped = 0usize;
                 if let Some(old) = &name
                     && old != &new_name
                 {
-                    if let Some(pc_old) = self.cfg.providers.remove(old) {
-                        for m in self.cfg.models.values_mut() {
-                            if &m.provider == old {
-                                m.provider = new_name.clone();
-                            }
-                        }
-                        let _ = pc_old;
-                    }
+                    self.cfg.providers.remove(old);
+                    skipped = self.cfg.rename_provider_models(old, &new_name);
                     if self.model_cfg.provider == *old {
                         self.model_cfg.provider = new_name.clone();
                     }
                 }
                 self.cfg.providers.insert(new_name.clone(), pc);
                 self.cfg.save().ok();
+                if skipped > 0 {
+                    self.status(
+                        &format!(
+                            "{skipped} model(s) kept their old key: '{new_name}' already serves \
+                             that name"
+                        ),
+                        StatusKind::Err,
+                    );
+                }
                 self.open_menu_replace(Menu::Models { provider: new_name });
             }
             Some(Menu::EditModel { provider, key }) => {
                 let vals: Vec<String> = self.form_fields.iter().map(|f| f.trimmed()).collect();
-                let (new_key, id, ctx) = (
+                let (name, id, ctx) = (
                     vals.first().cloned().unwrap_or_default(),
                     vals.get(1).cloned().unwrap_or_default(),
                     vals.get(2).cloned().unwrap_or_default(),
                 );
-                if new_key.is_empty() || id.is_empty() {
+                let new_key = model_key(&provider, &name);
+                if name.is_empty() || id.is_empty() {
                     self.status("key and request id are required", StatusKind::Err);
                     return;
                 }
@@ -683,7 +705,7 @@ impl App {
                     && self.cfg.models.contains_key(&new_key)
                 {
                     self.status(
-                        &format!("model '{new_key}' already exists"),
+                        &format!("model '{}' already exists", model_display(&new_key)),
                         StatusKind::Err,
                     );
                     return;
@@ -774,17 +796,21 @@ impl App {
                             self.status("key cannot be empty", StatusKind::Err);
                             return;
                         }
-                        if key.as_deref() != Some(raw.as_str())
-                            && self.cfg.models.contains_key(&raw)
+                        // the row edits the model's name; its provider comes from
+                        // the menu it was opened from, so the identity is built
+                        // here rather than typed.
+                        let new_key = model_key(&provider, &raw);
+                        if key.as_deref() != Some(new_key.as_str())
+                            && self.cfg.models.contains_key(&new_key)
                         {
                             self.status(
-                                &format!("model '{raw}' already exists"),
+                                &format!("model '{}' already exists", model_display(&new_key)),
                                 StatusKind::Err,
                             );
                             return;
                         }
                         if key.as_deref().is_some_and(|k| self.cfg.is_builtin_model(k))
-                            && key.as_deref() != Some(raw.as_str())
+                            && key.as_deref() != Some(new_key.as_str())
                         {
                             self.status(
                                 "built-in model key cannot be renamed — it is the catalog identity",
@@ -793,14 +819,14 @@ impl App {
                             return;
                         }
                         if let Some(old) = &key {
-                            if *old != raw {
+                            if *old != new_key {
                                 if let Some(mc) = self.cfg.models.remove(old) {
-                                    self.cfg.models.insert(raw.clone(), mc);
+                                    self.cfg.models.insert(new_key.clone(), mc);
                                 }
                                 if self.session.model_key == *old {
-                                    self.session.model_key = raw.clone();
+                                    self.session.model_key = new_key.clone();
                                 }
-                                self.rekey_parent_edit_model(&raw);
+                                self.rekey_parent_edit_model(&new_key);
                                 self.cfg.save().ok();
                             }
                         } else {
@@ -889,12 +915,9 @@ impl App {
                         }
                         if let Some(old) = &name {
                             if *old != raw {
-                                if let Some(pc) = self.cfg.providers.remove(old) {
-                                    for m in self.cfg.models.values_mut() {
-                                        if m.provider == *old {
-                                            m.provider = raw.clone();
-                                        }
-                                    }
+                                let pc = self.cfg.providers.remove(old);
+                                let skipped = self.cfg.rename_provider_models(old, &raw);
+                                if let Some(pc) = pc {
                                     self.cfg.providers.insert(raw.clone(), pc);
                                 }
                                 if self.model_cfg.provider == *old {
@@ -902,6 +925,15 @@ impl App {
                                 }
                                 self.rekey_parent_edit_provider(&raw);
                                 self.cfg.save().ok();
+                                if skipped > 0 {
+                                    self.status(
+                                        &format!(
+                                            "{skipped} model(s) kept their old key: '{raw}' \
+                                             already serves that name"
+                                        ),
+                                        StatusKind::Err,
+                                    );
+                                }
                             }
                         } else {
                             self.provider_draft.name = raw;
@@ -992,7 +1024,7 @@ impl App {
         if self.model_draft.key.is_empty() || self.model_draft.id.is_empty() {
             return;
         }
-        let new_key = self.model_draft.key.clone();
+        let new_key = model_key(provider, &self.model_draft.key);
         let updated = ModelConfig {
             provider: provider.to_string(),
             id: self.model_draft.id.clone(),
@@ -1034,6 +1066,7 @@ impl App {
             api_key_env: (!self.provider_draft.api_key_env.is_empty())
                 .then(|| self.provider_draft.api_key_env.clone()),
             continuation: true,
+            models: Default::default(),
         };
         self.cfg.providers.insert(new_name.clone(), pc);
         self.cfg.save().ok();

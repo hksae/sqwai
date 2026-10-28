@@ -162,14 +162,14 @@ fn edit_model_form_keeps_xhigh_effort() {
     // the providers-menu form once offered only five levels: an xhigh
     // model showed `off`, and saving the untouched form clobbered it
     let mut app = test_app("http://127.0.0.1:9/v1".into());
-    app.cfg.models.get_mut("m").unwrap().effort = EffortLevel::Xhigh;
+    app.cfg.models.get_mut("p/m").unwrap().effort = EffortLevel::Xhigh;
     app.open_menu_replace(Menu::EditModel {
         provider: "p".into(),
-        key: Some("m".into()),
+        key: Some("p/m".into()),
     });
     assert_eq!(app.form_fields[3].trimmed(), "xhigh");
     app.form_save();
-    assert_eq!(app.cfg.models.get("m").unwrap().effort, EffortLevel::Xhigh);
+    assert_eq!(app.cfg.models.get("p/m").unwrap().effort, EffortLevel::Xhigh);
 }
 
 #[test]
@@ -186,12 +186,12 @@ fn edit_model_form_options_match_control_cycle() {
 fn edit_model_form_round_trips_effort_declarations() {
     use crate::config::EffortControl;
     let mut app = test_app("http://127.0.0.1:9/v1".into());
-    let m = app.cfg.models.get_mut("m").unwrap();
+    let m = app.cfg.models.get_mut("p/m").unwrap();
     m.effort_control = Some(EffortControl::Budget);
     m.effort_always_on = true;
     app.open_menu_replace(Menu::EditModel {
         provider: "p".into(),
-        key: Some("m".into()),
+        key: Some("p/m".into()),
     });
     // control/always_on are config-only now (auto by provider format):
     // the form offers key, request id, context, effort — and must not
@@ -199,7 +199,7 @@ fn edit_model_form_round_trips_effort_declarations() {
     assert_eq!(app.form_fields.len(), 4);
     assert_eq!(app.form_fields[3].trimmed(), "off");
     app.form_save();
-    let m = app.cfg.models.get("m").unwrap();
+    let m = app.cfg.models.get("p/m").unwrap();
     assert_eq!(m.effort_control, Some(EffortControl::Budget));
     assert!(m.effort_always_on);
 }
@@ -883,6 +883,7 @@ fn providers_surface_leads_with_its_search_row() {
                 api_key: None,
                 api_key_env: None,
                 continuation: false,
+                models: Default::default(),
             },
         );
     }
@@ -1009,6 +1010,7 @@ fn providers_hints_stand_as_a_right_column() {
                 api_key: None,
                 api_key_env: None,
                 continuation: false,
+                models: Default::default(),
             },
         );
     }
@@ -1136,7 +1138,7 @@ fn settings_cycles_and_toggles() {
 #[test]
 fn switching_model_records_last_model() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
-    let mut other = app.cfg.models["m"].clone();
+    let mut other = app.cfg.models["p/m"].clone();
     other.id = "other-model".into();
     app.cfg.models.insert("m2".into(), other);
     app.run_action(MenuAction::UseModel("m2".into()));
@@ -1169,7 +1171,7 @@ fn win_v_paste_in_edit_model_field_saves_on_enter() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.open_menu(Menu::EditModel {
         provider: "p".into(),
-        key: Some("m".into()),
+        key: Some("p/m".into()),
     });
     // Open `key` field editor (`Model · p · key`)
     app.menu_sel = 0;
@@ -1207,12 +1209,12 @@ fn win_v_paste_in_edit_model_field_saves_on_enter() {
     assert!(
         matches!(
             app.cur_menu(),
-            Some(Menu::EditModel { key: Some(k), .. }) if k == "deepseek-v4-flash"
+            Some(Menu::EditModel { key: Some(k), .. }) if k == "p/deepseek-v4-flash"
         ),
         "expected EditModel with new key, title={}",
         app.menu_title()
     );
-    assert!(app.cfg.models.contains_key("deepseek-v4-flash"));
+    assert!(app.cfg.models.contains_key("p/deepseek-v4-flash"));
 }
 
 #[test]
@@ -1250,9 +1252,9 @@ fn empty_startup_session_is_not_persisted() {
 fn sessions_filter_narrows_and_esc_clears() {
     use crossterm::event::{Event, KeyCode, KeyModifiers};
     let mut app = test_app("http://127.0.0.1:9/v1".into());
-    let mut a = Session::new("m".into(), 100);
+    let mut a = Session::new("p/m".into(), 100);
     a.title = "alpha task".into();
-    let mut b = Session::new("m".into(), 100);
+    let mut b = Session::new("p/m".into(), 100);
     b.title = "beta task".into();
     app.sessions = vec![
         SessionHeader::from_session(&a),
@@ -1293,9 +1295,9 @@ fn sessions_filter_narrows_and_esc_clears() {
 fn sessions_first_keystroke_filters_instead_of_acting() {
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     let mut app = test_app("http://127.0.0.1:9/v1".into());
-    let mut a = Session::new("m".into(), 100);
+    let mut a = Session::new("p/m".into(), 100);
     a.title = "apple task".into();
-    let mut b = Session::new("m".into(), 100);
+    let mut b = Session::new("p/m".into(), 100);
     b.title = "apricot task".into();
     app.sessions = vec![
         SessionHeader::from_session(&a),
@@ -1602,7 +1604,7 @@ fn edit_model_is_a_four_row_surface_with_effort_on_enter() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.open_menu(Menu::EditModel {
         provider: "p".into(),
-        key: Some("m".into()),
+        key: Some("p/m".into()),
     });
     assert!(
         !app.is_form_menu(),
@@ -1666,13 +1668,13 @@ fn edit_model_is_a_four_row_surface_with_effort_on_enter() {
     app.menu_activate();
     assert!(matches!(app.cur_menu(), Some(Menu::EditModel { .. })));
     assert_eq!(app.menu_sel, 1);
-    assert_eq!(app.cfg.models["m"].id, "new-req-id");
+    assert_eq!(app.cfg.models["p/m"].id, "new-req-id");
 
     app.menu_sel = 3;
     app.menu_activate();
     assert!(matches!(
         app.cur_menu(),
-        Some(Menu::Effort { model: Some(k) }) if k == "m"
+        Some(Menu::Effort { model: Some(k) }) if k == "p/m"
     ));
 }
 
@@ -1688,17 +1690,17 @@ fn new_model_draft_commits_once_key_and_request_id_are_set() {
     app.menu_activate();
     app.form_fields[0] = super::super::forms::FormField::text("key", "brand-new".into());
     app.menu_activate();
-    assert!(!app.cfg.models.contains_key("brand-new"));
+    assert!(!app.cfg.models.contains_key("p/brand-new"));
 
     // Set request id second -> commits to cfg.models and promotes EditModel key
     app.menu_sel = 1;
     app.menu_activate();
     app.form_fields[0] = super::super::forms::FormField::text("request id", "brand-new-id".into());
     app.menu_activate();
-    assert_eq!(app.cfg.models["brand-new"].id, "brand-new-id");
+    assert_eq!(app.cfg.models["p/brand-new"].id, "brand-new-id");
     assert!(matches!(
         app.cur_menu(),
-        Some(Menu::EditModel { key: Some(k), .. }) if k == "brand-new"
+        Some(Menu::EditModel { key: Some(k), .. }) if k == "p/brand-new"
     ));
 }
 
@@ -1765,6 +1767,7 @@ fn list_surface_scales_to_half_terminal_with_eight_minimum_and_stays_compact_for
                 api_key: None,
                 api_key_env: None,
                 continuation: false,
+                models: Default::default(),
             },
         );
     }
@@ -1801,6 +1804,7 @@ fn list_surface_scales_to_half_terminal_with_eight_minimum_and_stays_compact_for
                 api_key: None,
                 api_key_env: None,
                 continuation: false,
+                models: Default::default(),
             },
         );
     }
@@ -1831,7 +1835,7 @@ fn pinned_skills_are_session_scoped_and_reload_by_name() {
     assert!(app.active_skills.is_empty());
     assert!(app.session.active_skills.is_empty());
 
-    let mut saved = Session::new("m".into(), 1000);
+    let mut saved = Session::new("p/m".into(), 1000);
     saved.active_skills = vec!["tui-rules".into(), "gone".into()];
     app.apply_session(saved);
     assert_eq!(app.active_skills.len(), 1);
