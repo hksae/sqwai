@@ -1085,7 +1085,7 @@ async fn run_agent(
         if mark_agent_run_started(&session_id) {
             let resumed_from = context::resume_notice(&root, &events_session).map(|_| "events");
             let _ = writer.session_start(
-                &model_id,
+                &current_model_key,
                 if plan_mode { "plan" } else { "act" },
                 approval_mode.as_str(),
                 None,
@@ -1105,7 +1105,7 @@ async fn run_agent(
                 "hash": format!("{:x}", sha2::Sha256::digest(user_message.content.as_bytes())),
                 "chars": user_message.content.chars().count(),
                 "goal_like": user_message.content.starts_with("goal:") || user_message.content.starts_with("/goal"),
-                "model": model_id,
+                "model": &current_model_key,
                 "approval": approval_mode.as_str(),
             }));
         }

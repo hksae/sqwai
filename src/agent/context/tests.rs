@@ -987,6 +987,10 @@ fn agent_state_names_the_model_and_the_compaction_point() {
     let p = Policy::with_compaction(256_000, 0.08, 4, 0.80);
     let s = agent_state("gpt-6-luna2", 61_000, &p);
     assert!(s.contains("Model: gpt-6-luna2"), "{s}");
+    // the endpoint names the model: two providers can serve one name, and the
+    // block is the model's only clue which one is answering
+    let s = agent_state("pateway/gpt-6-luna2", 61_000, &p);
+    assert!(s.contains("Model: gpt-6-luna2 @ pateway"), "{s}");
     assert!(s.contains("61k used of 256k"), "{s}");
     assert!(s.contains("compacts at 205k"), "{s}");
     assert!(agent_state("m", 0, &p).is_empty(), "no size yet");

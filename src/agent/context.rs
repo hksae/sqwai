@@ -1033,9 +1033,10 @@ pub fn agent_state(model_key: &str, used: u64, policy: &Policy) -> String {
         return String::new();
     }
     let limit = policy.context_limit;
+    let model = crate::config::model_display(model_key);
     format!(
         "<agent_state>
-Model: {model_key}
+Model: {model}
 Context: {} used of {} · ~{} free · compacts at {}
 </agent_state>
 ",

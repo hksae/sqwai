@@ -1311,7 +1311,7 @@ impl App {
         let tok_str = fmt_k(context_used);
         let ctx_label = format!("{ctx_pct}% ({tok_str})");
 
-        let model_label = self.session.model_key.clone();
+        let model_label = crate::config::model_display(&self.session.model_key);
         let effort_plan = self.effort_plan();
         let ef_short = effort_plan.short_label();
         let ef_label = ef_short

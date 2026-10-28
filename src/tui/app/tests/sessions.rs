@@ -763,7 +763,7 @@ fn pinned_frame_resolves_against_real_card_not_stale_rect() {
         .expect("session row");
     let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
     assert!(
-        text.starts_with("hi (") && text.ends_with(" · p/m · 1)"),
+        text.starts_with("hi (") && text.ends_with(" · m @ p · 1)"),
         "row wears Models-style parenthesized metadata: {text:?}"
     );
 }

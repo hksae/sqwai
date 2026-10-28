@@ -103,7 +103,7 @@ pub(super) enum ModelField {
 impl ModelField {
     pub(super) fn label(self) -> &'static str {
         match self {
-            Self::Key => "key",
+            Self::Key => "name",
             Self::RequestId => "request id",
             Self::Context => "context",
         }

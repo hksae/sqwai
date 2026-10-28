@@ -183,7 +183,7 @@ impl App {
                             .unwrap_or(0);
                         self.form_fields = vec![
                             FormField::text(
-                                "key",
+                                "name",
                                 key.as_deref()
                                     .map(key_name)
                                     .unwrap_or_default()
@@ -201,7 +201,7 @@ impl App {
                             .position(|s| *s == EffortLevel::Medium.as_str())
                             .unwrap_or(0);
                         self.form_fields = vec![
-                            FormField::text("key", String::new()),
+                            FormField::text("name", String::new()),
                             FormField::text("request id", String::new()),
                             FormField::text("context", "128000".into()),
                             FormField::choice("effort", EFFORT_OPTS, ef_sel),
@@ -694,7 +694,7 @@ impl App {
                 );
                 let new_key = model_key(&provider, &name);
                 if name.is_empty() || id.is_empty() {
-                    self.status("key and request id are required", StatusKind::Err);
+                    self.status("name and request id are required", StatusKind::Err);
                     return;
                 }
                 let Ok(context) = ctx.parse::<u64>() else {
@@ -717,7 +717,7 @@ impl App {
                     && key.as_deref() != Some(new_key.as_str())
                 {
                     self.status(
-                        "built-in model key cannot be renamed — it is the catalog identity",
+                        "built-in model name cannot be renamed — it is the catalog identity",
                         StatusKind::Err,
                     );
                     return;
@@ -793,7 +793,7 @@ impl App {
                 match field {
                     ModelField::Key => {
                         if raw.is_empty() {
-                            self.status("key cannot be empty", StatusKind::Err);
+                            self.status("name cannot be empty", StatusKind::Err);
                             return;
                         }
                         // the row edits the model's name; its provider comes from
@@ -813,7 +813,7 @@ impl App {
                             && key.as_deref() != Some(new_key.as_str())
                         {
                             self.status(
-                                "built-in model key cannot be renamed — it is the catalog identity",
+                                "built-in model name cannot be renamed — it is the catalog identity",
                                 StatusKind::Err,
                             );
                             return;

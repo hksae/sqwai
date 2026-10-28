@@ -220,7 +220,7 @@ fn a_builtin_model_key_cannot_be_renamed() {
         provider,
         key: Some(key.clone()),
     });
-    app.form_fields[0] = super::super::forms::FormField::text("key", "renamed".into());
+    app.form_fields[0] = super::super::forms::FormField::text("name", "renamed".into());
     app.form_save();
     assert!(
         app.cfg.models.contains_key(&key) && !app.cfg.models.contains_key("renamed"),
@@ -1612,7 +1612,7 @@ fn edit_model_is_a_four_row_surface_with_effort_on_enter() {
     );
     assert_eq!(app.menu_rows.len(), 4);
     for (i, (label, val)) in [
-        ("key", "m"),
+        ("name", "m"),
         ("request id", "test-model"),
         ("context", "1000"),
         ("effort", "off"),
@@ -1688,7 +1688,7 @@ fn new_model_draft_commits_once_key_and_request_id_are_set() {
     // Set key first
     app.menu_sel = 0;
     app.menu_activate();
-    app.form_fields[0] = super::super::forms::FormField::text("key", "brand-new".into());
+    app.form_fields[0] = super::super::forms::FormField::text("name", "brand-new".into());
     app.menu_activate();
     assert!(!app.cfg.models.contains_key("p/brand-new"));
 

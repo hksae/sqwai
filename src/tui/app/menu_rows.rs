@@ -7,7 +7,7 @@ use super::*;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
-use crate::config::{EffortLevel, WireFormat, key_name};
+use crate::config::{EffortLevel, WireFormat, key_name, model_display};
 use crate::providers::Role;
 use crate::tui::theme::Theme;
 
@@ -511,7 +511,7 @@ impl App {
             "model",
             format!(
                 "{} (id: {} · effort: {})",
-                self.session.model_key,
+                model_display(&self.session.model_key),
                 self.model_cfg.id,
                 self.model_cfg.effort.as_str()
             ),
@@ -824,7 +824,7 @@ impl App {
             row(Line::from(spans), action)
         };
         self.menu_rows.push(field_row(
-            "key",
+            "name",
             k_val,
             MenuAction::OpenModelField(ModelField::Key),
         ));
@@ -925,7 +925,7 @@ impl App {
         let limit = session.context_limit.max(1);
         self.menu_rows.push(row(
             Line::from(vec![
-                Span::styled(session.model_key.clone(), Theme::FG()),
+                Span::styled(model_display(&session.model_key), Theme::FG()),
                 Span::styled(
                     format!(
                         " · used {} ({:.1}%)",
@@ -1471,7 +1471,7 @@ impl App {
         format!(
             "session: {}\nmodel: {} ({})\nprovider: {}\ncontext: {} / {}\nproject: {}\nlog: {}\nconfig: {}",
             self.session.id,
-            self.session.model_key,
+            model_display(&self.session.model_key),
             self.model_cfg.id,
             self.model_cfg.provider,
             self.session.context_tokens_used(),
@@ -1682,7 +1682,7 @@ fn session_row(s: &SessionHeader, is_current: bool) -> MenuRow {
     let tail = format!(
         " ({} · {} · {})",
         fmt_time(s.last_activity()),
-        s.model_key,
+        model_display(&s.model_key),
         fmt_k(s.context_tokens)
     );
     (
