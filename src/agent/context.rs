@@ -1076,8 +1076,16 @@ fn idle_since(records: &[crate::agent::events::Record]) -> Option<String> {
     })
 }
 
+/// Token count for the model's own readout: `61k`, `256k`, `1m`. Millions get
+/// their own rung so a 1M window never reads as `1000k`.
 fn k_thousands(tokens: u64) -> String {
-    if tokens >= 1000 {
+    if tokens >= 1_000_000 {
+        if tokens % 1_000_000 == 0 {
+            format!("{}m", tokens / 1_000_000)
+        } else {
+            format!("{:.1}m", tokens as f64 / 1_000_000.0)
+        }
+    } else if tokens >= 1000 {
         format!("{:.0}k", tokens as f64 / 1000.0)
     } else {
         tokens.to_string()

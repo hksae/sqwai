@@ -993,6 +993,10 @@ fn agent_state_names_the_model_and_the_compaction_point() {
     assert!(s.contains("Model: gpt-6-luna2 @ pateway"), "{s}");
     assert!(s.contains("61k used of 256k"), "{s}");
     assert!(s.contains("compacts at 205k"), "{s}");
+    // a million-token window must read 1m, never 1000k
+    let wide = Policy::with_compaction(1_000_000, 0.08, 4, 0.80);
+    let s = agent_state("m", 61_000, &wide);
+    assert!(s.contains("61k used of 1m"), "{s}");
     assert!(agent_state("m", 0, &p).is_empty(), "no size yet");
     assert!(
         agent_state("m", 10, &Policy::new(0)).is_empty(),

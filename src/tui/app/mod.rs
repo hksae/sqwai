@@ -2125,8 +2125,17 @@ fn fmt_bytes(n: u64) -> String {
     }
 }
 
+/// Token count for the UI: 9847 → `9k`, 262144 → `262k`, 1000000 → `1m`.
+/// The millions rung exists because a 1M window written as `1000k` reads like
+/// a thousand of something small.
 fn fmt_k(n: u64) -> String {
-    if n >= 1000 {
+    if n >= 1_000_000 {
+        if n % 1_000_000 == 0 {
+            format!("{}m", n / 1_000_000)
+        } else {
+            format!("{:.1}m", n as f64 / 1_000_000.0)
+        }
+    } else if n >= 1000 {
         format!("{}k", n / 1000)
     } else {
         format!("{n}")

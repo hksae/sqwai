@@ -2318,8 +2318,8 @@ fn context_menu_shows_parts_legend_and_honest_gaps() {
         .map(|s| s.content.as_ref())
         .collect();
     assert!(
-        bar.contains("8% (8k)"),
-        "the bottom readout rounds to the panel's value: {bar}"
+        bar.contains(" 8% ") && !bar.contains("8k)"),
+        "the bottom readout rounds to the panel's value and carries no token count: {bar}"
     );
     // #209 L14 stays out of this panel: the fixed, uncompactable share is the
     // host's own accounting, and the owner asked for the user's content only

@@ -401,6 +401,20 @@ fn builtin_providers_and_models_are_immutable_and_updateable() {
 }
 
 #[test]
+fn token_counts_reach_the_millions_rung() {
+    use super::super::fmt_k;
+
+    // a 1M window read "1000k" until this test existed
+    assert_eq!(fmt_k(1_000_000), "1m");
+    assert_eq!(fmt_k(1_500_000), "1.5m");
+    assert_eq!(fmt_k(2_400_000), "2.4m");
+    assert_eq!(fmt_k(999_999), "999k");
+    assert_eq!(fmt_k(262_144), "262k");
+    assert_eq!(fmt_k(9_847), "9k");
+    assert_eq!(fmt_k(512), "512");
+}
+
+#[test]
 fn model_menu_row_formats_ctx() {
     use super::super::menus::fmt_ctx;
 
