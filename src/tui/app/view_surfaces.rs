@@ -1311,7 +1311,11 @@ impl App {
         let tok_str = fmt_k(context_used);
         let ctx_label = format!("{ctx_pct}% ({tok_str})");
 
-        let model_label = crate::config::model_display(&self.session.model_key);
+        // The bottom line carries the name alone: the row has no room to spare,
+        // and the model was picked from a provider-scoped menu, so the endpoint
+        // is not in question here. Identity with the endpoint lives in the
+        // session info, the sessions list and <agent_state>.
+        let model_label = crate::config::key_name(&self.session.model_key).to_string();
         let effort_plan = self.effort_plan();
         let ef_short = effort_plan.short_label();
         let ef_label = ef_short
