@@ -621,6 +621,81 @@ fn toggle_keeps_header_on_screen_row() {
     );
 }
 
+/// The reported bug: at the end of the history, opening a tool row that is not
+/// the last segment and closing it again left the composer and the status line
+/// off screen until a scroll. The anchor must hand `follow` back once it lands
+/// on the last page — the same rule `scroll` applies at its edge.
+#[test]
+fn closing_a_toggled_tool_above_the_tail_gives_the_bottom_band_back() {
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.startup = false;
+    for i in 0..6 {
+        app.push_segment(Segment::User(format!("q{i}")));
+        app.push_segment(Segment::Assistant {
+            text: format!("answer {i}"),
+            live: false,
+        });
+    }
+    let tool_idx = app.segments.len();
+    app.push_segment(Segment::Tool {
+        call_id: None,
+        name: "read".into(),
+        args: "f.rs".into(),
+        ok: Some(true),
+        output: "l1\nl2\nl3\nl4\nl5\nl6".into(),
+        diff: None,
+        preview: Vec::new(),
+        preview_total: 0,
+        expanded: false,
+        ask: None,
+    });
+    // the tail sits below the toggled row, as it does in a real turn
+    app.push_segment(Segment::Assistant {
+        text: "done".into(),
+        live: false,
+    });
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    app.follow = true;
+    terminal.draw(|frame| app.draw(frame)).unwrap();
+
+    let header = app
+        .cache_rowseg
+        .iter()
+        .position(|t| *t == Some(tool_idx))
+        .expect("tool header assembled");
+    app.click(header);
+    terminal.draw(|frame| app.draw(frame)).unwrap();
+    assert!(
+        matches!(
+            app.segments.get(tool_idx),
+            Some(Segment::Tool { expanded: true, .. })
+        ),
+        "the row opened"
+    );
+
+    let header = app
+        .cache_rowseg
+        .iter()
+        .position(|t| *t == Some(tool_idx))
+        .expect("tool header after expand");
+    app.click(header);
+    terminal.draw(|frame| app.draw(frame)).unwrap();
+    assert!(
+        matches!(
+            app.segments.get(tool_idx),
+            Some(Segment::Tool { expanded: false, .. })
+        ),
+        "the row closed again"
+    );
+    assert!(app.follow, "closing the row must resume following");
+
+    let frame = crate::tui::app::tests::render_to_string(&mut app, 80, 24);
+    assert!(
+        frame.contains('›'),
+        "the composer is on screen again:\n{frame}"
+    );
+}
+
 /// Review checklist 5: a repeat draw of an unchanged subagent view
 /// clones no transcript and renders nothing; closing restores the main
 /// rows whole, again with zero renders.

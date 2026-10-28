@@ -1334,8 +1334,15 @@ impl App {
         let h = self.last_chat.height.max(1) as usize;
         let max = self.cache_lines.len().saturating_sub(h);
         if let Some((abs, _)) = self.seg_row_range(tag) {
-            self.view_top = abs.saturating_sub(screen).min(max);
-            self.follow = false;
+            let top = abs.saturating_sub(screen).min(max);
+            self.view_top = top;
+            // An anchor that lands on the last page means there is nothing left
+            // below to follow, so the tail is pinned again — exactly what
+            // `scroll` does at its edge. Without this, opening a tool and
+            // closing it again leaves `follow` off while the transcript ends at
+            // the bottom, and the notice/composer/status band stays hidden
+            // until a scroll re-arms it.
+            self.follow = top >= max;
         }
     }
 
