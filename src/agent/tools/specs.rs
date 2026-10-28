@@ -402,10 +402,8 @@ stub. Optional `query` or `offset`/`limit` for part of a large result.",
             name: "plan",
             kind: Kind::Mutating,
             description: "Manage the host plan for multi-step work. `create` sets the goal plus \
-the steps you can see now (step 1 starts); constraints and criteria are optional notes. `op` may \
-be omitted for create when goal and steps are supplied. Criteria/constraints accept a string or an \
-array; a step may be a title string or {title, check}; XML-like tags in criteria/constraints are \
-stripped. Criteria are your done-notes and each step should carry a `check` — what proves it done. \
+the steps you can see now (step 1 starts); constraints and criteria are optional notes. Criteria \
+are your done-notes and each step should carry a `check` — what proves it done. \
 The host runs nothing and enforces nothing. `finish` closes the current step and advances; `add` \
 extends the plan as the horizon opens; `cancel` skips a step; `close` is the only thing that ends a \
 plan — it needs every step closed and a summary naming what proves the goal met; `abandon` retires \
@@ -429,14 +427,14 @@ ids; never re-read the plan through tools.",
                             {"type": "string"},
                             {"type": "array", "items": {"type": "string"}}
                         ],
-                        "description": "create: optional constraints; a string is accepted as one constraint"
+                        "description": "create: optional constraints"
                     },
                     "criteria": {
                         "oneOf": [
                             {"type": "string"},
                             {"type": "array", "items": {"type": "string"}}
                         ],
-                        "description": "create: plain-text done-notes of what must be true when finished; a string is accepted as one note; XML-like tags are stripped"
+                        "description": "create: plain-text done-notes of what must be true when finished"
                     },
                     "steps": {
                         "type": "array",
@@ -977,13 +975,9 @@ fn plan_tool_description_describes_criteria_as_notes() {
             .is_some_and(|required| required.iter().any(|v| v == "check")),
         "check is prompt-expected, not schema-required: {steps}"
     );
-    assert!(
-        plan.description.contains("string or an array")
-            && plan.description.contains("title string")
-            && plan.description.contains("tags"),
-        "plan description must document the accepted shapes: {}",
-        &plan.description[..plan.description.len().min(240)]
-    );
+    // The accepted shapes are advertised by the schema asserted above, not by a
+    // sentence in the description: a model reads `oneOf`, and the host tolerates
+    // the loose forms whether or not it says so.
 }
 
 /// Decode check: cp866 "Привет" (П=0x8F, р=0xE0, и=0xA8, в=0xA2,
