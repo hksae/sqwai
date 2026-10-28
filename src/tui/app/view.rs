@@ -1300,11 +1300,17 @@ impl App {
             .is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(150))
     }
 
+    /// The largest scroll offset that still puts a real row on the bottom line.
+    /// The scrolling card belongs to the document, so the view can reach past the
+    /// last history row into its rows. `chat_top`, `scroll` and the click anchor
+    /// all clamp with this one formula — when the anchor used its own, it could
+    /// not reach the card's rows and judged "at the end" against a shorter page.
+    pub(super) fn last_scroll_top(&self, height: u16) -> usize {
+        (self.cache_lines.len() + self.surf_rows).saturating_sub(height.max(1) as usize)
+    }
+
     pub(super) fn chat_top(&self, height: u16) -> usize {
-        let h = height.max(1) as usize;
-        // the scrolling card is part of the document, so the view can reach
-        // past the last history row into its rows
-        let max = (self.cache_lines.len() + self.surf_rows).saturating_sub(h);
+        let max = self.last_scroll_top(height);
         if self.follow {
             max
         } else {
@@ -1331,8 +1337,7 @@ impl App {
         if anchor_view != view {
             return;
         }
-        let h = self.last_chat.height.max(1) as usize;
-        let max = self.cache_lines.len().saturating_sub(h);
+        let max = self.last_scroll_top(self.last_chat.height);
         if let Some((abs, _)) = self.seg_row_range(tag) {
             let top = abs.saturating_sub(screen).min(max);
             self.view_top = top;

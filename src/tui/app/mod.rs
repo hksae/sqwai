@@ -2068,8 +2068,7 @@ impl App {
     fn scroll(&mut self, delta: i32) {
         let had_sel = self.sel.is_some();
         self.sel = None;
-        let h = self.last_chat.height.max(1) as usize;
-        let max = (self.cache_lines.len() + self.surf_rows).saturating_sub(h);
+        let max = self.last_scroll_top(self.last_chat.height);
         // while following, the viewport sits at the bottom; every tick moves the
         // absolute top by exactly delta lines, so scrolling past the edges can
         // never build up "dead" distance to unwind later
