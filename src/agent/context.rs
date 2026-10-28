@@ -692,14 +692,18 @@ pub fn transcript(messages: &[Message]) -> String {
 
 /// Token ceiling for the summarization API call. Must be generous enough for
 /// reasoning models (which spend part of `max_tokens` on internal thinking
-/// before emitting text); the actual stored summary length is bounded by
-/// [`SUMMARY_SHORT_MAX_CHARS`].
-pub const SUMMARY_SHORT_MAX_TOKENS: u32 = 2_048;
+/// before emitting text), and for [`SUMMARY_SHORT_MAX_CHARS`] of Cyrillic,
+/// which tokenizes at roughly two characters per token; the actual stored
+/// summary length is bounded by the host cap below.
+pub const SUMMARY_SHORT_MAX_TOKENS: u32 = 3_072;
 
-/// Host-enforced character cap for stored/applied summaries (~800 tokens).
+/// Host-enforced character cap for stored/applied summaries.
 /// Endpoints ignore `max_output_tokens`, so without this the chained summary
-/// grows every cycle and late compactions free ~nothing at full call price.
-pub const SUMMARY_SHORT_MAX_CHARS: usize = 3_200;
+/// grows every cycle and late compactions free ~nothing at full call price —
+/// the guard stays, only its size moved: a live session re-read 28 files after
+/// one cut (of 78 reads) because the summary at 2,462 chars carried no answer
+/// to "where does this live", and re-reading cost more than the difference.
+pub const SUMMARY_SHORT_MAX_CHARS: usize = 6_000;
 
 /// Enforce the cap: truncate to whole characters, mark the cut so a
 /// reader knows the tail is missing (truncation drops the END — goal and
@@ -732,17 +736,27 @@ fn summary_head(
     setting: &str,
 ) -> String {
     let mut out = format!(
-        "Summarize ONLY what the user explicitly asked, forbade, or stated \
-         as fact, plus key technical findings, root causes discovered, and \
-         completed or rejected work {setting} — and ONLY what is not \
-         already covered by the durable plan. The plan owns goals, \
-         constraints, and decisions; re-listing them wastes the budget this \
-         summary exists to save.\n\n\
-         Structure the summary concisely around:\n\
-         - Current state & next step at the cut\n\
-         - User intent, constraints & preferences (uncovered by `<durable-plan>`)\n\
-         - Key findings, root causes & code locations discovered\n\
-         - Work completed, verified, or rejected\n\n<durable-plan>\n",
+        "Summarize {setting} into the checkpoint another agent resumes the work \
+         from. Write only what the user asked, forbade, or established as fact, \
+         plus what was found and done — and only what the durable plan below does \
+         not already carry: the plan owns the goal, the constraints, and the step \
+         wording, so name a step by its id instead of restating it.\n\n\
+         Use exactly these sections, in this order, as terse single-line bullets:\n\n\
+         ## Now\n\
+         - Request being served: <the user's live request, in their own words>\n\
+         - In flight at the cut: <what was being done, how far it got, which errors stayed open>\n\
+         - Next: <one action, concrete enough to be a tool call>\n\
+         - Blocked: <what stops it and why, or \"(none)\">\n\
+         - Plan step: <id only, or \"(none)\">\n\n\
+         ## Files\n\
+         <paths needed to continue, at most 12, most important first, one clause each on \
+         why it matters — not everything that was read or changed; \"(none)\" if none>\n\n\
+         ## Findings\n\
+         <root causes and mechanisms, with the numbers and identifiers that established them>\n\n\
+         ## Work done or rejected\n\
+         <what is finished and how it was checked; what was tried and dropped, and why>\n\n\
+         ## User constraints not in the plan\n\
+         <requests, preferences and prohibitions the plan does not carry, or \"(none)\">\n\n<durable-plan>\n",
     );
     let plan_part = plan_hint.trim();
     if plan_part.is_empty() {
@@ -773,13 +787,16 @@ fn summary_tail(retry: bool) -> String {
         "Rules: no preamble, no questions, no instructions \
          to the reader, no invented facts, no tool calls — respond with text \
          only. Keep paths, identifiers, versions and numbers from the tool \
-         output verbatim; the summary is all that survives of it. Keep it under \
-         2,800 characters. If something is unknown, say it is unknown.",
+         output verbatim; the summary is all that survives of it. Where a \
+         `<previous-summary>` is given, newer history wins: carry on what still \
+         matters and drop what the work no longer needs. Keep it under 5,000 \
+         characters. If something is unknown, say it is unknown.",
     );
     if retry {
         out.push_str(&format!(
             "\n\nHARD LIMIT: the previous answer blew the budget. Answer again \
-             in at most {SUMMARY_SHORT_MAX_CHARS} characters, plain prose."
+             in at most {SUMMARY_SHORT_MAX_CHARS} characters, same sections, \
+             shorter bullets."
         ));
     }
     out

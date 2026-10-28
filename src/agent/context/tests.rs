@@ -674,22 +674,29 @@ fn summary_short_prompt_points_at_messages_above() {
 }
 
 /// The summary is all that survives of the tool output a compaction clears from
-/// the request, so it opens with where the work stands (the host truncates the
-/// END of an over-long answer) and keeps the identifiers verbatim. The tail line
-/// used to send the model to re-read files whose bytes `recall_result` still
-/// holds — that is the promise the cleared wire now depends on.
+/// the request, so it opens with where the work stands, names the paths that
+/// carry it, and keeps the identifiers verbatim. The tail line used to send the
+/// model to re-read files whose bytes `recall_result` still holds — that is the
+/// promise the cleared wire now depends on.
 #[test]
 fn the_summary_leads_with_the_state_and_keeps_the_numbers() {
     let input = summary_short_input(&[user("do it")], None, "", None, false);
-    let state = input
-        .find("Current state")
-        .expect("no current-state section in the structure");
-    let intent = input.find("User intent").expect("no intent section");
+    let now = input.find("## Now").expect("no Now section");
+    let files = input.find("## Files").expect("no Files section");
+    let findings = input.find("## Findings").expect("no Findings section");
     assert!(
-        state < intent,
-        "the section the next request needs must come first: {input}"
+        now < files && files < findings,
+        "what to do now, then where it lives, then what was learned: {input}"
+    );
+    assert!(input.contains("in their own words"), "{input}");
+    assert!(input.contains("at most 12"), "{input}");
+    assert!(
+        input.contains("name a step by its id instead of restating it"),
+        "{input}"
     );
     assert!(input.contains("verbatim"), "{input}");
+    // the anti-growth rule for chained summaries: newer history wins
+    assert!(input.contains("newer history wins"), "{input}");
 
     let applied = apply_summary("facts", &[user("next")]);
     let text = &applied[0].content;
@@ -706,7 +713,7 @@ fn summary_short_input_restricts_to_uncovered_asks() {
     assert!(input.contains("earlier facts"));
     assert!(input.contains("do not touch btree"));
     assert!(input.contains("keep API stable"));
-    assert!(input.contains("not already covered"));
+    assert!(input.contains("not already carry"));
     assert!(!input.contains("HARD LIMIT"));
     // no plan: everything counts as uncovered, said explicitly
     let noplan = summary_short_input(&older, None, "", None, false);
