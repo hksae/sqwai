@@ -1244,8 +1244,45 @@ fn provider_rename_moves_model_identity() {
     assert_eq!(cfg.models["old/other"].context, 2);
 }
 
-/// The catalog file stays flat (its generator writes it that way); what it
-/// deserializes into is the same `provider/name` identity the user file nests.
+/// A nested catalog is the shape that no longer needs hand-added provider
+/// prefixes; the menu order has to come from its section headers instead.
+#[test]
+fn nested_catalog_keeps_its_declaration_order() {
+    let catalog = BuiltinCatalog::from_toml_str(
+        "serial = 3\n\
+         [providers.zai]\nformat = \"openai\"\nbase_url = \"https://z.example/v1\"\n\
+         [providers.zai.models.\"glm-5.3\"]\nid = \"glm-5.3\"\ncontext = 200\neffort = \"off\"\n\
+         [providers.zai.models.\"glm-5.2\"]\nid = \"glm-5.2\"\ncontext = 100\neffort = \"off\"\n\
+         [providers.deepinfra]\nformat = \"openai\"\nbase_url = \"https://d.example/v1\"\n\
+         [providers.deepinfra.models.\"zai-org/GLM-5.3\"]\nid = \"zai-org/GLM-5.3\"\ncontext = 300\neffort = \"off\"\n",
+    )
+    .unwrap();
+    assert_eq!(
+        catalog.models.keys().collect::<Vec<_>>(),
+        vec![
+            "deepinfra/zai-org/GLM-5.3",
+            "zai/glm-5.2",
+            "zai/glm-5.3",
+        ]
+    );
+    // file order, not BTreeMap order: newest release first is what the menu shows
+    assert_eq!(
+        catalog.model_order,
+        vec![
+            "zai/glm-5.3".to_string(),
+            "zai/glm-5.2".to_string(),
+            "deepinfra/zai-org/GLM-5.3".to_string(),
+        ]
+    );
+    assert_eq!(catalog.provider_order, vec!["zai", "deepinfra"]);
+    assert_eq!(catalog.models["zai/glm-5.3"].provider, "zai");
+    // no hand-added prefix survives: the name is what the endpoint expects
+    assert_eq!(catalog.models["zai/glm-5.2"].id, "glm-5.2");
+}
+
+/// The catalog file may stay flat (its generator wrote it that way for a
+/// year); what it deserializes into is the same `provider/name` identity the
+/// user file nests.
 #[test]
 fn builtin_catalog_keys_are_qualified() {
     let catalog = BuiltinCatalog::from_toml_str(
@@ -1271,4 +1308,3 @@ fn builtin_catalog_keys_are_qualified() {
         "catalog keys must name their provider"
     );
 }
-

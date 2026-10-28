@@ -705,6 +705,9 @@ impl BuiltinCatalog {
     pub fn from_toml_str(text: &str) -> Result<Self> {
         let mut catalog: BuiltinCatalog =
             toml::from_str(text).context("parsing builtin providers TOML")?;
+        // File-declaration order expressed in the client's own identity, because
+        // the menu sorts by it (newest release first) and a catalog that nests
+        // its models has no `[models."<key>"]` headers left to read.
         let mut declared: Vec<String> = Vec::new();
         for line in text.lines() {
             let trimmed = line.trim();
@@ -712,6 +715,17 @@ impl BuiltinCatalog {
                 .strip_prefix("[providers.")
                 .and_then(|s| s.strip_suffix(']'))
             {
+                if let Some((provider, name)) = rest.split_once(".models.") {
+                    let name = name.trim_matches('"');
+                    if catalog
+                        .providers
+                        .get(provider)
+                        .is_some_and(|p| p.models.contains_key(name))
+                    {
+                        declared.push(model_key(provider, name));
+                    }
+                    continue;
+                }
                 let name = rest.trim_matches('"');
                 if catalog.providers.contains_key(name) {
                     catalog.provider_order.push(name.to_string());
@@ -721,8 +735,8 @@ impl BuiltinCatalog {
                 .and_then(|s| s.strip_suffix(']'))
             {
                 let key = rest.trim_matches('"');
-                if catalog.models.contains_key(key) {
-                    declared.push(key.to_string());
+                if let Some(m) = catalog.models.get(key) {
+                    declared.push(qualified_model_key(key, &m.provider));
                 }
             }
         }
@@ -730,22 +744,21 @@ impl BuiltinCatalog {
         Ok(catalog)
     }
 
-    /// The catalog file declares models flat with a `provider` field; in memory
-    /// they carry the same `provider/name` identity the user file nests them
-    /// under, so a built-in and a hand-added model of the same name at two
-    /// endpoints never collide. `declared` is the file's section order, which
-    /// the UI sorts menus by.
+    /// The catalog file declares models flat with a `provider` field, or nested
+    /// in its provider's table; either way the models carry the same
+    /// `provider/name` identity the user file nests them under, so a built-in
+    /// and a hand-added model of the same name at two endpoints never collide.
+    /// `declared` is the file's section order in that identity, which the UI
+    /// sorts menus by.
     fn qualify_models(&mut self, declared: &[String]) {
         let flat = std::mem::take(&mut self.models);
-        let mut remap: BTreeMap<String, String> = BTreeMap::new();
         let mut out: BTreeMap<String, ModelConfig> = BTreeMap::new();
         for (raw, mut m) in flat {
             let entry = qualified_model_key(&raw, &m.provider);
             m.provider = key_provider(&entry).unwrap_or_default().to_string();
-            remap.insert(raw, entry.clone());
             out.insert(entry, m);
         }
-        // nested tables are the shape the user file writes; a catalog that ever
+        // nested tables are the shape the user file writes; a catalog that
         // arrives that way must fold the same way instead of being ignored
         for (provider, pc) in &mut self.providers {
             for (name, mut m) in std::mem::take(&mut pc.models) {
@@ -758,7 +771,8 @@ impl BuiltinCatalog {
         self.models = out;
         self.model_order = declared
             .iter()
-            .filter_map(|raw| remap.get(raw).cloned())
+            .filter(|key| self.models.contains_key(*key))
+            .cloned()
             .collect();
     }
 
