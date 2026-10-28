@@ -2297,11 +2297,30 @@ fn context_menu_shows_parts_legend_and_honest_gaps() {
         reasoning_tokens: Some(300),
     });
     app.session.context_peak_tokens = 9_500;
+    app.session.context_limit = 100_000;
     app.build_menu_rows();
     let t = text(&app);
-    assert!(t.contains("used 8k"), "the header keeps only used: {t}");
+    assert!(
+        t.starts_with("m · used 8k / 100k (8.0%)"),
+        "the header names the model bare and prints the window it fills:\n{t}"
+    );
+    assert!(!t.contains('@'), "no endpoint suffix on this panel:\n{t}");
+    assert!(
+        t.contains("◍ cache") && t.contains("6k   6.0%"),
+        "the cached share is its own row:\n{t}"
+    );
     assert!(t.contains("unaccounted"), "the gap is its own row: {t}");
     assert!(t.contains("free"), "free space is a legend row: {t}");
+    // the same number must not read 0% in the status bar and 1.0% here
+    let bar: String = app
+        .status_bar_spans(100)
+        .iter()
+        .map(|s| s.content.as_ref())
+        .collect();
+    assert!(
+        bar.contains("8% (8k)"),
+        "the bottom readout rounds to the panel's value: {bar}"
+    );
     // #209 L14 stays out of this panel: the fixed, uncompactable share is the
     // host's own accounting, and the owner asked for the user's content only
     assert!(

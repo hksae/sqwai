@@ -923,13 +923,18 @@ impl App {
 
         let used = session.context_tokens_used();
         let limit = session.context_limit.max(1);
+        // The name alone: this surface is about one model's window, and the
+        // endpoint that serves it is already in the session info and the
+        // sessions list. The limit rides next to `used` so the percent has its
+        // denominator on the same line.
         self.menu_rows.push(row(
             Line::from(vec![
-                Span::styled(model_display(&session.model_key), Theme::FG()),
+                Span::styled(key_name(&session.model_key).to_string(), Theme::FG()),
                 Span::styled(
                     format!(
-                        " · used {} ({:.1}%)",
+                        " · used {} / {} ({:.1}%)",
                         fmt_k(used),
+                        fmt_k(limit),
                         session.context_percent()
                     ),
                     Theme::dim(),
@@ -996,6 +1001,25 @@ impl App {
                     Span::styled(format!("{:<11}", name), Theme::FG()),
                     Span::styled(format!("{:>7}", fmt_k(*tokens)), Theme::meta()),
                     Span::styled(format!("{:>6.1}%", part_pct(*tokens)), Theme::dim()),
+                ]),
+                MenuAction::None,
+            ));
+        }
+        // What the provider served from its own cache: a share of the prompt
+        // already counted by the parts above, so it never joins the meter — it
+        // is the one number that says how much of this window was re-read cheap.
+        let cached = session
+            .last_usage
+            .as_ref()
+            .and_then(|u| u.cached_tokens)
+            .unwrap_or(0);
+        if cached > 0 {
+            self.menu_rows.push(row(
+                Line::from(vec![
+                    Span::styled("◍ ".to_string(), Theme::dim()),
+                    Span::styled(format!("{:<11}", "cache"), Theme::FG()),
+                    Span::styled(format!("{:>7}", fmt_k(cached)), Theme::meta()),
+                    Span::styled(format!("{:>6.1}%", part_pct(cached)), Theme::dim()),
                 ]),
                 MenuAction::None,
             ));

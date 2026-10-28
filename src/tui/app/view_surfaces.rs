@@ -1245,7 +1245,9 @@ impl App {
 
     pub(super) fn status_bar_spans(&mut self, w: u16) -> Vec<Span<'static>> {
         let context_used = self.session.context_tokens_used();
-        let ctx_pct = (self.session.context_percent() as u64).min(100);
+        // rounded, not truncated: `/context` prints one decimal of the same
+        // number, and 0.98% must not read 0% here and 1.0% there
+        let ctx_pct = (self.session.context_percent().round() as u64).min(100);
         let tok_str = fmt_k(context_used);
         let ctx_label = format!("{ctx_pct}% ({tok_str})");
 
