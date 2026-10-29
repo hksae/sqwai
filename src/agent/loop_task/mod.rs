@@ -2197,8 +2197,9 @@ async fn run_agent(
                         // R taint: every content-bearing result carries
                         // its class; the trust flag goes low with it. Plan ops
                         // above stay high — host observations, not content.
-                        let taint = crate::agent::trust::tool_taint(
+                        let taint = crate::agent::trust::call_taint(
                             &call.name,
+                            &call.args,
                             mcp_registry
                                 .as_ref()
                                 .is_some_and(|registry| registry.contains(&call.name)),

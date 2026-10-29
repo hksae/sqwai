@@ -33,18 +33,19 @@ pub fn classify(cmd: &str) -> Verdict {
 /// safety classifier's job; this answers only "does this command send
 /// data outward". Token-scanned (like `check_protected_path`) so
 /// `somecurl` or an echoed string never matches a binary name.
-pub fn egress_kind(cmd: &str) -> Option<&'static str> {
-    // Shells glue `"cu"rl` back into `curl` before executing, so strip
-    // quotes before tokenizing — otherwise fragmented binaries dodge every
-    // shape below (same dodge the .sqwai gate used to allow).
+/// Tokens of a command line with quoting removed, for the egress shapes.
+///
+/// Shells glue `"cu"rl` back into `curl` before executing, so the quotes have
+/// to go before tokenizing — otherwise fragmented binaries dodge every shape
+/// that reads them. Returned twice: as written (flags are case-sensitive:
+/// `-T` uploads, `-t` does not) and lowercased (binary names are not).
+fn egress_words(cmd: &str) -> (Vec<String>, Vec<String>) {
     let dequoted: String = cmd
         .chars()
         .filter(|c| *c != '"' && *c != '\'' && *c != '`')
         .collect();
-    // Binary names match case-insensitively; flags stay case-sensitive
-    // (`-T` uploads, `-t` does not — lowercasing first would conflate them).
-    fn split(s: &str) -> Vec<&str> {
-        s.split(|c: char| {
+    let raw: Vec<String> = dequoted
+        .split(|c: char| {
             c.is_whitespace()
                 || matches!(
                     c,
@@ -53,10 +54,17 @@ pub fn egress_kind(cmd: &str) -> Option<&'static str> {
         })
         .map(|t| t.trim_matches(|c: char| matches!(c, '"' | '\'' | '`' | '(' | ')' | '[' | ']')))
         .filter(|t| !t.is_empty())
-        .collect()
-    }
-    let raw: Vec<&str> = split(&dequoted);
-    let tokens: Vec<String> = raw.iter().map(|t| t.to_lowercase()).collect();
+        .map(str::to_string)
+        .collect();
+    let lower = raw.iter().map(|t| t.to_lowercase()).collect();
+    (raw, lower)
+}
+
+pub fn egress_kind(cmd: &str) -> Option<&'static str> {
+    // Shells glue `"cu"rl` back into `curl` before executing, so strip
+    // quotes before tokenizing — otherwise fragmented binaries dodge every
+    // shape below (same dodge the .sqwai gate used to allow).
+    let (raw, tokens) = egress_words(cmd);
     // Basename, not the raw token: `C:\Windows\System32\curl.exe`, `\curl`
     // and `./curl` all run curl, and `ends_with("/curl")` missed the ones
     // spelled with a backslash.
@@ -125,10 +133,10 @@ pub fn egress_kind(cmd: &str) -> Option<&'static str> {
             "-T",
             "-F",
         ];
-        if raw.iter().any(|t| UPLOAD_FLAGS.contains(t)) {
+        if raw.iter().any(|t| UPLOAD_FLAGS.contains(&t.as_str())) {
             return Some("network upload");
         }
-        if curl && raw.contains(&"-d") {
+        if curl && raw.iter().any(|t| t == "-d") {
             return Some("network upload");
         }
         for (i, token) in tokens.iter().enumerate() {
@@ -160,6 +168,52 @@ pub fn egress_kind(cmd: &str) -> Option<&'static str> {
                 return Some("network upload");
             }
         }
+    }
+    None
+}
+
+/// Whether a command brings bytes in from (or sends them to) the network, as
+/// opposed to [`egress_kind`], which only names the shapes that *send*.
+///
+/// Used for taint: a shell command that fetched a page carried outside content
+/// into the session, and classifying every `bash` result as local let the
+/// egress gate stay silent afterwards.
+pub fn reaches_out(cmd: &str) -> Option<&'static str> {
+    let tokens = egress_words(cmd).1;
+    let has = |name: &str| tokens.iter().any(|t| command_basename(t) == name);
+    for (binary, label) in [
+        ("curl", "network fetch"),
+        ("wget", "network fetch"),
+        ("iwr", "network fetch"),
+        ("irm", "network fetch"),
+        ("invoke-webrequest", "network fetch"),
+        ("invoke-restmethod", "network fetch"),
+        ("ssh", "remote transport"),
+        ("scp", "remote transport"),
+        ("sftp", "remote transport"),
+        ("ftp", "remote transport"),
+        ("rsync", "remote transport"),
+        ("nc", "remote transport"),
+        ("ncat", "remote transport"),
+        ("netcat", "remote transport"),
+        ("telnet", "remote transport"),
+        ("socat", "remote transport"),
+    ] {
+        if has(binary) {
+            return Some(label);
+        }
+    }
+    // `git` only crosses the boundary on its remote verbs; a local commit or
+    // diff is still local bytes.
+    if tokens.first().is_some_and(|t| command_basename(t) == "git")
+        && tokens.iter().any(|t| {
+            matches!(
+                t.as_str(),
+                "push" | "pull" | "fetch" | "clone" | "ls-remote" | "submodule"
+            )
+        })
+    {
+        return Some("remote transport");
     }
     None
 }

@@ -43,6 +43,27 @@ pub fn tool_taint(name: &str, is_mcp: bool) -> Option<TaintClass> {
     }
 }
 
+/// Taint for a call whose ARGUMENTS decide where the bytes came from.
+///
+/// `bash` was classified Local unconditionally, so `curl https://host/x`
+/// returned page text that never raised the session's taint — and the egress
+/// gate, whose whole job is to ask before local data leaves the machine after
+/// external content arrived, stayed silent through the most obvious way to
+/// bring that content in.
+pub fn call_taint(
+    name: &str,
+    args: &serde_json::Value,
+    is_mcp: bool,
+) -> Option<TaintClass> {
+    if name == "bash" {
+        let command = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
+        if crate::agent::safety::reaches_out(command).is_some() {
+            return Some(TaintClass::External);
+        }
+    }
+    tool_taint(name, is_mcp)
+}
+
 /// Model-visible delimiters around external content. Short lines (the TUI
 /// width invariant holds), no content altered — screening already ran at
 /// the record layer.
@@ -165,6 +186,39 @@ mod tests {
         assert_eq!(tool_taint("plan", false), None);
         // an MCP-named tool without the registry flag is host data
         assert_eq!(tool_taint("some-mcp-tool", false), None);
+    }
+
+
+    /// `bash` was Local no matter what it ran, so a page pulled in with `curl`
+    /// inside a shell command left the session untainted and the egress gate
+    /// silent — through the most obvious way to bring outside bytes in.
+    #[test]
+    fn a_shell_command_that_reaches_out_carries_external_taint() {
+        let args = |cmd: &str| serde_json::json!({"command": cmd});
+        for cmd in [
+            "curl -s https://example.com/x",
+            "wget -qO- https://example.com/x",
+            "ssh host 'cat /etc/hosts'",
+            "scp host:/etc/x .",
+            "Invoke-WebRequest https://example.com/x",
+        ] {
+            assert_eq!(
+                call_taint("bash", &args(cmd), false),
+                Some(TaintClass::External),
+                "an egress command must taint the session: {cmd}"
+            );
+        }
+        // A local shell stays local, and every other tool keeps its class.
+        for cmd in ["cargo test", "ls -la", "grep -rn foo src"] {
+            assert_eq!(
+                call_taint("bash", &args(cmd), false),
+                Some(TaintClass::Local),
+                "a local command must not taint: {cmd}"
+            );
+        }
+        assert_eq!(call_taint("bash_output", &serde_json::json!({}), false), Some(TaintClass::Local));
+        assert_eq!(call_taint("webfetch", &serde_json::json!({}), false), Some(TaintClass::External));
+        assert_eq!(call_taint("plan", &serde_json::json!({}), false), None);
     }
 
     #[test]
