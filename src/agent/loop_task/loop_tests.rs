@@ -1335,6 +1335,104 @@ async fn esc_between_tool_calls_stops_the_batch() {
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
 
+/// ASK confirms network reads before the parallel read-only batch: the
+/// approval carries no "always" option and a denial reaches the model as a
+/// tool result without the URL ever being fetched.
+#[tokio::test]
+async fn ask_webfetch_prompts_without_always_before_fetching() {
+    let provider = std::sync::Arc::new(MockTestProvider {
+        events: std::sync::Mutex::new(vec![
+            vec![Ok(crate::providers::StreamEvent::ToolCall(
+                crate::providers::ToolCallReq::new(
+                    "c1",
+                    "webfetch",
+                    serde_json::json!({"url": "https://example.com/private"}),
+                ),
+            ))],
+            vec![Ok(crate::providers::StreamEvent::Text("done".into()))],
+        ]),
+    });
+    let temp_dir = std::env::temp_dir().join(format!("sqwai-test-netask-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&temp_dir);
+    let input = AgentInput {
+        provider,
+        model_id: "m".into(),
+        model_key: "netask".into(),
+        effort: None,
+        effort_support: crate::config::EffortSupport::default(),
+        max_tokens: None,
+        system: vec![],
+        messages: vec![Message::new(Role::User, "fetch it")],
+        root: temp_dir.clone(),
+        session_id: "test-netask-sess".into(),
+        blocked_patterns: vec![],
+        approval_mode: crate::config::ApprovalMode::Ask,
+        approval_grants: Default::default(),
+        web_allow_hosts: vec![],
+        context_limit: 10_000,
+        vision: true,
+        pdf: true,
+        tools: Default::default(),
+        limits: Default::default(),
+        active_skills: vec![],
+        read_ledger: Default::default(),
+        cleared_floor: 0,
+        enable_tools: true,
+        background_baselines: false,
+        read_only: false,
+        previous_response_id: None,
+        summary: None,
+        mcp: Default::default(),
+        skills: Default::default(),
+        compact_only: false,
+        compact_focus: String::new(),
+        compaction: Default::default(),
+        plan_limits: Default::default(),
+        shadow_store: crate::config::ShadowStore::Off,
+        subagent_depth: 0,
+        parent_step: None,
+        parent_session: None,
+        fallback_chain: vec![],
+    };
+
+    let mut handle = spawn_agent(input);
+    let mut prompted = false;
+    let mut denied_result = false;
+    while let Some(ev) = handle.rx.recv().await {
+        match ev {
+            AgentEvent::Approval {
+                id,
+                subject,
+                allow_always,
+                ..
+            } => {
+                assert!(subject.contains("https://example.com/private"), "{subject}");
+                assert!(!allow_always, "network reads must ask every time");
+                prompted = true;
+                handle
+                    .control
+                    .send(ControlMsg::ApprovalAnswer {
+                        id,
+                        decision: ApprovalDecision::Deny,
+                    })
+                    .await
+                    .unwrap();
+            }
+            AgentEvent::Completed(Ok(outcome)) => {
+                denied_result = outcome.messages.iter().any(|m| {
+                    m.role == Role::Tool && m.content.contains("network read denied by user")
+                });
+                break;
+            }
+            AgentEvent::Completed(Err(e)) => panic!("unexpected agent error: {e}"),
+            _ => {}
+        }
+    }
+    assert!(prompted, "webfetch in ASK must ask before fetching");
+    assert!(denied_result, "the denial must reach the transcript");
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
 /// #171: a child spawned for its parent's step joins the parent plan
 /// explicitly, so its evidence attaches under session-strict
 /// resolution instead of relying on the removed silent fallback.

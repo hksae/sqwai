@@ -709,7 +709,10 @@ impl App {
             Some(Menu::Skills) => (1, dyn_win, "skills"),
             Some(Menu::ConfirmDelete { .. }) => (2, 2, ""),
             Some(Menu::ConfirmFullAccess) => (self.menu_rows.len().saturating_sub(2), 2, ""),
-            Some(Menu::Approval { .. }) => (self.menu_rows.len().saturating_sub(3), 3, ""),
+            Some(Menu::Approval { allow_always, .. }) => {
+                let actions = if *allow_always { 3 } else { 2 };
+                (self.menu_rows.len().saturating_sub(actions), actions, "")
+            }
             Some(
                 Menu::EditModelField { .. }
                 | Menu::EditProviderField { .. }
@@ -1035,18 +1038,9 @@ impl App {
                 paint_field(slf, buf, area, y, rail);
             } else {
                 let avail = area.width.saturating_sub(2 + rail) as usize;
-                let mut spans: Vec<Span> = if i == 0
-                    && head == 2
-                    && let Some(Menu::Approval {
-                        subject, reason, ..
-                    }) = slf.cur_menu()
-                {
-                    let mut s =
-                        crate::tui::shimmer::shimmer_warn_spans(subject, slf.spinner_tick);
-                    s.push(Span::styled(format!(" ({reason})"), Theme::dim()));
-                    s
-                } else if i < head.saturating_sub(2)
+                let mut spans: Vec<Span> = if i < head.saturating_sub(2)
                     && matches!(slf.cur_menu(), Some(Menu::Approval { .. }))
+                    && !matches!(action, MenuAction::ApprovalExpand)
                 {
                     let row_text: String =
                         line.spans.iter().map(|sp| sp.content.as_ref()).collect();

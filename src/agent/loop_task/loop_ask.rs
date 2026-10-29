@@ -12,6 +12,9 @@ use tokio::sync::mpsc;
 /// runs in Ask mode. Grants earned under it cover the same reason, so one
 /// "always allow this session" answer still silences the repeats.
 const ASK_MODE_REASON: &str = "ask mode";
+/// Network reads leave the machine, so ASK confirms each one and never
+/// offers "always": the user asked to see every call.
+const NETWORK_ASK_REASON: &str = "network read in ask mode";
 
 /// Why a leap beyond the project root asks. The workspace jail is a
 /// prompt, not a wall: full access never asks (every path resolves), and
@@ -459,6 +462,7 @@ pub(crate) async fn bash_call(
             command.clone(),
             reason,
             safety::session_grant_preview(&command),
+            true,
             tx,
             ctl,
             next_id,
@@ -540,10 +544,12 @@ pub(crate) async fn bash_call(
 /// the event log, which made "why was the agent allowed to do that"
 /// unanswerable after the fact. `None` means the channel died (tui
 /// closed or agent cancelled).
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn approval_dialog(
     subject: String,
     reason: &str,
     grant: String,
+    allow_always: bool,
     tx: &mpsc::Sender<AgentEvent>,
     ctl: &mut mpsc::Receiver<ControlMsg>,
     next_id: &mut u64,
@@ -556,6 +562,7 @@ pub(crate) async fn approval_dialog(
         subject: subject.clone(),
         reason: reason.to_string(),
         grant,
+        allow_always,
     })
     .await
     .ok()?;
@@ -588,9 +595,10 @@ pub(crate) async fn approval_dialog(
 /// - ask mode additionally confirms every other mutating call
 ///
 /// `None` means run the call; `Some` is the final, refused outcome. An
-/// AlwaysSession answer grants the whole tool for the session (`edit *`),
-/// which is coarser than a bash grant but honest: the next edit of the
-/// same file or a different one is exactly what the user said yes to.
+/// AlwaysSession answer grants that file for the session: the next write or
+/// edit of the same path is exactly what the user said yes to, and nothing
+/// else is.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn mutating_tool_gate(
     call: &ToolCallReq,
     ctx: &mut ToolCtx,
@@ -598,16 +606,20 @@ pub(crate) async fn mutating_tool_gate(
     ctl: &mut mpsc::Receiver<ControlMsg>,
     next_id: &mut u64,
     mode: ApprovalMode,
-    tool_grants: &mut Vec<String>,
+    file_grants: &mut Vec<String>,
     events: &mut Option<crate::agent::events::EventLog>,
 ) -> Option<tools::Outcome> {
     let name = call.name.as_str();
-    let granted = tool_grants.iter().any(|t| t == name);
+    let path = tools::call_path(name, &call.args);
+    let rel = path.as_deref().and_then(|p| ctx.resolve_scope_rel(p).ok());
+    let granted = rel
+        .as_ref()
+        .is_some_and(|rel| file_grants.iter().any(|granted| granted == rel));
     // the workspace boundary, asked as an approval rather than refused:
     // one yes opens the target directory for the run (or the session)
     if matches!(name, "write" | "edit")
-        && let Some(path) = tools::call_path(name, &call.args)
-        && ctx.outside_uncovered(&path)
+        && let Some(path) = path.as_deref()
+        && ctx.outside_uncovered(path)
     {
         // full access and already-granted directories resolve on their own
         // (outside_all / outside_roots); there is nothing to ask
@@ -615,13 +627,14 @@ pub(crate) async fn mutating_tool_gate(
             return None;
         }
         let dir = ctx
-            .outside_grant_dir(&path)
+            .outside_grant_dir(path)
             .map(|d| d.to_string_lossy().to_string())
             .unwrap_or_default();
         let decision = approval_dialog(
-            format!("{name} {path}"),
+            mutating_subject(name, &call.args),
             OUTSIDE_WRITE_REASON,
             format!("{dir}/**"),
+            true,
             tx,
             ctl,
             next_id,
@@ -635,13 +648,13 @@ pub(crate) async fn mutating_tool_gate(
                 )));
             }
             Some(ApprovalDecision::AlwaysSession) => {
-                if let Some(d) = ctx.outside_grant_dir(&path) {
+                if let Some(d) = ctx.outside_grant_dir(path) {
                     ctx.outside_roots.push(d.clone());
                     ctx.outside_granted.push(d);
                 }
             }
             Some(ApprovalDecision::RunOnce) => {
-                if let Some(d) = ctx.outside_grant_dir(&path) {
+                if let Some(d) = ctx.outside_grant_dir(path) {
                     ctx.outside_roots.push(d);
                 }
             }
@@ -651,14 +664,13 @@ pub(crate) async fn mutating_tool_gate(
         return None;
     }
     if mode == ApprovalMode::Ask && !granted {
-        let subject = match tools::call_summary(name, &call.args) {
-            summary if summary.is_empty() => name.to_string(),
-            summary => format!("{name} {summary}"),
-        };
+        let subject = mutating_subject(name, &call.args);
+        let grant = rel.clone().unwrap_or_default();
         let decision = approval_dialog(
             subject,
             ASK_MODE_REASON,
-            format!("{name} *"),
+            grant,
+            rel.is_some(),
             tx,
             ctl,
             next_id,
@@ -671,12 +683,126 @@ pub(crate) async fn mutating_tool_gate(
                     "{name} call denied by user (ask mode)"
                 )));
             }
-            Some(ApprovalDecision::AlwaysSession) => tool_grants.push(name.to_string()),
+            Some(ApprovalDecision::AlwaysSession) => {
+                if let Some(rel) = rel {
+                    file_grants.push(rel);
+                }
+            }
             Some(ApprovalDecision::RunOnce) => {}
             None => return Some(tools::Outcome::err("tui closed awaiting approval")),
         }
     }
     None
+}
+
+/// The subject of a network approval: the tool and what it will reach.
+pub(crate) fn network_subject(name: &str, args: &serde_json::Value) -> String {
+    let what = if name == "webfetch" {
+        args["url"].as_str()
+    } else {
+        args["query"].as_str()
+    }
+    .unwrap_or("");
+    if what.is_empty() {
+        name.to_string()
+    } else {
+        format!("{name} {what}")
+    }
+}
+
+/// ASK confirms every network read; there is no grant to earn because the
+/// user chose to see each call. `None` means run it, `Some` is the refusal.
+pub(crate) async fn network_read_gate(
+    subject: String,
+    tx: &mpsc::Sender<AgentEvent>,
+    ctl: &mut mpsc::Receiver<ControlMsg>,
+    next_id: &mut u64,
+    events: &mut Option<crate::agent::events::EventLog>,
+) -> Option<tools::Outcome> {
+    match approval_dialog(
+        subject,
+        NETWORK_ASK_REASON,
+        String::new(),
+        false,
+        tx,
+        ctl,
+        next_id,
+        events,
+    )
+    .await
+    {
+        Some(ApprovalDecision::Deny) => Some(tools::Outcome::err(
+            "network read denied by user (ask mode)",
+        )),
+        Some(_) => None,
+        None => Some(tools::Outcome::err("tui closed awaiting approval")),
+    }
+}
+
+/// A short, human-readable line for a write/edit approval: the path, the
+/// line delta or size, and the first content line. Never the whole payload —
+/// the dialog stays a decision, not a diff viewer.
+fn mutating_subject(name: &str, args: &serde_json::Value) -> String {
+    let path = tools::call_path(name, args).unwrap_or_default();
+    let mut subject = if path.is_empty() {
+        name.to_string()
+    } else {
+        format!("{name} {path}")
+    };
+    match name {
+        "edit" => {
+            let old = args["old_string"].as_str().unwrap_or("");
+            let new = args["new_string"].as_str().unwrap_or("");
+            let all = args["replace_all"].as_bool().unwrap_or(false);
+            subject.push_str(&format!(
+                " (+{} −{} lines{})",
+                new.lines().count(),
+                old.lines().count(),
+                if all { ", replace all" } else { "" }
+            ));
+            if let Some(line) = first_content_line(new) {
+                subject.push_str(&format!(" · \"{line}\""));
+            }
+        }
+        "write" => {
+            let content = args["content"].as_str().unwrap_or("");
+            subject.push_str(&format!(
+                " ({} lines, {})",
+                content.lines().count(),
+                short_bytes(content.len())
+            ));
+            if let Some(line) = first_content_line(content) {
+                subject.push_str(&format!(" · \"{line}\""));
+            }
+        }
+        _ => {
+            let summary = tools::call_summary(name, args);
+            if !summary.is_empty() {
+                subject = format!("{name} {summary}");
+            }
+        }
+    }
+    subject
+}
+
+fn first_content_line(text: &str) -> Option<String> {
+    let line = text.lines().find(|line| !line.trim().is_empty())?;
+    let flat = line.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut clipped: String = flat.chars().take(60).collect();
+    if flat.chars().count() > 60 {
+        clipped.push('…');
+    }
+    Some(clipped)
+}
+
+fn short_bytes(n: usize) -> String {
+    if n < 1024 {
+        format!("{n} B")
+    } else if n < 1024 * 1024 {
+        format!("{:.1} KB", n as f64 / 1024.0)
+    } else {
+        format!("{:.1} MB", n as f64 / (1024.0 * 1024.0))
+    }
 }
 
 /// The path a read-only tool points at, when it has one: `read`/`ls`/
@@ -753,6 +879,7 @@ pub(crate) async fn run_tool_blocking(
 mod tests {
     use super::*;
     use serde_json::json;
+    use tokio::sync::mpsc;
 
     fn question(options: serde_json::Value) -> AskQuestion {
         AskQuestion {
@@ -820,5 +947,178 @@ mod tests {
         let why = ask_rejection(&qs).expect("refused");
         assert!(why.contains(&ASK_MAX_QUESTIONS.to_string()), "{why}");
         assert!(why.contains("next call"), "{why}");
+    }
+
+    #[test]
+    fn write_and_edit_approvals_get_a_short_summary() {
+        let edit = mutating_subject(
+            "edit",
+            &json!({
+                "file_path": "src/a.rs",
+                "old_string": "a\nb\n",
+                "new_string": "a\nc\n",
+            }),
+        );
+        assert!(edit.contains("edit src/a.rs"), "{edit}");
+        assert!(edit.contains("+2 −2 lines"), "{edit}");
+        assert!(edit.contains("\"a\""), "{edit}");
+
+        let write = mutating_subject(
+            "write",
+            &json!({"file_path": "src/b.rs", "content": "fn main() {}\n"}),
+        );
+        assert!(write.contains("write src/b.rs"), "{write}");
+        assert!(write.contains("1 lines"), "{write}");
+        assert!(write.contains("\"fn main() {}\""), "{write}");
+    }
+
+    #[tokio::test]
+    async fn network_ask_gate_has_no_always_and_can_deny() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let (ctl_tx, mut ctl_rx) = mpsc::channel(8);
+        let mut next_id = 0;
+        let mut events = None;
+        let subject = "webfetch https://example.com".to_string();
+        let gate = network_read_gate(subject, &tx, &mut ctl_rx, &mut next_id, &mut events);
+        let answer = async {
+            let Some(AgentEvent::Approval {
+                id,
+                reason,
+                allow_always,
+                ..
+            }) = rx.recv().await
+            else {
+                panic!("expected an approval event");
+            };
+            assert!(!allow_always, "network approvals must not offer always");
+            assert!(reason.contains("network"), "{reason}");
+            ctl_tx
+                .send(ControlMsg::ApprovalAnswer {
+                    id,
+                    decision: ApprovalDecision::Deny,
+                })
+                .await
+                .unwrap();
+        };
+        let (outcome, _) = tokio::join!(gate, answer);
+        let outcome = outcome.expect("denied network read");
+        assert!(!outcome.ok);
+    }
+
+    #[tokio::test]
+    async fn ask_file_grant_covers_only_the_approved_file() {
+        use crate::agent::tools::ToolCtx;
+        use crate::config::ApprovalMode;
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.rs"), "x").unwrap();
+        let mut ctx = ToolCtx::new(dir.path());
+        let mut grants = Vec::new();
+        let mut next_id = 0;
+        let mut events = None;
+
+        let call = ToolCallReq::new(
+            "c1",
+            "edit",
+            json!({"file_path": "a.rs", "old_string": "x", "new_string": "y"}),
+        );
+        let (tx, mut rx) = mpsc::channel(8);
+        let (ctl_tx, mut ctl_rx) = mpsc::channel(8);
+        let gate = mutating_tool_gate(
+            &call,
+            &mut ctx,
+            &tx,
+            &mut ctl_rx,
+            &mut next_id,
+            ApprovalMode::Ask,
+            &mut grants,
+            &mut events,
+        );
+        let answer = async {
+            let Some(AgentEvent::Approval { id, grant, .. }) = rx.recv().await else {
+                panic!("expected an approval event");
+            };
+            assert_eq!(grant, "a.rs");
+            ctl_tx
+                .send(ControlMsg::ApprovalAnswer {
+                    id,
+                    decision: ApprovalDecision::AlwaysSession,
+                })
+                .await
+                .unwrap();
+        };
+        let (outcome, _) = tokio::join!(gate, answer);
+        assert!(outcome.is_none(), "the first edit must run after approval");
+        assert_eq!(grants, vec!["a.rs".to_string()]);
+
+        let again = ToolCallReq::new(
+            "c2",
+            "edit",
+            json!({"file_path": "a.rs", "old_string": "y", "new_string": "z"}),
+        );
+        let outcome = mutating_tool_gate(
+            &again,
+            &mut ctx,
+            &tx,
+            &mut ctl_rx,
+            &mut next_id,
+            ApprovalMode::Ask,
+            &mut grants,
+            &mut events,
+        )
+        .await;
+        assert!(outcome.is_none(), "the granted file must not ask again");
+        assert!(
+            rx.try_recv().is_err(),
+            "no second approval for the granted file"
+        );
+
+        // the grant is file-scoped, not tool-scoped: a write to the same
+        // path is covered too
+        let same_file_write =
+            ToolCallReq::new("c2b", "write", json!({"file_path": "a.rs", "content": "z"}));
+        let outcome = mutating_tool_gate(
+            &same_file_write,
+            &mut ctx,
+            &tx,
+            &mut ctl_rx,
+            &mut next_id,
+            ApprovalMode::Ask,
+            &mut grants,
+            &mut events,
+        )
+        .await;
+        assert!(outcome.is_none(), "the granted file must cover writes too");
+        assert!(rx.try_recv().is_err());
+
+        let other = ToolCallReq::new(
+            "c3",
+            "write",
+            json!({"file_path": "b.rs", "content": "new"}),
+        );
+        let gate = mutating_tool_gate(
+            &other,
+            &mut ctx,
+            &tx,
+            &mut ctl_rx,
+            &mut next_id,
+            ApprovalMode::Ask,
+            &mut grants,
+            &mut events,
+        );
+        let answer = async {
+            let Some(AgentEvent::Approval { id, .. }) = rx.recv().await else {
+                panic!("a different file must still ask");
+            };
+            ctl_tx
+                .send(ControlMsg::ApprovalAnswer {
+                    id,
+                    decision: ApprovalDecision::Deny,
+                })
+                .await
+                .unwrap();
+        };
+        let (outcome, _) = tokio::join!(gate, answer);
+        assert!(outcome.is_some_and(|o| !o.ok));
     }
 }

@@ -383,12 +383,15 @@ impl App {
                 subject,
                 reason,
                 grant,
+                allow_always,
             } => {
                 self.open_menu(Menu::Approval {
                     id,
                     subject,
                     reason,
                     grant,
+                    allow_always,
+                    expanded: false,
                 });
                 self.dirty = true;
             }

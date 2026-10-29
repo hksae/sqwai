@@ -88,8 +88,9 @@ impl ApprovalDecision {
 pub struct SessionGrants {
     /// bash grants: structured command shapes (`git push *`, `rm -rf target`)
     pub(crate) bash: Vec<loop_ask::Grant>,
-    /// mutating tools approved wholesale for the session (`edit`)
-    pub(crate) tools: Vec<String>,
+    /// project-relative files whose write/edit calls were approved for the
+    /// session ("always allow this file")
+    pub(crate) files: Vec<String>,
     /// directories outside the root opened for the session ("always"),
     /// canonical prefixes
     pub(crate) dirs: Vec<PathBuf>,
@@ -205,6 +206,8 @@ pub enum AgentEvent {
         subject: String,
         reason: String,
         grant: String,
+        /// false for approvals that must repeat every time (network reads)
+        allow_always: bool,
     },
     /// a shadow git or layer-1 checkpoint was taken before a mutation
     #[allow(dead_code)]
@@ -1188,7 +1191,7 @@ async fn run_agent(
     // starts from whatever earlier turns earned and hands the grown set back
     // in `AgentOutcome`.
     let mut always_allow: Vec<loop_ask::Grant> = approval_grants.bash;
-    let mut tool_grants: Vec<String> = approval_grants.tools;
+    let mut file_grants: Vec<String> = approval_grants.files;
     // present-tense plan nudge, at most one per model request
     let mut plan_nudged;
     // "no plan at all" nudge, once per run: one reminder per user submit
@@ -1439,6 +1442,7 @@ async fn run_agent(
             &mut previous_response_id,
             &mut prompt_size,
             !fallback_chain.is_empty(),
+            approval_mode == ApprovalMode::Ask && subagent_depth == 0,
             Some((&ctx, &web_allow_hosts)),
         )
         .await
@@ -1862,6 +1866,23 @@ async fn run_agent(
                     if subagent_depth == 0 && approval_mode != ApprovalMode::Full {
                         for idx in call_index..batch_end.max(call_index + 1) {
                             let peer = &turn.calls[idx];
+                            if approval_mode == ApprovalMode::Ask
+                                && matches!(peer.name.as_str(), "webfetch" | "websearch")
+                            {
+                                let subject = loop_ask::network_subject(&peer.name, &peer.args);
+                                if let Some(outcome) = loop_ask::network_read_gate(
+                                    subject,
+                                    &tx,
+                                    &mut ctl,
+                                    &mut next_id,
+                                    &mut events,
+                                )
+                                .await
+                                {
+                                    parallel_outcomes.insert(idx, (0, outcome, None));
+                                }
+                                continue;
+                            }
                             let Some(path) = loop_ask::read_call_path(&peer.name, &peer.args)
                             else {
                                 continue;
@@ -1878,6 +1899,7 @@ async fn run_agent(
                                 format!("{} {path}", peer.name),
                                 loop_ask::OUTSIDE_READ_REASON,
                                 preview,
+                                true,
                                 &tx,
                                 &mut ctl,
                                 &mut next_id,
@@ -2035,7 +2057,7 @@ async fn run_agent(
                         &mut ctl,
                         &mut next_id,
                         approval_mode,
-                        &mut tool_grants,
+                        &mut file_grants,
                         &mut events,
                     )
                     .await
@@ -2562,7 +2584,7 @@ async fn run_agent(
             plan_todos,
             approval_grants: SessionGrants {
                 bash: always_allow,
-                tools: tool_grants,
+                files: file_grants,
                 dirs: std::mem::take(&mut ctx.outside_granted),
             },
             read_ledger: ctx.read_ledger,

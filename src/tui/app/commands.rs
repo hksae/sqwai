@@ -70,6 +70,8 @@ impl App {
                         subject: "git reset --hard HEAD~1".into(),
                         reason: "destructive git command".into(),
                         grant: "git reset *".into(),
+                        allow_always: true,
+                        expanded: false,
                     });
                 } else if rest.split_whitespace().nth(1) == Some("full_access") {
                     self.open_menu(Menu::ConfirmFullAccess);

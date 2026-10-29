@@ -13,6 +13,20 @@ impl App {
             MenuAction::None => {}
             MenuAction::Back => self.menu_back(),
             MenuAction::DecideApproval(decision) => self.approval_decide(decision),
+            MenuAction::ApprovalExpand => {
+                if let Some(Menu::Approval { expanded, .. }) = self.menu_stack.last_mut() {
+                    *expanded = true;
+                }
+                self.build_menu_rows();
+                self.menu_sel = self
+                    .menu_rows
+                    .iter()
+                    .position(|(_, a)| {
+                        matches!(a, MenuAction::DecideApproval(ApprovalDecision::Deny))
+                    })
+                    .unwrap_or(0);
+                self.dirty = true;
+            }
             MenuAction::EnableFullAccess => {
                 // the dialog is the only road in, and its Esc/cancel path
                 // never reaches here — enabling is the deliberate Enter.

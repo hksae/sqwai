@@ -128,6 +128,7 @@ pub(crate) async fn run_turn_with_prefetch(
     response_id: &mut Option<String>,
     prompt_size: &mut u64,
     has_fallback: bool,
+    ask_network: bool,
     prefetch_env: Option<(&crate::agent::tools::ToolCtx, &[String])>,
 ) -> Result<TurnOutcome, TurnFailure> {
     use futures::StreamExt;
@@ -223,10 +224,13 @@ pub(crate) async fn run_turn_with_prefetch(
                             let needs_outside_ask = !base_ctx.outside_all
                                 && super::loop_ask::read_call_path(&calls[idx].name, &calls[idx].args)
                                     .is_some_and(|p| base_ctx.outside_uncovered(&p));
-                            if !base_ctx
-                                .cancel
-                                .load(std::sync::atomic::Ordering::Relaxed)
+                            // ASK confirms every network read, and the
+                            // sequential gate skips calls already prefetched.
+                            let needs_network_ask = ask_network
+                                && matches!(calls[idx].name.as_str(), "webfetch" | "websearch");
+                            if !base_ctx.cancel.load(std::sync::atomic::Ordering::Relaxed)
                                 && !needs_outside_ask
+                                && !needs_network_ask
                                 && super::parallel_read_only_batch_end(
                                     &calls,
                                     0,

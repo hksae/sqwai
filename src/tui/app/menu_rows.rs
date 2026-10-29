@@ -61,8 +61,10 @@ impl App {
                 subject,
                 reason,
                 grant,
+                allow_always,
+                expanded,
                 ..
-            } => self.build_approval_rows(subject, &reason, &grant),
+            } => self.build_approval_rows(subject, &reason, &grant, allow_always, expanded),
             Menu::ConfirmFullAccess => self.build_confirm_full_access_rows(),
             Menu::AskFree { .. } => {}
             Menu::Plan => self.build_plan_rows(),
@@ -1238,36 +1240,33 @@ impl App {
             Some("enter: confirm · click: select · tab: next question · esc: skip".into());
     }
 
-    fn build_approval_rows(&mut self, subject: String, reason: &str, grant: &str) {
-        let single_line = !subject.contains('\n') && subject.chars().count() <= 68;
+    fn build_approval_rows(
+        &mut self,
+        subject: String,
+        reason: &str,
+        grant: &str,
+        allow_always: bool,
+        expanded: bool,
+    ) {
+        let lines = approval_subject_lines(&subject);
+        let single_line = lines.len() == 1 && lines[0].chars().count() <= 68;
         if single_line {
             self.menu_rows.push(row(
                 Line::from(vec![
-                    Span::styled(subject, Theme::WARN()),
+                    Span::styled(lines[0].clone(), Theme::WARN()),
                     Span::styled(format!(" ({reason})"), Theme::dim()),
                 ]),
                 MenuAction::None,
             ));
         } else {
-            let mut wrapped: Vec<String> = Vec::new();
-            for raw_line in subject.lines() {
-                if raw_line.is_empty() {
-                    continue;
-                }
-                let chars: Vec<char> = raw_line.chars().collect();
-                for chunk in chars.chunks(68) {
-                    if wrapped.len() >= 4 {
-                        break;
-                    }
-                    wrapped.push(chunk.iter().collect());
-                }
-                if wrapped.len() >= 4 {
-                    break;
-                }
-            }
-            for wline in wrapped {
+            let shown = if expanded {
+                lines.len()
+            } else {
+                lines.len().min(4)
+            };
+            for line in &lines[..shown] {
                 self.menu_rows.push(row(
-                    Line::from(vec![Span::styled(wline, Theme::WARN())]),
+                    Line::from(vec![Span::styled(line.clone(), Theme::WARN())]),
                     MenuAction::None,
                 ));
             }
@@ -1278,6 +1277,17 @@ impl App {
                 )]),
                 MenuAction::None,
             ));
+            if !expanded && lines.len() > shown {
+                let hidden_lines = lines.len() - shown;
+                let hidden_chars: usize = lines[shown..].iter().map(|l| l.chars().count()).sum();
+                self.menu_rows.push(row(
+                    Line::from(vec![Span::styled(
+                        format!("… {hidden_lines} more lines / {hidden_chars} chars — show all"),
+                        Theme::dim(),
+                    )]),
+                    MenuAction::ApprovalExpand,
+                ));
+            }
         }
         self.menu_rows.push(row(Line::default(), MenuAction::None));
         self.menu_rows.push(row(
@@ -1288,17 +1298,19 @@ impl App {
             Line::from(vec![Span::styled("run once".to_string(), Theme::base())]),
             MenuAction::DecideApproval(ApprovalDecision::RunOnce),
         ));
-        let mut always_spans = vec![Span::styled(
-            "always allow this session".to_string(),
-            Theme::base(),
-        )];
-        if !grant.is_empty() {
-            always_spans.push(Span::styled(format!(" ({grant})"), Theme::dim()));
+        if allow_always {
+            let mut always_spans = vec![Span::styled(
+                "always allow this session".to_string(),
+                Theme::base(),
+            )];
+            if !grant.is_empty() {
+                always_spans.push(Span::styled(format!(" ({grant})"), Theme::dim()));
+            }
+            self.menu_rows.push(row(
+                Line::from(always_spans),
+                MenuAction::DecideApproval(ApprovalDecision::AlwaysSession),
+            ));
         }
-        self.menu_rows.push(row(
-            Line::from(always_spans),
-            MenuAction::DecideApproval(ApprovalDecision::AlwaysSession),
-        ));
         self.menu_footer_text = Some("enter: confirm · esc: deny".into());
     }
 
@@ -1572,6 +1584,26 @@ impl App {
         }
         out
     }
+}
+
+/// Wrap an approval subject into display lines, 68 columns each. Blank lines
+/// are dropped so indentation in a command does not eat the preview.
+fn approval_subject_lines(subject: &str) -> Vec<String> {
+    let mut lines = Vec::new();
+    for raw_line in subject.lines() {
+        let raw_line = raw_line.trim_end_matches('\r');
+        if raw_line.is_empty() {
+            continue;
+        }
+        let chars: Vec<char> = raw_line.chars().collect();
+        for chunk in chars.chunks(68) {
+            lines.push(chunk.iter().collect());
+        }
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
 }
 
 fn plan_rows(plan: &crate::plan::Plan) -> Vec<MenuRow> {

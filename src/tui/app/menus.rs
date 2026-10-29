@@ -273,6 +273,10 @@ pub(super) enum Menu {
         subject: String,
         reason: String,
         grant: String,
+        /// false when the action must be confirmed every time (network reads)
+        allow_always: bool,
+        /// the full subject is shown instead of the four-line preview
+        expanded: bool,
     },
     /// Shift+Tab landed on full access: the red confirmation. Cancel is
     /// the preselected answer and Enter waits out the same grace period
@@ -345,6 +349,8 @@ pub(super) enum MenuAction {
     #[allow(dead_code)]
     AskPrev,
     DecideApproval(crate::agent::loop_task::ApprovalDecision),
+    /// expand the approval dialog's four-line subject preview
+    ApprovalExpand,
     EnableFullAccess,
     #[allow(dead_code)]
     OpenControls,
@@ -1542,7 +1548,7 @@ impl App {
             Some(Menu::TestColors) => " Colors ".into(),
             Some(Menu::TestMd) => " Md ".into(),
             Some(Menu::AskUser { .. }) => " Ask ".into(),
-            Some(Menu::Approval { .. }) => " Confirm command ".into(),
+            Some(Menu::Approval { .. }) => " Confirm action ".into(),
             Some(Menu::AskFree { .. }) => " Answer ".into(),
             Some(Menu::Plan) => match self.session_plan() {
                 Some(plan) => {

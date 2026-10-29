@@ -451,6 +451,8 @@ fn open_test_approval(app: &mut App) {
         subject: "rm -rf x".into(),
         reason: "test".into(),
         grant: "rm -rf x".into(),
+        allow_always: true,
+        expanded: false,
     });
 }
 
@@ -565,6 +567,98 @@ fn approval_letter_selects_and_digits_are_ignored() {
     assert!(
         matches!(app.cur_menu(), Some(Menu::Approval { .. })),
         "a digit must not decide the approval"
+    );
+}
+
+#[test]
+fn approval_without_always_hides_the_option() {
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.open_menu(Menu::Approval {
+        id: 8,
+        subject: "webfetch https://example.com".into(),
+        reason: "network read in ask mode".into(),
+        grant: String::new(),
+        allow_always: false,
+        expanded: false,
+    });
+    assert!(
+        !app.menu_rows.iter().any(|(_, a)| matches!(
+            a,
+            MenuAction::DecideApproval(ApprovalDecision::AlwaysSession)
+        )),
+        "a per-call approval must not offer always"
+    );
+    assert!(
+        app.menu_rows.iter().all(|(line, _)| {
+            !line
+                .spans
+                .iter()
+                .any(|span| span.content.contains("always allow"))
+        }),
+        "the always row must be absent, not just disabled"
+    );
+    // a is inert when there is no row to select
+    app.approval_select(ApprovalDecision::AlwaysSession);
+    assert_eq!(
+        app.menu_sel,
+        approval_option_index(&app, ApprovalDecision::Deny)
+    );
+}
+
+#[test]
+fn approval_long_subject_expands_on_request() {
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.open_menu(Menu::Approval {
+        id: 9,
+        subject: "line1\nline2\nline3\nline4\nline5\nline6".into(),
+        reason: "test".into(),
+        grant: "edit *".into(),
+        allow_always: true,
+        expanded: false,
+    });
+    let text = |app: &App| {
+        app.menu_rows
+            .iter()
+            .map(|(line, _)| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let compact = text(&app);
+    assert!(compact.contains("line1"), "{compact}");
+    assert!(
+        !compact.contains("line6"),
+        "preview must be capped: {compact}"
+    );
+    assert!(compact.contains("show all"), "{compact}");
+    let expand = app
+        .menu_rows
+        .iter()
+        .position(|(_, a)| matches!(a, MenuAction::ApprovalExpand))
+        .expect("expand row");
+    app.menu_sel = expand;
+    app.approval_opened_at =
+        Some(std::time::Instant::now() - std::time::Duration::from_millis(600));
+    app.menu_activate();
+    let expanded = text(&app);
+    assert!(
+        expanded.contains("line6"),
+        "the tail must be reachable: {expanded}"
+    );
+    assert!(
+        !app.menu_rows
+            .iter()
+            .any(|(_, a)| matches!(a, MenuAction::ApprovalExpand)),
+        "the expand row disappears once expanded"
+    );
+    assert_eq!(
+        app.menu_sel,
+        approval_option_index(&app, ApprovalDecision::Deny),
+        "expansion must land on the safe answer"
     );
 }
 
