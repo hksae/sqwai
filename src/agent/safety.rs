@@ -165,6 +165,14 @@ pub fn egress_kind(cmd: &str) -> Option<&'static str> {
 }
 
 pub fn classify_for(shell: ShellKind, cmd: &str) -> Verdict {
+    classify_for_depth(shell, cmd, 0)
+}
+
+/// Nesting bound for inline code: `bash -c "bash -c '...'"` shrinks at every
+/// level, but a malformed input must not be able to recurse without end.
+const MAX_INLINE_CODE_DEPTH: usize = 4;
+
+fn classify_for_depth(shell: ShellKind, cmd: &str, depth: usize) -> Verdict {
     // 0. Protected host-owned state (.sqwai/) hard block, or approval when
     // a variable expansion makes the real path unknowable (audit C1)
     match check_protected_path(cmd) {
@@ -183,19 +191,115 @@ pub fn classify_for(shell: ShellKind, cmd: &str) -> Verdict {
         Verdict::Safe => {}
         verdict => return verdict,
     }
-    let Ok(segments) = split_compound_commands(cmd) else {
-        return Verdict::Safe;
-    };
-    if segments.len() < 2 {
-        return Verdict::Safe;
+    if let Ok(segments) = split_compound_commands(cmd) {
+        for segment in &segments {
+            match classify_segment(shell, segment) {
+                Verdict::Safe => {}
+                verdict => return verdict,
+            }
+        }
     }
-    for segment in &segments {
-        match classify_segment(shell, segment) {
-            Verdict::Safe => {}
-            verdict => return verdict,
+    // An interpreter's inline code is a command in its own right, and the
+    // argument holding it is one opaque token to every layer above:
+    // `bash -lc 'rm -rf ~'` read as a shell running a program named `-lc`.
+    // Judge the code itself, the same way a substitution's body is judged.
+    if depth < MAX_INLINE_CODE_DEPTH {
+        for code in inline_code_arguments(cmd) {
+            match classify_for_depth(shell, &code, depth + 1) {
+                Verdict::Safe => {}
+                verdict => return verdict,
+            }
         }
     }
     Verdict::Safe
+}
+
+/// The code strings handed to an interpreter with an inline-code flag.
+///
+/// The flag is matched as a short-flag CLUSTER, not as the literal `-c`:
+/// `bash -lc`, `sh -ec` and `bash -c"..."` all evaluate the next word as code,
+/// and the exact comparison let every combined form through.
+fn inline_code_arguments(cmd: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for segment in cmd.split([';', '&', '|', '\n']) {
+        let words = shell_words(segment);
+        let Some(head) = words.first() else { continue };
+        if !INTERPRETERS.contains(&command_basename(head)) {
+            continue;
+        }
+        let mut i = 1usize;
+        while i < words.len() {
+            let word = &words[i];
+            if word == "--" {
+                break;
+            }
+            let is_code_flag = if let Some(body) = word.strip_prefix('-') {
+                !body.is_empty()
+                    && !body.starts_with('-')
+                    && body.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+                    && body.contains('c')
+            } else {
+                // `cmd /c ...`
+                command_basename(head) == "cmd" && word.eq_ignore_ascii_case("/c")
+            } || word.eq_ignore_ascii_case("-command");
+            if is_code_flag {
+                if let Some(code) = words.get(i + 1) {
+                    out.push(code.clone());
+                }
+                break;
+            }
+            // the first bare word is a script path, not inline code
+            if !word.starts_with('-') && !word.starts_with('/') {
+                break;
+            }
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Split a command into words the way a POSIX shell does for the cases this
+/// classifier cares about: quotes group and are removed, a backslash escapes
+/// the next byte. Not a full grammar — an unquoted `$VAR` stays literal.
+fn shell_words(segment: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut cur = String::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut started = false;
+    let mut chars = segment.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' if !in_single => {
+                if let Some(next) = chars.next() {
+                    cur.push(next);
+                    started = true;
+                }
+            }
+            '\'' if !in_double => {
+                in_single = !in_single;
+                started = true;
+            }
+            '"' if !in_single => {
+                in_double = !in_double;
+                started = true;
+            }
+            c if c.is_whitespace() && !in_single && !in_double => {
+                if started {
+                    words.push(std::mem::take(&mut cur));
+                    started = false;
+                }
+            }
+            c => {
+                cur.push(c);
+                started = true;
+            }
+        }
+    }
+    if started {
+        words.push(cur);
+    }
+    words
 }
 
 /// One already-split command: the heuristic layer plus the bash AST.

@@ -944,3 +944,39 @@ fn a_path_or_builtin_prefix_does_not_hide_the_binary() {
         assert_eq!(classify(cmd), Verdict::Safe, "false positive: {cmd}");
     }
 }
+
+/// An interpreter's inline code is a command the layers above never see: the
+/// argument is one opaque token, and the flag was matched as the literal `-c`,
+/// so every combined spelling (`-lc`, `-ec`, `-c"..."`) ran unexamined.
+#[test]
+fn inline_code_behind_a_flag_cluster_is_classified_as_code() {
+    for cmd in [
+        "bash -lc 'rm -rf ~/proj'",
+        "sh -ec 'rm -rf ~/proj'",
+        "bash -c \"rm -rf ~/proj\"",
+        "bash -xc \"rm -rf ~/proj\"",
+        "zsh -ic 'rm -rf ~/proj'",
+        "bash -lc 'sh -c \"rm -rf ~/proj\"'",
+        "cmd /c \"rmdir /s /q C:\tmp\"",
+    ] {
+        assert!(
+            matches!(classify(cmd), Verdict::NeedsApproval(_)),
+            "inline code ran unexamined: {cmd} -> {:?}",
+            classify(cmd)
+        );
+    }
+    // A script path is not inline code, and benign inline code stays Safe.
+    for cmd in [
+        "bash script.sh",
+        "bash -e build.sh",
+        "bash -lc 'ls -la'",
+        "sh -c \"echo hi\"",
+        "python script.py",
+    ] {
+        assert_eq!(
+            classify(cmd),
+            Verdict::Safe,
+            "false positive on a script or benign inline code: {cmd}"
+        );
+    }
+}
