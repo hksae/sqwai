@@ -180,6 +180,42 @@ fn critical_windows_writes_are_caught() {
     );
 }
 
+/// Criticality is a property of the path, not of the shell. Gating the check on
+/// `ShellKind::Cmd` meant bash — which is what `ShellKind::detect` picks on
+/// Windows whenever Git for Windows is installed — wrote into the Windows
+/// system tree with no approval at all, through a redirect or through an
+/// argument.
+#[test]
+fn a_windows_system_write_asks_in_every_shell() {
+    for shell in [ShellKind::Bash, ShellKind::Sh, ShellKind::Cmd, ShellKind::PowerShell] {
+        for cmd in [
+            "echo evil > C:/Windows/System32/evil.dll",
+            r"echo evil > C:\Windows\System32\drivers\etc\hosts",
+            "cp evil.bin C:/Windows/System32/evil.dll",
+            r"mv payload.exe C:\Windows\System32\payload.exe",
+            "rm -r C:/Windows/System32/drivers",
+            "echo x > C:/boot/bcd",
+        ] {
+            assert!(
+                matches!(classify_for(shell, cmd), Verdict::NeedsApproval(_)),
+                "{shell:?} let a system write through: {cmd}"
+            );
+        }
+    }
+    // ordinary project work stays quiet in every shell
+    for cmd in [
+        "echo hi > out.txt",
+        "cp src/a.rs src/b.rs",
+        "cat README.md | head -20",
+    ] {
+        assert_eq!(
+            classify_for(ShellKind::Bash, cmd),
+            Verdict::Safe,
+            "false positive on ordinary work: {cmd}"
+        );
+    }
+}
+
 #[test]
 fn safe_commands_pass() {
     for cmd in [
