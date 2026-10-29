@@ -3,6 +3,7 @@
 ## Build and test
 - Use `cargo check` for a fast compile check (pinned toolchain via rust-toolchain.toml).
 - Use targeted `cargo test <filter>` when verifying a completed change; run the full `cargo test` suite ONLY when all the work is finished, or the user asked for it — a large diff is not a reason by itself.
+- Build once: `cargo test --no-run`, then run the built test binary with a filter. A filtered `cargo test` still recompiles and relinks the whole crate, and that build costs more than the tests.
 - Review insta snapshots by hand before accepting them; never bulk-accept a refresh.
 - Do not build a release executable automatically unless explicitly asked (the user builds it); run only tests.
 
