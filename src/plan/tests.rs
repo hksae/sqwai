@@ -1130,3 +1130,45 @@ fn new_step_deserializes_strings_and_aliases_and_finish_names_next_step() {
         _ => panic!("expected Updated"),
     }
 }
+
+/// A model-facing op that replay does not name is recorded in the intent log and
+/// then silently dropped when the plan file has to be rebuilt after a crash — so
+/// the list is pinned against the op enum rather than kept by hand.
+#[test]
+fn every_model_facing_op_is_replayable() {
+    let samples = [
+        Op::Finish {
+            id: "1".into(),
+            ids: vec![],
+            summary: "did it".into(),
+        },
+        Op::Cancel {
+            id: None,
+            reason: "the step is no longer wanted".into(),
+        },
+        Op::Add {
+            after: None,
+            title: "one more".into(),
+            check: None,
+        },
+        Op::Amend {
+            constraints: vec!["never touch target/".into()],
+        },
+        Op::Close {
+            summary: "goal met".into(),
+        },
+        Op::Abandon {
+            reason: "the specification conflicts".into(),
+        },
+    ];
+    for op in samples {
+        let tag = serde_json::to_value(&op).unwrap()["op"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            super::store::REPLAYABLE_OPS.contains(&tag.as_str()),
+            "{tag} is recorded but never replayed"
+        );
+    }
+}

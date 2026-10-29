@@ -407,6 +407,15 @@ fn rebuild_created(
     Some(plan)
 }
 
+/// Every recorded op name replay knows how to re-apply. `create` rebuilds the
+/// plan through another path and `reopen` is a host op, so both are handled
+/// above; an op missing from this list is recorded and then dropped on the
+/// floor of a crash between the intent record and the stored plan, which is why
+/// a test pins the list against the op enum.
+pub const REPLAYABLE_OPS: &[&str] = &[
+    "finish", "cancel", "add", "amend", "join", "close", "abandon", "propose_reset", "block_plan",
+];
+
 /// Apply one recorded intent to an in-memory plan. `Ok(true)` means the op
 /// took effect; `Ok(false)` means the record carries no replayable effect
 /// (rejected op, read-only op, unknown shape); `Err` means the plan state
@@ -465,7 +474,7 @@ fn apply_record(plan: &mut Plan, record: &crate::agent::events::Record) -> Resul
             plan.revision = plan.revision.saturating_add(1);
             Ok(true)
         }
-        Some("finish" | "cancel" | "add" | "join" | "close" | "abandon" | "propose_reset" | "block_plan") => {
+        Some(op) if REPLAYABLE_OPS.contains(&op) => {
             let op: Op = serde_json::from_value(serde_json::Value::Object(fields.clone()))
                 .map_err(|_| Rejection::new("replay_shape", "unparsable op intent", ""))?;
             apply(plan, op, &Limits::default()).map(|_| true)
