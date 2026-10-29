@@ -53,9 +53,10 @@ fn defs() -> Vec<ToolDef> {
             name: "read",
             kind: Kind::ReadOnly,
             description: "Read one or more files. Modes: `file_path` with `offset`/`limit` \
-(200–500-line windows; a large file's first read carries its outline); `ranges` \
+(one window per call, `limit` defaults to the host's read window — 2000 lines unless the \
+project set another; a large file's first read carries its outline); `ranges` \
 (\"40-90,560-600\") for several windows of one file in one call; `file_path` with \
-`symbols`/`symbol` for exact AST bodies; `paths` (up to 16) to fuse reads. Required once \
+`symbols`/`symbol` for exact declaration bodies; `paths` (up to 16) to fuse reads. Required once \
 before `replace_all` edits and overwrites; repeat reads of unchanged windows return a pointer.",
             parameters: json!({
                 "type": "object",
@@ -67,14 +68,14 @@ before `replace_all` edits and overwrites; repeat reads of unchanged windows ret
                         "description": "optional list of up to 16 paths relative to the project root, read in a single fused call"
                     },
                     "ranges": {"type": "string", "description": "optional 1-based inclusive windows of file_path, e.g. \"40-90,560-600\" (up to 8)"},
-                    "symbol": {"type": "string", "description": "optional function/struct/method name to extract via tree-sitter AST"},
+                    "symbol": {"type": "string", "description": "optional declaration name (function, type, method, class) to extract via tree-sitter AST"},
                     "symbols": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "optional list of function/struct/method names to extract from the file via tree-sitter AST in one step"
+                        "description": "optional list of declaration names to extract from the file via tree-sitter AST in one step"
                     },
                     "offset": {"type": "integer", "description": "1-based first line to read"},
-                    "limit": {"type": "integer", "description": "max lines to read"}
+                    "limit": {"type": "integer", "description": "max lines to read; the host caps one window at its configured read window"}
                 }
             }),
         },
@@ -156,13 +157,13 @@ mismatch); replace_all needs one. Never edit on a stale read — the host refuse
             name: "glob",
             kind: Kind::ReadOnly,
             description: "Find files by name when you know its shape but not its place: \
-src/**/*.rs, **/*test*.py. Respects .gitignore. `sort` ranks the list (mtime newest first by \
+src/**/*, **/*test*. Respects .gitignore. `sort` ranks the list (mtime newest first by \
 default, also lines, size, name, none) and `stats` adds the line and byte columns, so one call \
 answers which files in a tree are biggest, longest or most recently touched.",
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "pattern": {"type": "string", "description": "path pattern relative to `path`, e.g. src/**/*.rs; a bare name matches at any depth; comma-separated for several"},
+                    "pattern": {"type": "string", "description": "path pattern relative to `path`, e.g. src/**/*; a bare name matches at any depth; comma-separated for several"},
                     "path": {"type": "string", "description": "base dir, default project root"},
                     "sort": {"type": "string", "enum": ["mtime", "lines", "size", "name", "none"], "description": "ranking of the list (default mtime, newest first)"},
                     "limit": {"type": "integer", "description": "max files to return (default 300)"},
@@ -183,8 +184,8 @@ Pass context:N for N surrounding lines per match (like grep -C) so a follow-up r
                 "properties": {
                     "pattern": {"type": "string", "description": "regex, matched line by line"},
                     "path": {"type": "string", "description": "dir or file to search"},
-                    "include": {"type": "string", "description": "comma-separated filename globs to keep, e.g. \"*.rs, *.toml\""},
-                    "exclude": {"type": "string", "description": "comma-separated glob patterns to skip, e.g. \"*.snap,target/**\""},
+                    "include": {"type": "string", "description": "comma-separated filename globs to keep, e.g. \"*.py, *.md\""},
+                    "exclude": {"type": "string", "description": "comma-separated glob patterns to skip, e.g. \"*.min.js,dist/**\""},
                     "context": {"type": "integer", "description": "surrounding lines per match, like grep -C (default 0)"},
                     "output_mode": {"type": "string", "enum": ["content", "files", "count"], "description": "content (default) shows matches; files lists matching paths only; count gives matches per file"}
                 },
@@ -195,7 +196,8 @@ Pass context:N for N surrounding lines per match (like grep -C) so a follow-up r
             name: "outline",
             kind: Kind::ReadOnly,
             description: "Symbols and dependency map of ONE source file (not a directory): \
-imports, importers, functions, methods and types with line numbers. `max_depth` controls symbol \
+what it imports, what imports it, and its declarations — functions, methods and types — with \
+line numbers. `max_depth` controls symbol \
 nesting (default 2; 1 = top-level only).",
             parameters: json!({
                 "type": "object",
@@ -265,13 +267,13 @@ bash_output(id, wait_secs) for background jobs.",
         ToolDef {
             name: "git_status",
             kind: Kind::ReadOnly,
-            description: "Show the Git branch and worktree status. Use it before committing and after a run that touched many files — it names what moved, which a count does not.",
+            description: "Show the Git branch and worktree status. Use it before committing.",
             parameters: json!({"type":"object","properties":{"porcelain":{"type":"boolean"}}}),
         },
         ToolDef {
             name: "git_diff",
             kind: Kind::ReadOnly,
-            description: "Show the unstaged diff, optionally one path. Read your own edits back before reporting them.",
+            description: "Show the unstaged diff, optionally one path.",
             parameters: json!({"type":"object","properties":{"target":{"type":"string"}}}),
         },
         ToolDef {
