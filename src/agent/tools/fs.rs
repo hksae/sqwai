@@ -80,6 +80,15 @@ pub(super) fn spill_output(ctx: &ToolCtx, tool: &str, text: &str) -> Option<Stri
 /// "the file exists" mean "the file is whole" after a crash.
 fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
+    // A rename needs write permission on the *directory*, so without this check
+    // it would silently replace a file the user cannot write — the old
+    // `fs::write` failed on it. Read-only stays a refusal, not a bypass.
+    if fs::metadata(path).is_ok_and(|meta| meta.permissions().readonly()) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "file is read-only",
+        ));
+    }
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -2962,6 +2971,38 @@ mod tests {
             std::fs::read_to_string(dir.path().join("a.rs")).unwrap(),
             "fn a() { body(); }\n"
         );
+    }
+
+    /// The rename only needs write permission on the directory, so a read-only
+    /// file must be refused by name — otherwise an atomic write would replace a
+    /// file the user (and the old `fs::write`) could not write.
+    #[test]
+    fn a_read_only_file_is_refused_not_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("locked.txt");
+        std::fs::write(&file, "keep me\n").unwrap();
+        let mut perms = std::fs::metadata(&file).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&file, perms).unwrap();
+
+        let mut ctx = ToolCtx::new(dir.path());
+        let first = read(&mut ctx, "locked.txt", &json!({}));
+        assert!(first.ok, "{}", first.output);
+        let written = write_file(&mut ctx, "locked.txt", "overwritten\n");
+        assert!(!written.ok, "a read-only file must not be replaced");
+        assert!(
+            written.output.contains("read-only"),
+            "the refusal names why: {}",
+            written.output
+        );
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "keep me\n");
+        let leftovers: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains("sqwai-tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "temp files leaked: {leftovers:?}");
     }
 
     /// The rename installs a new inode, so the mode of the file it replaces has
