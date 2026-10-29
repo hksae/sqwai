@@ -804,3 +804,38 @@ fn interpreter_and_exec_grants_are_exact_only_to_prevent_privilege_escalation() 
         );
     }
 }
+
+/// Every text-level layer reads only the outer command, so a substitution used
+/// to carry its payload past all of them: `looks_like_rm_rf` splits on
+/// whitespace and sees the token `$(rm`, and the AST only inspects a
+/// substitution when it *is* the command head. A live run of
+/// `echo $(rm -rf ~/proj)` classified Safe with the deletion still queued.
+#[test]
+fn a_command_substitution_is_classified_as_the_command_it_runs() {
+    for cmd in [
+        "echo $(rm -rf ~/proj)",
+        "echo \"`rm -rf ~/proj`\"",
+        "ls $(rm -r build)",
+        "echo $(echo $(rm -rf ~/proj))",
+        "echo $(shutdown -h now)",
+    ] {
+        assert!(
+            matches!(classify(cmd), Verdict::NeedsApproval(_)),
+            "substitution hid a destructive command: {cmd} -> {:?}",
+            classify(cmd)
+        );
+    }
+    // The split must not turn ordinary quoting into a finding: a literal in
+    // quotes is not a substitution, and a benign one stays quiet.
+    for cmd in [
+        "echo 'rm -rf is a dangerous command'",
+        "echo $(date)",
+        "grep -r \"$(pwd)\" src",
+    ] {
+        assert_eq!(
+            classify(cmd),
+            Verdict::Safe,
+            "false positive from the substitution split: {cmd}"
+        );
+    }
+}

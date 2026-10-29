@@ -173,6 +173,34 @@ pub fn classify_for(shell: ShellKind, cmd: &str) -> Verdict {
         Verdict::NeedsApproval(reason) => return Verdict::NeedsApproval(reason),
         Verdict::Safe => {}
     }
+    // A command substitution is code the shell runs, but every text-level
+    // layer reads only the OUTER command: `looks_like_rm_rf` splits on
+    // whitespace and meets the token `$(rm`, so `echo $(rm -rf ~/proj)` came
+    // back Safe with the deletion still about to run. The whole line is judged
+    // first (the pipe detectors need the full pipeline to see `| sh`), then
+    // `split_compound_commands` pulls `$(...)` and backtick bodies out as their
+    // own entries so a hidden command is judged as the command it is.
+    match classify_segment(shell, cmd) {
+        Verdict::Safe => {}
+        verdict => return verdict,
+    }
+    let Ok(segments) = split_compound_commands(cmd) else {
+        return Verdict::Safe;
+    };
+    if segments.len() < 2 {
+        return Verdict::Safe;
+    }
+    for segment in &segments {
+        match classify_segment(shell, segment) {
+            Verdict::Safe => {}
+            verdict => return verdict,
+        }
+    }
+    Verdict::Safe
+}
+
+/// One already-split command: the heuristic layer plus the bash AST.
+fn classify_segment(shell: ShellKind, cmd: &str) -> Verdict {
     // Layer 1: shell-specific heuristic (substring/regex)
     if let Verdict::NeedsApproval(reason) = heuristic_classify(shell, cmd) {
         return Verdict::NeedsApproval(reason);
@@ -1278,6 +1306,37 @@ pub fn split_compound_commands(cmd: &str) -> Result<Vec<String>, &'static str> {
                 cur.push_str("$(");
                 cur.push_str(&inner);
                 cur.push(')');
+                continue;
+            }
+            // Backticks run inside double quotes exactly as they do outside
+            // them (`echo "`rm -rf x`"` is a substitution, not a literal), so
+            // this branch has to extract the body too or the command hides
+            // behind the quote.
+            if c == '`' {
+                let mut inner = String::new();
+                let mut closed = false;
+                while let Some(bc) = chars.next() {
+                    if bc == '\\' {
+                        if let Some(esc) = chars.next() {
+                            inner.push(esc);
+                        }
+                        continue;
+                    }
+                    if bc == '`' {
+                        closed = true;
+                        break;
+                    }
+                    inner.push(bc);
+                }
+                if !closed {
+                    return Err("unterminated backtick substitution");
+                }
+                if let Ok(subs) = split_compound_commands(&inner) {
+                    nested.extend(subs);
+                }
+                cur.push('`');
+                cur.push_str(&inner);
+                cur.push('`');
                 continue;
             }
             cur.push(c);
