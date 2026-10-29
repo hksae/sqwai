@@ -38,28 +38,38 @@ pub fn anchor(root: &std::path::Path, session_id: &str) -> String {
     // live on every request (rebuilt per request, cache-hot when
     // unchanged), so a turn-start snapshot would only resurrect the
     // two-plan problem. The anchor keeps what the event log proves got done.
-    let mut changed = Vec::new();
+    let mut changed: Vec<String> = Vec::new();
+    let mut reverted: Vec<String> = Vec::new();
     let mut recent_reads: Vec<String> = Vec::new();
-    let mut last_verification = None;
-    let mut decisions: Vec<String> = Vec::new();
+    let mut last_exec: Option<(u64, String)> = None;
     let records = crate::agent::events::EventLog::records_for(root, session_id).unwrap_or_default();
     for record in &records {
-        if record.kind == "file_diff"
-            && let Some(path) = record.fields.get("path").and_then(|value| value.as_str())
-        {
-            changed.push(bounded(path, 160));
+        if record.kind == "file_diff" {
+            // A shell command can touch a path without changing a byte, and the
+            // record carries the diff counts: "touched" is not "changed".
+            // Records older than the counters are taken at face value.
+            let untouched = matches!(
+                (
+                    record.fields.get("added").and_then(|value| value.as_u64()),
+                    record.fields.get("removed").and_then(|value| value.as_u64()),
+                ),
+                (Some(0), Some(0))
+            );
+            if !untouched
+                && let Some(path) = record.fields.get("path").and_then(|value| value.as_str())
+            {
+                mark_changed(&mut changed, &mut reverted, bounded(path, 160));
+            }
         }
-        // An `/undo` takes back what it names: records arrive in sequence
-        // order, so a later write re-lists the path and the memo follows
-        // the tree instead of the session's whole history. Without this
-        // the anchor tells the model, exactly when it is re-grounded after
-        // a compaction, that reverted files still hold the agent's work.
+        // An `/undo` takes back what it names, but it restores a pre-image,
+        // not HEAD: an earlier edit to the same file can survive it, so the
+        // path moves to "reverted" instead of being declared unchanged.
+        // Records arrive in sequence order, and a later write moves it back.
         if record.kind == "undo"
             && let Some(files) = record.fields.get("files").and_then(|v| v.as_array())
         {
             for file in files.iter().filter_map(|v| v.as_str()) {
-                let name = bounded(file, 160);
-                changed.retain(|path: &String| *path != name);
+                mark_reverted(&mut changed, &mut reverted, bounded(file, 160));
             }
         }
         // A `/redo` puts the reverted files back into the worktree.
@@ -67,7 +77,7 @@ pub fn anchor(root: &std::path::Path, session_id: &str) -> String {
             && let Some(files) = record.fields.get("files").and_then(|v| v.as_array())
         {
             for file in files.iter().filter_map(|v| v.as_str()) {
-                changed.push(bounded(file, 160));
+                mark_changed(&mut changed, &mut reverted, bounded(file, 160));
             }
         }
         if matches!(record.kind.as_str(), "observation" | "tool_call")
@@ -120,30 +130,20 @@ pub fn anchor(root: &std::path::Path, session_id: &str) -> String {
                 }
             }
         }
+        // A fact, not a judgment: the anchor does not know whether a command
+        // verified anything, and "successful exec" that counted `ls` would let
+        // a model claim its change was checked. The command itself rides along.
         if matches!(record.kind.as_str(), "observation" | "tool_result")
-            && record
-                .fields
-                .get("tool")
-                .and_then(|value| value.as_str())
-                .is_some_and(|tool| matches!(tool, "bash" | "git_diff"))
+            && record.fields.get("tool").and_then(|value| value.as_str()) == Some("bash")
             && record.fields.get("ok").and_then(|value| value.as_bool()) == Some(true)
         {
-            last_verification = Some(record.seq);
-        }
-        if record.kind == "note"
-            && record
+            let command = record
                 .fields
-                .get("note")
+                .get("args_digest")
                 .and_then(|value| value.as_str())
-                .is_some_and(|kind| {
-                    matches!(
-                        kind,
-                        "decision" | "lesson" | "rejected" | "blocker" | "assumption"
-                    )
-                })
-            && let Some(text) = record.fields.get("text").and_then(|value| value.as_str())
-        {
-            decisions.push(text.to_string());
+                .unwrap_or("")
+                .to_string();
+            last_exec = Some((record.seq, command));
         }
     }
     if let Some(idle) = idle_since(&records) {
@@ -152,19 +152,27 @@ pub fn anchor(root: &std::path::Path, session_id: &str) -> String {
 "
         ));
     }
-    changed.sort();
-    changed.dedup();
     if changed.is_empty() {
         out.push_str("files changed this session: none\n");
     } else {
+        // Chronological, newest last, capped by recency rather than alphabet:
+        // after a compaction the last thing touched is what the model needs.
+        let start = changed.len().saturating_sub(24);
+        let shown = changed[start..].join(" · ");
+        if changed.len() > 24 {
+            out.push_str(&format!(
+                "files changed this session: {shown} (last 24 of {})\n",
+                changed.len()
+            ));
+        } else {
+            out.push_str(&format!("files changed this session: {shown}\n"));
+        }
+    }
+    if !reverted.is_empty() {
+        let start = reverted.len().saturating_sub(6);
         out.push_str(&format!(
-            "files changed this session: {}\n",
-            changed
-                .iter()
-                .take(24)
-                .cloned()
-                .collect::<Vec<_>>()
-                .join(" · ")
+            "reverted by /undo since: {}\n",
+            reverted[start..].join(" · ")
         ));
     }
     recent_reads.retain(|p| !changed.contains(p));
@@ -176,24 +184,18 @@ pub fn anchor(root: &std::path::Path, session_id: &str) -> String {
         ));
     }
     out.push_str(&format!(
-        "last verification: {}\n",
-        last_verification
-            .map(|seq| format!("successful exec j#{seq}"))
+        "last successful exec: {}\n",
+        last_exec
+            .map(|(seq, command)| {
+                let command = bounded(command.trim(), 90);
+                if command.is_empty() {
+                    format!("bash j#{seq}")
+                } else {
+                    format!("bash j#{seq} — {command}")
+                }
+            })
             .unwrap_or_else(|| "none".to_string())
     ));
-    if decisions.is_empty() {
-        out.push_str("decisions: none\n");
-    } else {
-        let start = decisions.len().saturating_sub(6);
-        out.push_str(&format!(
-            "decisions: {}\n",
-            decisions[start..]
-                .iter()
-                .map(|text| bounded(text, 160))
-                .collect::<Vec<_>>()
-                .join(" · ")
-        ));
-    }
     // recent failures with their own words: exact error texts the next turn
     // needs, without re-running the command. Cancelled runs are the user's
     // doing, not failures, and stay out.
@@ -234,6 +236,20 @@ pub fn anchor(root: &std::path::Path, session_id: &str) -> String {
     }
     // No imperatives here. The anchor describes what the host ledger proves.
     out
+}
+
+/// Keep the newest occurrence of a path: a later write outranks an earlier one,
+/// and an undo moves the path from `changed` onto the reverted line.
+fn mark_changed(changed: &mut Vec<String>, reverted: &mut Vec<String>, name: String) {
+    changed.retain(|path| *path != name);
+    reverted.retain(|path| *path != name);
+    changed.push(name);
+}
+
+fn mark_reverted(changed: &mut Vec<String>, reverted: &mut Vec<String>, name: String) {
+    changed.retain(|path| *path != name);
+    reverted.retain(|path| *path != name);
+    reverted.push(name);
 }
 
 /// Return the host-owned instruction used when a session resumes mid-step.

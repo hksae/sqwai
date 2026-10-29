@@ -73,16 +73,14 @@ fn anchor_keeps_event_facts_not_plan_state() {
     assert!(!rendered.contains("implement anchor"), "{rendered}");
     // events facts stay
     assert!(rendered.contains("files changed this session: src/main.rs"));
-    assert!(rendered.contains("last verification: successful exec j#2"));
+    assert!(rendered.contains("last successful exec: bash j#2"), "{rendered}");
     std::fs::remove_dir_all(root).ok();
 }
 
-/// An `/undo` takes the claim back. The anchor is a memo about the tree, not
-/// a ledger of everything the session ever touched — and it is read exactly
-/// when the model is re-grounded, so a stale "files changed" line is the
-/// worst possible place to keep claiming reverted bytes.
+/// An `/undo` takes the claim back but restores a pre-image, not HEAD, so the
+/// path leaves "changed" and lands on its own line; a later write moves it back.
 #[test]
-fn anchor_drops_files_that_a_later_undo_reverted() {
+fn anchor_moves_undone_files_to_their_own_line() {
     let root = temp_root("anchor-undo");
     std::fs::remove_dir_all(&root).ok();
     std::fs::create_dir_all(&root).unwrap();
@@ -97,13 +95,18 @@ fn anchor_drops_files_that_a_later_undo_reverted() {
         .unwrap();
 
     let rendered = anchor(&root, "s");
+    let changed_line = rendered
+        .lines()
+        .find(|line| line.starts_with("files changed this session:"))
+        .unwrap_or_default();
+    assert!(changed_line.contains("src/b.rs"), "{rendered}");
     assert!(
-        rendered.contains("files changed this session: src/b.rs"),
-        "{rendered}"
+        !changed_line.contains("src/a.rs"),
+        "the reverted file leaves the changed line: {rendered}"
     );
     assert!(
-        !rendered.contains("src/a.rs"),
-        "the reverted file must drop out: {rendered}"
+        rendered.contains("reverted by /undo since: src/a.rs"),
+        "and is named as reverted instead: {rendered}"
     );
 
     // writing it again after the revert counts, exactly like the live tree
@@ -111,19 +114,27 @@ fn anchor_drops_files_that_a_later_undo_reverted() {
         .append("file_diff", serde_json::json!({"path": "src/a.rs"}))
         .unwrap();
     let rendered = anchor(&root, "s");
+    let changed_line = rendered
+        .lines()
+        .find(|line| line.starts_with("files changed this session:"))
+        .unwrap_or_default();
     assert!(
-        rendered.contains("files changed this session: src/a.rs · src/b.rs"),
-        "{rendered}"
+        changed_line.contains("src/b.rs · src/a.rs"),
+        "chronological, newest last: {changed_line}"
+    );
+    assert!(
+        !rendered.contains("reverted by /undo since:"),
+        "the later write supersedes the revert: {rendered}"
     );
     std::fs::remove_dir_all(root).ok();
 }
 
 /// Decisions, lessons and recent failures survive in the anchor: after a
-/// compaction "why this way" and "what broke" must come from host state,
-/// not from model memory. Cancelled runs are the user's doing, not
-/// failures, and stay out.
+/// "What broke" comes from the host ledger, not from model memory. Notes are
+/// legacy — nothing writes them — so they must not resurface; failures do, and
+/// cancelled runs are the user's doing and stay out.
 #[test]
-fn anchor_surfaces_decisions_and_recent_failures() {
+fn anchor_surfaces_recent_failures_and_ignores_legacy_notes() {
     let root = temp_root("anchor-decisions");
     let mut events = crate::agent::events::EventLog::open(&root, "s").unwrap();
     events
@@ -158,9 +169,9 @@ fn anchor_surfaces_decisions_and_recent_failures() {
         .unwrap();
 
     let rendered = anchor(&root, "s");
-    assert!(rendered.contains("chose btree over lsm"), "{rendered}");
-    assert!(rendered.contains("flush before read"), "{rendered}");
-    assert!(rendered.contains("disk is fast"), "{rendered}");
+    assert!(!rendered.contains("chose btree over lsm"), "{rendered}");
+    assert!(!rendered.contains("flush before read"), "{rendered}");
+    assert!(!rendered.contains("disk is fast"), "{rendered}");
     assert!(rendered.contains("boom: segfault"), "{rendered}");
     assert!(
         !rendered.contains("cancelled"),
@@ -902,8 +913,8 @@ fn anchor_restores_files_on_redo_and_lists_recent_reads_and_blockers() {
         "recent unedited reads must appear in anchor: {rendered}"
     );
     assert!(
-        rendered.contains("waiting on schema migration"),
-        "blocker notes must survive in anchor decisions: {rendered}"
+        !rendered.contains("waiting on schema migration"),
+        "nothing writes `note` records any more; the anchor must not surface one: {rendered}"
     );
     std::fs::remove_dir_all(root).ok();
 }
@@ -1049,3 +1060,83 @@ fn anchor_says_when_the_session_was_idle() {
     std::fs::remove_dir_all(root).ok();
 }
 
+
+/// A `file_diff` with zero added and removed lines is a touch, not a change:
+/// a shell command that rewrote identical bytes must not claim the file. And
+/// the exec line is a fact about bash — a later `git_diff` does not replace it.
+#[test]
+fn anchor_skips_untouched_diffs_and_names_the_last_exec() {
+    let root = temp_root("anchor-untouched");
+    std::fs::remove_dir_all(&root).ok();
+    std::fs::create_dir_all(&root).unwrap();
+    let mut events = crate::agent::events::EventLog::open(&root, "s").unwrap();
+    for (path, added, removed) in [("src/touched.rs", 0, 0), ("src/real.rs", 3, 1)] {
+        events
+            .append(
+                "file_diff",
+                serde_json::json!({"path": path, "added": added, "removed": removed}),
+            )
+            .unwrap();
+    }
+    events
+        .append(
+            "observation",
+            serde_json::json!({"tool": "bash", "ok": true, "args_digest": "cargo test"}),
+        )
+        .unwrap();
+    events
+        .append(
+            "observation",
+            serde_json::json!({"tool": "git_diff", "ok": true}),
+        )
+        .unwrap();
+
+    let rendered = anchor(&root, "s");
+    assert!(
+        rendered.contains("files changed this session: src/real.rs"),
+        "{rendered}"
+    );
+    assert!(
+        !rendered.contains("src/touched.rs"),
+        "a zero diff is not a change: {rendered}"
+    );
+    assert!(
+        rendered.contains("last successful exec: bash j#3 — cargo test"),
+        "{rendered}"
+    );
+    assert!(
+        !rendered.contains("git_diff"),
+        "a git diff is not an execution: {rendered}"
+    );
+    std::fs::remove_dir_all(root).ok();
+}
+
+/// The changed list is capped by recency, not alphabet, and says how much it
+/// dropped — silently truncating is how a model concludes nothing else moved.
+#[test]
+fn anchor_keeps_the_newest_changes_and_says_how_many_it_dropped() {
+    let root = temp_root("anchor-cap");
+    std::fs::remove_dir_all(&root).ok();
+    std::fs::create_dir_all(&root).unwrap();
+    let mut events = crate::agent::events::EventLog::open(&root, "s").unwrap();
+    for index in 0..30 {
+        events
+            .append(
+                "file_diff",
+                serde_json::json!({"path": format!("src/f{index:02}.rs")}),
+            )
+            .unwrap();
+    }
+
+    let rendered = anchor(&root, "s");
+    assert!(rendered.contains("(last 24 of 30)"), "{rendered}");
+    assert!(
+        rendered.contains("src/f29.rs"),
+        "the newest change is shown: {rendered}"
+    );
+    assert!(
+        !rendered.contains("src/f05.rs"),
+        "the oldest are the ones dropped: {rendered}"
+    );
+    std::fs::remove_dir_all(root).ok();
+}
