@@ -651,6 +651,65 @@ fn call_key_ref(call: &ToolCallReq) -> Option<String> {
     ))
 }
 
+/// Make every tool-call id in this turn unique, in place.
+///
+/// Providers recycle `tool_call.id`, and both failures that follow are ours to
+/// carry: an id replayed inside one turn would run the same side effect twice,
+/// and an id reused from earlier history leaves two tool results under one
+/// `tool_call_id`, which OpenAI-compatible endpoints reject — the session then
+/// dies on a protocol error that looks unrelated to anything the model did. An
+/// exact replay (same name, same arguments) is dropped; a collision between two
+/// different calls is resolved by renaming the later one, so a real new call is
+/// never swallowed by the provider's own clash.
+fn normalize_call_ids(calls: &mut Vec<ToolCallReq>, history: &std::collections::HashSet<String>) {
+    let incoming = std::mem::take(calls);
+    let mut used = history.clone();
+    let mut taken: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut out: Vec<ToolCallReq> = Vec::with_capacity(incoming.len());
+    for mut call in incoming {
+        let fingerprint = format!(
+            "{} {}",
+            call.name,
+            serde_json::to_string(&call.args).unwrap_or_default()
+        );
+        if taken.get(&call.id).is_some_and(|prev| *prev == fingerprint) {
+            continue;
+        }
+        if used.contains(&call.id) {
+            let base = call.id.clone();
+            let mut n = 1usize;
+            loop {
+                let candidate = format!("{base}__sq{n}");
+                if used.insert(candidate.clone()) {
+                    call.id = candidate;
+                    break;
+                }
+                n += 1;
+            }
+        } else {
+            used.insert(call.id.clone());
+        }
+        taken.insert(call.id.clone(), fingerprint);
+        out.push(call);
+    }
+    *calls = out;
+}
+
+/// Every `tool_call.id` the transcript already carries, so a recycled id is
+/// recognised before it reaches the wire again.
+fn history_call_ids(messages: &[Message]) -> std::collections::HashSet<String> {
+    let mut ids = std::collections::HashSet::new();
+    for message in messages {
+        for call in &message.tool_calls {
+            ids.insert(call.id.clone());
+        }
+        if let Some(id) = message.tool_call_id.as_deref() {
+            ids.insert(id.to_string());
+        }
+    }
+    ids
+}
+
 /// Media ids still visible on the wire, for `view_image`/`view_document`
 /// repeat suppression. Recomputed at a tool-batch boundary: results attached
 /// inside the batch are noted into `ctx` as they land.
@@ -1607,6 +1666,10 @@ async fn run_agent(
         let token_limit_hit =
             limits.max_tokens_per_turn > 0 && turn_tokens_used >= limits.max_tokens_per_turn;
 
+        // Providers hand back ids they already used; normalizing before the
+        // empty check means a turn whose every call was a replay ends as the
+        // final answer it is, rather than re-asking in a loop.
+        normalize_call_ids(&mut turn.calls, &history_call_ids(&messages));
         if turn.calls.is_empty() {
             // final answer
             let text = turn.text.clone();

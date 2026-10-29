@@ -1991,3 +1991,58 @@ async fn closing_a_plan_does_not_end_the_run_by_itself() {
         "the note rides before the answer that ends the turn"
     );
 }
+
+/// A provider that replays an id inside one turn must not run the call twice:
+/// a repeated `bash` or `edit` is a real second side effect, not a no-op.
+#[test]
+fn a_replayed_call_in_one_turn_runs_once() {
+    let mut calls = vec![
+        ToolCallReq::new("c1", "bash", serde_json::json!({"command": "make"})),
+        ToolCallReq::new("c1", "bash", serde_json::json!({"command": "make"})),
+    ];
+    normalize_call_ids(&mut calls, &std::collections::HashSet::new());
+    assert_eq!(calls.len(), 1, "the replay must not survive: {calls:?}");
+    assert_eq!(calls[0].id, "c1");
+}
+
+/// The same id on two different calls is the provider's collision, not the
+/// model's wish — renaming keeps both real calls alive.
+#[test]
+fn two_different_calls_sharing_an_id_both_survive() {
+    let mut calls = vec![
+        ToolCallReq::new("c1", "edit", serde_json::json!({"file_path": "a.rs"})),
+        ToolCallReq::new("c1", "edit", serde_json::json!({"file_path": "b.rs"})),
+    ];
+    normalize_call_ids(&mut calls, &std::collections::HashSet::new());
+    assert_eq!(calls.len(), 2, "a collision must not swallow a call");
+    assert_ne!(calls[0].id, calls[1].id);
+    assert!(calls[1].id.starts_with("c1__sq"), "{:?}", calls[1].id);
+}
+
+/// An id reused from earlier history leaves two tool results under one
+/// `tool_call_id`, and the endpoint rejects the payload: the session dies on a
+/// protocol error that looks unrelated to anything the model did.
+#[test]
+fn an_id_already_in_history_is_renamed_not_dropped() {
+    let mut history = std::collections::HashSet::new();
+    history.insert("call_7".to_string());
+    let mut calls = vec![ToolCallReq::new(
+        "call_7",
+        "read",
+        serde_json::json!({"file_path": "a.rs"}),
+    )];
+    normalize_call_ids(&mut calls, &history);
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].id, "call_7__sq1");
+}
+
+#[test]
+fn history_ids_are_read_from_both_sides_of_the_pair() {
+    let mut messages = vec![Message::new(Role::Assistant, "").with_tool_calls(vec![
+        ToolCallReq::new("a", "read", serde_json::json!({})),
+    ])];
+    messages.push(Message::tool_result("b", "x".to_string(), false));
+    let ids = history_call_ids(&messages);
+    assert!(ids.contains("a"), "{ids:?}");
+    assert!(ids.contains("b"), "{ids:?}");
+}
