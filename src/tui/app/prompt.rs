@@ -113,7 +113,18 @@ impl App {
         if !self.session_environment.is_empty() {
             parts.push(SystemPart::cached(self.session_environment.clone()));
         }
-        if let Some(active_skills) = crate::prompts::skills::prompt(&self.active_skills) {
+        // An `always: true` skill is delivered here, not through the cached
+        // catalog: its body is repository text and the catalog is the prefix
+        // a cloned tree must not be able to write into.
+        let always = if self.cfg.skills.auto_load {
+            crate::prompts::skills::prompt_with_always(
+                &self.active_skills,
+                self.cached_skills(),
+            )
+        } else {
+            crate::prompts::skills::prompt(&self.active_skills)
+        };
+        if let Some(active_skills) = always {
             parts.push(
                 SystemPart::volatile(active_skills)
                     .in_section(crate::providers::PrefixSection::Skills),
