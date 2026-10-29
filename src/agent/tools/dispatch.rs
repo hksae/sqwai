@@ -562,6 +562,9 @@ pub(crate) fn plan_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
                         " — resend as plan(op=\"finish\", id=\"<step>\", summary=\"one sentence: what this step settled\")"
                     }
                     "add" => " — resend as plan(op=\"add\", title=\"...\")",
+                    "amend" => {
+                        " — resend as plan(op=\"amend\", constraints=[\"the user's rule, in their own words\"])"
+                    }
                     "cancel" => " — resend as plan(op=\"cancel\", id=\"<step>\", reason=\"...\")",
                     "abandon" => " — resend as plan(op=\"abandon\", reason=\"...\")",
                     _ => {

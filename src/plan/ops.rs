@@ -83,6 +83,13 @@ pub enum Op {
         ids: Vec<String>,
         summary: String,
     },
+    /// Record a rule the user gave after `create`. The plan block is the only
+    /// plan state re-sent verbatim on every request, so a constraint that lives
+    /// only in the conversation is re-summarized until it disappears.
+    #[serde(alias = "add_constraint")]
+    Amend {
+        constraints: Vec<String>,
+    },
     Add {
         #[serde(default)]
         after: Option<String>,
@@ -353,6 +360,7 @@ pub fn apply(plan: &mut Plan, op: Op, limits: &Limits) -> Result<Applied, Reject
             "work that plan instead: finish its steps, do not create another one. The current plan is in your context above",
         ),
         Op::Finish { id, ids, summary } => finish(plan, &id, &ids, summary),
+        Op::Amend { constraints } => amend(plan, &constraints),
         Op::Cancel { id, reason } => cancel(plan, id.as_deref(), reason),
         Op::Close { summary } => close(plan, summary),
         Op::Abandon { reason } => {
@@ -405,6 +413,28 @@ fn unknown_step(plan: &mut Plan, id: &str) -> Result<Applied, Rejection> {
         format!("no step {id} in this plan"),
         "the current steps with their ids are in your context above",
     )
+}
+
+fn amend(plan: &mut Plan, constraints: &[String]) -> Result<Applied, Rejection> {
+    let mut added: Vec<String> = Vec::new();
+    for raw in constraints {
+        let text = raw.trim();
+        if text.is_empty() || plan.constraints.iter().any(|c| c.trim() == text) {
+            continue;
+        }
+        added.push(text.to_string());
+    }
+    if added.is_empty() {
+        return reject(
+            plan,
+            "empty_constraints",
+            "amend needs at least one constraint the plan does not already carry",
+            "the user's rule, in their own words: op=\"amend\", constraints=[\"...\"]",
+        );
+    }
+    let n = added.len();
+    plan.constraints.extend(added);
+    accept(plan, format!("plan {} amended: {n} constraint(s) added", plan.id))
 }
 
 fn finish(

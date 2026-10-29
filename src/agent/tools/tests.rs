@@ -1323,6 +1323,55 @@ fn plan_criteria_are_visible_and_non_blocking() {
     fs::remove_dir_all(&dir).ok();
 }
 
+/// The rule the user states mid-session has to survive the next compaction,
+/// and the only place that survives is the plan — so `amend` must reach the
+/// store and the block the model reads on the following request.
+#[test]
+fn plan_amend_records_a_late_constraint() {
+    let (mut ctx, dir) = proj();
+    let created = plan_op(
+        &mut ctx,
+        &json!({
+            "op": "create",
+            "goal": "sweep the bug list",
+            "constraints": ["read-only until told"],
+            "criteria": ["each bug re-checked"],
+            "steps": [{"title": "triage"}]
+        }),
+    );
+    assert!(created.ok, "{}", created.output);
+
+    let amended = plan_op(
+        &mut ctx,
+        &json!({"op": "amend", "constraints": ["never touch target/"]}),
+    );
+    assert!(amended.ok, "{}", amended.output);
+    let plan = plan::open_active(&dir).unwrap().unwrap();
+    assert!(
+        plan.constraints
+            .iter()
+            .any(|c| c == "never touch target/"),
+        "{:?}",
+        plan.constraints
+    );
+    let rendered = plan::render(&plan);
+    assert!(
+        rendered.contains("read-only until told") && rendered.contains("never touch target/"),
+        "both rules must ride the block: {rendered}"
+    );
+
+    let duplicate = plan_op(
+        &mut ctx,
+        &json!({"op": "amend", "constraints": ["never touch target/"]}),
+    );
+    assert!(
+        duplicate.output.contains("empty_constraints"),
+        "a constraint the plan already carries is refused, not counted: {}",
+        duplicate.output
+    );
+    fs::remove_dir_all(&dir).ok();
+}
+
 #[test]
 fn plan_ops_round_trip_through_the_dispatcher() {
     let (mut ctx, dir) = proj();

@@ -54,6 +54,71 @@ fn new_plan() -> Plan {
     .expect("plan creates")
 }
 
+/// A rule the user gave after `create` has to land in the plan: the plan block
+/// is the only copy the host re-sends verbatim, so a rule left in the chat is
+/// re-summarized until it disappears.
+#[test]
+fn amend_adds_a_constraint_without_touching_the_steps() {
+    let mut plan = new_plan();
+    let steps_before = render_status(&plan);
+    let applied = apply(
+        &mut plan,
+        Op::Amend {
+            constraints: vec![
+                // already carried, differing only in whitespace: no duplicate
+                " no new dependencies ".to_string(),
+                "touch nothing under target/".to_string(),
+            ],
+        },
+        &Limits::default(),
+    )
+    .expect("amend applies");
+    assert!(matches!(applied, Applied::Updated { .. }), "{applied:?}");
+    assert_eq!(
+        plan.constraints.join("|"),
+        "no new dependencies|touch nothing under target/",
+        "{:?}",
+        plan.constraints
+    );
+    assert_eq!(
+        render_status(&plan),
+        steps_before,
+        "amend never touches the steps"
+    );
+    assert!(
+        render_goal(&plan).contains("touch nothing under target/"),
+        "the block the model reads must carry the rule: {}",
+        render_goal(&plan)
+    );
+
+    // an amend carrying nothing new is refused, and a refusal moves nothing
+    let revision_before = plan.revision;
+    let rejected = apply(
+        &mut plan,
+        Op::Amend {
+            constraints: vec!["   ".to_string()],
+        },
+        &Limits::default(),
+    )
+    .expect_err("a blank constraint is not an amendment");
+    assert_eq!(rejected.code, "empty_constraints");
+    assert_eq!(plan.revision, revision_before, "a refusal is not a turn");
+}
+
+/// The alias is what lets a model that reached for `add_constraint` land on the
+/// right op instead of eating a schema rejection.
+#[test]
+fn amend_parses_under_its_alias_and_serializes_as_amend() {
+    let op: Op = serde_json::from_value(serde_json::json!({
+        "op": "add_constraint",
+        "constraints": ["ask before committing"],
+    }))
+    .expect("alias deserializes");
+    assert!(matches!(op, Op::Amend { .. }));
+    let back = serde_json::to_value(&op).unwrap();
+    assert_eq!(back["op"], serde_json::json!("amend"), "{back}");
+}
+
 #[test]
 fn a_step_check_is_optional_and_rendered() {
     let plan = create(

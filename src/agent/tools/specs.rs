@@ -418,7 +418,9 @@ stub. Optional `query` or `offset`/`limit` for part of a large result.",
 the steps you can see now (step 1 starts); constraints and criteria are optional notes. Criteria \
 are your done-notes and each step should carry a `check` — what proves it done. \
 The host runs nothing and enforces nothing. `finish` closes the current step and advances; `add` \
-extends the plan as the horizon opens; `cancel` skips a step; `close` is the only thing that ends a \
+extends the plan as the horizon opens; `amend` records a rule the user gave after `create` — the \
+plan block is re-sent verbatim every request, while a rule left only in the conversation is \
+re-summarized until it disappears; `cancel` skips a step; `close` is the only thing that ends a \
 plan — it needs every step closed and a summary naming what proves the goal met; `abandon` retires \
 a plan whose direction changed. Keep one step in progress while work remains. Use the live step \
 ids; never re-read the plan through tools.",
@@ -426,8 +428,8 @@ ids; never re-read the plan through tools.",
                 "type": "object",
                 "properties": {
                     "op": {"type": "string", "enum": [
-                        "create", "finish", "add", "cancel", "close", "abandon"
-                    ], "description": "create (default when goal and steps are supplied), finish, add, cancel, close, abandon"},
+                        "create", "finish", "add", "amend", "cancel", "close", "abandon"
+                    ], "description": "create (default when goal and steps are supplied), finish, add, amend, cancel, close, abandon"},
                     "id": {"type": "string", "description": "finish / cancel: step number ('1', '2', '3', ...), NEVER the plan ULID. Optional for finish (defaults to the current in_progress step)"},
                     "ids": {
                         "type": "array",
@@ -440,7 +442,7 @@ ids; never re-read the plan through tools.",
                             {"type": "string"},
                             {"type": "array", "items": {"type": "string"}}
                         ],
-                        "description": "create: optional constraints"
+                        "description": "create/amend: rules the work must respect; amend adds ones the user stated after `create`"
                     },
                     "criteria": {
                         "oneOf": [
