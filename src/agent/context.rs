@@ -242,9 +242,10 @@ pub fn anchor(root: &std::path::Path, session_id: &str) -> String {
 ///
 /// The events signal alone is not trusted: steps from older, abandoned
 /// plans leave `start` records too, and a plan file can be revised after the
-/// crash. The open step is only reported when it belongs to the currently
-/// active plan for this session and the plan's own state agrees that the
-/// step is in progress.
+/// crash. So when an active plan exists for this session its own state must
+/// also show the step in progress, or nothing is reported. With no active plan
+/// the notice is built from accepted records alone — the case where the crash
+/// landed between the accepted op and the stored plan file.
 pub fn resume_notice(root: &std::path::Path, session_id: &str) -> Option<String> {
     let records = crate::agent::events::EventLog::records_for(root, session_id).ok()?;
     let active = crate::plan::open_active_for_session(root, Some(session_id))
@@ -536,8 +537,11 @@ pub fn wire_estimated_tokens(messages: &[Message], wire: &crate::agent::tool_out
 ///
 /// `keep_turns` counts user turns, not messages: the last `keep_turns` user
 /// messages and everything after the earliest of them stays verbatim.
-/// The cut lands on a user turn and never separates an assistant tool call
-/// from its results — providers reject orphaned tool results.
+/// The cut is aimed at a user turn and then walks back to the nearest safe
+/// boundary, so it often lands on an assistant step — and in a run with no
+/// spare user turn (one long prompt) it lands there by design. What it never
+/// does is separate an assistant tool call from its results: providers reject
+/// orphaned tool results.
 /// Test-only shorthand: production always passes an explicit keep_turns.
 #[allow(dead_code)]
 pub fn split_for_summary(messages: &[Message]) -> (&[Message], &[Message]) {
