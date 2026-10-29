@@ -1607,6 +1607,27 @@ const EXACT_ONLY_BINARIES: &[&str] = &[
     "bunx",
     "pnpx",
     "uvx",
+    // Egress transports. A wildcard grant on one of these approves a BINARY,
+    // not a destination: "always allow" on `curl -X DELETE https://a/x` then
+    // covered `curl -X DELETE https://evil/any`, and the same for `git push`
+    // — one confirmation turned into arbitrary outbound traffic and arbitrary
+    // forced pushes. They match the exact command instead.
+    "curl",
+    "wget",
+    "ssh",
+    "scp",
+    "sftp",
+    "ftp",
+    "rsync",
+    "nc",
+    "ncat",
+    "netcat",
+    "telnet",
+    "socat",
+    "iwr",
+    "irm",
+    "invoke-webrequest",
+    "invoke-restmethod",
 ];
 
 /// Destructive filesystem binaries where a session grant must also pin the
@@ -1704,6 +1725,17 @@ impl SubcommandGrant {
         }
 
         let head = resolve_arity_head(&bin_base, &words[1..]);
+        // `git push` is the same problem as `curl`: the arity head names the
+        // verb, and a wildcard grant on it approved the destination too, so
+        // "always allow" on `git push origin main` covered `git push evil`.
+        if head == "git push" {
+            return Self {
+                head,
+                flags: std::collections::BTreeSet::new(),
+                targets: None,
+                exact_command: Some(norm_sub),
+            };
+        }
         if [
             "npm exec",
             "pnpm exec",
