@@ -338,7 +338,9 @@ pub struct AgentInput {
     pub approval_grants: SessionGrants,
     /// PLAN mode: read-only tools only, mutations are refused
     pub plan_mode: bool,
-    /// model context limit used to enforce the plan size budget
+    /// Context window of the target model. The plan tool is handed it as an
+    /// argument but reads nothing from it: plan size is bounded by
+    /// `[plan].max_steps`, not by tokens.
     pub context_limit: u64,
     /// Whether the target model accepts image input; unknown counts as yes.
     pub vision: bool,
@@ -424,7 +426,7 @@ const REPEAT_NOTE_MARK: &str = "\n[host: you already called";
 const REPEAT_STUB_MARK: &str = "[host: not re-reported";
 
 /// Turn-local intervention when the agent gets stuck in an unproductive
-/// `edit -> bash (fail)` loop (`TokenEconomizer` / `DeskCheck`).
+/// `edit -> bash (fail)` loop.
 pub(crate) fn failure_loop_nudge(consecutive_failures: usize) -> Option<&'static str> {
     if consecutive_failures >= 3 && consecutive_failures.is_multiple_of(3) {
         Some(
@@ -461,7 +463,6 @@ enum RepeatVerdict {
 /// `completion=204 reasoning=146` — a note attached to 18,846 repeating bytes is
 /// not a brake, the bytes are the fuel. Withholding them ends the loop on the
 /// third look no matter how degenerately the model decodes.
-#[cfg(test)]
 #[cfg(test)]
 fn repeat_verdict(messages: &[Message], call: &ToolCallReq, output: &str) -> RepeatVerdict {
     repeat_verdict_with_limit(
@@ -595,14 +596,17 @@ fn root_entries_note(root: &std::path::Path) -> String {
     )
 }
 
-/// One event record per snapshot commit, named for what actually took it.
+/// The shape a snapshot record would carry, named for what actually took it:
+/// `snapshot_session` for mutations, `snapshot_boundary` for step edges, so the
+/// layer is stated once and the reason carries the difference. Step tags arrive
+/// through the same vector as mutations because `plan` snapshots its own
+/// boundaries — reading the label is how the two stop being recorded twice, once
+/// as a step edge and once as a phantom "post_mutation".
 ///
-/// Every entry here is a shadow-git snapshot (`snapshot_session` for mutations,
-/// `snapshot_boundary` for step edges), so the layer is stated once and the
-/// reason carries the difference. Step tags arrive through the same vector as
-/// mutations because `plan` snapshots its own boundaries — reading the label
-/// is how the two stop being recorded twice, once as a step edge and once as
-/// a phantom "post_mutation".
+/// Test-only today: the loop links a snapshot into the ledger inside the
+/// `file_diff` record, and no path writes a standalone `checkpoint` event. This
+/// is the shape that stays if that ever changes, and `checkpoint_event_tests`
+/// holds it to it.
 #[cfg(test)]
 fn checkpoint_fields(sha: &str, label: &str) -> serde_json::Value {
     if let Some(step) = label.strip_prefix("step_") {
@@ -654,13 +658,14 @@ fn call_key_ref(call: &ToolCallReq) -> Option<String> {
 /// Make every tool-call id in this turn unique, in place.
 ///
 /// Providers recycle `tool_call.id`, and both failures that follow are ours to
-/// carry: an id replayed inside one turn would run the same side effect twice,
-/// and an id reused from earlier history leaves two tool results under one
+/// carry: an id replayed inside one response would run the same side effect
+/// twice, and an id reused from earlier history leaves two tool results under one
 /// `tool_call_id`, which OpenAI-compatible endpoints reject — the session then
 /// dies on a protocol error that looks unrelated to anything the model did. An
-/// exact replay (same name, same arguments) is dropped; a collision between two
-/// different calls is resolved by renaming the later one, so a real new call is
-/// never swallowed by the provider's own clash.
+/// exact replay inside the same response (same name, same arguments) is dropped;
+/// every other collision — a different call sharing an id, or a call reusing an
+/// id from history — is renamed, so a real new call is never swallowed by the
+/// provider's own clash.
 fn normalize_call_ids(calls: &mut Vec<ToolCallReq>, history: &std::collections::HashSet<String>) {
     let incoming = std::mem::take(calls);
     let mut used = history.clone();

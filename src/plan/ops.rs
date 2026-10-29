@@ -58,9 +58,11 @@ pub(crate) fn strip_tags(text: &str) -> String {
     TAGS.replace_all(text, "").trim().to_string()
 }
 
-/// One operation per call. `Serialize` is for the event log intent
-/// record: every accepted op is recorded with its full args before the
-/// plan file is stored, so a crash between the two heals by replay.
+/// One operation per call. `Serialize` is for the event log intent record,
+/// written before the plan file is stored so a crash between the two can heal by
+/// replay. The record is not a full copy of the op: `create` stores step titles
+/// without their checks, and only the names in
+/// [`store::REPLAYABLE_OPS`](crate::plan::store::REPLAYABLE_OPS) are re-applied.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Op {
@@ -69,8 +71,8 @@ pub enum Op {
         #[serde(default)]
         constraints: Vec<String>,
         /// Done-criteria notes the agent writes for itself (plain text).
-        /// Required non-empty — the one create-time check, a form
-        /// completeness gate, not a workflow gate.
+        /// Optional: an empty list is a plan without them, and nothing in
+        /// `create` gates on it.
         #[serde(default, alias = "acceptance")]
         criteria: Vec<String>,
         #[serde(default)]
@@ -160,7 +162,7 @@ pub fn abandon(plan: &mut Plan) {
 }
 
 /// Reason gate for `Abandon`: must explain what is wrong (spec conflict or
-/// direction change), not gesture at effort. Empty and one-word reasons are
+/// direction change), not gesture at effort. Anything under three words is
 /// refused with guidance.
 pub fn validate_surrender_reason(reason: &str, what: &str) -> Result<String, Rejection> {
     let quoted = reason.trim().to_string();

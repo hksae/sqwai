@@ -2,14 +2,17 @@
 //!
 //! Three stages, cheapest first:
 //!
-//! 1. **prune** — shrink old tool output in place. No LLM, no structural
-//!    change: the model still sees every turn, just less payload.
+//! 1. **stub old tool output** — the request carries a pointer where a result
+//!    used to sit, while the session store keeps the bytes. No LLM, no
+//!    structural change: the model still sees every turn, just less payload.
+//!    This is the per-request path in `tool_output`, not a rewrite of history.
 //! 2. **summarize** — ask the model to compress the oldest turns into one
 //!    summary message, keeping the recent tail verbatim.
 //! 3. **hard trim** — drop the oldest turns entirely. Never fails.
 //!
-//! Stage 2 depends on a provider round-trip and can fail; it then falls back
-//! to stage 3. A session that hits the ceiling therefore keeps working with a
+//! Stage 2 depends on a provider round-trip and can fail; it is then replaced by
+//! an extractive local summary, and stage 3 trims only if the history still does
+//! not fit. A session that hits the ceiling therefore keeps working with a
 //! degraded memory instead of dying on a failed request.
 //!
 //! The durable plan is not touched by any stage: it lives in
@@ -20,9 +23,9 @@
 use crate::providers::{Message, Role};
 
 /// Host-generated state anchor for the moments when the transcript really has
-/// lost detail: after a compaction and on a restored session. It contains only
-/// durable plan data and bounded events-derived facts; the model never writes
-/// or rewrites this block.
+/// lost detail: after a compaction and on a restored session. It carries only
+/// bounded events-derived facts — plan state rides separately, rebuilt onto
+/// every request — and the model never writes or rewrites this block.
 ///
 /// It used to ride every request while `system.md` told the model to treat it
 /// as the source of truth "because earlier history may be gone" — which taught
@@ -356,16 +359,20 @@ pub struct Policy {
     /// the trigger is whichever bites first, so a large reserve on a small
     /// model still leaves room for the answer.
     pub threshold: Option<f64>,
-    /// Bytes per token the provider's own accounting shows. The loop re-reads
-    /// it after every request ([`crate::agent::tool_output::observe_bytes_per_token`]);
-    /// until the first real sample it is the cold-start constant.
+    /// Bytes per token the provider's own accounting shows. Learned once per
+    /// run from the first sample big enough to trust
+    /// ([`crate::agent::tool_output::observe_bytes_per_token`]) and then kept:
+    /// re-reading it each turn moved the clear threshold backwards and forfeited
+    /// the prefix cache. Until that sample arrives it is the cold-start constant.
     pub bytes_per_token: u64,
     /// What the provider billed for the last request that carried the whole
     /// transcript, against what the host counted on it. The compaction gate
     /// measures from here rather than from a bytes-per-token guess alone,
     /// because the guess was the whole size of the miss: a request the host read
     /// as 184,209 tokens was billed as 209,553 and died on the overflow.
-    /// Reset whenever the transcript changes shape (compaction, fallback switch).
+    /// Reset at each compaction, where the transcript it described is gone. A
+    /// continuation→whole-transcript fallback does not reset it: the next
+    /// stateless request re-anchors before the number is used again.
     pub measured: Option<crate::agent::tool_output::WireAnchor>,
 }
 
@@ -445,7 +452,7 @@ impl Policy {
 /// `compact_history` pipeline in `loop_task` reuses `local_summary` for the
 /// same purpose. The active pipeline can disable model summaries and fall back
 /// to pruning/trimming while preserving the host-generated anchor. Exercised
-/// only by the tests at the bottom of this file, so the non-test build would
+/// only by the tests in `context/tests.rs`, so the non-test build would
 /// otherwise flag it dead.
 #[derive(Debug, Clone, Default)]
 #[allow(dead_code)]
@@ -652,7 +659,7 @@ fn is_safe_cut(messages: &[Message], cut: usize) -> bool {
 
 /// A previously written summary block. Such a message never goes back
 /// through summarization inline: its text rides via `<previous-summary>`
-/// (see `summary_input`), so rendering it into the transcript would nest
+/// (see `summary_head`), so rendering it into the transcript would nest
 /// tags and duplicate tokens on every further compaction.
 fn is_summary_message(message: &Message) -> bool {
     message.content.contains("<conversation-summary>")

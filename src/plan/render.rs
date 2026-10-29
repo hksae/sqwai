@@ -4,8 +4,9 @@
 
 use super::{Plan, PlanStatus, StepStatus};
 
-/// The stable half of the plan: goal, constraints, criteria. Rides the
-/// cacheable prefix; only changes when the user or a create does.
+/// The stable half of the plan: goal, constraints, criteria. It changes on
+/// `create`, on `amend` and when the user edits the plan; like every other plan
+/// state it is re-sent per request, never cached in front of the conversation.
 pub fn render_goal(plan: &Plan) -> String {
     let mut out = String::new();
     out.push_str(&format!("plan {}\n", plan.id));

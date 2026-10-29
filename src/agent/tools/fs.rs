@@ -1,5 +1,8 @@
-//! File tool handlers. Every path passes through `ToolCtx::resolve`
-//! (project-jail), mutations snapshot first, edits require a prior read.
+//! File tool handlers. Reads and listings pass through `ToolCtx::resolve`
+//! (project-jail), mutations through `resolve_writable`, every mutation
+//! snapshots first, and a whole-file overwrite or `replace_all` edit needs a
+//! read taken earlier in the session — a single exact edit is self-validating
+//! and only needs the file to be non-stale.
 
 use super::{FileDiff, Kind, Outcome, ToolCtx};
 use serde_json::json;
@@ -172,7 +175,8 @@ pub(crate) fn make_diff(old: &str, new: &str) -> String {
     out
 }
 
-/// (+added/-removed) line counts from a unified diff body
+/// sha256 fingerprint of a file's raw bytes — the freshness anchor the read
+/// ledger and the edit gate compare against.
 pub(crate) fn content_hash(content: &[u8]) -> String {
     format!("sha256:{:x}", Sha256::digest(content))
 }
@@ -213,6 +217,7 @@ pub(crate) fn file_diff(
     }
 }
 
+/// (+added/-removed) line counts from a unified diff body.
 pub(crate) fn diff_counts(diff: &str) -> (usize, usize) {
     let mut add = 0usize;
     let mut rem = 0usize;
@@ -1306,8 +1311,9 @@ fn changed_span(before: &str, after: &str) -> Option<(usize, usize)> {
 }
 
 /// Where a single edit landed, in the file's new line numbers, with the first
-/// line of what went in plus 1–2 surrounding boundary lines with their new
-/// line numbers so consecutive edits further down never require a re-read.
+/// line of what went in plus the line before and the two after — up to three
+/// boundary lines with their new numbers, so consecutive edits further down
+/// never require a re-read.
 fn edit_landing(before: &str, after: &str) -> String {
     let al: Vec<&str> = after.lines().collect();
     let Some((from, to)) = changed_span(before, after) else {

@@ -424,7 +424,8 @@ pub fn post_compaction_floor(messages: &[Message]) -> usize {
 }
 
 /// Indices of the tool results to replace: what the budget says the pool cannot
-/// afford, and never fewer than [`Wire::cleared_floor`].
+/// afford, held up to [`Wire::cleared_floor`] but cut back to leave the newest
+/// result in — the floor is a count of the past, so a pool of one clears nothing.
 pub fn cleared_indices(messages: &[Message], wire: &Wire) -> Vec<usize> {
     let budget = WireBudget::for_messages(wire, messages);
     let pool: Vec<(usize, usize)> = messages
@@ -461,11 +462,11 @@ pub fn cleared_indices(messages: &[Message], wire: &Wire) -> Vec<usize> {
             }
         }
     }
-    // The boundary only ever moves forward. A large new result fills the fresh
-    // window sooner, which would otherwise hand back results the model was told
-    // were removed — live session: `cleared` 205 → 191 → 208 → 193 in a minute,
-    // each move rewriting the head of the transcript and costing the whole prefix
-    // cache (99.9% → 6.7% hits).
+    // Between compactions the boundary only ever moves forward. A large new
+    // result fills the fresh window sooner, which would otherwise hand back
+    // results the model was told were removed — live session: `cleared`
+    // 205 → 191 → 208 → 193 in a minute, each move rewriting the head of the
+    // transcript and costing the whole prefix cache (99.9% → 6.7% hits).
     // The newest result always stays: the floor is a count of the past, and a
     // stale one (after compaction the transcript it counted is gone) must never
     // swallow the answer the model is working on.
