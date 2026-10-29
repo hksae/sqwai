@@ -71,6 +71,44 @@ pub(super) fn spill_output(ctx: &ToolCtx, tool: &str, text: &str) -> Option<Stri
     Some(format!(".sqwai/spill/{name}"))
 }
 
+/// Write a file through a sibling temp file, then rename it over the target.
+///
+/// `fs::write` truncates first: interrupted halfway it leaves a short file
+/// whose hash the read ledger has already recorded and whose `+N/-M` the model
+/// has already been told, so the next `edit` anchors on text that is not there.
+/// The rename is atomic for every reader, and the sync before it is what makes
+/// "the file exists" mean "the file is whole" after a crash.
+fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "file".to_string());
+    let tmp = path.with_file_name(format!(".{name}.sqwai-tmp{}", std::process::id()));
+    let result = (|| -> std::io::Result<()> {
+        let mut file = fs::File::create(&tmp)?;
+        file.write_all(bytes)?;
+        file.flush()?;
+        file.sync_all()?;
+        // The rename installs the temp inode, so the mode of the file being
+        // replaced has to be carried over — otherwise an executable script
+        // comes back non-executable.
+        #[cfg(unix)]
+        if let Ok(meta) = fs::metadata(path) {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(
+                &tmp,
+                fs::Permissions::from_mode(meta.permissions().mode()),
+            );
+        }
+        fs::rename(&tmp, path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
+}
+
 /// guard shared by destructive writes: overwriting an existing file and
 /// replace_all edits proceed only on a fresh read — blind mass changes
 /// are the one failure exact matching cannot catch.
@@ -664,7 +702,7 @@ pub(super) fn write_file(ctx: &mut ToolCtx, raw: &str, content: &str) -> Outcome
     let body = restore_bom(content.to_string(), had_bom && !content.starts_with(BOM));
     // checkpoint before mutation
     let checkpoint = Some(checkpoint(ctx, &p, "write"));
-    if let Err(e) = fs::write(&p, &body) {
+    if let Err(e) = write_atomic(&p, body.as_bytes()) {
         return Outcome::err(format!("write failed: {e}"));
     }
     ctx.mark_read(&p);
@@ -1338,7 +1376,7 @@ pub(super) fn edit(
     let updated = restore_bom(edited, had_bom);
     let checkpoint_id = Some(checkpoint(ctx, &p, "edit"));
     let hash_before = content_hash(original.as_bytes());
-    if let Err(e) = fs::write(&p, &updated) {
+    if let Err(e) = write_atomic(&p, updated.as_bytes()) {
         return Outcome::err(format!("write failed: {e}"));
     }
     ctx.mark_read(&p);
@@ -2900,5 +2938,48 @@ mod tests {
             "{}",
             out.output
         );
+    }
+
+    /// A write goes through a sibling temp file and a rename, so an
+    /// interrupted write cannot leave the short file the read ledger already
+    /// hashed. The temp must not survive the call either way.
+    #[test]
+    fn a_write_leaves_no_temp_file_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = ToolCtx::new(dir.path());
+        let written = write_file(&mut ctx, "a.rs", "fn a() {}\n");
+        assert!(written.ok, "{}", written.output);
+        let edited = edit(&mut ctx, "a.rs", "fn a() {}", "fn a() { body(); }", false);
+        assert!(edited.ok, "{}", edited.output);
+        let leftovers: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains("sqwai-tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "temp files leaked: {leftovers:?}");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("a.rs")).unwrap(),
+            "fn a() { body(); }\n"
+        );
+    }
+
+    /// The rename installs a new inode, so the mode of the file it replaces has
+    /// to be carried over or an executable script comes back non-executable.
+    #[test]
+    #[cfg(unix)]
+    fn a_write_keeps_the_file_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("run.sh");
+        std::fs::write(&script, "#!/bin/sh\necho old\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut ctx = ToolCtx::new(dir.path());
+        let first = read(&mut ctx, "run.sh", &json!({}));
+        assert!(first.ok, "{}", first.output);
+        let written = write_file(&mut ctx, "run.sh", "#!/bin/sh\necho new\n");
+        assert!(written.ok, "{}", written.output);
+        let mode = std::fs::metadata(&script).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o755, "the rename lost the mode: {mode:o}");
     }
 }
