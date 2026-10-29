@@ -1022,29 +1022,28 @@ async fn run_agent(
             Some(&prefix),
         )
         .await;
-        if let Some((before, after, summarized)) = outcome.as_ref()
+        if let Some(outcome) = outcome.as_ref()
             && let Some(writer) = compaction_events.as_mut()
         {
-            let _ = writer.append(
-                "compaction",
-                serde_json::json!({
-                    "phase": "end",
-                    "before": before,
-                    "after": after,
-                    "dropped_msgs": message_count_before.saturating_sub(messages.len()),
-                    "kept_msgs": messages.len(),
-                    "anchor_tokens": context::anchor(&root, &events_session).len().div_ceil(4),
-                    "summarized": summarized,
-                    "summary": summary.as_deref().unwrap_or(""),
-                }),
-            );
+            let mut fields = serde_json::json!({
+                "phase": "end",
+                "before": outcome.before,
+                "after": outcome.after,
+                "dropped_msgs": message_count_before.saturating_sub(messages.len()),
+                "kept_msgs": messages.len(),
+                "anchor_tokens": context::anchor(&root, &events_session).len().div_ceil(4),
+                "summarized": outcome.summarized,
+                "summary": summary.as_deref().unwrap_or(""),
+            });
+            loop_compact::record_trim_fields(&mut fields, outcome.trimmed.as_ref());
+            let _ = writer.append("compaction", fields);
         }
-        if let Some((before, after, summarized)) = outcome {
+        if let Some(outcome) = outcome {
             let _ = tx
                 .send(AgentEvent::Compaction {
-                    summarized,
-                    before,
-                    after,
+                    summarized: outcome.summarized,
+                    before: outcome.before,
+                    after: outcome.after,
                 })
                 .await;
         } else {
@@ -1301,7 +1300,7 @@ async fn run_agent(
             system: &turn_system,
             tools: &tools,
         };
-        if let Some((before, after, summarized)) = compact_history(
+        if let Some(outcome) = compact_history(
             &provider,
             &model_id,
             &mut messages,
@@ -1316,11 +1315,9 @@ async fn run_agent(
         {
             record_compaction(
                 &mut events,
-                before,
-                after,
+                &outcome,
                 msgs_before,
                 messages.len(),
-                summarized,
                 summary.as_deref().unwrap_or(""),
             );
             // The request block answered live skill bodies with a pointer. The
@@ -1358,9 +1355,9 @@ async fn run_agent(
             turn_system = build_turn_system(&system, &root, &session_id);
             let _ = tx
                 .send(AgentEvent::Compaction {
-                    summarized,
-                    before,
-                    after,
+                    summarized: outcome.summarized,
+                    before: outcome.before,
+                    after: outcome.after,
                 })
                 .await;
         }
@@ -1510,7 +1507,7 @@ async fn run_agent(
                         system: &turn_system,
                         tools: &tools,
                     };
-                    if let Some((before, after, summarized)) = compact_history(
+                    if let Some(outcome) = compact_history(
                         &provider,
                         &model_id,
                         &mut messages,
@@ -1525,11 +1522,9 @@ async fn run_agent(
                     {
                         record_compaction(
                             &mut events,
-                            before,
-                            after,
+                            &outcome,
                             overflow_msgs_before,
                             messages.len(),
-                            summarized,
                             summary.as_deref().unwrap_or(""),
                         );
                         ctx.cleared_floor =
@@ -1543,9 +1538,9 @@ async fn run_agent(
                         turn_system = build_turn_system(&system, &root, &session_id);
                         let _ = tx
                             .send(AgentEvent::Compaction {
-                                summarized,
-                                before,
-                                after,
+                                summarized: outcome.summarized,
+                                before: outcome.before,
+                                after: outcome.after,
                             })
                             .await;
                         continue;

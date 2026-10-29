@@ -433,12 +433,12 @@ fn split_for_summary_adaptive_force_compacts_a_short_conversation() {
         older.is_empty(),
         "configured keep_turns leaves nothing: {older:?}"
     );
-    let (older, keep) = split_for_summary_adaptive(&messages, 4, true);
+    let (older, keep) = split_for_summary_adaptive(&messages, 4, true, u64::MAX);
     assert_eq!(older.len(), 2, "the earlier exchange is summarized");
     assert_eq!(keep.len(), 1, "the last turn stays verbatim");
     assert_eq!(keep[0].content, "second request");
     // without force the configured keep_turns is respected
-    let (older, _) = split_for_summary_adaptive(&messages, 4, false);
+    let (older, _) = split_for_summary_adaptive(&messages, 4, false, u64::MAX);
     assert!(older.is_empty());
 }
 
@@ -742,7 +742,7 @@ fn hard_trim_fits_the_budget_and_stays_safe() {
     for _ in 0..40 {
         messages.push(user(&"x".repeat(400))); // ~100 tokens each
     }
-    let trimmed = hard_trim(&messages, 1_000); // ~10 messages
+    let trimmed = hard_trim_with_report(&messages, 1_000).0; // ~10 messages
     assert!(estimated_tokens(&trimmed) <= 1_000);
     assert!(!trimmed.is_empty());
     assert!(
@@ -766,7 +766,7 @@ fn hard_trim_never_starts_with_tool_role() {
         Message::tool_result("c1", "file.txt", false),
     ];
     // Budget is 0, forcing fallback
-    let trimmed = hard_trim(&messages, 0);
+    let trimmed = hard_trim_with_report(&messages, 0).0;
     assert!(!trimmed.is_empty());
     assert_eq!(trimmed[0].role, Role::User);
 }
@@ -782,7 +782,7 @@ fn hard_trim_never_eats_a_leading_summary() {
     for i in 0..10 {
         messages.push(user(&format!("turn {i} {}", "x".repeat(400))));
     }
-    let trimmed = hard_trim(&messages, 500);
+    let trimmed = hard_trim_with_report(&messages, 500).0;
     assert!(
         trimmed[0].content.contains("<conversation-summary>"),
         "summary must survive: {:?}",
@@ -813,7 +813,7 @@ fn hard_trim_cuts_a_single_prompt_tool_loop() {
         ));
     }
     let budget = estimated_tokens(&messages) / 2;
-    let trimmed = hard_trim(&messages, budget);
+    let trimmed = hard_trim_with_report(&messages, budget).0;
     assert!(
         trimmed.len() < messages.len(),
         "must drop old cycles, kept {} of {}",
@@ -958,7 +958,7 @@ fn anchor_tracks_fused_paths_hard_trim_deducts_summary_head_and_local_summary_sk
         Message::new(Role::User, "tail"),
     ];
     let head_toks = estimated_tokens(std::slice::from_ref(&summary_msg));
-    let trimmed = hard_trim(&msgs, head_toks + 20);
+    let trimmed = hard_trim_with_report(&msgs, head_toks + 20).0;
     assert!(
         estimated_tokens(&trimmed) <= head_toks + 20,
         "hard_trim must deduct summary head tokens so total stays within budget: {} > {}",
@@ -1139,4 +1139,80 @@ fn anchor_keeps_the_newest_changes_and_says_how_many_it_dropped() {
         "the oldest are the ones dropped: {rendered}"
     );
     std::fs::remove_dir_all(root).ok();
+}
+
+/// `keep_turns` counts turns, and one turn can hide hundreds of tool steps: the
+/// tail is pulled under a token budget at a safe boundary instead of being
+/// handed to `hard_trim` whole.
+#[test]
+fn a_fat_tail_is_cut_by_tokens_not_only_by_turns() {
+    use crate::providers::ToolCallReq;
+    let mut messages = Vec::new();
+    for turn in 0..6 {
+        messages.push(Message::new(Role::User, format!("task {turn}")));
+        for step in 0..30 {
+            let id = format!("c{turn}_{step}");
+            messages.push(Message::new(Role::Assistant, "work").with_tool_calls(vec![
+                ToolCallReq::new(id.clone(), "bash", serde_json::json!({"command": "echo hi"})),
+            ]));
+            messages.push(Message::tool_result(id, "x".repeat(2_000), false));
+        }
+        messages.push(Message::new(Role::Assistant, format!("done {turn}")));
+    }
+
+    let (older, keep) = split_for_summary_adaptive(&messages, 4, false, 8_000);
+    assert!(
+        !older.is_empty(),
+        "a fat tail must leave something to summarize"
+    );
+    assert!(!keep.is_empty());
+    assert!(
+        estimated_tokens(keep) <= 8_000,
+        "tail over budget: {}",
+        estimated_tokens(keep)
+    );
+    assert_ne!(
+        keep.first().map(|m| &m.role),
+        Some(&Role::Tool),
+        "the cut must land on a safe boundary"
+    );
+
+    // without a budget the turn count alone keeps a much fatter tail
+    let (older_big, keep_big) = split_for_summary_adaptive(&messages, 4, false, u64::MAX);
+    assert!(!older_big.is_empty());
+    assert!(
+        estimated_tokens(keep_big) > estimated_tokens(keep),
+        "the budget must cut deeper than the turn count"
+    );
+}
+
+/// A hard trim is the one loss the summary cannot describe — it is written
+/// before the cut — so it reports what it dropped.
+#[test]
+fn a_hard_trim_reports_what_it_dropped() {
+    use crate::providers::ToolCallReq;
+    let mut messages = Vec::new();
+    for turn in 0..6 {
+        messages.push(Message::new(Role::User, format!("task {turn}")));
+        messages.push(
+            Message::new(Role::Assistant, "x".repeat(4_000)).with_tool_calls(vec![
+                ToolCallReq::new(
+                    format!("w{turn}"),
+                    "write",
+                    serde_json::json!({"file_path": format!("src/f{turn}.rs")}),
+                ),
+            ]),
+        );
+        messages.push(Message::tool_result(format!("w{turn}"), "ok", false));
+    }
+
+    let (kept, report) = hard_trim_with_report(&messages, 200);
+    let report = report.expect("a trim must report what it dropped");
+    assert!(report.dropped > 0);
+    assert!(report.span.contains('→'), "span: {}", report.span);
+    assert!(
+        !report.paths.is_empty(),
+        "edited paths from the dropped span must survive"
+    );
+    assert!(kept.len() < messages.len());
 }

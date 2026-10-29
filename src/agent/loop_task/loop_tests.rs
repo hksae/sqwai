@@ -1,4 +1,6 @@
-use super::loop_compact::{CompactionPrefix, compact_history, compaction_request, record_compaction};
+use super::loop_compact::{
+    CompactionOutcome, CompactionPrefix, compact_history, compaction_request, record_compaction,
+};
 use super::loop_subagent::{SUBAGENT_TIMEOUT_SECS, adopt_in_progress_step};
 use super::*;
 use crate::providers::StreamEvent;
@@ -804,7 +806,7 @@ async fn compact_history_trims_a_long_plain_transcript() {
     )
     .await
     .expect("must compact a 4x-over-budget transcript");
-    assert!(out.1 < out.0, "must shrink: {out:?}");
+    assert!(out.after < out.before, "must shrink: {out:?}");
     assert!(messages.len() < 95, "messages must drop");
 }
 
@@ -936,9 +938,35 @@ fn compaction_record_carries_tokens_and_summary() {
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
     let events = crate::agent::events::EventLog::open(&root, "sess").expect("open");
-    record_compaction(&mut Some(events), 10_000, 2_500, 40, 10, true, "did things");
+    record_compaction(
+        &mut Some(events),
+        &CompactionOutcome {
+            before: 10_000,
+            after: 2_500,
+            summarized: true,
+            trimmed: Some(context::TrimReport {
+                dropped: 12,
+                span: "user → assistant".into(),
+                paths: vec!["src/a.rs".into()],
+            }),
+        },
+        40,
+        10,
+        "did things",
+    );
     // None events: silent no-op, never panics
-    record_compaction(&mut None, 1, 1, 1, 1, false, "");
+    record_compaction(
+        &mut None,
+        &CompactionOutcome {
+            before: 1,
+            after: 1,
+            summarized: false,
+            trimmed: None,
+        },
+        1,
+        1,
+        "",
+    );
     let recs = crate::agent::events::EventLog::records(&root).expect("read");
     let c = recs
         .iter()
@@ -950,7 +978,65 @@ fn compaction_record_carries_tokens_and_summary() {
     assert_eq!(c.fields["msgs_after"], 10);
     assert_eq!(c.fields["summarized"], true);
     assert_eq!(c.fields["summary"], "did things");
+    assert_eq!(c.fields["trimmed_msgs"], 12);
+    assert_eq!(c.fields["trimmed_span"], "user → assistant");
+    assert_eq!(c.fields["trimmed_paths"][0], "src/a.rs");
     let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Until a billed measurement exists, the gate must price the fixed prefix
+/// too: a small transcript with a huge system block does not fit a small
+/// window even though its messages do.
+#[tokio::test]
+async fn a_big_prefix_makes_a_small_transcript_compact() {
+    let provider: SharedProvider = std::sync::Arc::new(MockTestProvider {
+        events: std::sync::Mutex::new(Vec::new()),
+    });
+    let system = vec![crate::providers::SystemPart::volatile("x".repeat(60_000))];
+    let tools: Vec<crate::providers::ToolSpec> = Vec::new();
+    let prefix = CompactionPrefix {
+        system: &system,
+        tools: &tools,
+    };
+    let mut messages = three_turns();
+    let mut summary = None;
+    let out = compact_history(
+        &provider,
+        "m",
+        &mut messages,
+        &mut summary,
+        &context::Policy::with_compaction(16_000, 0.08, 2, 0.80),
+        false,
+        "",
+        None,
+        Some(&prefix),
+    )
+    .await;
+    assert!(
+        out.is_some(),
+        "60 KB of system parts must not fit a 16k window"
+    );
+
+    // the same transcript without the prefix is left alone
+    let mut messages = three_turns();
+    let mut summary = None;
+    let empty = CompactionPrefix {
+        system: &[],
+        tools: &[],
+    };
+    let out = compact_history(
+        &provider,
+        "m",
+        &mut messages,
+        &mut summary,
+        &context::Policy::with_compaction(40_000, 0.08, 2, 0.80),
+        false,
+        "",
+        None,
+        Some(&empty),
+    )
+    .await;
+    assert!(out.is_none(), "messages alone fit: {out:?}");
 }
 
 fn count_summaries(messages: &[Message]) -> usize {
@@ -985,8 +1071,8 @@ async fn compact_history_summarizes_through_the_model() {
     )
     .await
     .expect("pressure is over: must compact");
-    assert!(out.0 > out.1, "must shrink: {:?}", out);
-    assert!(out.2, "model summary must be reported");
+    assert!(out.before > out.after, "must shrink: {out:?}");
+    assert!(out.summarized, "model summary must be reported");
     assert_eq!(summary.as_deref(), Some("MOCK-SUMMARY"));
     assert_eq!(count_summaries(&messages), 1);
     assert!(messages[0].content.contains("MOCK-SUMMARY"));
@@ -1066,7 +1152,7 @@ async fn compact_history_falls_back_to_local_summary() {
     )
     .await
     .expect("pressure is over: must compact");
-    assert!(out.2);
+    assert!(out.summarized);
     assert_eq!(count_summaries(&messages), 1);
     assert!(
         summary
@@ -1104,7 +1190,7 @@ async fn compact_history_retries_a_blown_summary_budget() {
     )
     .await
     .expect("pressure is over: must compact");
-    assert!(out.2);
+    assert!(out.summarized);
     assert_eq!(summary.as_deref(), Some("SHORT"));
 }
 

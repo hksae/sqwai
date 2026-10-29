@@ -29,27 +29,54 @@ pub(crate) fn plan_hint_for_summary(root: &std::path::Path, session_id: &str) ->
 /// It is now; bytes-freed is `before - after`.
 pub(crate) fn record_compaction(
     events: &mut Option<crate::agent::events::EventLog>,
-    before: u64,
-    after: u64,
+    outcome: &CompactionOutcome,
     msgs_before: usize,
     msgs_after: usize,
-    summarized: bool,
     summary_text: &str,
 ) {
     let Some(writer) = events.as_mut() else {
         return;
     };
-    let _ = writer.append(
-        "compaction",
-        serde_json::json!({
-            "before": before,
-            "after": after,
-            "msgs_before": msgs_before,
-            "msgs_after": msgs_after,
-            "summarized": summarized,
-            "summary": summary_text,
-        }),
-    );
+    let mut fields = serde_json::json!({
+        "before": outcome.before,
+        "after": outcome.after,
+        "msgs_before": msgs_before,
+        "msgs_after": msgs_after,
+        "summarized": outcome.summarized,
+        "summary": summary_text,
+    });
+    // The one loss the summary cannot describe: it was written before the cut.
+    record_trim_fields(&mut fields, outcome.trimmed.as_ref());
+    let _ = writer.append("compaction", fields);
+}
+
+/// Attach the hard-trim report to a compaction record. Shared with the
+/// `/compact` path, which writes its own richer event.
+pub(crate) fn record_trim_fields(
+    fields: &mut serde_json::Value,
+    trimmed: Option<&context::TrimReport>,
+) {
+    let Some(trimmed) = trimmed else {
+        return;
+    };
+    let Some(map) = fields.as_object_mut() else {
+        return;
+    };
+    map.insert("trimmed_msgs".into(), trimmed.dropped.into());
+    map.insert("trimmed_span".into(), trimmed.span.clone().into());
+    if !trimmed.paths.is_empty() {
+        map.insert(
+            "trimmed_paths".into(),
+            serde_json::Value::Array(
+                trimmed
+                    .paths
+                    .iter()
+                    .cloned()
+                    .map(serde_json::Value::String)
+                    .collect(),
+            ),
+        );
+    }
 }
 
 /// Parent prefix handed to compaction so the summary request can reuse it:
@@ -176,7 +203,7 @@ pub(crate) async fn compact_history(
     plan_hint: &str,
     focus: Option<&str>,
     prefix: Option<&CompactionPrefix<'_>>,
-) -> Option<(u64, u64, bool)> {
+) -> Option<CompactionOutcome> {
     let measured = |m: &[Message]| context::estimated_tokens(m);
     let mut wire = crate::agent::tool_output::Wire {
         context_limit: policy.context_limit,
@@ -193,13 +220,27 @@ pub(crate) async fn compact_history(
     let wire_measured =
         |m: &[Message], w: &crate::agent::tool_output::Wire| context::wire_estimated_tokens(m, w);
     let before = measured(messages);
+    // The billing anchor prices the whole request, prefix included; a byte
+    // estimate prices only the transcript. Until a measurement lands (session
+    // start, and again right after every compaction) the prefix has to be
+    // added by hand, or a large system block on a small window stays invisible
+    // until the provider overflows.
+    let fixed_tokens = prefix.map_or(0, |prefix| prefix_tokens(prefix, wire.bytes_per_token));
+    let priced = |m: &[Message], w: &crate::agent::tool_output::Wire| {
+        let tokens = wire_measured(m, w);
+        if w.measured.is_none() {
+            tokens.saturating_add(fixed_tokens)
+        } else {
+            tokens
+        }
+    };
 
     // No per-turn pruning by design (Codex shape): what the model read
     // stays verbatim until real pressure. Silently rewriting old tool
     // output taught the model to re-read the same files in circles —
     // the prune note even instructed it to. History shrinks only below,
     // on pressure, via summary or hard trim.
-    if !force && policy.pressure(wire_measured(messages, &wire)) == context::Pressure::Ok {
+    if !force && policy.pressure(priced(messages, &wire)) == context::Pressure::Ok {
         // Pressure is fine: history is untouched, report nothing.
         return None;
     }
@@ -208,7 +249,12 @@ pub(crate) async fn compact_history(
     // tool call can never be separated from its results. `force` (manual
     // `/compact`) also shrinks the kept tail when the configured keep_turns
     // would leave nothing to summarize.
-    let (older, keep) = context::split_for_summary_adaptive(messages, policy.keep_turns(), force);
+    let (older, keep) = context::split_for_summary_adaptive(
+        messages,
+        policy.keep_turns(),
+        force,
+        policy.tail_budget(),
+    );
     let older: Vec<Message> = older.to_vec();
     let keep: Vec<Message> = keep.to_vec();
     let keep_len = keep.len();
@@ -274,16 +320,62 @@ pub(crate) async fn compact_history(
         wire.measured = None;
     }
 
-    // stage 4: still too big — drop the oldest turns outright
-    if policy.pressure(wire_measured(messages, &wire)) != context::Pressure::Ok {
-        let budget = policy.budget();
-        *messages = context::hard_trim(messages, budget);
+    // stage 4: still too big — drop the oldest turns outright. The prefix
+    // keeps its share of the window, and the drop is reported: it is the one
+    // fact the summary, written before the cut, cannot carry.
+    let mut trimmed = None;
+    if policy.pressure(priced(messages, &wire)) != context::Pressure::Ok {
+        let budget = policy.budget().saturating_sub(if wire.measured.is_none() {
+            fixed_tokens
+        } else {
+            0
+        });
+        let (kept, report) = context::hard_trim_with_report(messages, budget);
+        *messages = kept;
+        trimmed = report;
     }
     let after = measured(messages);
     if after == before && !summarized {
         return None;
     }
-    Some((before, after, summarized))
+    Some(CompactionOutcome {
+        before,
+        after,
+        summarized,
+        trimmed,
+    })
+}
+
+/// What one compaction did, for the caller's journal record.
+#[derive(Debug, Clone)]
+pub struct CompactionOutcome {
+    pub before: u64,
+    pub after: u64,
+    pub summarized: bool,
+    pub trimmed: Option<context::TrimReport>,
+}
+
+/// Tokens the fixed part of the request occupies: system parts plus tool
+/// schemas. Priced by bytes at the same ratio the transcript uses; the billing
+/// anchor supersedes it once one exists.
+fn prefix_tokens(prefix: &CompactionPrefix<'_>, bytes_per_token: u64) -> u64 {
+    let bytes = prefix
+        .system
+        .iter()
+        .map(|part| part.text.len())
+        .sum::<usize>()
+        + prefix
+            .tools
+            .iter()
+            .map(|spec| {
+                spec.name.len()
+                    + spec.description.len()
+                    + serde_json::to_string(&spec.parameters)
+                        .map(|text| text.len())
+                        .unwrap_or(0)
+            })
+            .sum::<usize>();
+    (bytes as u64).div_ceil(bytes_per_token.max(1))
 }
 
 /// Stream one request and collect its text; every other event is discarded.

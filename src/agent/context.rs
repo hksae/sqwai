@@ -461,6 +461,17 @@ impl Policy {
             Pressure::Summarize
         }
     }
+
+    /// Upper bound for the verbatim tail. `keep_turns` counts turns, and one
+    /// user turn can hide hundreds of tool steps, so a tail chosen by turns
+    /// alone can be larger than the whole budget — and then `hard_trim` cuts
+    /// it blind. A twentieth of the window, kept between 6k and 32k tokens.
+    pub fn tail_budget(&self) -> u64 {
+        if self.context_limit == 0 {
+            return u64::MAX;
+        }
+        (self.context_limit / 20).clamp(6_000, 32_000)
+    }
 }
 
 /// Provider-free compaction utility (keep the recent tail, extractively
@@ -615,24 +626,31 @@ pub fn split_for_summary_with_keep(
     (&messages[..cut], &messages[cut..])
 }
 
-/// Split `messages` into `(older, keep)` for summarization. When `force` is
-/// true (manual `/compact` or overflow recovery) and the configured `keep_turns`
-/// leaves `older` empty because the conversation has few turns, adaptively
-/// steps `keep_turns` down to `1` (or summarizes a single completed exchange)
-/// so an explicit `/compact` never no-ops on a multi-message transcript.
+/// Split `messages` into `(older, keep)` for summarization. The cut follows
+/// `keep_turns`, then the tail is pulled under `tail_budget` by moving the cut
+/// forward to a safe boundary — a turn count cannot bound a tail that hides a
+/// hundred tool steps. When `force` is true (manual `/compact` or overflow
+/// recovery) and the configured `keep_turns` leaves `older` empty because the
+/// conversation has few turns, adaptively steps `keep_turns` down to `1` (or
+/// summarizes a single completed exchange) so an explicit `/compact` never
+/// no-ops on a multi-message transcript.
 pub fn split_for_summary_adaptive(
     messages: &[Message],
     keep_turns: usize,
     force: bool,
+    tail_budget: u64,
 ) -> (&[Message], &[Message]) {
     let (older, keep) = split_for_summary_with_keep(messages, keep_turns);
-    if !older.is_empty() || !force {
+    if !older.is_empty() {
+        return fit_tail(messages, older.len(), tail_budget).unwrap_or((older, keep));
+    }
+    if !force {
         return (older, keep);
     }
     for k in (1..keep_turns.max(1)).rev() {
         let (o, kp) = split_for_summary_with_keep(messages, k);
         if !o.is_empty() {
-            return (o, kp);
+            return fit_tail(messages, o.len(), tail_budget).unwrap_or((o, kp));
         }
     }
     if messages.len() >= 2
@@ -644,6 +662,27 @@ pub fn split_for_summary_adaptive(
         return (messages, &[]);
     }
     (&[], messages)
+}
+
+/// Pull the verbatim tail under `budget` by advancing the cut to the next safe
+/// boundary. `None` means the tail already fits (or the cut could not move),
+/// and the caller keeps the turn-count choice.
+fn fit_tail<'a>(
+    messages: &'a [Message],
+    start: usize,
+    budget: u64,
+) -> Option<(&'a [Message], &'a [Message])> {
+    if start == 0 || estimated_tokens(&messages[start..]) <= budget {
+        return None;
+    }
+    let mut cut = start;
+    while cut < messages.len() && estimated_tokens(&messages[cut..]) > budget {
+        cut += 1;
+    }
+    while cut < messages.len() && !is_safe_cut(messages, cut) {
+        cut += 1;
+    }
+    (cut > start).then(|| messages.split_at(cut))
 }
 
 fn is_safe_cut(messages: &[Message], cut: usize) -> bool {
@@ -909,7 +948,21 @@ fn summary_message(summary: &str) -> String {
 /// kept tail alone exceeds the budget — e.g. a forced-low threshold with
 /// heavy tool traffic — where an unprotected trim would eat the summary it
 /// has just written.
-pub fn hard_trim(messages: &[Message], budget: u64) -> Vec<Message> {
+/// What a hard trim dropped, for the compaction record: the one fact the
+/// summary cannot carry, because the summary was written before the cut.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrimReport {
+    pub dropped: usize,
+    /// Roles of the first and last dropped message, e.g. `user → assistant`.
+    pub span: String,
+    /// Files whose edits lived in the dropped span (at most six).
+    pub paths: Vec<String>,
+}
+
+pub fn hard_trim_with_report(
+    messages: &[Message],
+    budget: u64,
+) -> (Vec<Message>, Option<TrimReport>) {
     let (head, rest, remaining_budget) = match messages.first() {
         Some(first) if first.content.contains("<conversation-summary>") => {
             let head_tokens = estimated_tokens(std::slice::from_ref(first));
@@ -921,16 +974,58 @@ pub fn hard_trim(messages: &[Message], budget: u64) -> Vec<Message> {
         }
         _ => (None, messages, budget),
     };
-    let trimmed = hard_trim_inner(rest, remaining_budget);
-    match head {
+    let (trimmed, dropped) = hard_trim_inner(rest, remaining_budget);
+    let report = (dropped > 0).then(|| trim_report(rest, dropped));
+    let kept = match head {
         Some(h) => std::iter::once(h).chain(trimmed).collect(),
         None => trimmed,
+    };
+    (kept, report)
+}
+
+fn trim_report(messages: &[Message], dropped: usize) -> TrimReport {
+    let dropped = dropped.min(messages.len());
+    let first = messages
+        .first()
+        .map(|message| role_name(&message.role))
+        .unwrap_or("?");
+    let last = messages
+        .get(dropped.saturating_sub(1))
+        .map(|message| role_name(&message.role))
+        .unwrap_or("?");
+    let mut paths: Vec<String> = Vec::new();
+    for message in &messages[..dropped] {
+        for call in &message.tool_calls {
+            if !matches!(call.name.as_str(), "write" | "edit") {
+                continue;
+            }
+            if let Some(path) = call.args.get("file_path").and_then(|value| value.as_str())
+                && !paths.iter().any(|seen| seen == path)
+            {
+                paths.push(path.to_string());
+            }
+        }
+    }
+    paths.truncate(6);
+    TrimReport {
+        dropped,
+        span: format!("{first} → {last}"),
+        paths,
     }
 }
 
-fn hard_trim_inner(messages: &[Message], budget: u64) -> Vec<Message> {
+fn role_name(role: &Role) -> &'static str {
+    match role {
+        Role::User => "user",
+        Role::Assistant => "assistant",
+        Role::Tool => "tool",
+        Role::System => "system",
+    }
+}
+
+fn hard_trim_inner(messages: &[Message], budget: u64) -> (Vec<Message>, usize) {
     if estimated_tokens(messages) <= budget {
-        return messages.to_vec();
+        return (messages.to_vec(), 0);
     }
     let mut start = 0usize;
     while start < messages.len() && estimated_tokens(&messages[start..]) > budget {
@@ -941,9 +1036,9 @@ fn hard_trim_inner(messages: &[Message], budget: u64) -> Vec<Message> {
     }
     if start >= messages.len() {
         if let Some(pos) = messages.iter().rposition(|m| m.role == Role::User) {
-            return messages[pos..].to_vec();
+            return (messages[pos..].to_vec(), pos);
         }
-        return vec![Message::new(Role::User, "Continue.")];
+        return (vec![Message::new(Role::User, "Continue.")], messages.len());
     }
     let mut kept = messages[start..].to_vec();
     // Anthropic rejects an assistant-first transcript with a 400, and the
@@ -952,7 +1047,7 @@ fn hard_trim_inner(messages: &[Message], budget: u64) -> Vec<Message> {
     if kept.first().is_some_and(|m| m.role != Role::User) {
         kept.insert(0, Message::new(Role::User, TRIM_MARKER));
     }
-    kept
+    (kept, start)
 }
 
 /// Host note replacing the trimmed head when the safe cut lands mid tool
