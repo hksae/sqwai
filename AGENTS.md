@@ -2,7 +2,8 @@
 
 ## Build and test
 - Use `cargo check` for a fast compile check (pinned toolchain via rust-toolchain.toml).
-- Use targeted `cargo test <filter>` when verifying a completed change; run the full `cargo test` suite only when explicitly requested or when changing cross-cutting core modules.
+- Use targeted `cargo test <filter>` when verifying a completed change; run the full `cargo test` suite ONLY when all the work is finished, or the user asked for it — a large diff is not a reason by itself.
+- Review insta snapshots by hand before accepting them; never bulk-accept a refresh.
 - Do not build a release executable automatically unless explicitly asked (the user builds it); run only tests.
 
 ## Git and workflow
@@ -11,10 +12,7 @@
 ## TUI invariants
 - Keep the TUI usable in narrow terminals and with long lines.
 - Every rendered row must respect the available width.
-- Invalidate render caches when content, layout, or dimensions change.
 - Preserve keyboard, mouse, focus, resize, scrolling, overlay, and mode-transition behavior when changing views.
 
 ## Project behavior
-- Keep new, resumed, and switched sessions distinct.
-- Do not persist an empty placeholder session merely because the application opened.
-- Preserve host-owned plan, evidence, checkpoint, memory, safety, and untrusted-content behavior.
+- Preserve host-owned plan, evidence, checkpoint, safety, and untrusted-content behavior.
