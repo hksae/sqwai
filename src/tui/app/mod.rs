@@ -278,6 +278,10 @@ pub struct App {
     /// their bodies are not "loaded earlier", so the request block skips the
     /// restored note for them.
     skills_pinned_this_turn: Vec<String>,
+    /// The row a `/skill <name>` command shows while the message it submits
+    /// carries the skill body. Taken by `submit`; `None` means an ordinary
+    /// typed message.
+    skill_once_display: Option<String>,
     skill_search: TextArea<'static>,
     skill_focus: bool,
 
@@ -766,6 +770,7 @@ impl App {
             discovered_skills: Vec::new(),
             active_skills: Vec::new(),
             skills_pinned_this_turn: Vec::new(),
+            skill_once_display: None,
             skill_search: Self::fresh_input(String::new()),
             skill_focus: false,
             cfg,

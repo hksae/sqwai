@@ -115,6 +115,9 @@ impl App {
     }
 
     pub(super) fn submit(&mut self) {
+        // A `/skill` command sets this before calling submit: the message is
+        // the skill body, while the row shows the command line.
+        let injected_display = self.skill_once_display.take();
         crate::tui::event_log::log(
             "SUBMIT",
             format!(
@@ -242,48 +245,55 @@ impl App {
         self.rebuild_provider();
         self.stable_parts = self.stable_parts();
         crate::providers::set_conversation_id(&self.session.id.to_string());
-        self.push_segment(Segment::User(text.clone()));
+        self.push_segment(Segment::User(
+            injected_display.clone().unwrap_or_else(|| text.clone()),
+        ));
         self.session.push_with_images(Role::User, &text, images);
         self.turn_user_index = Some(self.session.messages.len().saturating_sub(1));
 
         let root = self.project_root.clone();
         // Auto-pin any `$skill-name` mentioned inline in the user prompt, and
         // append a 1-line skill hint when the prompt matches an inactive skill's triggers.
+        // A `/skill` command's message is a skill body, not prose: scanning it
+        // would pin whatever skills the body happens to name and hint at its
+        // own triggers.
         self.skills_pinned_this_turn.clear();
-        let mentions = {
-            let discovered = self.cached_skills();
-            if discovered.is_empty() {
-                Vec::new()
-            } else {
-                crate::prompts::skills::extract_dollar_mentions(discovered, &text)
+        if injected_display.is_none() {
+            let mentions = {
+                let discovered = self.cached_skills();
+                if discovered.is_empty() {
+                    Vec::new()
+                } else {
+                    crate::prompts::skills::extract_dollar_mentions(discovered, &text)
+                }
+            };
+            for sk in mentions {
+                if !self
+                    .active_skills
+                    .iter()
+                    .any(|s| s.name.eq_ignore_ascii_case(&sk.name))
+                {
+                    self.skills_pinned_this_turn.push(sk.name.clone());
+                    self.active_skills.push(sk);
+                    self.context_bootstrap_pending = true;
+                }
             }
-        };
-        for sk in mentions {
-            if !self
-                .active_skills
-                .iter()
-                .any(|s| s.name.eq_ignore_ascii_case(&sk.name))
-            {
-                self.skills_pinned_this_turn.push(sk.name.clone());
-                self.active_skills.push(sk);
-                self.context_bootstrap_pending = true;
-            }
-        }
-        self.sync_active_skills_to_session();
-        if self.cfg.skills.auto_load {
-            let discovered = self.cached_skills();
-            let active_names: Vec<String> =
-                self.active_skills.iter().map(|s| s.name.clone()).collect();
-            let touched_paths = self.recent_touched_paths();
-            if let Some(hint) = crate::prompts::skills::match_hints(
-                discovered,
-                &active_names,
-                &text,
-                &touched_paths,
-            ) && let Some(last) = self.session.messages.last_mut()
-            {
-                last.content.push('\n');
-                last.content.push_str(&hint);
+            self.sync_active_skills_to_session();
+            if self.cfg.skills.auto_load {
+                let discovered = self.cached_skills();
+                let active_names: Vec<String> =
+                    self.active_skills.iter().map(|s| s.name.clone()).collect();
+                let touched_paths = self.recent_touched_paths();
+                if let Some(hint) = crate::prompts::skills::match_hints(
+                    discovered,
+                    &active_names,
+                    &text,
+                    &touched_paths,
+                ) && let Some(last) = self.session.messages.last_mut()
+                {
+                    last.content.push('\n');
+                    last.content.push_str(&hint);
+                }
             }
         }
 

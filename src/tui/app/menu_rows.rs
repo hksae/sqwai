@@ -1374,24 +1374,9 @@ impl App {
                 .iter()
                 .any(|s| s.name.eq_ignore_ascii_case(&skill.name));
             let is_active = is_pinned || skill.always;
-            let mut meta_parts = vec![skill.scope.as_str().to_string()];
-            if is_pinned {
-                meta_parts.push("pinned".to_string());
-            } else if skill.always {
-                meta_parts.push("always".to_string());
-            }
-            meta_parts.push(fmt_ctx(skill.char_len() as u64));
-            if !skill.files.is_empty() {
-                meta_parts.push(format!("{}f", skill.files.len()));
-            }
-            if let Some(desc) = &skill.description {
-                let first = desc.lines().next().unwrap_or("").trim();
-                if !first.is_empty() {
-                    let clipped = super::view::truncate_display_width(first, 42);
-                    meta_parts.push(clipped);
-                }
-            }
-            let tail = format!(" ({})", meta_parts.join(" · "));
+            // The list answers two things only: what exists, and whose it is.
+            // Size, bundled files, and the description live in the skill view.
+            let tail = format!(" ({})", skill.scope.as_str());
             rendered.push((skill.name.clone(), tail, is_active));
         }
         for (name, tail, is_active) in rendered {

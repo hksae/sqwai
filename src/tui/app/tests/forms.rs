@@ -1805,6 +1805,121 @@ fn a_live_skill_body_becomes_a_pointer_in_the_request_block() {
     let _ = std::fs::remove_dir_all(app.project_root.join(".sqwai"));
 }
 
+/// `/skill <name> [args]` runs a skill once: the body becomes this message and
+/// the skill is not pinned. `$name` and the menu remain the pinning paths.
+#[tokio::test]
+async fn skill_command_runs_once_without_pinning() {
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    let skill_dir = app.project_root.join(".sqwai/skills/tui-rules");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: tui-rules\ndescription: TUI layout invariants\ntriggers: [ratatui]\n---\nKeep rows within width.\n",
+    )
+    .unwrap();
+    app.refresh_skills();
+
+    app.input = App::fresh_input("/skill tui-rules keep it short".into());
+    app.submit();
+
+    let sent = app
+        .session
+        .messages
+        .iter()
+        .rev()
+        .find(|m| m.role == crate::providers::Role::User)
+        .expect("message sent");
+    assert!(
+        sent.content.contains("Keep rows within width."),
+        "the body rides the message: {}",
+        sent.content
+    );
+    assert!(
+        sent.content.trim_end().ends_with("keep it short"),
+        "the rest of the line is the request: {}",
+        sent.content
+    );
+    assert!(app.active_skills.is_empty(), "one-shot must not pin");
+    assert!(app.session.active_skills.is_empty());
+    assert!(
+        app.segments
+            .iter()
+            .any(|s| matches!(s, Segment::User(text) if text == "/skill tui-rules keep it short")),
+        "the reader sees the command line, not the body"
+    );
+    // A body is not prose: its trigger must not append a hint to the message.
+    assert!(
+        !sent.content.contains("[skill hint:"),
+        "{}",
+        sent.content
+    );
+
+    let _ = std::fs::remove_dir_all(app.project_root.join(".sqwai"));
+}
+
+/// A query that fits several skills sends nothing: it opens the catalog with
+/// the filter filled in, so the choice is made by a human.
+#[test]
+fn ambiguous_skill_command_opens_the_menu_and_sends_nothing() {
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    for name in ["tui-rules", "tui-tests"] {
+        let dir = app.project_root.join(".sqwai/skills").join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: d\n---\nBody.\n"),
+        )
+        .unwrap();
+    }
+    app.refresh_skills();
+
+    app.input = App::fresh_input("/skill tui".into());
+    app.submit();
+    assert!(matches!(app.cur_menu(), Some(Menu::Skills)), "menu opened");
+    assert!(app.session.messages.is_empty(), "nothing sent");
+    assert!(app.active_skills.is_empty());
+
+    let _ = std::fs::remove_dir_all(app.project_root.join(".sqwai"));
+}
+
+/// The skills list answers two things only: what exists and whose it is.
+#[test]
+fn skills_menu_shows_only_the_scope_on_the_right() {
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    let dir = app.project_root.join(".sqwai/skills/tui-rules");
+    std::fs::create_dir_all(dir.join("references")).unwrap();
+    std::fs::write(
+        dir.join("SKILL.md"),
+        "---\nname: tui-rules\ndescription: TUI layout invariants\ntriggers: [ratatui]\n---\nKeep rows within width.\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("references/springs.md"), "# Springs\n").unwrap();
+    app.refresh_skills();
+    app.open_menu(Menu::Skills);
+
+    let text: String = app
+        .menu_rows
+        .iter()
+        .map(|(line, _)| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("tui-rules (project)"), "{text}");
+    assert!(!text.contains("pinned"), "{text}");
+    assert!(!text.contains("chars"), "{text}");
+    assert!(!text.contains("1f"), "{text}");
+    assert!(
+        !text.contains("TUI layout invariants"),
+        "the description belongs to the skill view: {text}"
+    );
+
+    let _ = std::fs::remove_dir_all(app.project_root.join(".sqwai"));
+}
+
 #[test]
 fn recent_paths_feed_skill_glob_hints() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());

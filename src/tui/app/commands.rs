@@ -96,29 +96,59 @@ impl App {
                     self.run_action(MenuAction::ClearPinnedSkills);
                     return;
                 }
-                self.refresh_skills();
-                let loaded = crate::prompts::skills::filter_by_query(self.cached_skills(), query);
-                if loaded.is_empty() {
-                    self.status("skill not found", StatusKind::Warn);
-                } else {
-                    let mut names = Vec::new();
-                    for sk in loaded {
-                        names.push(sk.name.clone());
-                        if !self
-                            .active_skills
-                            .iter()
-                            .any(|s| s.name.eq_ignore_ascii_case(&sk.name))
-                        {
-                            self.active_skills.push(sk);
-                        }
-                    }
-                    self.context_bootstrap_pending = true;
-                    self.sync_active_skills_to_session();
+                if self.streaming {
                     self.status(
-                        &format!("loaded skill(s): {}", names.join(", ")),
-                        StatusKind::Ok,
+                        "skill: wait for the current turn to finish",
+                        StatusKind::Warn,
                     );
+                    return;
                 }
+                self.refresh_skills();
+                // One-shot: the body becomes this message and the skill is not
+                // pinned. Pinning stays an explicit act — `$name` in the text,
+                // the `/skills` toggle, or the model loading it for the task.
+                let after = rest.strip_prefix("skill").unwrap_or(rest).trim_start();
+                let (name, args) = match after.split_once(char::is_whitespace) {
+                    Some((name, args)) => (name, args.trim()),
+                    None => (after, ""),
+                };
+                let skill = self
+                    .cached_skills()
+                    .iter()
+                    .find(|skill| skill.name.eq_ignore_ascii_case(name))
+                    .cloned()
+                    .or_else(|| {
+                        let mut matches =
+                            crate::prompts::skills::filter_by_query(self.cached_skills(), name);
+                        (matches.len() == 1).then(|| matches.remove(0))
+                    });
+                let Some(skill) = skill else {
+                    let matches =
+                        crate::prompts::skills::filter_by_query(self.cached_skills(), name);
+                    if matches.len() > 1 {
+                        self.skill_search = Self::fresh_input(name.to_string());
+                        self.open_menu(Menu::Skills);
+                        self.status(
+                            &format!("{} skills match '{name}' — pick one", matches.len()),
+                            StatusKind::Warn,
+                        );
+                    } else {
+                        self.status(&format!("skill not found: {name}"), StatusKind::Warn);
+                    }
+                    return;
+                };
+                let mut body = crate::prompts::skills::render_skill_detail(&skill);
+                if !args.is_empty() {
+                    body.push_str("\n\n");
+                    body.push_str(args);
+                }
+                self.skill_once_display = Some(if args.is_empty() {
+                    format!("/skill {name}")
+                } else {
+                    format!("/skill {name} {args}")
+                });
+                self.input = Self::fresh_input(body);
+                self.submit();
             }
 
             "/skills" => {
