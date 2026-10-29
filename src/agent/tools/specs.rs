@@ -383,7 +383,8 @@ modified files.",
             name: "skill",
             kind: Kind::ReadOnly,
             description: "Load a skill from `<available_skills>` by `name`, or one bundled file \
-via `file`.",
+via `file`. The description is a trigger, not the procedure: load the body before doing the task \
+its way, and do not load one whose body is already in this conversation.",
             parameters: json!({
                 "type": "object",
                 "properties": {

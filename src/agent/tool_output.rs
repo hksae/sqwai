@@ -399,6 +399,55 @@ fn clearable(message: &Message) -> bool {
     message.role == Role::Tool && !message.is_error && !is_stub(&message.content)
 }
 
+/// Call ids of `skill` results. Those results are exempt from clearing: the
+/// pinned skill block decides per skill whether its body is still in the
+/// conversation, so stubbing a body on the wire while its message still sits in
+/// the transcript would leave the model a pointer to text it cannot see.
+fn skill_call_ids(messages: &[Message]) -> std::collections::HashSet<&str> {
+    messages
+        .iter()
+        .flat_map(|message| message.tool_calls.iter())
+        .filter(|call| call.name == "skill")
+        .map(|call| call.id.as_str())
+        .collect()
+}
+
+fn clearable_for(message: &Message, skill_calls: &std::collections::HashSet<&str>) -> bool {
+    clearable(message)
+        && !message
+            .tool_call_id
+            .as_deref()
+            .is_some_and(|id| skill_calls.contains(id))
+}
+
+/// Names of skills whose body is still on the wire: the call is in the
+/// transcript and its result has not been stubbed. The pinned block answers
+/// those with a pointer instead of a second copy of the same bytes.
+pub fn live_skill_names(messages: &[Message]) -> std::collections::BTreeSet<String> {
+    let mut by_call: HashMap<&str, &str> = HashMap::new();
+    for message in messages {
+        for call in &message.tool_calls {
+            if call.name != "skill" {
+                continue;
+            }
+            if let Some(name) = call.args["name"].as_str() {
+                by_call.insert(call.id.as_str(), name);
+            }
+        }
+    }
+    messages
+        .iter()
+        .filter(|message| message.role == Role::Tool && !is_stub(&message.content))
+        .filter_map(|message| {
+            message
+                .tool_call_id
+                .as_deref()
+                .and_then(|id| by_call.get(id).copied())
+        })
+        .map(|name| name.to_ascii_lowercase())
+        .collect()
+}
+
 /// Tool results a kept tail keeps on the wire right after a compaction wrote a
 /// summary. Everything older is stubbed on the spot.
 ///
@@ -414,11 +463,20 @@ pub const POST_COMPACTION_KEEP_RESULTS: usize = 3;
 /// How many results the run has already hidden after a compaction: the whole
 /// kept tail except the newest few, and never the batch the model is answering.
 pub fn post_compaction_floor(messages: &[Message]) -> usize {
-    let pool = messages.iter().filter(|m| clearable(m)).count();
+    let skill_calls = skill_call_ids(messages);
+    let pool = messages
+        .iter()
+        .filter(|m| clearable_for(m, &skill_calls))
+        .count();
     let in_flight = messages
         .iter()
         .rposition(|m| m.role == Role::Assistant && !m.tool_calls.is_empty())
-        .map(|step| messages[step + 1..].iter().filter(|m| clearable(m)).count())
+        .map(|step| {
+            messages[step + 1..]
+                .iter()
+                .filter(|m| clearable_for(m, &skill_calls))
+                .count()
+        })
         .unwrap_or(0);
     pool.saturating_sub(POST_COMPACTION_KEEP_RESULTS.max(in_flight))
 }
@@ -428,10 +486,11 @@ pub fn post_compaction_floor(messages: &[Message]) -> usize {
 /// result in — the floor is a count of the past, so a pool of one clears nothing.
 pub fn cleared_indices(messages: &[Message], wire: &Wire) -> Vec<usize> {
     let budget = WireBudget::for_messages(wire, messages);
+    let skill_calls = skill_call_ids(messages);
     let pool: Vec<(usize, usize)> = messages
         .iter()
         .enumerate()
-        .filter(|(_, m)| clearable(m))
+        .filter(|(_, m)| clearable_for(m, &skill_calls))
         .map(|(i, m)| (i, m.content.len() + media_wire_bytes(m)))
         .collect();
     let total: usize = pool.iter().map(|(_, bytes)| bytes).sum();
@@ -725,6 +784,53 @@ mod tests {
             7,
             "the compaction clear survives the roomy window"
         );
+    }
+
+    /// A `skill` result is the one tool output the pinned skill block can point
+    /// at: clearing it would leave the model a pointer to text it cannot see,
+    /// so it is exempt from the pool and from the compaction floor, and its
+    /// name counts as live while the result is in the transcript.
+    #[test]
+    fn a_skill_body_survives_clearing_and_reports_itself_live() {
+        let mut messages = exchange(&["r0", "r1", "r2", "r3"]);
+        messages.push(
+            Message::new(Role::Assistant, "").with_tool_calls(vec![ToolCallReq::new(
+                "s1",
+                "skill",
+                json!({"name": "craft"}),
+            )]),
+        );
+        messages.push(Message::tool_result("s1", "Skill body.", false));
+
+        // Four clearable results, three stay readable: the skill never joins
+        // the pool (counting it would make the floor 2).
+        assert_eq!(post_compaction_floor(&messages), 1);
+
+        let floored = Wire {
+            cleared_floor: 2,
+            ..wire(1_000_000)
+        };
+        let cleared = cleared_indices(&messages, &floored);
+        assert!(
+            !cleared
+                .iter()
+                .any(|i| messages[*i].tool_call_id.as_deref() == Some("s1")),
+            "the skill body must stay on the wire: {cleared:?}"
+        );
+
+        assert_eq!(
+            live_skill_names(&messages),
+            ["craft".to_string()].into_iter().collect()
+        );
+
+        // A stub result, or a transcript the compaction replaced, is not live.
+        messages.pop();
+        messages.push(Message::tool_result(
+            "s1",
+            crate::agent::tool_output::stub("skill", "craft", 11, "s1"),
+            false,
+        ));
+        assert!(live_skill_names(&messages).is_empty());
     }
 
     /// Recall with no projection args, as the tool is most often called.

@@ -315,10 +315,12 @@ fn skill_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
     }
     let all = crate::prompts::skills::discover(&ctx.skills_cfg, &ctx.root);
     if name.eq_ignore_ascii_case("list") {
-        if all.is_empty() {
+        let visible: Vec<&crate::prompts::skills::Skill> =
+            all.iter().filter(|skill| skill.model_invocable).collect();
+        if visible.is_empty() {
             return Outcome::ok("no skills available in configured or project skill directories");
         }
-        let lines: Vec<String> = all
+        let lines: Vec<String> = visible
             .iter()
             .map(|s| {
                 let desc = s.description.as_deref().unwrap_or("no description");
@@ -327,7 +329,7 @@ fn skill_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
             .collect();
         return Outcome::ok(format!(
             "available skills ({}):\n{}",
-            all.len(),
+            visible.len(),
             lines.join("\n")
         ));
     }
@@ -351,6 +353,13 @@ fn skill_op(ctx: &mut ToolCtx, args: &Value) -> Outcome {
             names.join(", ")
         ));
     };
+
+    if !skill.model_invocable {
+        return Outcome::err(format!(
+            "skill '{}' is user-invoked only (disable-model-invocation): the user has to load it",
+            skill.name
+        ));
+    }
 
     if let Some(file) = args["file"]
         .as_str()

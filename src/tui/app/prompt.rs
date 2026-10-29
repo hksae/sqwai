@@ -114,20 +114,26 @@ impl App {
             parts.push(SystemPart::cached(self.session_environment.clone()));
         }
         // An `always: true` skill is delivered here, not through the cached
-        // catalog: its body is repository text and the catalog is the prefix
-        // a cloned tree must not be able to write into.
-        let always = if self.cfg.skills.auto_load {
-            crate::prompts::skills::prompt_with_always(
-                &self.active_skills,
-                self.cached_skills(),
-            )
+        // catalog: its body is repository text and the catalog is the prefix a
+        // cloned tree must not be able to write into. A pinned skill whose body
+        // is still in the conversation is only a pointer — that body already
+        // travels once, as a tool result.
+        let live = crate::agent::tool_output::live_skill_names(&self.session.messages);
+        let fresh: std::collections::BTreeSet<String> = self
+            .skills_pinned_this_turn
+            .iter()
+            .map(|name| name.to_ascii_lowercase())
+            .collect();
+        let all: &[crate::prompts::skills::Skill] = if self.cfg.skills.auto_load {
+            self.cached_skills()
         } else {
-            crate::prompts::skills::prompt(&self.active_skills)
+            &[]
         };
-        if let Some(active_skills) = always {
+        if let Some(block) =
+            crate::prompts::skills::active_block(&self.active_skills, all, &live, &fresh)
+        {
             parts.push(
-                SystemPart::volatile(active_skills)
-                    .in_section(crate::providers::PrefixSection::Skills),
+                SystemPart::volatile(block).in_section(crate::providers::PrefixSection::Skills),
             );
         }
         // Plan state rides every request (built in the turn loop, not

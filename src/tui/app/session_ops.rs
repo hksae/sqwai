@@ -70,6 +70,7 @@ impl App {
             }
         }
         self.active_skills = loaded;
+        self.skills_pinned_this_turn.clear();
         self.sync_active_skills_to_session();
     }
 
@@ -248,6 +249,7 @@ impl App {
         let root = self.project_root.clone();
         // Auto-pin any `$skill-name` mentioned inline in the user prompt, and
         // append a 1-line skill hint when the prompt matches an inactive skill's triggers.
+        self.skills_pinned_this_turn.clear();
         let mentions = {
             let discovered = self.cached_skills();
             if discovered.is_empty() {
@@ -262,6 +264,7 @@ impl App {
                 .iter()
                 .any(|s| s.name.eq_ignore_ascii_case(&sk.name))
             {
+                self.skills_pinned_this_turn.push(sk.name.clone());
                 self.active_skills.push(sk);
                 self.context_bootstrap_pending = true;
             }

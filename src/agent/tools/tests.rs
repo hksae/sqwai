@@ -889,6 +889,48 @@ fn skill_tool_sees_skills_from_configured_dirs() {
     let _ = fs::remove_dir_all(dir);
 }
 
+/// `disable-model-invocation` keeps a skill out of the model's reach entirely:
+/// not in the list, not loadable by name, not readable through `file`. The
+/// user's own paths (`/skill`, `$name`, the toggle) never go through this tool.
+#[test]
+fn a_user_only_skill_is_invisible_to_the_skill_tool() {
+    let (mut ctx, dir) = proj();
+    fs::create_dir_all(dir.join(".sqwai/skills/handbook")).unwrap();
+    fs::write(
+        dir.join(".sqwai/skills/handbook/SKILL.md"),
+        "---\nname: handbook\ndescription: house rules\ndisable-model-invocation: true\n---\nAsk before publishing.\n",
+    )
+    .unwrap();
+
+    let list = execute(&mut ctx, "skill", &json!({"name": "list"}));
+    assert!(
+        !list.output.contains("handbook"),
+        "hidden from the list: {}",
+        list.output
+    );
+
+    let load = execute(&mut ctx, "skill", &json!({"name": "handbook"}));
+    assert!(!load.ok, "the model must not load it: {}", load.output);
+    assert!(load.output.contains("user-invoked only"), "{}", load.output);
+
+    let file = execute(
+        &mut ctx,
+        "skill",
+        &json!({"name": "handbook", "file": "SKILL.md"}),
+    );
+    assert!(!file.ok, "nor read it through `file`: {}", file.output);
+
+    // Discovered, and still available to the user's own pinning path.
+    let discovered = crate::prompts::skills::discover(&ctx.skills_cfg, &ctx.root);
+    assert!(
+        discovered
+            .iter()
+            .any(|s| s.name == "handbook" && !s.model_invocable)
+    );
+
+    let _ = fs::remove_dir_all(dir);
+}
+
 /// A symlink inside the project pointing at host-owned state must not be a
 /// way around the jail: the check runs on the canonicalized path.
 #[cfg(unix)]

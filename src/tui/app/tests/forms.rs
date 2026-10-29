@@ -1747,6 +1747,64 @@ fn pinned_skills_are_session_scoped_and_reload_by_name() {
     assert_eq!(app.session.active_skills, ["tui-rules"]);
 }
 
+/// The request block carries a pinned skill's body once: while the `skill`
+/// result is in the conversation the block is a pointer; a transcript that no
+/// longer has that result (compaction, restart) gets the body back, marked
+/// restored so its captured text is not read as the current request.
+#[test]
+fn a_live_skill_body_becomes_a_pointer_in_the_request_block() {
+    fn skill_block(app: &mut crate::tui::app::App) -> String {
+        app.system_block()
+            .into_iter()
+            .filter(|p| p.section == crate::providers::PrefixSection::Skills)
+            .map(|p| p.text)
+            .collect()
+    }
+
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    let skill_dir = app.project_root.join(".sqwai/skills/tui-rules");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: tui-rules\ndescription: TUI layout invariants\n---\nKeep rows within width.\n",
+    )
+    .unwrap();
+    app.refresh_skills();
+    app.active_skills = app.cached_skills().to_vec();
+
+    // No result in the transcript yet: the body travels in the block.
+    let block = skill_block(&mut app);
+    assert!(block.contains("Keep rows within width."), "{block}");
+    assert!(!block.contains("status=\"loaded\""), "{block}");
+
+    // A live tool result now carries the same body: the block is a pointer.
+    app.session.messages.push(
+        crate::providers::Message::new(crate::providers::Role::Assistant, "").with_tool_calls(
+            vec![crate::providers::ToolCallReq::new(
+                "s1",
+                "skill",
+                serde_json::json!({"name": "tui-rules"}),
+            )],
+        ),
+    );
+    app.session.messages.push(crate::providers::Message::tool_result(
+        "s1",
+        "Keep rows within width.",
+        false,
+    ));
+    let block = skill_block(&mut app);
+    assert!(block.contains("status=\"loaded\""), "{block}");
+    assert!(!block.contains("Keep rows within width."), "{block}");
+
+    // The transcript the compaction replaced has no result: body again.
+    app.session.messages.clear();
+    let block = skill_block(&mut app);
+    assert!(block.contains("status=\"restored\""), "{block}");
+    assert!(block.contains("Keep rows within width."), "{block}");
+
+    let _ = std::fs::remove_dir_all(app.project_root.join(".sqwai"));
+}
+
 #[test]
 fn recent_paths_feed_skill_glob_hints() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());

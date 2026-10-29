@@ -274,6 +274,10 @@ pub struct App {
     context_bootstrap_pending: bool,
     discovered_skills: Vec<crate::prompts::skills::Skill>,
     active_skills: Vec<crate::prompts::skills::Skill>,
+    /// Skills pinned by the message being sent right now (`$name` mentions):
+    /// their bodies are not "loaded earlier", so the request block skips the
+    /// restored note for them.
+    skills_pinned_this_turn: Vec<String>,
     skill_search: TextArea<'static>,
     skill_focus: bool,
 
@@ -761,6 +765,7 @@ impl App {
             context_bootstrap_pending: true,
             discovered_skills: Vec::new(),
             active_skills: Vec::new(),
+            skills_pinned_this_turn: Vec::new(),
             skill_search: Self::fresh_input(String::new()),
             skill_focus: false,
             cfg,

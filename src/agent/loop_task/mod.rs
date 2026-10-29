@@ -1323,6 +1323,26 @@ async fn run_agent(
                 summarized,
                 summary.as_deref().unwrap_or(""),
             );
+            // The request block answered live skill bodies with a pointer. The
+            // summary just replaced those bodies, so the pointer now points at
+            // text the model no longer has: re-send the pinned bodies from disk.
+            if !active_skills.is_empty()
+                && let Some(text) = crate::prompts::skills::active_block_from_disk(
+                    &skills,
+                    &root,
+                    &active_skills,
+                    &std::collections::BTreeSet::new(),
+                    &std::collections::BTreeSet::new(),
+                )
+            {
+                turn_system.retain(|part| {
+                    !(part.section == crate::providers::PrefixSection::Skills && !part.cacheable)
+                });
+                turn_system.push(
+                    SystemPart::volatile(text)
+                        .in_section(crate::providers::PrefixSection::Skills),
+                );
+            }
             // The transcript the clear floor was counting against is gone, but
             // the summary that replaced it covers the older results: hide them
             // now instead of re-serving them and clearing them again one by one.

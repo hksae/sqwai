@@ -602,15 +602,28 @@ pub(crate) async fn run_subagent(
     // retain only `Mode:` + `<turn_environment>` in the volatile tail (dropping
     // parent-only one-shot notices like ANCHOR, stopped-turn, or undo notes),
     // then append the child's `<subagent_contract>` and `<parent_context>`.
+    //
+    // The parent's skill block is deliberately not inherited: it answers bodies
+    // that are in the *parent's* conversation with a pointer, and the child's
+    // transcript starts empty. The child gets its own block from disk.
     let mut child_system: Vec<SystemPart> = system
         .into_iter()
         .filter(|p| {
-            p.cacheable
-                || p.text.starts_with("Mode: ")
-                || p.text.starts_with("<turn_environment>")
-                || (!task.clean && p.text.starts_with("<skills>"))
+            p.cacheable || p.text.starts_with("Mode: ") || p.text.starts_with("<turn_environment>")
         })
         .collect();
+    if task.clean {
+        // a clean child reviews with an unbiased slate: no pinned skills either
+    } else if let Some(block) = crate::prompts::skills::active_block_from_disk(
+        &skills,
+        root,
+        active_skills,
+        &std::collections::BTreeSet::new(),
+        &std::collections::BTreeSet::new(),
+    ) {
+        child_system
+            .push(SystemPart::volatile(block).in_section(crate::providers::PrefixSection::Skills));
+    }
     child_system.push(SystemPart::volatile(build_subagent_tail(
         root,
         parent_session,
