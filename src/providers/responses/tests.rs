@@ -8,8 +8,14 @@ fn sse_server(body: String) -> (String, std::thread::JoinHandle<()>) {
     use std::net::TcpListener;
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
+    listener.set_nonblocking(true).unwrap();
     let h = std::thread::spawn(move || {
-        let (stream, _) = listener.accept().unwrap();
+        let Some(stream) = crate::providers::accept_bounded(
+            &listener,
+            std::time::Duration::from_secs(20),
+        ) else {
+            return;
+        };
         let mut reader = BufReader::new(stream.try_clone().unwrap());
         let mut line = String::new();
         let mut len = 0usize;

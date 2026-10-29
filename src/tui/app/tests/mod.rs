@@ -14,10 +14,15 @@ use std::net::TcpListener;
 fn mock_sse_server(reasoning: &str, content: &str) -> (String, std::thread::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
+    listener.set_nonblocking(true).unwrap();
     let reasoning = reasoning.to_string();
     let content = content.to_string();
     let h = std::thread::spawn(move || {
-        let (stream, _) = listener.accept().unwrap();
+        let Some(stream) =
+            crate::providers::accept_bounded(&listener, std::time::Duration::from_secs(20))
+        else {
+            return;
+        };
         let mut reader = BufReader::new(&stream);
         let mut req = String::new();
         loop {
@@ -105,16 +110,29 @@ async fn dump_request_body() {
     use std::sync::{Arc, Mutex};
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
+    listener.set_nonblocking(true).unwrap();
     let captured: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let cap = captured.clone();
     let h = std::thread::spawn(move || {
-        let (stream, _) = listener.accept().unwrap();
+        // Bounded: the poll loop below gives up after ~12 s and joins this
+        // thread, so an `accept()` that never got a connection used to hang
+        // the suite instead of failing one test.
+        let Some(stream) =
+            crate::providers::accept_bounded(&listener, std::time::Duration::from_secs(20))
+        else {
+            return;
+        };
         let mut reader = BufReader::new(stream.try_clone().unwrap());
         let mut line = String::new();
         let mut content_length = 0usize;
         loop {
             line.clear();
-            if reader.read_line(&mut line).unwrap() == 0 || line == "\r\n" {
+            match reader.read_line(&mut line) {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(_) => return,
+            }
+            if line == "\r\n" {
                 break;
             }
             if let Some(v) = line

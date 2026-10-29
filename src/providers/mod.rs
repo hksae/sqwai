@@ -1208,6 +1208,39 @@ pub async fn check_connection(p: &ResolvedProvider) -> Result<String, String> {
     Ok(detail.unwrap_or_else(|| "ok".to_string()))
 }
 
+/// Accept one connection on a non-blocking listener, or give up.
+///
+/// Every canned-HTTP test server in this crate used to call `accept()` while
+/// blocking: when the client never arrived, the thread never returned, and the
+/// `join()` in the test — which has no deadline of its own, unlike the poll
+/// loop above it — held the whole suite. A timed-out accept returns `None` so
+/// the thread ends and the test fails with a message instead of hanging.
+#[cfg(test)]
+pub(crate) fn accept_bounded(
+    listener: &std::net::TcpListener,
+    wait: std::time::Duration,
+) -> Option<std::net::TcpStream> {
+    let deadline = std::time::Instant::now() + wait;
+    loop {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                // Windows hands the accepted socket the listener's blocking
+                // mode; the readers in these helpers are blocking on purpose.
+                let _ = stream.set_nonblocking(false);
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
+                return Some(stream);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                if std::time::Instant::now() >= deadline {
+                    return None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            Err(_) => return None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod connection_tests {
     use super::*;
@@ -1232,12 +1265,15 @@ mod connection_tests {
     ) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
         let head = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
         let head_writer = head.clone();
         let body = body.to_string();
         let reason = reason.to_string();
         let handle = std::thread::spawn(move || {
-            let (stream, _) = listener.accept().unwrap();
+            let Some(stream) = accept_bounded(&listener, std::time::Duration::from_secs(20)) else {
+                return;
+            };
             let mut reader = BufReader::new(stream.try_clone().unwrap());
             let mut seen = String::new();
             let mut line = String::new();
