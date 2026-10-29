@@ -909,3 +909,38 @@ fn an_egress_grant_pins_the_whole_command() {
         );
     }
 }
+
+/// A binary is named by its basename, not by the literal token. Every layer
+/// compared the raw word, so `/bin/rm`, `\rm` (the alias-suppression
+/// spelling) and `rm.exe` walked past the recursive-delete check as ordinary
+/// arguments, and `command`/`exec`/`builtin` hid the real head.
+#[test]
+fn a_path_or_builtin_prefix_does_not_hide_the_binary() {
+    for cmd in [
+        "/bin/rm -rf x",
+        "/usr/bin/rm -rf x",
+        r"\rm -rf x",
+        "rm.exe -rf x",
+        "command rm -rf x",
+        "builtin rm -rf x",
+        "exec rm -rf x",
+        "sudo command rm -rf x",
+        "command -p rm -rf x",
+    ] {
+        assert!(
+            matches!(classify(cmd), Verdict::NeedsApproval(_)),
+            "prefix hid the recursive delete: {cmd} -> {:?}",
+            classify(cmd)
+        );
+    }
+    // the same prefixing must not make ordinary commands look dangerous
+    for cmd in [
+        "command -v cargo",
+        "exec cargo test",
+        "/usr/bin/env cargo check",
+        "command ls -la",
+        "/bin/ls -la",
+    ] {
+        assert_eq!(classify(cmd), Verdict::Safe, "false positive: {cmd}");
+    }
+}

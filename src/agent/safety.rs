@@ -57,11 +57,10 @@ pub fn egress_kind(cmd: &str) -> Option<&'static str> {
     }
     let raw: Vec<&str> = split(&dequoted);
     let tokens: Vec<String> = raw.iter().map(|t| t.to_lowercase()).collect();
-    let has = |name: &str| {
-        tokens
-            .iter()
-            .any(|t| t == name || t.ends_with(&format!("/{name}")))
-    };
+    // Basename, not the raw token: `C:\Windows\System32\curl.exe`, `\curl`
+    // and `./curl` all run curl, and `ends_with("/curl")` missed the ones
+    // spelled with a backslash.
+    let has = |name: &str| tokens.iter().any(|t| command_basename(t) == name);
     // git push: the subcommand follows the binary, but flags (with values)
     // may sit between them (`git -C repo push`). Skip flags and their
     // values; the first bare token decides. (Narrated "echo git push" is
@@ -69,7 +68,7 @@ pub fn egress_kind(cmd: &str) -> Option<&'static str> {
     // stays the classifier's problem, not this gate's.)
     if tokens
         .first()
-        .is_some_and(|t| t == "git" || t.ends_with("/git"))
+        .is_some_and(|t| command_basename(t) == "git")
     {
         // flags taking a separate value (matched lowercase: tokens are
         // already folded; single-token `--opt=value` forms skip as flags
@@ -553,8 +552,7 @@ fn check_git_destructive(lower: &str) -> Option<&'static str> {
             continue;
         }
         let idx = effective_command_index(&words);
-        let head = words[idx].trim_end_matches(".exe");
-        if head != "git" && !head.ends_with("/git") && !head.ends_with("\\git") {
+        if command_basename(words[idx]) != "git" {
             continue;
         }
         let mut i = idx + 1;
@@ -648,8 +646,8 @@ fn check_find_destructive(lower: &str) -> bool {
             continue;
         }
         let idx = effective_command_index(&words);
-        let head = words[idx].trim_end_matches(".exe");
-        if (head == "find" || head.ends_with("/find"))
+        let head = command_basename(words[idx]);
+        if head == "find"
             && words[idx + 1..].iter().any(|w| {
                 matches!(
                     *w,
@@ -670,8 +668,8 @@ fn check_tee_critical(lower: &str) -> bool {
             continue;
         }
         let idx = effective_command_index(&words);
-        let head = words[idx].trim_end_matches(".exe");
-        if (head == "tee" || head.ends_with("/tee"))
+        let head = command_basename(words[idx]);
+        if head == "tee"
             && words[idx + 1..]
                 .iter()
                 .filter(|w| !w.starts_with('-'))
@@ -717,7 +715,10 @@ fn looks_like_rm_rf(lower: &str) -> bool {
     // token-level check to avoid matching "confirm" etc.
     let tokens: Vec<&str> = lower.split_whitespace().collect();
     for (i, t) in tokens.iter().enumerate() {
-        if *t == "rm" {
+        // The binary is matched by BASENAME: `/bin/rm`, `\rm` and
+        // `C:\tools\rm.exe` all run rm, and comparing the raw token let each
+        // of them through as an ordinary argument.
+        if command_basename(t) == "rm" {
             let rest = &tokens[i + 1..];
             // any flag containing 'r' (recursive): -r, -rf, -fr, --recursive
             if rest
@@ -732,6 +733,23 @@ fn looks_like_rm_rf(lower: &str) -> bool {
         }
     }
     false
+}
+
+/// The binary a token names: directory stripped under either separator, a
+/// leading `\` dropped, `.exe` trimmed. One spelling of "which command is
+/// this" so the layers cannot disagree about it again.
+pub(crate) fn command_basename(token: &str) -> &str {
+    // Quotes are stripped only when they CLOSE: a token that merely starts
+    // with one is the head of a quoted string the whitespace split cut apart
+    // (`'rm -rf is a sentence'` yields `'rm`), not a quoted binary name.
+    let trimmed = match token.as_bytes() {
+        [first, .., last] if first == last && matches!(first, b'"' | b'\'') && token.len() > 1 => {
+            &token[1..token.len() - 1]
+        }
+        _ => token,
+    };
+    let tail = trimmed.rsplit(['/', '\\']).next().unwrap_or(trimmed);
+    tail.trim_end_matches(".exe")
 }
 
 fn powershell_recursive_delete(lower: &str) -> bool {
@@ -807,8 +825,7 @@ fn critical_write_operand(lower: &str) -> bool {
             continue;
         }
         let idx = effective_command_index(&words);
-        let head = words[idx].trim_end_matches(".exe");
-        let head = head.rsplit(['/', '\\']).next().unwrap_or(head);
+        let head = command_basename(words[idx]);
         if !WRITERS.contains(&head) {
             continue;
         }
@@ -849,7 +866,7 @@ fn has_dynamic_code(lower: &str) -> bool {
         if head == "eval" || head == "source" || head == "." {
             return true;
         }
-        let head_clean = head.strip_suffix(".exe").unwrap_or(head);
+        let head_clean = command_basename(head);
         if matches!(
             head_clean,
             "sh" | "bash"
@@ -912,9 +929,7 @@ fn pipe_into_shell(lower: &str) -> bool {
             continue;
         }
         let idx = effective_command_index(&words);
-        let token = words[idx].strip_suffix(".exe").unwrap_or(words[idx]);
-        let token = token.rsplit(['/', '\\']).next().unwrap_or(token);
-        if INTERPRETERS.contains(&token) {
+        if INTERPRETERS.contains(&command_basename(words[idx])) {
             return true;
         }
     }
@@ -977,6 +992,10 @@ const DANGEROUS_HEADS: &[&str] = &[
 /// the scope (audit H2).
 pub(crate) const ELEVATION_PREFIXES: &[&str] = &[
     "sudo", "doas", "env", "nice", "nohup", "xargs", "time", "timeout", "strace",
+    // Shell builtins that run their argument as the command: `command rm -rf x`
+    // and `exec rm -rf x` are rm, and skipping them here is what lets the
+    // classifiers below see the real binary instead of the builtin.
+    "command", "builtin", "exec",
 ];
 
 /// Flags that consume the word after them, per wrapper.
@@ -1307,13 +1326,15 @@ fn command_parts(node: &Node, src: &str) -> Option<(String, Vec<String>, bool)> 
     if words.is_empty() {
         return None;
     }
-    // strip elevation prefixes to find the real head
+    // strip elevation prefixes to find the real head, then reduce it to the
+    // binary it names: `/bin/rm`, `\rm` and `rm.exe` are all rm.
     let mut head = words[0].clone();
     if ELEVATION_PREFIXES.contains(&head.as_str()) {
         elevated = true;
         let refs: Vec<&str> = words.iter().map(|w| w.as_str()).collect();
         head = words[effective_command_index(&refs)].clone();
     }
+    head = command_basename(&head).to_string();
     Some((head, words, elevated))
 }
 
