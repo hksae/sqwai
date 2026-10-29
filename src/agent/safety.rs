@@ -795,7 +795,7 @@ fn check_git_destructive(lower: &str) -> Option<&'static str> {
                 if args.iter().any(|a| *a == "--no-verify" || *a == "-n") {
                     return Some("bypasses git hooks");
                 }
-                if args.iter().any(|a| *a == "--amend") {
+                if args.contains(&"--amend") {
                     return Some("rewrites the last commit");
                 }
             }
