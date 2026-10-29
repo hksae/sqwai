@@ -64,7 +64,7 @@ before `replace_all` edits and overwrites; repeat reads of unchanged windows ret
                     "paths": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "optional list of up to 16 file paths to read in a single fused call"
+                        "description": "optional list of up to 16 paths relative to the project root, read in a single fused call"
                     },
                     "ranges": {"type": "string", "description": "optional 1-based inclusive windows of file_path, e.g. \"40-90,560-600\" (up to 8)"},
                     "symbol": {"type": "string", "description": "optional function/struct/method name to extract via tree-sitter AST"},
@@ -119,7 +119,7 @@ reported the file stale); new files need none.",
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "file_path": {"type": "string"},
+                    "file_path": {"type": "string", "description": "path relative to the project root"},
                     "content": {"type": "string"}
                 },
                 "required": ["file_path", "content"]
@@ -135,8 +135,8 @@ mismatch); replace_all needs one. Never edit on a stale read — the host refuse
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "file_path": {"type": "string"},
-                    "old_string": {"type": "string"},
+                    "file_path": {"type": "string", "description": "path relative to the project root"},
+                    "old_string": {"type": "string", "description": "exact text as it appears in the file, including indentation"},
                     "new_string": {"type": "string"},
                     "replace_all": {"type": "boolean"}
                 },
@@ -149,7 +149,7 @@ mismatch); replace_all needs one. Never edit on a stale read — the host refuse
             description: "List one directory's entries (name, type, size). First move in an unfamiliar tree, and the check on what a write actually created.",
             parameters: json!({
                 "type": "object",
-                "properties": {"path": {"type": "string"}}
+                "properties": {"path": {"type": "string", "description": "directory relative to the project root; empty lists the root"}}
             }),
         },
         ToolDef {
@@ -162,7 +162,7 @@ answers which files in a tree are biggest, longest or most recently touched.",
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "pattern": {"type": "string"},
+                    "pattern": {"type": "string", "description": "path pattern relative to `path`, e.g. src/**/*.rs; a bare name matches at any depth; comma-separated for several"},
                     "path": {"type": "string", "description": "base dir, default project root"},
                     "sort": {"type": "string", "enum": ["mtime", "lines", "size", "name", "none"], "description": "ranking of the list (default mtime, newest first)"},
                     "limit": {"type": "integer", "description": "max files to return (default 300)"},
@@ -181,9 +181,9 @@ Pass context:N for N surrounding lines per match (like grep -C) so a follow-up r
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "pattern": {"type": "string"},
+                    "pattern": {"type": "string", "description": "regex, matched line by line"},
                     "path": {"type": "string", "description": "dir or file to search"},
-                    "include": {"type": "string", "description": "filename glob filter, e.g. *.rs"},
+                    "include": {"type": "string", "description": "comma-separated filename globs to keep, e.g. \"*.rs, *.toml\""},
                     "exclude": {"type": "string", "description": "comma-separated glob patterns to skip, e.g. \"*.snap,target/**\""},
                     "context": {"type": "integer", "description": "surrounding lines per match, like grep -C (default 0)"},
                     "output_mode": {"type": "string", "enum": ["content", "files", "count"], "description": "content (default) shows matches; files lists matching paths only; count gives matches per file"}
