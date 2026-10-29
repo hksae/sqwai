@@ -385,6 +385,7 @@ impl App {
                 grant,
                 allow_always,
             } => {
+                self.clear_test_ask_mode();
                 self.open_menu(Menu::Approval {
                     id,
                     subject,

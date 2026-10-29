@@ -47,7 +47,7 @@ pub(super) const SUBCOMMANDS: &[(&str, &[&str])] = &[
     (
         "/test",
         &[
-            "anim", "approval", "art", "ask", "churn", "colors", "md", "plan",
+            "anim", "approval", "art", "ask", "ask-mode", "churn", "colors", "md", "plan",
         ],
     ),
     ("/undo", &["list", "step", "turn"]),
@@ -753,6 +753,11 @@ impl App {
     }
 
     pub(super) fn open_menu(&mut self, menu: Menu) {
+        // Any other surface ends the `/test ask-mode` run; the approval
+        // sequence itself opens Menu::Approval, so that is not "other".
+        if self.test_approval_active && !matches!(&menu, Menu::Approval { .. }) {
+            self.clear_test_ask_mode();
+        }
         self.menu_stack.push(menu);
         self.menu_sel = 0;
         self.menu_open_mouse = self.last_mouse;
@@ -1480,6 +1485,11 @@ impl App {
     }
 
     pub(super) fn approval_decide(&mut self, decision: ApprovalDecision) {
+        if self.test_approval_active {
+            self.close_interaction();
+            self.show_next_test_approval();
+            return;
+        }
         let id = match self.cur_menu() {
             Some(Menu::Approval { id, .. }) => *id,
             _ => return,

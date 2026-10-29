@@ -1886,6 +1886,7 @@ fn test_subcommands_gated_behind_experimental_flag() {
             "/test approval".to_string(),
             "/test art".to_string(),
             "/test ask".to_string(),
+            "/test ask-mode".to_string(),
             "/test churn".to_string(),
             "/test colors".to_string(),
             "/test md".to_string(),
@@ -2011,7 +2012,10 @@ fn held_shift_tab_cycles_approval_only_once() {
     // without an intervening Release that is a hold, not presses
     send(&mut app, KeyEventKind::Press);
     send(&mut app, KeyEventKind::Press);
-    assert_ne!(app.approval_mode, before, "held presses must not cycle back");
+    assert_ne!(
+        app.approval_mode, before,
+        "held presses must not cycle back"
+    );
     // Release ends the hold: the next press cycles instantly, no window
     send(&mut app, KeyEventKind::Release);
     send(&mut app, KeyEventKind::Press);

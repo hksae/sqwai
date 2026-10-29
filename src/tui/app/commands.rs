@@ -64,7 +64,10 @@ impl App {
                     self.open_menu(Menu::Plan);
                 } else if rest.split_whitespace().nth(1) == Some("ask") {
                     self.start_test_ask();
+                } else if rest.split_whitespace().nth(1) == Some("ask-mode") {
+                    self.start_test_ask_mode();
                 } else if rest.split_whitespace().nth(1) == Some("approval") {
+                    self.clear_test_ask_mode();
                     self.open_menu(Menu::Approval {
                         id: 0,
                         subject: "git reset --hard HEAD~1".into(),
@@ -471,6 +474,110 @@ impl App {
         p.steps[4].status = plan::StepStatus::Cancelled;
         p.steps[4].reason = Some("unified into /plan instead".into());
         p
+    }
+
+    fn test_ask_mode_approvals() -> Vec<TestApproval> {
+        vec![
+            TestApproval {
+                subject: "git status --short".into(),
+                reason: "ask mode".into(),
+                grant: "git status *".into(),
+                allow_always: true,
+            },
+            TestApproval {
+                subject: "git reset --hard HEAD~1".into(),
+                reason: "destructive git command".into(),
+                grant: "git reset *".into(),
+                allow_always: true,
+            },
+            TestApproval {
+                subject: "git fetch origin main\ngit rebase origin/main\ncargo test --no-run\ncargo test\nrm -rf target/debug".into(),
+                reason: "ask mode".into(),
+                grant: "git fetch *".into(),
+                allow_always: true,
+            },
+            TestApproval {
+                subject: "cargo run --release --bin sqwai -- --model closerouter/deepseek-v4.1-flash-1017 --approval ask --session 01M3VRK85FW136MMBN1953B0AA --log-level debug --project C:\\Users\\Asus\\sqwai".into(),
+                reason: "ask mode".into(),
+                grant: "cargo run *".into(),
+                allow_always: true,
+            },
+            TestApproval {
+                subject: "write src/parser.rs (42 lines, 1.2 KB) · \"fn parse(input: &str) -> Result<Ast> {\"".into(),
+                reason: "ask mode".into(),
+                grant: "src/parser.rs".into(),
+                allow_always: true,
+            },
+            TestApproval {
+                subject: "edit src/agent/loop_task/mod.rs (+12 −3 lines) · \"let call = &turn.calls[idx];\"".into(),
+                reason: "ask mode".into(),
+                grant: "src/agent/loop_task/mod.rs".into(),
+                allow_always: true,
+            },
+            TestApproval {
+                subject: "webfetch https://docs.rs/tokio/latest/tokio/task/fn.spawn_blocking.html".into(),
+                reason: "network read in ask mode".into(),
+                grant: String::new(),
+                allow_always: false,
+            },
+            TestApproval {
+                subject: "websearch \"ratatui scrollable paragraph\"".into(),
+                reason: "network read in ask mode".into(),
+                grant: String::new(),
+                allow_always: false,
+            },
+            TestApproval {
+                subject: "write C:\\Users\\Asus\\Documents\\notes.md (12 lines, 812 B) · \"# Notes\"".into(),
+                reason: "writes outside the project directory".into(),
+                grant: "C:/Users/Asus/Documents/**".into(),
+                allow_always: true,
+            },
+            TestApproval {
+                subject: "npm publish --access public".into(),
+                reason: "publishes a package".into(),
+                grant: "npm publish *".into(),
+                allow_always: true,
+            },
+        ]
+    }
+
+    pub(super) fn clear_test_ask_mode(&mut self) {
+        self.test_approvals.clear();
+        self.test_approval_total = 0;
+        self.test_approval_seen = 0;
+        self.test_approval_active = false;
+    }
+
+    fn start_test_ask_mode(&mut self) {
+        self.clear_test_ask_mode();
+        self.test_approvals = Self::test_ask_mode_approvals().into();
+        self.test_approval_total = self.test_approvals.len();
+        self.test_approval_active = true;
+        self.show_next_test_approval();
+    }
+
+    pub(super) fn show_next_test_approval(&mut self) {
+        let Some(next) = self.test_approvals.pop_front() else {
+            let total = self.test_approval_total;
+            self.clear_test_ask_mode();
+            self.status(
+                &format!("ask-mode test: {total} approvals done"),
+                StatusKind::Ok,
+            );
+            return;
+        };
+        self.test_approval_seen += 1;
+        let seen = self.test_approval_seen;
+        let total = self.test_approval_total;
+        self.open_menu(Menu::Approval {
+            id: 0,
+            subject: next.subject,
+            reason: next.reason,
+            grant: next.grant,
+            allow_always: next.allow_always,
+            expanded: false,
+        });
+        self.status(&format!("ask-mode test · {seen}/{total}"), StatusKind::Info);
     }
 
     fn start_test_ask(&mut self) {

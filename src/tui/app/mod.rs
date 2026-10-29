@@ -219,6 +219,16 @@ struct TestChurn {
     open: Option<String>,
 }
 
+/// One dialog in the `/test ask-mode` sequence. It is a real `Menu::Approval`
+/// in every visual respect; the only difference is that a decision advances
+/// to the next fixture instead of reaching an agent.
+pub(super) struct TestApproval {
+    pub(super) subject: String,
+    pub(super) reason: String,
+    pub(super) grant: String,
+    pub(super) allow_always: bool,
+}
+
 pub struct App {
     cfg: Config,
     model_cfg: ModelConfig,
@@ -299,6 +309,12 @@ pub struct App {
     /// handlers (zero tokens, works offline). While `Some`, the frame
     /// loop emits a row every few seconds; Esc stops it.
     test_churn: Option<TestChurn>,
+    /// `/test ask-mode`: the remaining fake approvals and their progress.
+    /// A decision on the open dialog shows the next one; nothing is sent.
+    test_approvals: std::collections::VecDeque<TestApproval>,
+    test_approval_total: usize,
+    test_approval_seen: usize,
+    test_approval_active: bool,
     /// Approval axis (ask/auto/full) — the status chip, cycled with
     /// Shift+Tab. Session-local by design: never persisted, every
     /// launch starts from `[safety].approval_mode`.
@@ -743,6 +759,10 @@ impl App {
             aborted: false,
             agent: None,
             test_churn: None,
+            test_approvals: std::collections::VecDeque::new(),
+            test_approval_total: 0,
+            test_approval_seen: 0,
+            test_approval_active: false,
             todos: Vec::new(),
             subagents: Vec::new(),
             subagent_chats: std::collections::BTreeMap::new(),
