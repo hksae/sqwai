@@ -390,17 +390,7 @@ impl App {
         self.status(&result, StatusKind::Info);
     }
 
-    /// Switch ACT/PLAN through one funnel: arms the chip color sweep from
-    /// the currently displayed color (see `mode_blend`), so a toggle
-    /// mid-sweep redirects the blend instead of breaking it.
-    pub(super) fn set_mode(&mut self, mode: Mode) {
-        let from = self.mode_chip_rgb(Instant::now());
-        self.mode = mode;
-        self.mode_blend = Some((from, Instant::now()));
-        self.dirty = true;
-    }
-
-    /// Switch the approval axis (ask/auto/full) through the same funnel:
+    /// Switch the approval axis (ask/auto/full) through one funnel:
     /// sweep from the displayed color. The change is a notice, not history
     /// — the chip is what still says the mode ten minutes later.
     pub(super) fn set_approval_mode(&mut self, mode: crate::config::ApprovalMode) {
@@ -423,13 +413,8 @@ impl App {
     /// gated behind the confirm dialog (a held key must not be able to
     /// grant it) — once per app run: after the first enable the dialog
     /// steps aside so cycling stays fluid, and only a restart brings it
-    /// back. Leaving full is always immediate. In PLAN the axis is moot
-    /// — mutations are refused outright — so the key is a deliberate no-op
-    /// there rather than arming a mode the user cannot see acting.
+    /// back. Leaving full is always immediate.
     pub(super) fn cycle_approval_mode(&mut self) {
-        if self.mode != Mode::Act {
-            return;
-        }
         match self.approval_mode.cycle_next() {
             crate::config::ApprovalMode::Full if self.full_access_unlocked => {
                 self.set_approval_mode(crate::config::ApprovalMode::Full)

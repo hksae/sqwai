@@ -58,7 +58,7 @@ pub const SHIMMER_PERIOD_TICKS: usize = 40;
 const CREST_RGB: (u8, u8, u8) = (255, 255, 255);
 
 /// Linear blend between two RGB colors, like Codex `color::blend`.
-/// Shared with the mode-chip sweep (yellow ACT ↔ blue PLAN).
+/// Shared by the status-chip and effort-slider sweeps.
 pub(crate) fn blend(base: (u8, u8, u8), crest: (u8, u8, u8), t: f64) -> (u8, u8, u8) {
     let mix = |b: u8, c: u8| (b as f64 + (c as f64 - b as f64) * t).round() as u8;
     (

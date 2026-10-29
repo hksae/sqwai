@@ -14,7 +14,7 @@
 ///
 /// The system block is assembled per request as ordered *parts*: the stable
 /// prefix above, then whatever changes while the agent works (the plan's goal
-/// and status, the mode line, this turn's environment). Volatile facts always
+/// and status, the approval line, this turn's environment). Volatile facts always
 /// go last so they cannot invalidate a cached prefix — a key change in front of
 /// the conversation costs the whole conversation.
 pub mod env;
@@ -356,7 +356,7 @@ mod tests {
             "no_evidence",
         ];
 
-        let specs = crate::agent::tools::tool_specs(false);
+        let specs = crate::agent::tools::tool_specs();
         for name in retired_tools {
             assert!(
                 !specs.iter().any(|s| s.name == name),

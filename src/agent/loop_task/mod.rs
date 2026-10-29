@@ -336,8 +336,6 @@ pub struct AgentInput {
     /// "always allow this session" answers from earlier turns of this
     /// session; the TUI carries them across per-turn `run_agent` spawns
     pub approval_grants: SessionGrants,
-    /// PLAN mode: read-only tools only, mutations are refused
-    pub plan_mode: bool,
     /// Context window of the target model. The plan tool is handed it as an
     /// argument but reads nothing from it: plan size is bounded by
     /// `[plan].max_steps`, not by tokens.
@@ -875,7 +873,6 @@ async fn run_agent(
         approval_mode,
         approval_grants,
         web_allow_hosts,
-        plan_mode,
         mut context_limit,
         vision,
         pdf,
@@ -951,10 +948,10 @@ async fn run_agent(
         compaction.keep_turns,
         compaction.threshold,
     );
-    // Tools are part of the request prefix: sorted for stability, one set in
-    // both modes, and omitted entirely for requests that cannot call them.
+    // Tools are part of the request prefix: sorted for stability, one set,
+    // and omitted entirely for requests that cannot call them.
     let tools: Vec<crate::providers::ToolSpec> = if enable_tools {
-        let base = tools::tool_specs(plan_mode);
+        let base = tools::tool_specs();
         if let Some(registry) = &mcp_registry {
             tools::merge_specs(base, registry.specs())
         } else {
@@ -1149,7 +1146,6 @@ async fn run_agent(
             let resumed_from = context::resume_notice(&root, &events_session).map(|_| "events");
             let _ = writer.session_start(
                 &current_model_key,
-                if plan_mode { "plan" } else { "act" },
                 approval_mode.as_str(),
                 None,
                 "unknown",
@@ -1789,7 +1785,6 @@ async fn run_agent(
                     &model_id,
                     &blocked_patterns,
                     &web_allow_hosts,
-                    plan_mode,
                     approval_mode,
                     context_limit,
                     vision,
@@ -2023,14 +2018,6 @@ async fn run_agent(
                     tools::Outcome::err(
                         "project is read-only because another sqwai instance owns the lock; use --force to enable writes",
                     )
-                } else if plan_mode
-                    && tools::is_mutating_call(&call.name, &call.args)
-                    && call.name != "plan"
-                {
-                    tools::Outcome::err(format!(
-                        "PLAN mode is read-only: '{}' is disabled. Switch to ACT to use it.",
-                        call.name
-                    ))
                 } else if subagent_depth == 0
                     && call.name != "bash"
                     && call.name != "plan"
@@ -2115,7 +2102,6 @@ async fn run_agent(
                                 &root,
                                 &blocked_patterns,
                                 &web_allow_hosts,
-                                plan_mode,
                                 approval_mode,
                                 context_limit,
                                 vision,

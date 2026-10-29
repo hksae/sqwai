@@ -1501,7 +1501,7 @@ mod system_layout_tests {
             system: vec![
                 SystemPart::cached("rules"),
                 SystemPart::cached("skill bodies").in_section(PrefixSection::Skills),
-                SystemPart::volatile("Mode: act"),
+                SystemPart::volatile("approval: auto"),
             ],
             messages: vec![
                 Message::new(Role::User, "question"),
@@ -1530,7 +1530,7 @@ mod system_layout_tests {
         assert_eq!(b.skills_bytes, "skill bodies".len() as u64);
         assert_eq!(
             b.host_bytes,
-            "Mode: act".len() as u64,
+            "approval: auto".len() as u64,
             "the host block is the volatile parts, not the replay"
         );
         assert_eq!(

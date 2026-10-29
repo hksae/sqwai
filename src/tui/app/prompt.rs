@@ -5,18 +5,25 @@
 #![allow(unused_imports)]
 use super::*;
 
-const PLAN_MODE_PROMPT: &str = "## Plan mode
-The workspace is read-only: write/edit/shell calls are refused in Plan mode. Never end a \
-change request with \"I cannot modify files\" — the plan is the deliverable.
-- A change to the repo: explore first, then return a decision-complete plan (goal, \
-constraints/assumptions, changes, verification) and close with one line: switch to Act and \
-say go. For an open-ended request, propose a concrete plan with stated assumptions instead \
-of interrogating.
-- Exploration or a question: answer or report findings and stop; no plan.
-- \"Go\" while in Plan: do not execute; point to Act if a plan exists, otherwise plan.
-Never claim the plan was approved; only the user switches modes.";
-
 impl App {
+    /// The approval line the model reads: what asks, and what resolves anywhere.
+    pub(super) fn approval_prompt_line(&self) -> &'static str {
+        match self.approval_mode {
+            ApprovalMode::Full => {
+                "approval: full — file tools resolve any path, nothing asks; \
+                                   prefer write/edit/read over shell workarounds"
+            }
+            ApprovalMode::Ask => {
+                "approval: ask — every shell command and every mutating call \
+                                  asks the user first"
+            }
+            ApprovalMode::Auto => {
+                "approval: auto — risky shell commands and writes outside the project root ask \
+                 first; everything else runs"
+            }
+        }
+    }
+
     /// Stable part of the system block: built-in markdown (overridable by
     /// config_dir/system.md), AGENTS.md, SQWAI.md, the static environment,
     /// then the loaded skills — one cacheable part per layer.
@@ -140,38 +147,12 @@ impl App {
         // here): a turn-start snapshot would predate this turn's plan
         // mutations, leaving the model two plans — one live, one stale.
         let root = self.project_root.clone();
-        // The model is never told its mode elsewhere: without this line it
-        // learns Plan vs Act from the first refusal, burning a turn. The
-        // approval axis rides the same line — a live session's model hit
+        // The approval axis rides the host block: a live session's model hit
         // one outside-root refusal, concluded file tools cannot leave the
         // project, and wrote everything through bash heredocs for the rest
         // of the session, never learning the user had switched to full
         // access where `write` resolves anywhere.
-        let approval_line = match self.approval_mode {
-            ApprovalMode::Full => {
-                "approval: full — file tools resolve any path, nothing asks; \
-                                   prefer write/edit/read over shell workarounds"
-            }
-            ApprovalMode::Ask => {
-                "approval: ask — every shell command and every mutating call \
-                                  asks the user first"
-            }
-            ApprovalMode::Auto => {
-                "approval: auto — risky shell commands and writes outside the project root ask \
-                 first; everything else runs"
-            }
-        };
-        parts.push(SystemPart::volatile(format!(
-            "Mode: {} ({})",
-            match self.mode {
-                Mode::Plan => "plan",
-                Mode::Act => "act",
-            },
-            approval_line
-        )));
-        if self.mode == Mode::Plan {
-            parts.push(SystemPart::volatile(PLAN_MODE_PROMPT));
-        }
+        parts.push(SystemPart::volatile(self.approval_prompt_line()));
         // `turn_facts` (date, git status, directory tree) is populated off the
         // UI thread at the start of `run_agent` so pressing Enter never blocks
         // on git subprocesses.

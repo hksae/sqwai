@@ -1516,13 +1516,8 @@ impl App {
             out.push_str(&active_skills);
             out.push_str("\n\n");
         }
-        out.push_str(&format!(
-            "Mode: {}\n\n",
-            match self.mode {
-                Mode::Plan => "plan",
-                Mode::Act => "act",
-            }
-        ));
+        out.push_str(self.approval_prompt_line());
+        out.push_str("\n\n");
         let facts = crate::prompts::env::turn_facts(&self.project_root);
         if !facts.trim().is_empty() {
             out.push_str(facts.trim());
@@ -1569,7 +1564,7 @@ impl App {
             }
         }
 
-        let specs = crate::agent::tools::tool_specs(matches!(self.mode, Mode::Plan));
+        let specs = crate::agent::tools::tool_specs();
         out.push_str(&format!("# Tools ({})\n\n", specs.len()));
         for spec in specs {
             let first_line = spec.description.lines().next().unwrap_or("");

@@ -611,21 +611,6 @@ impl App {
                                 self.inline_ask_open_custom(q);
                             }
                         }
-                        // plan/act is switched by the user only.
-                        KeyCode::Tab
-                            if !shift
-                                && self.menu_stack.is_empty()
-                                && self.active_ask_seg().is_none() =>
-                        {
-                            // first Press after a Release toggles instantly —
-                            // no debounce window, no delay. Repeats while
-                            // held are ignored outright via tab_held.
-                            if !self.tab_held {
-                                self.tab_held = true;
-                                let next = self.mode.toggle();
-                                self.set_mode(next);
-                            }
-                        }
                         // Shift+Tab cycles the approval axis (ask → auto →
                         // full → ask) while nothing else owns the key. Both
                         // encodings are matched: most terminals send

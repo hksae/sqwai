@@ -211,7 +211,6 @@ pub(crate) async fn run_subagent_batch(
     model_id: &str,
     blocked_patterns: &[String],
     web_allow_hosts: &[String],
-    plan_mode: bool,
     approval_mode: crate::config::ApprovalMode,
     context_limit: u64,
     vision: bool,
@@ -299,7 +298,6 @@ pub(crate) async fn run_subagent_batch(
                         &root,
                         &blocked_patterns,
                         &web_allow_hosts,
-                        plan_mode,
                         approval_mode,
                         context_limit,
                         vision,
@@ -447,7 +445,6 @@ pub(crate) async fn run_subagent(
     root: &Path,
     blocked_patterns: &[String],
     web_allow_hosts: &[String],
-    plan_mode: bool,
     approval_mode: crate::config::ApprovalMode,
     context_limit: u64,
     vision: bool,
@@ -509,7 +506,6 @@ pub(crate) async fn run_subagent(
                         root,
                         blocked_patterns,
                         web_allow_hosts,
-                        plan_mode,
                         approval_mode,
                         context_limit,
                         vision,
@@ -599,9 +595,9 @@ pub(crate) async fn run_subagent(
     }
     // Keep all cacheable system parts byte-identical to the parent so every
     // child hits the parent's warm KV cache for `tools + stable system`, and
-    // retain only `Mode:` + `<turn_environment>` in the volatile tail (dropping
-    // parent-only one-shot notices like ANCHOR, stopped-turn, or undo notes),
-    // then append the child's `<subagent_contract>` and `<parent_context>`.
+    // retain only the approval line + `<turn_environment>` in the volatile tail
+    // (dropping parent-only one-shot notices like ANCHOR, stopped-turn, or undo
+    // notes), then append the child's `<subagent_contract>` and `<parent_context>`.
     //
     // The parent's skill block is deliberately not inherited: it answers bodies
     // that are in the *parent's* conversation with a pointer, and the child's
@@ -609,7 +605,9 @@ pub(crate) async fn run_subagent(
     let mut child_system: Vec<SystemPart> = system
         .into_iter()
         .filter(|p| {
-            p.cacheable || p.text.starts_with("Mode: ") || p.text.starts_with("<turn_environment>")
+            p.cacheable
+                || p.text.starts_with("approval: ")
+                || p.text.starts_with("<turn_environment>")
         })
         .collect();
     if task.clean {
@@ -646,7 +644,6 @@ pub(crate) async fn run_subagent(
         session_id: child_session.clone(),
         blocked_patterns: blocked_patterns.to_vec(),
         web_allow_hosts: web_allow_hosts.to_vec(),
-        plan_mode,
         approval_mode,
         approval_grants: super::SessionGrants::default(),
         context_limit,

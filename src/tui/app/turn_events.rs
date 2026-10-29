@@ -818,18 +818,14 @@ impl App {
                         | Menu::ConfirmFullAccess,
                 )
             );
-        let mode = self
-            .mode_blend
-            .is_some_and(|(_, t0)| t0.elapsed().as_millis() < MODE_BLEND_MS as u128);
         let effort = self
             .effort_blend
             .is_some_and(|(_, t0)| t0.elapsed().as_millis() < MODE_BLEND_MS as u128);
-        let animating = stream || tools || gallery || mode || effort;
+        let animating = stream || tools || gallery || effort;
         let why = (u32::from(stream)
             | (u32::from(tools) << 1)
             | (u32::from(gallery) << 2)
-            | (u32::from(mode) << 3)
-            | (u32::from(effort) << 4))
+            | (u32::from(effort) << 3))
             | if animating { 0 } else { 1 << 6 };
         (animating, why)
     }

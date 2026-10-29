@@ -646,7 +646,7 @@ fn path_escape_is_rejected() {
 #[test]
 fn bash_description_names_one_shell_the_actual_one() {
     use crate::agent::shell::ShellKind;
-    let spec = super::specs::tool_specs(false)
+    let spec = super::specs::tool_specs()
         .into_iter()
         .find(|s| s.name == "bash")
         .expect("bash is registered");
@@ -1045,13 +1045,13 @@ fn git_status_and_diff_work_in_project_root() {
 
 #[test]
 fn tool_specs_are_stably_sorted() {
-    let names: Vec<String> = tool_specs(false).iter().map(|t| t.name.clone()).collect();
+    let names: Vec<String> = tool_specs().iter().map(|t| t.name.clone()).collect();
     assert_eq!(names, tool_names());
 
     let mut sorted = names.clone();
     sorted.sort();
     assert_eq!(names, sorted, "tool order must not depend on registration");
-    let again: Vec<String> = tool_specs(false).iter().map(|t| t.name.clone()).collect();
+    let again: Vec<String> = tool_specs().iter().map(|t| t.name.clone()).collect();
     assert_eq!(names, again, "the schema block must be byte-stable");
 }
 
@@ -1092,29 +1092,17 @@ fn trim_middle_keeps_head_and_tail() {
     assert!(out.chars().count() <= 9 + 60, "{out}");
 }
 
-/// One schema set in every mode: the tool block is part of the request
-/// prefix, so a mode-dependent set re-keys the cache on every Plan/Act
-/// toggle. Plan mode refuses mutating calls at dispatch instead
-/// (`is_mutating_call`); the schemas stay identical so the prefix does.
+/// Mutating tools are advertised like any other; the gates read
+/// `is_mutating_call` at dispatch instead of hiding them from the schema.
 #[test]
-fn tool_schemas_are_mode_independent() {
-    let names = |plan_mode: bool| {
-        let mut names: Vec<String> = tool_specs(plan_mode)
-            .iter()
-            .map(|t| t.name.clone())
-            .collect();
-        names.sort();
-        names
-    };
-    assert_eq!(names(true), names(false));
-    let specs = tool_specs(true);
+fn tool_schemas_advertise_mutating_tools_and_classify_them() {
+    let specs = tool_specs();
     for name in ["read", "plan", "write", "edit", "bash"] {
         assert!(
             specs.iter().any(|t| t.name == name),
-            "{name} is advertised in PLAN mode too"
+            "{name} is advertised"
         );
     }
-    // the refusal lives at dispatch, not in the schemas
     assert!(is_mutating_call(
         "write",
         &json!({"file_path": "src/a.rs", "content": "x"})

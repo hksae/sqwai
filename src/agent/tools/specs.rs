@@ -732,21 +732,17 @@ fn call_summary_raw(name: &str, args: &Value) -> String {
 ///
 /// Sorted by name, never by registration order: the tool block is part of the
 /// request prefix, so it must be byte-identical between requests for a
-/// prefix cache to hit. The set is mode-independent for the same reason;
-/// Plan mode refuses mutating calls at dispatch instead of hiding them.
+/// prefix cache to hit.
 pub fn tool_names() -> Vec<String> {
     let mut names: Vec<String> = defs().into_iter().map(|d| d.name.to_string()).collect();
     names.sort();
     names
 }
 
-pub fn tool_specs(_plan_mode: bool) -> Vec<crate::providers::ToolSpec> {
-    // One schema set in every mode. The tool block is part of the request
-    // prefix, so a mode-dependent set re-keys the cache on every Plan/Act
-    // toggle; masking (Manus-style) would cost the same. Plan mode is
-    // enforced by the dispatcher instead (`is_mutating_call` at dispatch
-    // refuses mutating calls with an honest message, `git_branch` actions
-    // included) — which is where the authority already lived.
+pub fn tool_specs() -> Vec<crate::providers::ToolSpec> {
+    // The tool block is part of the request prefix: a set that varies by
+    // anything but the session's configuration re-keys the cache, so the
+    // schemas stay one sorted list.
     let mut specs: Vec<crate::providers::ToolSpec> = defs()
         .into_iter()
         .map(|d| crate::providers::ToolSpec {
@@ -960,7 +956,7 @@ fn cp866_char(byte: u8) -> char {
 /// description must present them as notes the host never runs or certifies.
 #[test]
 fn plan_tool_description_describes_criteria_as_notes() {
-    let plan = tool_specs(false)
+    let plan = tool_specs()
         .into_iter()
         .find(|s| s.name == "plan")
         .expect("plan tool");
@@ -1039,7 +1035,7 @@ fn decode_child_output_handles_console_codepage() {
 #[test]
 fn the_ask_user_schema_matches_the_shared_bounds() {
     use crate::agent::loop_task::{ASK_MAX_OPTIONS, ASK_MAX_QUESTIONS, ASK_MIN_OPTIONS};
-    let spec = tool_specs(false)
+    let spec = tool_specs()
         .into_iter()
         .find(|t| t.name == "ask_user")
         .expect("ask_user is offered");
@@ -1072,7 +1068,7 @@ fn the_ask_user_schema_matches_the_shared_bounds() {
 /// growth stays a conscious decision, not drift.
 #[test]
 fn tool_specs_wire_weight() {
-    let specs = tool_specs(false);
+    let specs = tool_specs();
     let wire: String = specs
         .iter()
         .map(|s| serde_json::to_string(&s.parameters).unwrap_or_default())

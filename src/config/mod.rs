@@ -106,9 +106,8 @@ impl EffortLevel {
     }
 }
 
-/// When the agent asks the user before acting. Orthogonal to the TUI's
-/// PLAN/ACT axis (PLAN refuses mutations outright, whatever this says);
-/// this axis answers "when does a tool call need a confirmation dialog".
+/// When the agent asks the user before acting: "when does a tool call need
+/// a confirmation dialog".
 /// It governs prompts only: the hard gates — `[safety].blocked_patterns`,
 /// host-owned paths, the path jail, the SSRF allowlist — hold in every
 /// mode, full access included.
@@ -1081,9 +1080,9 @@ pub struct UiConfig {
     /// Takes effect on the next launch.
     #[serde(default = "default_true")]
     pub mouse: bool,
-    /// show the approval-mode chip (ASK/AUTO/FULL) next to the ACT/PLAN
-    /// chip in the status bar. Hiding it changes nothing about the mode
-    /// itself — Shift+Tab still cycles it.
+    /// show the approval-mode chip (ASK/AUTO/FULL) in the status bar.
+    /// Hiding it changes nothing about the mode itself — Shift+Tab still
+    /// cycles it.
     #[serde(default = "default_true")]
     pub approval_chip: bool,
 }

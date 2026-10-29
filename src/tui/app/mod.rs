@@ -154,43 +154,10 @@ struct Toast {
     until: Instant,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum Mode {
-    Plan,
-    Act,
-}
-
-impl Mode {
-    fn toggle(self) -> Self {
-        match self {
-            Self::Plan => Self::Act,
-            Self::Act => Self::Plan,
-        }
-    }
-    fn label(self) -> &'static str {
-        match self {
-            Self::Plan => "PLAN",
-            Self::Act => "ACT",
-        }
-    }
-    /// Sweep endpoint for the chip color transition.
-    fn chip_rgb(self) -> (u8, u8, u8) {
-        match self {
-            Self::Act => MODE_ACT_RGB,
-            Self::Plan => MODE_PLAN_RGB,
-        }
-    }
-}
-
-/// Mode-chip color sweep length: a quick flash, not a lingering animation.
+/// Status-chip color sweep length: a quick flash, not a lingering animation.
 const MODE_BLEND_MS: u64 = 250;
-/// Sweep endpoints: the effort Low/High hues, so the settle frame does
-/// not pop (see `Theme::mode_chip_act/plan`) — which is why they name
-/// the theme's numbers instead of carrying their own copy.
-const MODE_ACT_RGB: (u8, u8, u8) = crate::tui::theme::Theme::OK_RGB;
-const MODE_PLAN_RGB: (u8, u8, u8) = (110, 165, 255);
 
-/// Approval chip (the second chip in the status bar). Sweep endpoints name
+/// Approval chip. Sweep endpoints name
 /// the theme's verdicts so the settle frame does not pop; the AUTO gray
 /// has no house RGB — META is ANSI Gray — so the sweep uses the effort
 /// scale's Off stop (128,128,128), the palette's existing "quiet" number,
@@ -332,9 +299,8 @@ pub struct App {
     /// handlers (zero tokens, works offline). While `Some`, the frame
     /// loop emits a row every few seconds; Esc stops it.
     test_churn: Option<TestChurn>,
-    mode: Mode,
-    /// Approval axis (ask/auto/full) — the second status chip, cycled with
-    /// Shift+Tab in ACT. Session-local by design: never persisted, every
+    /// Approval axis (ask/auto/full) — the status chip, cycled with
+    /// Shift+Tab. Session-local by design: never persisted, every
     /// launch starts from `[safety].approval_mode`.
     approval_mode: crate::config::ApprovalMode,
     /// Full access was enabled once in this app run: the confirm dialog
@@ -350,7 +316,7 @@ pub struct App {
     startup: bool,
     pub(super) last_ctrl_c: Option<Instant>,
     /// Tab is physically held down (seen Press without Release): repeats
-    /// while held must not toggle the mode, only a fresh press does
+    /// while held must not cycle approval, only a fresh press does
     tab_held: bool,
     /// transient bottom-bar notice (3s): every status/error lands here, the
     /// chat stays clean. A new notice replaces the current one.
@@ -577,7 +543,7 @@ pub struct App {
     /// rebuilt on every slider draw; empty when another menu is open
     effort_hits: Vec<(Rect, usize)>,
     /// effort slider color sweep: (displayed color, arm time) plus the
-    /// selection it was armed for. Mirrors the mode-chip blend: a level
+    /// selection it was armed for. Mirrors the approval-chip blend: a level
     /// change redirects mid-sweep instead of restarting it. Retired (→ None)
     /// past the sweep, and cleared whenever the popup opens fresh.
     effort_blend: Option<((u8, u8, u8), Instant)>,
@@ -635,12 +601,10 @@ pub struct App {
     /// take seconds with many sessions, so `/new` must not block on it.
     maintain_rx:
         Option<std::sync::mpsc::Receiver<anyhow::Result<crate::agent::checkpoints::Maintenance>>>,
-    /// Mode-chip color sweep: RGB the sweep started from + start time. The
-    /// target is always the current mode's color, so a toggle mid-sweep
-    /// re-anchors from the displayed color — rapid toggles redirect the
-    /// blend instead of breaking it. Retired (→ None) past the sweep.
-    mode_blend: Option<((u8, u8, u8), Instant)>,
-    /// Same sweep for the approval chip, with the same re-anchor rule.
+    /// Approval-chip color sweep: RGB the sweep started from + start time.
+    /// The target is always the current approval mode's color, so a toggle
+    /// mid-sweep re-anchors from the displayed color — rapid toggles redirect
+    /// the blend instead of breaking it. Retired (→ None) past the sweep.
     approval_blend: Option<((u8, u8, u8), Instant)>,
     status_y: u16,
 
@@ -793,7 +757,6 @@ impl App {
             pending_reveal: String::new(),
             thinking_open: false,
             thinking_idx: None,
-            mode: Mode::Act,
             approval_mode,
             full_access_unlocked: approval_mode == ApprovalMode::Full,
             approval_grants: Default::default(),
@@ -907,7 +870,6 @@ impl App {
             builtin_update_rx: None,
             last_builtin_check: Instant::now(),
             maintain_rx: None,
-            mode_blend: None,
             approval_blend: None,
             status_y: 0,
             press: None,
@@ -1035,14 +997,11 @@ impl App {
             consider(dl);
         }
 
-        // 4. Short 250ms color sweeps (mode chips / effort slider): step at
-        //    ~60 FPS (16ms) for smooth gradient interpolation.
+        // 4. Short 250ms color sweeps (approval chip / effort slider): step
+        //    at ~60 FPS (16ms) for smooth gradient interpolation.
         let smooth_blend = self
-            .mode_blend
+            .approval_blend
             .is_some_and(|(_, t0)| t0.elapsed().as_millis() < MODE_BLEND_MS as u128)
-            || self
-                .approval_blend
-                .is_some_and(|(_, t0)| t0.elapsed().as_millis() < MODE_BLEND_MS as u128)
             || self
                 .effort_blend
                 .is_some_and(|(_, t0)| t0.elapsed().as_millis() < MODE_BLEND_MS as u128);
@@ -1212,13 +1171,6 @@ impl App {
             // Retire the finished chip sweep: without this the last RGB
             // frame would stick, since nothing else repaints a settled
             // status bar.
-            if self
-                .mode_blend
-                .is_some_and(|(_, t0)| t0.elapsed().as_millis() >= MODE_BLEND_MS as u128)
-            {
-                self.mode_blend = None;
-                self.dirty = true;
-            }
             if self
                 .approval_blend
                 .is_some_and(|(_, t0)| t0.elapsed().as_millis() >= MODE_BLEND_MS as u128)

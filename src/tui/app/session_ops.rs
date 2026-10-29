@@ -334,7 +334,6 @@ impl App {
             approval_mode: self.approval_mode,
             approval_grants: self.approval_grants.clone(),
             web_allow_hosts: self.cfg.web.allow_hosts.clone(),
-            plan_mode: self.mode == Mode::Plan,
             context_limit: self.session.context_limit,
             vision: self.model_cfg.vision.unwrap_or(true),
             pdf: self.model_cfg.pdf.unwrap_or(false),
@@ -485,7 +484,6 @@ impl App {
             approval_mode: self.approval_mode,
             approval_grants: self.approval_grants.clone(),
             web_allow_hosts: Vec::new(),
-            plan_mode: false,
             context_limit: self.session.context_limit,
             vision: self.model_cfg.vision.unwrap_or(true),
             pdf: self.model_cfg.pdf.unwrap_or(false),
@@ -717,23 +715,8 @@ impl App {
         self.dirty = true;
     }
 
-    pub(super) fn mode_chip_rgb(&self, now: Instant) -> (u8, u8, u8) {
-        let to = self.mode.chip_rgb();
-        match &self.mode_blend {
-            Some((from, t0)) => {
-                let el = now.duration_since(*t0).as_millis();
-                if el >= MODE_BLEND_MS as u128 {
-                    to
-                } else {
-                    crate::tui::shimmer::blend(*from, to, el as f64 / MODE_BLEND_MS as f64)
-                }
-            }
-            None => to,
-        }
-    }
-
     /// The approval chip's sweep, re-anchored from the displayed color on
-    /// a mid-sweep switch, exactly like `mode_chip_rgb`.
+    /// a mid-sweep switch.
     pub(super) fn approval_chip_rgb(&self, now: Instant) -> (u8, u8, u8) {
         let to = self.approval_mode.chip_rgb();
         match &self.approval_blend {

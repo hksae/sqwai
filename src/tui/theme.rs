@@ -104,9 +104,9 @@ impl Theme {
         Color::DarkGray
     }
     /// One green, one red, one amber for the whole UI. Verdicts (the tool dot,
-    /// the finish wave, blockquotes, the ACT chip) and the effort scale's
-    /// matching stops all read these three numbers: the app used to carry four
-    /// greens and two reds, every one of them claiming to mean "good".
+    /// the finish wave, blockquotes) and the effort scale's matching stops all
+    /// read these three numbers: the app used to carry four greens and two
+    /// reds, every one of them claiming to mean "good".
     pub const OK_RGB: (u8, u8, u8) = (135, 200, 145);
     pub const ERR_RGB: (u8, u8, u8) = (220, 150, 145);
     pub const WARN_RGB: (u8, u8, u8) = (222, 180, 124);
@@ -243,16 +243,7 @@ impl Theme {
     pub fn border_dim() -> Style {
         Style::new().fg(Self::BORDER_DIM())
     }
-    /// ACT mode chip: the effort Low hue, never bold — same soft treatment
-    /// as the effort palette it mirrors.
-    pub fn mode_chip_act() -> Style {
-        Style::new().fg(Self::effort_color(EffortLevel::Low))
-    }
-    /// PLAN mode chip: the effort High hue, never bold.
-    pub fn mode_chip_plan() -> Style {
-        Style::new().fg(Self::effort_color(EffortLevel::High))
-    }
-    /// Approval-axis chips, the second chip in the status bar. Color shows
+    /// Approval-axis chips, the status bar's chip. Color shows
     /// deviation from the norm: the default (Auto) is quiet META gray, Ask
     /// earns the house amber (attention — the same WARN the approval
     /// dialog paints the command with), Full earns the one red. Never bold;
@@ -313,8 +304,6 @@ impl Theme {
             ("RULE", Style::new().fg(Self::rule_color())),
             ("SECTION", Self::section()),
             ("MARKER", Self::marker()),
-            ("MODE_ACT", Self::mode_chip_act()),
-            ("MODE_PLAN", Self::mode_chip_plan()),
             ("MODE_ASK", Self::mode_chip_ask()),
             ("MODE_AUTO", Self::mode_chip_auto()),
             ("MODE_FULL", Self::mode_chip_full()),

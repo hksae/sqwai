@@ -1266,37 +1266,18 @@ impl App {
         self.md_click = None;
         self.ctx_click = None;
 
-        // Two chips one column apart: the mode chip's trailing pad is the
-        // whole gap, the approval chip carries no leading pad. The mode
-        // chip answers "read-only or full", the approval chip "who
-        // approves" — separate axes, separate keys (Tab, Shift+Tab), both
-        // visible even in PLAN. [ui].approval_chip = false drops the
-        // second chip from the bar; the axis itself stays on Shift+Tab.
-        let mode_chip = format!(" {} ", self.mode.label());
+        // The status chip answers "who approves". [ui].approval_chip = false
+        // drops it from the bar; the axis itself stays on Shift+Tab.
         let approval_chip = if self.cfg.ui.approval_chip {
-            format!("{} ", self.approval_mode.label())
+            format!(" {} ", self.approval_mode.label())
         } else {
             String::new()
         };
-        let left_base_cols = cols(&mode_chip) + cols(&approval_chip);
+        let left_base_cols = cols(&approval_chip);
         let fixed_len: usize = cols(&ctx_label) + 1 + cols(&model_label) + 1 + cols(&ef_label) + 1;
 
         let lw = left_base_cols as u16;
         let right_len = fixed_len;
-        let chip_settled = match self.mode {
-            Mode::Act => Theme::mode_chip_act(),
-            Mode::Plan => Theme::mode_chip_plan(),
-        };
-        let chip_style = match self.mode_blend {
-            Some((_, t0))
-                if t0.elapsed().as_millis() < MODE_BLEND_MS as u128
-                    && crate::tui::shimmer::has_truecolor() =>
-            {
-                let (r, g, b) = self.mode_chip_rgb(std::time::Instant::now());
-                Style::new().fg(Color::Rgb(r, g, b))
-            }
-            _ => chip_settled,
-        };
         let approval_settled = match self.approval_mode {
             ApprovalMode::Ask => Theme::mode_chip_ask(),
             ApprovalMode::Auto => Theme::mode_chip_auto(),
@@ -1312,7 +1293,7 @@ impl App {
             }
             _ => approval_settled,
         };
-        let mut spans = vec![Span::styled(mode_chip, chip_style)];
+        let mut spans: Vec<Span> = Vec::new();
         if self.cfg.ui.approval_chip {
             spans.push(Span::styled(approval_chip, approval_style));
         }

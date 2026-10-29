@@ -929,7 +929,6 @@ impl EventLog {
     pub fn session_start(
         &mut self,
         model: &str,
-        mode: &str,
         approval: &str,
         head: Option<&str>,
         cwd_hash: &str,
@@ -939,7 +938,6 @@ impl EventLog {
             "session_start",
             json!({
                 "model": model,
-                "mode": mode,
                 "approval": approval,
                 "head": head,
                 "cwd_hash": cwd_hash,

@@ -875,7 +875,7 @@ mod live_cache {
         let live = live_provider();
         let mut system = stable_prefix();
         system.push(crate::providers::SystemPart::volatile(
-            "Mode: act\n<plan_status>status: active, steps: 1 done</plan_status>",
+            "approval: auto\n<plan_status>status: active, steps: 1 done</plan_status>",
         ));
 
         // fresh turn: [system][host block][user]
@@ -1049,7 +1049,7 @@ fn openrouter_injects_cache_control_for_anthropic_gemini_and_qwen() {
         model_id: "anthropic/claude-sonnet-4.5".into(),
         system: vec![
             crate::providers::SystemPart::cached("stable rules"),
-            crate::providers::SystemPart::volatile("Mode: act"),
+            crate::providers::SystemPart::volatile("approval: auto"),
         ],
         messages: vec![Message::new(Role::User, "hello")],
         effort: None,

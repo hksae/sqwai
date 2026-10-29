@@ -1132,66 +1132,29 @@ fn effort_levels_include_off_for_status_bar_and_model_settings() {
 }
 
 #[test]
-fn mode_chip_matches_mode_when_settled() {
-    let mut app = test_app("http://127.0.0.1:9/v1".into());
-    // settled ACT: bright-green go-chip
-    let spans = app.status_bar_spans(120);
-    assert_eq!(spans[0].content.as_ref(), " ACT ");
-    assert_eq!(spans[0].style, crate::tui::theme::Theme::mode_chip_act());
-    // settled PLAN: blue chip (blend force-expired, no timing involved)
-    app.set_mode(Mode::Plan);
-    app.mode_blend = Some((
-        super::super::MODE_PLAN_RGB,
-        std::time::Instant::now() - std::time::Duration::from_secs(5),
-    ));
-    let spans = app.status_bar_spans(120);
-    assert_eq!(spans[0].content.as_ref(), " PLAN ");
-    assert_eq!(spans[0].style, crate::tui::theme::Theme::mode_chip_plan());
-}
-
-#[test]
-fn mode_toggle_rearms_blend_instead_of_breaking() {
-    // rapid toggles redirect the sweep from the displayed color: the
-    // blend stays armed and the mode always wins
-    let mut app = test_app("http://127.0.0.1:9/v1".into());
-    app.set_mode(Mode::Plan);
-    assert_eq!(app.mode, Mode::Plan);
-    assert!(app.mode_blend.is_some(), "toggle arms the sweep");
-    app.set_mode(Mode::Act);
-    assert_eq!(app.mode, Mode::Act);
-    assert!(
-        app.mode_blend.is_some(),
-        "second toggle re-arms, never drops"
-    );
-}
-
-#[test]
 fn approval_chip_matches_mode_when_settled() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
-    // default AUTO: the quiet gray chip sits second, the mode chip keeps
-    // its place and its color
+    // default AUTO: the quiet gray chip opens the bar
     let spans = app.status_bar_spans(120);
-    assert_eq!(spans[0].content.as_ref(), " ACT ");
-    assert_eq!(spans[0].style, crate::tui::theme::Theme::mode_chip_act());
-    assert_eq!(spans[1].content.as_ref(), "AUTO ");
-    assert_eq!(spans[1].style, crate::tui::theme::Theme::mode_chip_auto());
+    assert_eq!(spans[0].content.as_ref(), " AUTO ");
+    assert_eq!(spans[0].style, crate::tui::theme::Theme::mode_chip_auto());
     // ASK earns the amber, FULL the red (blend force-expired, no timing)
     let expire = |app: &mut App| {
         app.approval_blend = Some((
-            super::super::MODE_PLAN_RGB,
+            (0, 0, 0),
             std::time::Instant::now() - std::time::Duration::from_secs(5),
         ));
     };
     app.set_approval_mode(ApprovalMode::Ask);
     expire(&mut app);
     let spans = app.status_bar_spans(120);
-    assert_eq!(spans[1].content.as_ref(), "ASK ");
-    assert_eq!(spans[1].style, crate::tui::theme::Theme::mode_chip_ask());
+    assert_eq!(spans[0].content.as_ref(), " ASK ");
+    assert_eq!(spans[0].style, crate::tui::theme::Theme::mode_chip_ask());
     app.set_approval_mode(ApprovalMode::Full);
     expire(&mut app);
     let spans = app.status_bar_spans(120);
-    assert_eq!(spans[1].content.as_ref(), "FULL ");
-    assert_eq!(spans[1].style, crate::tui::theme::Theme::mode_chip_full());
+    assert_eq!(spans[0].content.as_ref(), " FULL ");
+    assert_eq!(spans[0].style, crate::tui::theme::Theme::mode_chip_full());
 }
 
 #[test]
@@ -1199,7 +1162,6 @@ fn approval_chip_can_be_hidden_by_config() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.cfg.ui.approval_chip = false;
     let spans = app.status_bar_spans(120);
-    assert_eq!(spans[0].content.as_ref(), " ACT ");
     assert!(
         spans.iter().all(|s| !s.content.contains("AUTO")),
         "the approval chip is gone from the bar"
@@ -1264,18 +1226,6 @@ fn launching_in_full_mode_counts_as_already_enabled() {
     app.cycle_approval_mode();
     assert_eq!(app.approval_mode, ApprovalMode::Full);
     assert!(app.menu_stack.is_empty(), "no dialog for a pre-enabled run");
-}
-
-#[test]
-fn approval_cycle_is_deliberately_inert_in_plan() {
-    let mut app = test_app("http://127.0.0.1:9/v1".into());
-    app.set_mode(Mode::Plan);
-    app.cycle_approval_mode();
-    assert_eq!(app.approval_mode, ApprovalMode::Auto);
-    assert!(
-        app.menu_stack.is_empty(),
-        "PLAN must not arm a hidden approval mode"
-    );
 }
 
 #[test]
@@ -2036,35 +1986,40 @@ fn test_galleries_open_with_content() {
 }
 
 #[test]
-fn held_tab_toggles_mode_only_once() {
+fn held_shift_tab_cycles_approval_only_once() {
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
     let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.full_access_unlocked = true;
     let send = |app: &mut App, kind: KeyEventKind| {
         let (tx, rx) = std::sync::mpsc::channel();
         tx.send(Event::Key(KeyEvent::new_with_kind(
             KeyCode::Tab,
-            KeyModifiers::empty(),
+            KeyModifiers::SHIFT,
             kind,
         )))
         .unwrap();
         app.poll_input(&rx).unwrap();
     };
-    let before = app.mode;
+    let before = app.approval_mode;
     send(&mut app, KeyEventKind::Press);
-    assert_ne!(app.mode, before, "press must toggle");
+    assert_ne!(app.approval_mode, before, "press must cycle");
     // auto-repeat while held must not flap back and forth
     send(&mut app, KeyEventKind::Repeat);
     send(&mut app, KeyEventKind::Repeat);
-    assert_ne!(app.mode, before, "repeat must not toggle");
+    assert_ne!(app.approval_mode, before, "repeat must not cycle");
     // terminals without repeat events send held Tab as rapid Press:
     // without an intervening Release that is a hold, not presses
     send(&mut app, KeyEventKind::Press);
     send(&mut app, KeyEventKind::Press);
-    assert_ne!(app.mode, before, "held presses must not toggle back");
-    // Release ends the hold: the next press toggles instantly, no window
+    assert_ne!(app.approval_mode, before, "held presses must not cycle back");
+    // Release ends the hold: the next press cycles instantly, no window
     send(&mut app, KeyEventKind::Release);
     send(&mut app, KeyEventKind::Press);
-    assert_eq!(app.mode, before, "fresh press must toggle at once");
+    assert_eq!(
+        app.approval_mode,
+        ApprovalMode::Ask,
+        "fresh press must cycle at once"
+    );
 }
 
 fn queue_test_app() -> crate::tui::app::App {
@@ -2376,7 +2331,7 @@ fn context_menu_shows_parts_legend_and_honest_gaps() {
     // block on the scale unreadable
     assert!(t.contains("● skills"), "skills is a legend row: {t}");
     // and the replayed chain of thought is not allowed to hide inside a row
-    // named after the mode line
+    // named after the approval line
     assert!(
         t.contains("● reasoning"),
         "replayed provider state is a legend row: {t}"
