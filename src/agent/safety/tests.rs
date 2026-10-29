@@ -799,6 +799,42 @@ fn git_force_and_clean_in_any_flag_position_and_script_interpreters_are_caught()
     }
 }
 
+/// Hook bypass, history rewrite, and blanket staging all look like routine git
+/// but change what the user gets to review, so each shape asks on its own while
+/// the explicit-path forms stay free.
+#[test]
+fn git_hook_bypass_amend_and_blanket_add_need_approval() {
+    for cmd in [
+        "git commit --no-verify -m x",
+        "git commit -n -m x",
+        "git commit --amend -m x",
+        "git commit --amend --no-edit",
+        "git add .",
+        "git add ./",
+        "git add -A",
+        "git add --all",
+        "git -C repo add -A",
+        "cargo test && git add .",
+    ] {
+        for shell in [ShellKind::Bash, ShellKind::PowerShell, ShellKind::Cmd] {
+            assert!(
+                matches!(classify_for(shell, cmd), Verdict::NeedsApproval(_)),
+                "missed git shape for {shell:?}: {cmd}"
+            );
+        }
+    }
+
+    for cmd in [
+        "git commit -m x",
+        "git add src/main.rs",
+        "git add -p",
+        "git add -u",
+        "git status",
+    ] {
+        assert_eq!(classify(cmd), Verdict::Safe, "false positive: {cmd}");
+    }
+}
+
 #[test]
 fn compound_splitter_handles_chains_substitutions_and_rejects_dangling_ops() {
     let subs =

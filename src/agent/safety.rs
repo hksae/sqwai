@@ -695,7 +695,10 @@ fn heuristic_classify(shell: ShellKind, cmd: &str) -> Verdict {
 /// Token-level detector for destructive/forceful git subcommands across all
 /// shells. Handles global git options (`git -C dir push origin main --force`)
 /// and flags in any position (`--force`, `-f`, `--force-with-lease`, `+ref`,
-/// `clean -fd`, `reset --hard`, `branch -D`, `stash clear/drop`).
+/// `clean -fd`, `reset --hard`, `branch -D`, `stash clear/drop`,
+/// `commit --no-verify/--amend`, `add -A/.`).
+///
+/// The input is already lowercased, so `-A` arrives here as `-a`.
 fn check_git_destructive(lower: &str) -> Option<&'static str> {
     const GIT_VALUE_FLAGS: &[&str] = &[
         "-c",
@@ -786,6 +789,22 @@ fn check_git_destructive(lower: &str) -> Option<&'static str> {
             "stash" => {
                 if args.first().is_some_and(|a| *a == "clear" || *a == "drop") {
                     return Some("forceful git operation");
+                }
+            }
+            "commit" => {
+                if args.iter().any(|a| *a == "--no-verify" || *a == "-n") {
+                    return Some("bypasses git hooks");
+                }
+                if args.iter().any(|a| *a == "--amend") {
+                    return Some("rewrites the last commit");
+                }
+            }
+            "add" | "stage" => {
+                if args
+                    .iter()
+                    .any(|a| *a == "." || *a == "./" || *a == "-a" || *a == "--all")
+                {
+                    return Some("stages every path, untracked files included");
                 }
             }
             "filter-branch" | "filter-repo" => {

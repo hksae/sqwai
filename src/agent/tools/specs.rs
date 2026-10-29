@@ -40,6 +40,8 @@ fn bash_description() -> &'static str {
         format!(
             "Run a shell command in the project directory. The shell here is {shell}: use its \
 syntax. Destructive or risky shapes need approval or are refused — never work around that. \
+Nothing is at the keyboard: pass non-interactive flags (`--yes`, `-y`, `--no-input`) instead of \
+running a command that waits for a prompt. \
 Long output is truncated to a tail with the full log path. Use background=true for long jobs; \
 wait with bash_output. Files read or searched through the shell stay unregistered: `write` and \
 `edit` still require a `read` of the file first."
