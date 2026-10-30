@@ -76,7 +76,7 @@ impl App {
                 self.persist_transcript(messages, summary)
             }
             AgentEvent::RequestBreakdown(b) => {
-                self.session.last_breakdown = Some(b);
+                self.session.pending_breakdown = Some(b);
                 let fixed = b.system_tokens + b.skills_tokens + b.host_tokens;
                 crate::providers::log_http(&format!(
                     "request breakdown: system={}B skills={}B history={}B \

@@ -122,12 +122,18 @@ pub struct Session {
     /// live context occupancy — it replaces, never accumulates.
     #[serde(default)]
     pub last_usage: Option<Usage>,
-    /// Parts of the last built request in estimated tokens (bytes over four,
-    /// the same counter as `estimated_tokens`). The parts never sum to the
-    /// provider's `prompt_tokens` exactly; the gap is displayed as its own
-    /// "unaccounted" row, not spread over the others.
+    /// Parts of the last **completed** request in tokens. Written together
+    /// with `last_usage` by `add_usage`, never before: a breakdown priced from
+    /// bytes belongs to the request that is going out, and showing it beside
+    /// the meter of the request that came back is how one screen ends up
+    /// describing two different requests with three denominators.
     #[serde(default)]
     pub last_breakdown: Option<crate::providers::RequestBreakdown>,
+    /// The breakdown of the request currently in flight. Held apart from
+    /// `last_breakdown` until the provider bills it, so the context view never
+    /// mixes a fresh byte estimate with a stale token count.
+    #[serde(default, skip)]
+    pub pending_breakdown: Option<crate::providers::RequestBreakdown>,
     /// High-water mark of the provider's `prompt_tokens` across the session:
     /// "it was 12k, now it is 8k" is the question a compaction answers, and
     /// without a stored peak the menu can only show the current frame.
@@ -236,6 +242,7 @@ impl Session {
             estimated_tokens: 0,
             last_usage: None,
             last_breakdown: None,
+            pending_breakdown: None,
             context_peak_tokens: 0,
             summary: None,
             cache_confirmed: false,
@@ -448,11 +455,13 @@ impl Session {
         // keep the prompt size of the request that actually reported one.
         if u.prompt_tokens > 0 {
             self.last_usage = Some(*u);
-            // The breakdown was built before the request left, from bytes over
-            // four. This is the moment both numbers for the same request are in
-            // hand, so the rows are re-expressed in what the provider billed.
-            if let Some(breakdown) = self.last_breakdown.as_mut() {
+            // The pair lands together. This is the first moment both numbers for
+            // the same request are in hand, so the rows are re-expressed in what
+            // the provider billed and only then become the breakdown the context
+            // view reads.
+            if let Some(mut breakdown) = self.pending_breakdown.take() {
                 breakdown.rescale_to_prompt_tokens(u.prompt_tokens);
+                self.last_breakdown = Some(breakdown);
             }
         } else if let Some(prev) = self.last_usage.as_mut() {
             prev.completion_tokens += u.completion_tokens;
@@ -465,6 +474,36 @@ impl Session {
             Some(u) if u.prompt_tokens > 0 => u.prompt_tokens,
             _ => self.estimated_tokens,
         }
+    }
+
+    /// What the **next** request would cost, priced the way the compaction gate
+    /// prices it: the provider's own count for the last whole-transcript
+    /// request, plus the bytes the transcript has gained or lost since, at the
+    /// ratio that request showed. `used` answers what already happened; this is
+    /// the only number that says whether a compaction is coming, and without it
+    /// a session that had grown to 1.6× its window in one turn still read as
+    /// 10% full right up to the cut.
+    pub fn context_tokens_next(&self) -> u64 {
+        let Some(breakdown) = self.last_breakdown.as_ref() else {
+            return self.estimated_tokens;
+        };
+        let Some(usage) = self.last_usage.filter(|u| u.prompt_tokens > 0) else {
+            return self.estimated_tokens;
+        };
+        let ratio = crate::agent::tool_output::observe_bytes_per_token(
+            breakdown.total_bytes,
+            usage.prompt_tokens,
+        )
+        .unwrap_or(crate::agent::tool_output::DEFAULT_BYTES_PER_TOKEN);
+        let wire = crate::agent::tool_output::Wire {
+            context_limit: self.context_limit,
+            bytes_per_token: ratio,
+            measured: Some(crate::agent::tool_output::WireAnchor {
+                tokens: usage.prompt_tokens,
+                bytes: breakdown.total_bytes,
+            }),
+        };
+        crate::agent::context::wire_estimated_tokens(&self.messages, &wire)
     }
 
     /// Cumulative tokens over the whole session: billing and statistics only.
@@ -1105,7 +1144,7 @@ mod tests {
     #[test]
     fn usage_event_re_prices_the_breakdown_rows() {
         let mut s = Session::new("m".into(), 1000);
-        s.last_breakdown = Some(crate::providers::RequestBreakdown {
+        s.pending_breakdown = Some(crate::providers::RequestBreakdown {
             history_bytes: 400,
             history_tokens: 100,
             reasoning_bytes: 3_600,
@@ -1113,12 +1152,18 @@ mod tests {
             total_bytes: 4_000,
             ..Default::default()
         });
+        assert!(
+            s.last_breakdown.is_none(),
+            "a request still in flight must not publish rows priced from bytes \
+             beside the previous request's meter"
+        );
         s.add_usage(&Usage {
             prompt_tokens: 500,
             completion_tokens: 1,
             ..Default::default()
         });
-        let b = s.last_breakdown.expect("breakdown stays");
+        let b = s.last_breakdown.expect("the pair lands together");
+        assert!(s.pending_breakdown.is_none(), "and the pending one is spent");
         assert_eq!(
             b.history_tokens + b.reasoning_tokens,
             500,

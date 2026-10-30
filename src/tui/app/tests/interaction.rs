@@ -2325,8 +2325,8 @@ fn context_menu_shows_parts_legend_and_honest_gaps() {
     };
     assert_eq!(
         meter.spans[0].style.bg,
-        dot("tools"),
-        "the fattest part (tools, i.e. their output) leads the bar"
+        dot("tool output"),
+        "the fattest part (the tools' output) leads the bar"
     );
     // skills are their own part: burying them in "system" made the biggest
     // block on the scale unreadable
@@ -2340,6 +2340,47 @@ fn context_menu_shows_parts_legend_and_honest_gaps() {
     assert!(
         t.contains("● host block"),
         "the volatile host block is a legend row: {t}"
+    );
+}
+
+#[test]
+fn context_prices_the_request_that_has_not_left_yet() {
+    // A live session read 10% full and compacted on the next turn: the meter
+    // showed the request that came back, never the one about to leave. `next`
+    // is the compaction gate's own arithmetic, so growth is visible before the
+    // cut rather than in its aftermath.
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.command("context");
+    app.session.context_limit = 100_000;
+    app.session.last_breakdown = Some(crate::providers::RequestBreakdown {
+        total_bytes: 32_000,
+        ..Default::default()
+    });
+    app.session.last_usage = Some(crate::providers::Usage {
+        prompt_tokens: 8_000,
+        ..Default::default()
+    });
+    app.session
+        .push(crate::providers::Role::User, &"x".repeat(400_000));
+    app.build_menu_rows();
+    let t: String = app
+        .menu_rows
+        .iter()
+        .map(|(l, _)| {
+            l.spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        t.contains("▸ next") && t.contains("100k"),
+        "the row names the incoming request and prices it from the last billed one:\n{t}"
+    );
+    assert!(
+        t.contains("used 8k"),
+        "and it does not rewrite what already went out:\n{t}"
     );
 }
 

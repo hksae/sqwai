@@ -909,7 +909,7 @@ impl App {
             ("system", b.map(|b| b.system_tokens).unwrap_or(0)),
             ("skills", b.map(|b| b.skills_tokens).unwrap_or(0)),
             ("history", b.map(|b| b.history_tokens).unwrap_or(0)),
-            ("tools", b.map(|b| b.tool_output_tokens).unwrap_or(0)),
+            ("tool output", b.map(|b| b.tool_output_tokens).unwrap_or(0)),
             ("reasoning", b.map(|b| b.reasoning_tokens).unwrap_or(0)),
             ("host block", b.map(|b| b.host_tokens).unwrap_or(0)),
         ];
@@ -1044,6 +1044,25 @@ impl App {
                     Span::styled(format!("{:<11}", "unaccounted"), Theme::FG()),
                     Span::styled(format!("{:>7}", fmt_k(unaccounted)), Theme::meta()),
                     Span::styled(format!("{:>6.1}%", unaccounted_pct), Theme::dim()),
+                ]),
+                MenuAction::None,
+            ));
+        }
+        // What already went out says nothing about what is about to leave: a
+        // session can read as a tenth full and compact on the next turn, because
+        // one read burst filled the window in between. This is the gate's own
+        // arithmetic, shown before the gate fires.
+        let next = session.context_tokens_next();
+        if next > used {
+            self.menu_rows.push(row(
+                Line::from(vec![
+                    Span::styled("▸ ".to_string(), Theme::dim()),
+                    Span::styled(format!("{:<11}", "next"), Theme::FG()),
+                    Span::styled(format!("{:>7}", fmt_k(next)), Theme::meta()),
+                    Span::styled(
+                        format!("{:>6.1}%", (100.0 * next as f64 / limit as f64).min(100.0)),
+                        Theme::dim(),
+                    ),
                 ]),
                 MenuAction::None,
             ));
