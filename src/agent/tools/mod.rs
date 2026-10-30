@@ -20,7 +20,8 @@ pub(crate) mod web;
 pub use ctx::ReadLedger;
 pub(crate) use ctx::{ReadState, ToolCtx};
 pub(crate) use dispatch::{
-    FileDiff, Outcome, bg_running_commands_for, execute, kill_remaining_jobs,
+    FileDiff, Outcome, RESULT_CAP_BYTES, TURN_CAP_BYTES, bg_running_commands_for, bound_result,
+    execute, kill_remaining_jobs, turn_result_bytes,
 };
 pub(crate) use git::porcelain_paths;
 pub(crate) use policy::{

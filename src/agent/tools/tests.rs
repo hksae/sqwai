@@ -1,9 +1,10 @@
 use super::dispatch::plan_op;
 use super::*;
 use crate::plan;
+use crate::providers::{Message, Role};
 use serde_json::json;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[test]
 fn changed_any_file_requires_actual_lines() {
@@ -2565,4 +2566,152 @@ fn an_edit_to_a_plain_file_does_not_add_a_bom() {
     assert!(!bytes.starts_with(&[0xEF, 0xBB, 0xBF]), "{bytes:?}");
     assert_eq!(&bytes, b"fn b() {}\n");
     fs::remove_dir_all(&dir).ok();
+}
+
+// ── entry caps: what a tool result may carry into the transcript ───────────
+
+fn cap_dir(label: &str) -> (ToolCtx, PathBuf) {
+    let dir = std::env::temp_dir().join(format!(
+        "sqwai-cap-{label}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).unwrap();
+    (ToolCtx::new(&dir), dir)
+}
+
+fn spill_files(dir: &Path) -> Vec<PathBuf> {
+    let root = dir.join(".sqwai").join("spill");
+    match fs::read_dir(&root) {
+        Ok(entries) => entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.is_file())
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// The path the marker names, exactly as the model reads it.
+fn spilled_path(dir: &Path, output: &str) -> PathBuf {
+    let rest = output
+        .split("full output: ")
+        .nth(1)
+        .expect("marker names a path");
+    let name = rest.split(" ·").next().expect("path is delimited");
+    dir.join(name)
+}
+
+fn lines_body(count: usize) -> String {
+    (0..count)
+        .map(|i| format!("line {i} of the output\n"))
+        .collect()
+}
+
+#[test]
+fn a_result_under_the_cap_is_left_whole_and_unspilled() {
+    let (ctx, dir) = cap_dir("under");
+    let body = "x".repeat(RESULT_CAP_BYTES - 1);
+    let mut out = Outcome::ok(body.clone());
+    assert_eq!(bound_result(&ctx, "bash", &mut out, 0), body.len());
+    assert_eq!(out.output, body, "an in-budget answer must not be touched");
+    assert!(spill_files(&dir).is_empty(), "no cut, no file");
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn an_oversized_result_keeps_head_tail_and_names_the_whole_of_it() {
+    let (ctx, dir) = cap_dir("over");
+    let body = lines_body(4000);
+    let mut out = Outcome::ok(body.clone());
+    let kept = bound_result(&ctx, "read", &mut out, 0);
+    assert!(
+        kept <= RESULT_CAP_BYTES,
+        "a capped result must land inside the cap, got {kept}"
+    );
+    assert!(out.output.starts_with("line 0 of the output"));
+    assert!(out.output.trim_end().ends_with("line 3999 of the output"));
+    let head = out.output.split("[… ").next().unwrap();
+    assert!(
+        head.trim_end_matches('\n').ends_with("of the output"),
+        "the cut must land on a line boundary, not mid-row: {head:?}"
+    );
+    let file = spilled_path(&dir, &out.output);
+    assert_eq!(
+        fs::read(&file).expect("the spilled file exists"),
+        body.as_bytes(),
+        "the pointer is only honest if the file holds every byte it withheld"
+    );
+    let tail = out.output.rsplit("]\n").next().unwrap();
+    assert!(
+        tail.starts_with("line ") && tail.trim_end().ends_with("line 3999 of the output"),
+        "the kept tail must start on a whole line: {tail:?}"
+    );
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn capping_twice_changes_nothing_and_spills_once() {
+    let (ctx, dir) = cap_dir("idem");
+    let mut out = Outcome::ok(lines_body(6000));
+    let first = bound_result(&ctx, "read", &mut out, 0);
+    let again = bound_result(&ctx, "read", &mut out, first);
+    assert_eq!(again, first, "the second pass must find nothing to cut");
+    assert_eq!(out.output.len(), first);
+    assert_eq!(
+        spill_files(&dir).len(),
+        1,
+        "an idempotent pass cannot leave a second copy of the answer"
+    );
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn a_turn_that_spent_its_budget_gets_a_slice_not_a_window() {
+    let (ctx, dir) = cap_dir("turn");
+    let body = lines_body(6000);
+    let mut out = Outcome::ok(body.clone());
+    let spent = bound_result(&ctx, "read", &mut out, 0);
+    let mut slice = Outcome::ok(body.clone());
+    let cut = bound_result(&ctx, "read", &mut slice, TURN_CAP_BYTES);
+    assert!(
+        cut < spent / 4,
+        "after the turn budget is gone the next result earns far less: {cut} vs {spent}"
+    );
+    assert!(slice.output.contains("full output: "));
+    assert!(slice.output.starts_with("line 0 of the output"));
+    assert!(slice.output.trim_end().ends_with("line 5999 of the output"));
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn a_cut_is_never_worth_less_than_a_few_kilobytes() {
+    let (ctx, dir) = cap_dir("tiny");
+    let body = format!("{}\n{}", "a".repeat(RESULT_CAP_BYTES), "b".repeat(2048));
+    let mut out = Outcome::ok(body.clone());
+    assert_eq!(
+        bound_result(&ctx, "bash", &mut out, 0),
+        body.len(),
+        "hiding 2 KB behind a pointer costs a round-trip to save nothing"
+    );
+    assert_eq!(out.output, body);
+    assert!(spill_files(&dir).is_empty());
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn turn_result_bytes_counts_only_this_turns_results() {
+    let from = 2usize;
+    let messages = vec![
+        Message::new(Role::User, "ask"),
+        Message::new(Role::Assistant, "thinking"),
+        Message::tool_result("c1", "one", false),
+        Message::new(Role::Assistant, "more"),
+        Message::tool_result("c2", "two", false),
+    ];
+    assert_eq!(turn_result_bytes(&messages, from), 6);
+    assert_eq!(turn_result_bytes(&messages, messages.len()), 0);
 }

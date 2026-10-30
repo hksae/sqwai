@@ -142,6 +142,121 @@ impl Outcome {
     }
 }
 
+/// Bytes one tool result may carry into the transcript and onto every later
+/// request. Past it the whole answer goes to a spill file and the result keeps
+/// a head, a tail and the path — the shape the whole field settled on
+/// (opencode 50 KiB, gemini-cli 40k chars, Claude Code ~30k, Cline 48k,
+/// OpenHands 50k). Ours is the 99th percentile of our own distribution: across
+/// 424 sessions and 4,587 results the median is 0.6 KB and p99 is 36 KB, while
+/// **1% of results carry 20.6% of all the bytes**. So this cap touches 1.2% of
+/// results and stops a quarter of the tool-output bulk riding along forever.
+pub const RESULT_CAP_BYTES: usize = 32 * 1024;
+/// Bytes one model turn may add through its results. No agent in the field has
+/// a turn budget — they absorb the burst by re-compacting — because for them
+/// the burst is only expensive. For us it is fatal: one live turn put ~1 MB of
+/// file reads into the transcript, and a turn that big leaves no compaction
+/// tail that can hold it, which is how a 50%-full session woke up at 4% having
+/// read nothing.
+pub const TURN_CAP_BYTES: usize = 96 * 1024;
+/// Kept bytes of a result the caps reject. The head carries the shape of the
+/// answer, the tail the part that usually holds the error or the summary.
+const RESULT_KEEP_TAIL: usize = 8 * 1024;
+/// A turn that has already spent its whole budget gets a slice, not a window:
+/// the model was fed plenty this turn, and the pointer is the same one.
+const TURN_SLICE_HEAD: usize = 2 * 1024;
+const TURN_SLICE_TAIL: usize = 1024;
+/// Bytes the marker line costs, held back so a capped result always lands
+/// under [`RESULT_CAP_BYTES`] — that is what makes the pass idempotent, and an
+/// idempotent pass is one that never rewrites a message twice.
+const SPILL_MARKER_RESERVE: usize = 256;
+const RESULT_KEEP_HEAD: usize = RESULT_CAP_BYTES - RESULT_KEEP_TAIL - SPILL_MARKER_RESERVE;
+/// Never cut for less than this: snipping 400 bytes into a file pointer costs
+/// the model a round-trip to save nothing.
+const MIN_SNIP_BYTES: usize = 4 * 1024;
+
+/// Bound a result's text in place, spilling the whole answer when a cut is
+/// needed. Returns the bytes it now carries, so the caller can keep a turn
+/// total.
+///
+/// A result is never shortened without naming where the rest is: a truncation
+/// that points nowhere is the silent substitution that lets a model speak with
+/// confidence about bytes it was not shown. When the spill cannot be written,
+/// nothing is cut at all.
+pub(crate) fn bound_result(
+    ctx: &ToolCtx,
+    name: &str,
+    outcome: &mut Outcome,
+    turn_spent: usize,
+) -> usize {
+    let len = outcome.output.len();
+    let over_result = len > RESULT_CAP_BYTES;
+    let over_turn = turn_spent + len > TURN_CAP_BYTES;
+    if !(over_result || over_turn) {
+        return len;
+    }
+    let (head, tail) = if turn_spent >= TURN_CAP_BYTES {
+        (TURN_SLICE_HEAD, TURN_SLICE_TAIL)
+    } else {
+        (RESULT_KEEP_HEAD, RESULT_KEEP_TAIL)
+    };
+    let kept_head = floor_to_line(&outcome.output, head);
+    let kept_tail = ceil_to_line(&outcome.output, tail);
+    let hidden = len.saturating_sub(kept_head.len() + kept_tail.len());
+    if hidden < MIN_SNIP_BYTES {
+        return len;
+    }
+    let Some(path) = fs::spill_output(ctx, name, &outcome.output) else {
+        return len;
+    };
+    outcome.output = format!(
+        "{kept_head}\n[… {hidden} bytes not shown · full output: {path} · read that path for the rest]\n{kept_tail}"
+    );
+    outcome.output.len()
+}
+
+/// Bytes the results added since `from` already carry.
+pub(crate) fn turn_result_bytes(messages: &[crate::providers::Message], from: usize) -> usize {
+    messages[from..]
+        .iter()
+        .filter(|m| m.role == crate::providers::Role::Tool)
+        .map(|m| m.content.len())
+        .sum()
+}
+
+/// A prefix of at most `bytes`, ending on a character and — when one is near —
+/// a line boundary, so a cut never leaves half an identifier on the wire.
+fn floor_to_line(text: &str, bytes: usize) -> &str {
+    if text.len() <= bytes {
+        return text;
+    }
+    let mut cut = bytes;
+    while cut > 0 && !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let snap = text[..cut].rsplit_once('\n').map(|(head, _)| head.len());
+    match snap {
+        Some(pos) if pos > cut.saturating_sub(200) => &text[..pos],
+        _ => &text[..cut],
+    }
+}
+
+/// A suffix of at most `bytes`, starting on a character and — when one is near
+/// — just after a line boundary.
+fn ceil_to_line(text: &str, bytes: usize) -> &str {
+    if text.len() <= bytes {
+        return text;
+    }
+    let mut start = text.len() - bytes;
+    while start < text.len() && !text.is_char_boundary(start) {
+        start += 1;
+    }
+    let snap = text[start..].find('\n').map(|i| start + i + 1);
+    match snap {
+        Some(pos) if pos < start + 200 => &text[pos..],
+        _ => &text[start..],
+    }
+}
+
 /// (id, owning session, command) of background jobs whose processes are
 /// still alive. The undo preflight refuses a restore while any
 /// of these run — the writer lock stops in-process dispatch, but an

@@ -1739,6 +1739,10 @@ async fn run_agent(
                 .with_provider_state(turn.provider_state)
                 .with_thinking(turn.reasoning_text, turn.reasoning_ms),
         );
+        // Where this turn's results start: the entry caps measure the turn's
+        // total from here, so a burst of separately legal reads cannot add a
+        // megabyte that no later mechanism can undo.
+        let turn_results_from = messages.len();
 
         if token_limit_hit {
             for call in &turn.calls {
@@ -2546,6 +2550,12 @@ async fn run_agent(
                         RepeatVerdict::Withheld(stub) => outcome.output = stub,
                     }
                 }
+                tools::bound_result(
+                    &ctx,
+                    &call.name,
+                    &mut outcome,
+                    tools::turn_result_bytes(&messages, turn_results_from),
+                );
                 messages.push(
                     Message::tool_result(&call.id, outcome.output, !outcome.ok)
                         .with_images(outcome.images.clone())
