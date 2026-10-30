@@ -368,11 +368,38 @@ pub(crate) async fn bash_call(
         );
     }
 
+    // What the classifier said about this command, recorded whether or not a
+    // dialog followed. AUTO's whole contract is "the classifier is the floor",
+    // and a floor nobody can see is a guess: a command that passed as `safe`
+    // left no trace of the judgment behind it, so "why did AUTO run this" cannot
+    // be answered from the journal — the same hole that made every context bug
+    // this week take three passes to find. `approval` records the question and
+    // the answer; this records the host's own opinion, before escalation.
+    let record_verdict = |events: &mut Option<crate::agent::events::EventLog>,
+                          verdict: &str,
+                          reason: &str| {
+        let Some(writer) = events.as_mut() else {
+            return;
+        };
+        let _ = writer.append_evidence(
+            "verdict",
+            serde_json::json!({
+                "tool": "bash",
+                "call_id": call.id,
+                "mode": approval.as_str(),
+                "verdict": verdict,
+                "reason": reason,
+                "command": command.chars().take(200).collect::<String>(),
+            }),
+        );
+    };
+
     // 0. hard block from config — no questions. The regexes arrive compiled by
     // the run that owns this call; an invalid pattern is refused at startup,
     // so there is nothing here to report but a match.
     for (pat, re) in blocked {
         if re.is_match(&command) || re.is_match(&lower) {
+            record_verdict(events, "blocked_by_pattern", pat);
             return tools::Outcome::err(format!(
                 "command blocked by [safety].blocked_patterns '{pat}'"
             ));
@@ -382,11 +409,18 @@ pub(crate) async fn bash_call(
     // 1. heuristic dangerous-command detector
     let mut needs_approval =
         match safety::classify_for(crate::agent::shell::ShellKind::detect(), &command) {
-            safety::Verdict::Safe => None,
+            safety::Verdict::Safe => {
+                record_verdict(events, "safe", "");
+                None
+            }
             safety::Verdict::Blocked(reason) => {
+                record_verdict(events, "blocked", reason);
                 return tools::Outcome::err(format!("error: {reason}"));
             }
-            safety::Verdict::NeedsApproval(reason) => Some(reason.to_string()),
+            safety::Verdict::NeedsApproval(reason) => {
+                record_verdict(events, "needs_approval", reason);
+                Some(reason.to_string())
+            }
         };
 
     // Subagents cannot prompt, so Ask mode would deny them every command
@@ -1260,6 +1294,58 @@ mod tests {
         assert!(
             rx.try_recv().is_err(),
             "and no dialog may be queued behind the call"
+        );
+    }
+
+    /// The whole point of AUTO is that the classifier decides, so the journal has
+    /// to say what it decided — including, especially, the commands it let
+    /// through without asking. No dialog means no `approval` record, and until
+    /// this record existed there was no evidence at all of the judgment.
+    #[tokio::test]
+    async fn auto_records_the_verdict_for_a_command_it_never_asks_about() {
+        use crate::config::ApprovalMode;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = crate::agent::tools::ToolCtx::new(dir.path())
+            .in_session("verdict-record".to_string());
+        let call = ToolCallReq::new("c1", "bash", json!({"command": "echo classifier-floor"}));
+        let (tx, _rx) = mpsc::channel(8);
+        let (_ctl_tx, mut ctl_rx) = mpsc::channel(8);
+        // No user on the other end: a command that needed a dialog would come
+        // back refused here, so an ok outcome proves the pass was silent.
+        drop(_ctl_tx);
+        let mut events = crate::agent::events::EventLog::open(dir.path(), "verdict-record").ok();
+        let mut outside = None;
+        let outcome = bash_call(
+            &call,
+            &mut ctx,
+            &tx,
+            &mut ctl_rx,
+            &mut Vec::new(),
+            &[],
+            &mut 0u64,
+            0,
+            ApprovalMode::Auto,
+            &mut events,
+            &mut outside,
+        )
+        .await;
+        assert!(outcome.ok, "a safe command runs: {}", outcome.output);
+
+        let records = crate::agent::events::EventLog::records(dir.path()).expect("read journal");
+        let verdict = records
+            .iter()
+            .find(|r| r.kind == "verdict")
+            .expect("a silent pass must still record the classifier's verdict");
+        assert_eq!(verdict.fields["verdict"], "safe");
+        assert_eq!(verdict.fields["mode"], "auto");
+        assert_eq!(verdict.fields["call_id"], "c1");
+        assert!(
+            verdict.fields["command"]
+                .as_str()
+                .is_some_and(|c| c.contains("classifier-floor")),
+            "the record names what was judged: {:?}",
+            verdict.fields["command"]
         );
     }
 }
