@@ -1850,20 +1850,34 @@ async fn run_agent(
                                 }
                                 continue;
                             }
-                            let Some(path) = loop_ask::read_call_path(&peer.name, &peer.args)
-                            else {
+                            let outside: Vec<String> = loop_ask::read_call_paths(&peer.name, &peer.args)
+                                .into_iter()
+                                .filter(|path| ctx.outside_uncovered(path))
+                                .collect();
+                            let Some(path) = outside.first() else {
                                 continue;
                             };
-                            if !ctx.outside_uncovered(&path) {
-                                continue;
-                            }
-                            let grant_dir = ctx.outside_grant_dir(&path);
+                            // The dialog opens one directory, so the rest of the
+                            // outside targets in this call are named rather than
+                            // solved: after approval the handler still refuses
+                            // what no grant covers, and the model must not have
+                            // been told the whole call was cleared.
+                            let more = outside.len() - 1;
+                            let grant_dir = ctx.outside_grant_dir(path);
                             let preview = grant_dir
                                 .as_ref()
                                 .map(|d| format!("{}/**", d.display()))
                                 .unwrap_or_default();
                             let decision = loop_ask::approval_dialog(
-                                format!("{} {path}", peer.name),
+                                format!(
+                                    "{} {path}{}",
+                                    peer.name,
+                                    if more > 0 {
+                                        format!(" (+{more} more outside)")
+                                    } else {
+                                        String::new()
+                                    }
+                                ),
                                 loop_ask::OUTSIDE_READ_REASON,
                                 preview,
                                 true,

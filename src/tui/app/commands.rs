@@ -533,6 +533,12 @@ impl App {
                 allow_always: true,
             },
             TestApproval {
+                subject: "read src/main.rs, C:\\Users\\Asus\\Downloads\\app.config.json (+1 more outside)".into(),
+                reason: "reads outside the project directory".into(),
+                grant: "C:/Users/Asus/Downloads/**".into(),
+                allow_always: true,
+            },
+            TestApproval {
                 subject: "npm publish --access public".into(),
                 reason: "publishes a package".into(),
                 grant: "npm publish *".into(),

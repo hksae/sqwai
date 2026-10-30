@@ -405,6 +405,25 @@ impl ToolCtx {
         }
     }
 
+    /// True when `p` lies under a directory an "always this session" answer
+    /// opened. The boundary question stops asking once the directory is in
+    /// `outside_roots`; the mutation question has to stop with it, or the dialog
+    /// that named its grant `dir/**` asks again for every file inside that
+    /// directory and the answer the user gave meant more than the grant said.
+    ///
+    /// Only for paths outside the root: a granted directory that happens to
+    /// contain the project (`C:\Users\me` opened from a `C:\Users\me\proj`
+    /// session) must not silence the per-file question for the project itself.
+    pub fn outside_granted_covers(&self, p: &str) -> bool {
+        match self.resolve_target(p.trim()) {
+            Ok((_, resolved)) => {
+                resolved.strip_prefix(&self.root_canon).is_err()
+                    && self.outside_granted.iter().any(|r| resolved.starts_with(r))
+            }
+            Err(_) => false,
+        }
+    }
+
     /// The directory an approval of `p` should open: the path itself when
     /// it is an existing directory, its parent for a file target. `None`
     /// when the path does not resolve.

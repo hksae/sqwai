@@ -663,20 +663,22 @@ fn approval_long_subject_expands_on_request() {
 }
 
 #[test]
-fn ask_mode_test_cycles_eleven_dialogs_and_sends_nothing() {
+fn ask_mode_test_cycles_the_whole_gallery_and_sends_nothing() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.cfg.ui.experimental_test = true;
     app.command("test ask-mode");
     assert!(app.test_approval_active);
+    let total = app.test_approval_total;
+    assert_eq!(total, 12, "the gallery is twelve dialogs deep");
     let mut subjects = Vec::new();
-    for _ in 0..11 {
+    for _ in 0..total {
         match app.cur_menu() {
             Some(Menu::Approval { subject, .. }) => subjects.push(subject.clone()),
             _ => panic!("expected an approval dialog"),
         }
         app.approval_decide(ApprovalDecision::RunOnce);
     }
-    assert_eq!(subjects.len(), 11);
+    assert_eq!(subjects.len(), total);
     assert!(app.cur_menu().is_none(), "the sequence must end");
     assert!(!app.test_approval_active);
     assert!(app.agent.is_none(), "the test must not reach an agent");
@@ -687,6 +689,10 @@ fn ask_mode_test_cycles_eleven_dialogs_and_sends_nothing() {
     assert!(
         subjects.iter().any(|s| s.contains("write src/parser.rs")),
         "the write summary is part of the run: {subjects:?}"
+    );
+    assert!(
+        subjects.iter().any(|s| s.contains("more outside")),
+        "the fused outside read is part of the run: {subjects:?}"
     );
     assert!(
         subjects.iter().any(|s| s.lines().count() >= 50),

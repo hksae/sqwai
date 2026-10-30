@@ -612,9 +612,12 @@ pub(crate) async fn mutating_tool_gate(
     let name = call.name.as_str();
     let path = tools::call_path(name, &call.args);
     let rel = path.as_deref().and_then(|p| ctx.resolve_scope_rel(p).ok());
-    let granted = rel
-        .as_ref()
-        .is_some_and(|rel| file_grants.iter().any(|granted| granted == rel));
+    let granted = path
+        .as_deref()
+        .is_some_and(|p| ctx.outside_granted_covers(p))
+        || rel
+            .as_ref()
+            .is_some_and(|rel| file_grants.iter().any(|granted| granted == rel));
     // the workspace boundary, asked as an approval rather than refused:
     // one yes opens the target directory for the run (or the session)
     if matches!(name, "write" | "edit")
@@ -805,18 +808,43 @@ fn short_bytes(n: usize) -> String {
     }
 }
 
-/// The path a read-only tool points at, when it has one: `read`/`ls`/
-/// `outline` via `call_path`, `grep` by its own `path` argument. `glob`
-/// patterns are not paths and stay out.
-pub(crate) fn read_call_path(name: &str, args: &serde_json::Value) -> Option<String> {
-    if name == "grep" {
-        return args
-            .get("path")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string());
+/// Every path a read-only call points at: `read` takes one `file_path` or up to
+/// sixteen fused `paths`, `ls`/`outline`/`grep` take a `path`. `glob` patterns
+/// are not paths and stay out.
+///
+/// The plural is the whole point. `call_path` answers for `file_path` only, so a
+/// fused read had no path for the outside gate to look at: the call skipped the
+/// dialog and the handler refused its outside targets — a refusal where the mode
+/// promises a question.
+pub(crate) fn read_call_paths(name: &str, args: &serde_json::Value) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut push = |value: Option<&str>| {
+        if let Some(path) = value.map(str::trim).filter(|s| !s.is_empty()) {
+            out.push(path.to_string());
+        }
+    };
+    match name {
+        "read" => {
+            push(args["file_path"].as_str());
+            if let Some(paths) = args["paths"].as_array() {
+                for path in paths {
+                    push(path.as_str());
+                }
+            }
+        }
+        "ls" | "outline" | "grep" => push(args["path"].as_str()),
+        _ => {}
     }
-    tools::call_path(name, args)
+    out
+}
+
+/// Whether this read call touches anything outside what the run may already
+/// read. True for a fused read with one outside path among ten inside ones:
+/// that one path is what the dialog is about.
+pub(crate) fn reads_outside(ctx: &ToolCtx, name: &str, args: &serde_json::Value) -> bool {
+    read_call_paths(name, args)
+        .iter()
+        .any(|path| ctx.outside_uncovered(path))
 }
 
 /// Execute a tool handler on a dedicated blocking thread.
@@ -1120,5 +1148,118 @@ mod tests {
         };
         let (outcome, _) = tokio::join!(gate, answer);
         assert!(outcome.is_some_and(|o| !o.ok));
+    }
+
+    /// A fused `read` carries up to sixteen paths and no `file_path`, so the
+    /// gate saw no path at all: the call skipped the dialog and the handler
+    /// refused its outside targets — a refusal in the one mode that asks.
+    #[test]
+    fn a_fused_read_names_every_path_for_the_outside_gate() {
+        use crate::agent::tools::ToolCtx;
+
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("a.rs"), "x").unwrap();
+        let far = outside.path().join("b.rs");
+        std::fs::write(&far, "y").unwrap();
+        let ctx = ToolCtx::new(root.path());
+
+        let fused = json!({"paths": ["a.rs", far.to_string_lossy()]});
+        assert_eq!(
+            read_call_paths("read", &fused).len(),
+            2,
+            "every fused path is a candidate, not just the first"
+        );
+        assert!(
+            reads_outside(&ctx, "read", &fused),
+            "one outside target in a fused call is enough to ask"
+        );
+        assert!(!reads_outside(&ctx, "read", &json!({"paths": ["a.rs"]})));
+        assert!(!reads_outside(&ctx, "read", &json!({"file_path": "a.rs"})));
+        assert!(
+            !reads_outside(&ctx, "glob", &json!({"pattern": "**/*.rs"})),
+            "a pattern is not a path"
+        );
+    }
+
+    /// The dialog for an outside write names its grant `dir/**`. Until the grant
+    /// covered the directory, every next file inside it earned its own dialog, so
+    /// the answer the user gave ("always") meant less than the text offered.
+    #[tokio::test]
+    async fn always_on_an_outside_directory_stops_asking_per_file() {
+        use crate::agent::tools::ToolCtx;
+        use crate::config::ApprovalMode;
+
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let first = outside.path().join("first.rs");
+        let second = outside.path().join("second.rs");
+        std::fs::write(&first, "x").unwrap();
+        std::fs::write(&second, "x").unwrap();
+
+        let mut ctx = ToolCtx::new(root.path());
+        let mut grants = Vec::new();
+        let mut next_id = 0;
+        let mut events = None;
+        let (tx, mut rx) = mpsc::channel(8);
+        let (ctl_tx, mut ctl_rx) = mpsc::channel(8);
+        let write = |path: &std::path::Path, id: &str| {
+            ToolCallReq::new(
+                id,
+                "write",
+                json!({"file_path": path.to_string_lossy(), "content": "y"}),
+            )
+        };
+
+        let call = write(&first, "c1");
+        let gate = mutating_tool_gate(
+            &call,
+            &mut ctx,
+            &tx,
+            &mut ctl_rx,
+            &mut next_id,
+            ApprovalMode::Ask,
+            &mut grants,
+            &mut events,
+        );
+        let answer = async {
+            let Some(AgentEvent::Approval { id, grant, .. }) = rx.recv().await else {
+                panic!("the first write outside the root must ask");
+            };
+            assert!(
+                grant.ends_with("/**"),
+                "the dialog offers a directory, and the answer must mean that: {grant}"
+            );
+            ctl_tx
+                .send(ControlMsg::ApprovalAnswer {
+                    id,
+                    decision: ApprovalDecision::AlwaysSession,
+                })
+                .await
+                .unwrap();
+        };
+        let (outcome, _) = tokio::join!(gate, answer);
+        assert!(outcome.is_none(), "the approved call runs");
+
+        let again = write(&second, "c2");
+        let outcome = mutating_tool_gate(
+            &again,
+            &mut ctx,
+            &tx,
+            &mut ctl_rx,
+            &mut next_id,
+            ApprovalMode::Ask,
+            &mut grants,
+            &mut events,
+        )
+        .await;
+        assert!(
+            outcome.is_none(),
+            "a second file in a directory the session was given for must not ask again"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "and no dialog may be queued behind the call"
+        );
     }
 }

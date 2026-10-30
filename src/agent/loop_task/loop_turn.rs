@@ -212,8 +212,11 @@ pub(crate) async fn run_turn_with_prefetch(
                             // refused exactly this way — prefetched past
                             // the gate. Hand it back to the dispatcher.
                             let needs_outside_ask = !base_ctx.outside_all
-                                && super::loop_ask::read_call_path(&calls[idx].name, &calls[idx].args)
-                                    .is_some_and(|p| base_ctx.outside_uncovered(&p));
+                                && super::loop_ask::reads_outside(
+                                    base_ctx,
+                                    &calls[idx].name,
+                                    &calls[idx].args,
+                                );
                             // ASK confirms every network read, and the
                             // sequential gate skips calls already prefetched.
                             let needs_network_ask = ask_network
