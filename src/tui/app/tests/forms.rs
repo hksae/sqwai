@@ -1032,7 +1032,7 @@ fn settings_scalar_edit_valid_and_invalid_reset() {
 fn settings_cycles_and_toggles() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.run_action(MenuAction::CycleUndoShadow);
-    assert_eq!(app.cfg.undo.shadow.as_str(), "user");
+    assert_eq!(app.cfg.undo.shadow.as_str(), "off");
 
     let auto = app.cfg.skills.auto_load;
     app.run_action(MenuAction::ToggleSkillsAutoLoad);

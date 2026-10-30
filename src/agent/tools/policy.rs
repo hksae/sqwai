@@ -84,6 +84,33 @@ pub(crate) fn bash_scope_hit(ctx: &ToolCtx, scope: &[String], command: &str) -> 
 /// `/elsewhere/x`, and resolving `x` against the project root called that
 /// deletion safe while the snapshot, scoped to the root, never held the file.
 pub(crate) fn first_outside_target(ctx: &ToolCtx, command: &str) -> Option<String> {
+    resolved_write_targets(command)
+        .into_iter()
+        .find(|target| ctx.outside_uncovered(target))
+}
+
+/// The first write target of this command that lands in the host's own data
+/// directory: the event log, plans, checkpoints, sessions and media — the raw
+/// material `/undo` restores from, and an audit trail the model must not
+/// rewrite. Refused in every mode, exactly as `.sqwai` was while it held that
+/// state; a project that itself lives under the data dir owns its own tree and
+/// is exempt.
+pub(crate) fn first_host_state_target(ctx: &ToolCtx, command: &str) -> Option<String> {
+    let base = crate::agent::state::data_base()?;
+    resolved_write_targets(command)
+        .into_iter()
+        .find(|target| ctx.resolves_under(target, &base))
+}
+
+/// Write targets of a shell command in the order they run, each resolved
+/// against the directory the command has changed into by that point.
+///
+/// Segments are walked in order so a `cd` updates the directory the following
+/// relative targets belong to: `cd /elsewhere && rm x` deletes
+/// `/elsewhere/x`, and resolving `x` against the project root called that
+/// deletion safe while the snapshot, scoped to the root, never held the file.
+fn resolved_write_targets(command: &str) -> Vec<String> {
+    let mut out = Vec::new();
     let mut base: Option<String> = None;
     for segment in command.split([';', '\n', '&', '|']) {
         let mut words = segment.split_whitespace();
@@ -105,20 +132,17 @@ pub(crate) fn first_outside_target(ctx: &ToolCtx, command: &str) -> Option<Strin
             if bare.is_empty() {
                 continue;
             }
-            let resolved = if is_absolute_like(bare) {
+            out.push(if is_absolute_like(bare) {
                 bare.to_string()
             } else {
                 match &base {
                     Some(base) => format!("{base}/{bare}"),
                     None => bare.to_string(),
                 }
-            };
-            if ctx.outside_uncovered(&resolved) {
-                return Some(resolved);
-            }
+            });
         }
     }
-    None
+    out
 }
 
 /// The directory a `cd`/`pushd` argument names, given where the command
@@ -163,19 +187,14 @@ fn bash_write_targets(command: &str) -> Vec<String> {
             targets.push(dest.to_string());
         }
     }
-    // operands of mutating shapes, per command segment (quoting blanked so
-    // a narrated "we need tee" is not a tee invocation). `&` and `|` split
-    // too: `cd x && rm y` and `cp a b | tee c` are chains of commands, and a
-    // chain read as one segment hides every write past its first word.
-    for segment in blanked.split([';', '\n', '&', '|']) {
-        let words: Vec<&str> = segment
-            .split(|c: char| c.is_whitespace() || c == '(' || c == ')')
-            .filter(|w| !w.is_empty() && *w != "&")
-            .collect();
-        // `a && b` splits into two separators, so one segment is empty
-        if words.is_empty() {
-            continue;
-        }
+    // operands of mutating shapes, per command segment. One quote-aware pass:
+    // a quoted operand (`rm "C:\path with spaces"`) is a real target, while an
+    // operator inside quotes (`echo "a > b"`) stays text because the tokenizer
+    // never splits there. `&` and `|` split too: `cd x && rm y` and
+    // `cp a b | tee c` are chains of commands, and a chain read as one segment
+    // hides every write past its first word.
+    for words in shell_segments(command) {
+        let words: Vec<&str> = words.iter().map(String::as_str).collect();
         // binary is the first word past the transparent wrappers —
         // the SAME list the safety AST walk strips (audit H2: the
         // desynced copy here let `nohup mv` escape the scope) — and
@@ -287,6 +306,69 @@ fn blank_quoted(command: &str) -> String {
     }
     out
 }
+
+/// Split a command into segments at unquoted `;`, `&`, `|` and newlines, and
+/// each segment into words with quotes grouped and removed.
+///
+/// One pass, so a quoted operand keeps its spaces (`rm "C:\my file"` is one
+/// target) and an operator inside quotes stays text (`echo "a > b"` writes
+/// nothing). Parentheses end a word, matching the word split the shape scan
+/// has always used.
+fn shell_segments(command: &str) -> Vec<Vec<String>> {
+    let mut segments = Vec::new();
+    let mut words: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut started = false;
+    let (mut in_single, mut in_double) = (false, false);
+    let mut chars = command.chars().peekable();
+    let end_word = |cur: &mut String, started: &mut bool, words: &mut Vec<String>| {
+        if *started {
+            words.push(std::mem::take(cur));
+            *started = false;
+        }
+    };
+    while let Some(c) = chars.next() {
+        match c {
+            // Outside quotes a backslash escapes the next byte. Inside double
+            // quotes it is literal here: Windows paths arrive quoted
+            // (`rm "C:\my file"`), and eating the separators would turn a real
+            // target into a path that does not exist.
+            '\\' if !in_single && !in_double => {
+                if let Some(next) = chars.next() {
+                    cur.push(next);
+                    started = true;
+                }
+            }
+            '\'' if !in_double => {
+                in_single = !in_single;
+                started = true;
+            }
+            '"' if !in_single => {
+                in_double = !in_double;
+                started = true;
+            }
+            c if !in_single && !in_double && matches!(c, ';' | '&' | '|' | '\n') => {
+                end_word(&mut cur, &mut started, &mut words);
+                if !words.is_empty() {
+                    segments.push(std::mem::take(&mut words));
+                }
+            }
+            c if !in_single && !in_double && (c.is_whitespace() || c == '(' || c == ')') => {
+                end_word(&mut cur, &mut started, &mut words);
+            }
+            c => {
+                cur.push(c);
+                started = true;
+            }
+        }
+    }
+    end_word(&mut cur, &mut started, &mut words);
+    if !words.is_empty() {
+        segments.push(words);
+    }
+    segments
+}
+
 /// Lexically clean a relative path: drop `.`, resolve `..` against the
 /// stack. No filesystem access — the jail verdict already came from
 /// `resolve`.

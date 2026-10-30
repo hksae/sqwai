@@ -1273,10 +1273,12 @@ pub struct UndoConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum ShadowStore {
-    /// `.sqwai/checkpoints/git` inside the project
-    #[default]
+    /// `.sqwai/checkpoints/git` inside the project — opt-in, and the only
+    /// store a `git clean -fdx` can take with it
     Local,
-    /// `~/.local/share/sqwai/checkpoints/<project-hash>/`
+    /// `<data>/projects/<project-hash>/checkpoints/git`, beside the event
+    /// log and the plan
+    #[default]
     User,
     /// no shadow repository; bash runs uninsured and says so
     Off,
@@ -1289,7 +1291,7 @@ fn default_undo_blob_grace_secs() -> u64 {
     86_400
 }
 fn default_undo_shadow() -> ShadowStore {
-    ShadowStore::Local
+    ShadowStore::User
 }
 fn default_undo_shadow_max_bytes() -> u64 {
     1_073_741_824

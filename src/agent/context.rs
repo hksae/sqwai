@@ -15,8 +15,8 @@
 //! not fit. A session that hits the ceiling therefore keeps working with a
 //! degraded memory instead of dying on a failed request.
 //!
-//! The durable plan is not touched by any stage: it lives in
-//! `.sqwai/plans/<id>.json` and is re-injected into the system
+//! The durable plan is not touched by any stage: it lives in the data dir
+//! (`state::plans_dir`) and is re-injected into the system
 //! block every request, so compaction can never cost the agent
 //! its goal or next step.
 

@@ -121,7 +121,10 @@ fn secrets_are_screened_out_of_summaries_and_text() {
         )
         .unwrap();
 
-    let raw = fs::read_to_string(root.join(".sqwai/events/session.jsonl")).unwrap();
+    let raw = fs::read_to_string(
+        crate::agent::state::events_dir(&root).join("session.jsonl"),
+    )
+    .unwrap();
     assert!(
         !raw.contains("sk-ant-api03"),
         "the key reached the event log"
@@ -607,7 +610,7 @@ fn records_undo_checkpoint_files_and_reopened_steps() {
 #[test]
 fn repairs_partial_tail_and_records_that_it_did() {
     let root = root();
-    let path = root.join(".sqwai").join("events").join("session.jsonl");
+    let path = crate::agent::state::events_dir(&root).join("session.jsonl");
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(&path, "{\"seq\":1,\"ts\":\"1\",\"step\":null,\"plan\":null,\"agent\":\"main\",\"kind\":\"note\",\"text\":\"ok\"}\n{\"seq\":2").unwrap();
     let mut events = EventLog::open(&root, "session").unwrap();
@@ -715,7 +718,7 @@ fn writer_stamps_inherited_epoch_and_defaults_to_none() {
 #[test]
 fn records_skip_a_corrupt_mid_file_line() {
     let dir = tempfile::tempdir().unwrap();
-    let jdir = dir.path().join(".sqwai/events");
+    let jdir = crate::agent::state::events_dir(dir.path());
     std::fs::create_dir_all(&jdir).unwrap();
     std::fs::write(
         jdir.join("s.jsonl"),
@@ -737,7 +740,7 @@ fn records_skip_a_corrupt_mid_file_line() {
 fn concurrent_handles_never_duplicate_seq() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().to_path_buf();
-    std::fs::create_dir_all(root.join(".sqwai/events")).unwrap();
+    std::fs::create_dir_all(crate::agent::state::events_dir(&root)).unwrap();
     let mut handles = Vec::new();
     for _ in 0..8 {
         let root = root.clone();

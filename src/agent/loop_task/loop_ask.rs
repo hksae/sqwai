@@ -19,7 +19,8 @@ const NETWORK_ASK_REASON: &str = "network read in ask mode";
 /// Why a leap beyond the project root asks. The workspace jail is a
 /// prompt, not a wall: full access never asks (every path resolves), and
 /// an approval opens the target directory for reads AND writes. Host-owned
-/// state (`.sqwai/`) is root-relative — it can never appear on this branch.
+/// state lives in the data directory now and is refused before this branch
+/// (`first_host_state_target`); what stays under `.sqwai/` is jail-only.
 pub(crate) const OUTSIDE_WRITE_REASON: &str = "writes outside the project directory";
 pub(crate) const OUTSIDE_READ_REASON: &str = "reads outside the project directory";
 
@@ -366,6 +367,17 @@ pub(crate) async fn bash_call(
             })
             .to_string(),
         );
+    }
+
+    // -0.5 host state: the event log, plans, checkpoints, sessions and media
+    // live in the data dir now, outside the tree `/undo` snapshots. A shell
+    // command that writes there is refused in every mode, the same guarantee
+    // `.sqwai` had while it held that state inside the project.
+    if let Some(target) = tools::first_host_state_target(ctx, &command) {
+        return tools::Outcome::err(format!(
+            "command blocked: '{target}' is sqwai's own state (event log, plans, checkpoints) \
+             and has no undo of its own"
+        ));
     }
 
     // What the classifier said about this command, recorded whether or not a

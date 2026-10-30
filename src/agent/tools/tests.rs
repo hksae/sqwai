@@ -2760,3 +2760,31 @@ fn a_cd_moves_the_targets_of_the_outside_check() {
     fs::remove_dir_all(&dir).ok();
     fs::remove_dir_all(&outside).ok();
 }
+
+/// The data dir holds the event log, plans and checkpoints; a shell write that
+/// lands there has no undo of its own, so it is refused — unlike an ordinary
+/// write outside the project, which only asks.
+#[test]
+fn a_write_into_the_data_dir_is_host_state() {
+    let (ctx, dir) = proj();
+    let state = crate::agent::state::project_dir(&dir);
+    let spell = |p: &Path| p.to_string_lossy().replace('\\', "/");
+
+    let hit = first_host_state_target(&ctx, &format!("rm -rf \"{}\"", spell(&state)));
+    assert!(
+        hit.is_some(),
+        "deleting the state directory must be refused, not asked"
+    );
+    // chained behind a cd, and with a relative tail
+    let hit = first_host_state_target(
+        &ctx,
+        &format!("cd {} && rm -rf events", spell(&state)),
+    );
+    assert!(hit.is_some(), "a chained relative delete must be seen too");
+    // ordinary project writes are not host state
+    assert_eq!(first_host_state_target(&ctx, "rm -f perf.txt"), None);
+    assert_eq!(first_host_state_target(&ctx, "cargo build > build.log"), None);
+
+    fs::remove_dir_all(&dir).ok();
+    fs::remove_dir_all(&state).ok();
+}

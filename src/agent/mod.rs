@@ -10,6 +10,7 @@ pub mod safety;
 pub mod secrets;
 pub mod shadow;
 pub mod shell;
+pub mod state;
 pub mod tool_output;
 pub mod tools;
 pub mod trust;

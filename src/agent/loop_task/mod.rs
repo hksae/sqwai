@@ -545,10 +545,10 @@ fn strip_host_repeat_marks(output: &str) -> &str {
     }
 }
 
-/// A refused reach into host-owned state (`file tools` jail, or `bash`
-/// protected path). Repeated refusals mean the model is guessing `.sqwai`
-/// paths instead of looking at the project root, so the second one carries
-/// the real inventory.
+/// A refused reach into host-owned state (`file tools` jail, `bash`
+/// protected path, or the data dir). Repeated refusals mean the model is
+/// guessing `.sqwai` paths instead of looking at the project root, so the
+/// second one carries the real inventory.
 fn is_host_state_denial(output: &str) -> bool {
     output.contains("host-owned state") || output.contains("protected_path")
 }
@@ -575,8 +575,9 @@ fn root_entries_note(root: &std::path::Path) -> String {
     }
     format!(
         "[host: repeated attempt to open host-owned state under .sqwai/ — that directory holds \
-         bookkeeping (events, checkpoints, plans, spilled output), never project inputs. Project \
-         root '{}' contains: {list}. Use exactly these names; run ls \".\" for the current view.]",
+         spilled tool output, project skills and exports, never the plan or the event log (those \
+         live in sqwai's data directory). Project root '{}' contains: {list}. Use exactly these \
+         names; run ls \".\" for the current view.]",
         root.display()
     )
 }

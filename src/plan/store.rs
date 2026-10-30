@@ -289,7 +289,7 @@ fn applied_session(root: &Path, plan_id: &str) -> Option<String> {
 /// `plan_deleted` for the same id means the absence is deliberate.
 fn replay_orphans(root: &Path, ops_applied: &mut usize) -> Vec<String> {
     let mut rebuilt = Vec::new();
-    let dir = root.join(".sqwai").join("events");
+    let dir = crate::agent::state::events_dir(root);
     let Ok(entries) = std::fs::read_dir(dir) else {
         return rebuilt;
     };
@@ -570,7 +570,7 @@ fn rebuild_corrupt(root: &Path, id: &str) -> Option<Plan> {
         u64,
         serde_json::Map<String, serde_json::Value>,
     )> = Vec::new();
-    let dir = root.join(".sqwai").join("events");
+    let dir = crate::agent::state::events_dir(root);
     let Ok(entries) = std::fs::read_dir(dir) else {
         return None;
     };

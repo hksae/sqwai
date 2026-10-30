@@ -663,9 +663,9 @@ fn open_rebuilds_torn_plan_file_from_events() {
         }),
     )
     .unwrap();
-    std::fs::create_dir_all(dir.join(".sqwai/plans")).unwrap();
+    std::fs::create_dir_all(plans_dir(&dir)).unwrap();
     std::fs::write(
-        dir.join(".sqwai/plans").join(format!("{id}.json")),
+        plans_dir(&dir).join(format!("{id}.json")),
         r#"{"version":1,"id":"rebuild-me","status":"act"#,
     )
     .unwrap();
@@ -677,7 +677,8 @@ fn open_rebuilds_torn_plan_file_from_events() {
     assert_eq!(plan.applied_events.get("aaa"), Some(&1));
     assert_eq!(plan.applied_events.get("bbb"), Some(&1));
     assert!(
-        !dir.join(".sqwai/plans/corrupt")
+        !plans_dir(&dir)
+            .join("corrupt")
             .join(format!("{id}.json"))
             .exists()
     );
@@ -710,18 +711,10 @@ fn open_quarantines_when_rebuild_diverges_or_lacks_intent() {
         }),
     )
     .unwrap();
-    std::fs::create_dir_all(dir.join(".sqwai/plans")).unwrap();
-    std::fs::write(
-        dir.join(".sqwai/plans").join(format!("{id}.json")),
-        "garbage{",
-    )
-    .unwrap();
+    std::fs::create_dir_all(plans_dir(&dir)).unwrap();
+    std::fs::write(plans_dir(&dir).join(format!("{id}.json")), "garbage{").unwrap();
     assert!(open(&dir, id).is_err());
-    assert!(
-        dir.join(".sqwai/plans/corrupt")
-            .join(format!("{id}.json"))
-            .exists()
-    );
+    assert!(plans_dir(&dir).join("corrupt").join(format!("{id}.json")).exists());
 
     let dir2 = std::env::temp_dir().join(format!("sqwai-plan-del-{}", new_id()));
     let mut j2 = crate::agent::events::EventLog::open(&dir2, "aaa").unwrap();
@@ -744,7 +737,7 @@ fn open_quarantines_when_rebuild_diverges_or_lacks_intent() {
     std::fs::create_dir_all(dir2.join(".sqwai/plans")).unwrap();
     std::fs::write(dir2.join(".sqwai/plans/gone.json"), "garbage{").unwrap();
     assert!(open(&dir2, "gone").is_err());
-    assert!(dir2.join(".sqwai/plans/corrupt/gone.json").exists());
+    assert!(plans_dir(&dir2).join("corrupt/gone.json").exists());
     std::fs::remove_dir_all(&dir).ok();
     std::fs::remove_dir_all(&dir2).ok();
 }

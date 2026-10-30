@@ -35,17 +35,21 @@ pub struct Shadow {
 pub fn dir_for(root: &Path, store: ShadowStore) -> Option<PathBuf> {
     match store {
         ShadowStore::Off => None,
-        ShadowStore::Local => Some(root.join(".sqwai").join("checkpoints").join("git")),
+        ShadowStore::Local => {
+            let local = root.join(".sqwai").join("checkpoints").join("git");
+            if local.exists() {
+                return Some(local);
+            }
+            // A chain the state move migrated out of the project is still this
+            // project's chain: an explicit `local` setting keeps finding it
+            // until a new local repository exists.
+            let migrated = crate::agent::state::checkpoints_dir(root).join("git");
+            Some(if migrated.exists() { migrated } else { local })
+        }
         ShadowStore::User => {
             // Keyed by the project's path so two checkouts of the same
-            // repository do not share a chain. Truncated because the
-            // directory name is for humans reading `ls`, not for uniqueness
-            // beyond collision resistance.
-            let digest = blake3::hash(root.to_string_lossy().as_bytes()).to_hex();
-            let key = &digest[..16];
-            crate::config::data_dir()
-                .ok()
-                .map(|dir| dir.join("checkpoints").join(key).join("git"))
+            // repository do not share a chain.
+            Some(crate::agent::state::checkpoints_dir(root).join("git"))
         }
     }
 }
@@ -544,7 +548,7 @@ mod tests {
     }
 
     fn open(root: &Path) -> Shadow {
-        Shadow::open(root, ShadowStore::Local)
+        Shadow::open(root, ShadowStore::default())
             .unwrap()
             .expect("git is available in the test environment")
     }
@@ -688,18 +692,18 @@ mod tests {
         );
     }
 
-    /// `.sqwai/` holds the event log, the plan and the blob store. A snapshot
-    /// that contained them would grow without bound and a restore could
-    /// rewrite the host's own state.
+    /// `.sqwai/` holds spilled tool output, exports and project skills. A
+    /// snapshot that contained them would grow without bound and a restore
+    /// could rewrite the host's own files.
     #[test]
     fn host_state_is_never_snapshotted() {
         let dir = project();
         let root = dir.path();
-        std::fs::create_dir_all(root.join(".sqwai/events")).unwrap();
-        std::fs::write(root.join(".sqwai/events/s.jsonl"), b"{}").unwrap();
+        std::fs::create_dir_all(root.join(".sqwai/spill")).unwrap();
+        std::fs::write(root.join(".sqwai/spill/s.jsonl"), b"{}").unwrap();
         let shadow = open(root);
         let sha = shadow.snapshot("s", "one").unwrap().unwrap();
-        assert_eq!(shadow.show(&sha, ".sqwai/events/s.jsonl").unwrap(), None);
+        assert_eq!(shadow.show(&sha, ".sqwai/spill/s.jsonl").unwrap(), None);
     }
 
     #[test]
@@ -711,12 +715,10 @@ mod tests {
             Some(root.join(".sqwai").join("checkpoints").join("git"))
         );
         assert_eq!(dir_for(root, ShadowStore::Off), None);
-        let user = dir_for(root, ShadowStore::User).expect("a user data dir");
-        assert!(
-            user.starts_with(crate::config::data_dir().unwrap()),
-            "{user:?}"
+        assert_eq!(
+            dir_for(root, ShadowStore::User),
+            Some(crate::agent::state::checkpoints_dir(root).join("git"))
         );
-        assert!(user.ends_with("git"));
     }
 
     #[test]

@@ -134,14 +134,14 @@ async fn safe_mutating_bash_on_clean_tree_skips_snapshot_but_stays_revertible() 
     // clean tree, established head
     let head = crate::agent::checkpoints::snapshot_session(
         &dir,
-        ShadowStore::Local,
+        ShadowStore::User,
         session,
         "probe base",
     )
     .unwrap()
     .expect("first snapshot commits");
     assert!(
-        !crate::agent::checkpoints::tree_changed(&dir, ShadowStore::Local, session),
+        !crate::agent::checkpoints::tree_changed(&dir, ShadowStore::User, session),
         "tree is clean against its head"
     );
     // Safe-classified, but mutates (verified Safe above this test)
@@ -185,11 +185,11 @@ async fn safe_mutating_bash_on_clean_tree_skips_snapshot_but_stays_revertible() 
     );
     // …but the mutation stays revertible through the head, which is
     // exactly what full /undo diffs against (unscoped fallback)
-    let diff = crate::agent::checkpoints::changed_files(&dir, ShadowStore::Local, &head).unwrap();
+    let diff = crate::agent::checkpoints::changed_files(&dir, ShadowStore::User, &head).unwrap();
     assert!(diff.iter().any(|p| p == "probe.txt"), "{diff:?}");
     let report = crate::agent::checkpoints::restore_paths_in(
         &dir,
-        ShadowStore::Local,
+        ShadowStore::User,
         &head,
         &[crate::agent::checkpoints::Target {
             path: "probe.txt".to_string(),
@@ -633,6 +633,34 @@ async fn full_mode_keeps_the_hard_gates() {
         "the .sqwai/ paths stay protected in full mode: {}",
         outcome.output
     );
+    // the data dir holds the event log, plans and checkpoints now: writing
+    // there is refused before any mode decides about prompts
+    let state = crate::agent::state::project_dir(&dir);
+    let call = ToolCallReq::new(
+        "c2",
+        "bash",
+        serde_json::json!({"command": format!("rm -rf \"{}\"", state.display())}),
+    );
+    let outcome = bash_call(
+        &call,
+        &mut ctx,
+        &tx_agent,
+        &mut rx_agent,
+        &mut Vec::new(),
+        &[],
+        &mut next_id,
+        0,
+        crate::config::ApprovalMode::Full,
+        &mut no_events,
+        &mut None,
+    )
+    .await;
+    assert!(
+        !outcome.ok && outcome.output.contains("sqwai's own state"),
+        "the data dir stays protected in full mode: {}",
+        outcome.output
+    );
+    assert!(state.exists(), "the refusal must not delete the state dir");
     std::fs::remove_dir_all(&dir).ok();
 }
 

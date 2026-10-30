@@ -567,7 +567,7 @@ fn prune_empty_dirs(root: &Path, path: &Path) {
 /// or written.
 #[cfg(test)] // the Local shorthand the restore tests call; the product uses restore_paths_in
 pub fn restore_paths(root: &Path, sha: &str, targets: &[Target]) -> Result<RestoreReport> {
-    restore_paths_in(root, ShadowStore::Local, sha, targets)
+    restore_paths_in(root, crate::config::ShadowStore::default(), sha, targets)
 }
 
 pub fn restore_paths_in(
@@ -576,7 +576,7 @@ pub fn restore_paths_in(
     sha: &str,
     targets: &[Target],
 ) -> Result<RestoreReport> {
-    let Some(shadow) = shadow(root, store).or_else(|| shadow(root, ShadowStore::Local)) else {
+    let Some(shadow) = shadow(root, store) else {
         anyhow::bail!("no shadow repository: git is unavailable or [undo].shadow is off");
     };
     let mut report = RestoreReport::default();

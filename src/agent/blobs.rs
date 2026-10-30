@@ -9,8 +9,9 @@
 //! which of several files belonged to which step, and the event log can.
 //!
 //! Blobs are named by their blake3 hash, stored under
-//! `.sqwai/checkpoints/blobs/<first two hex>/<hash>` and deduplicated by that
-//! name: writing the same content twice costs one existence check.
+//! `<data>/projects/<key>/checkpoints/blobs/<first two hex>/<hash>` and
+//! deduplicated by that name: writing the same content twice costs one
+//! existence check.
 //!
 //! The event log's `file_diff` keeps recording `hash_before` / `hash_after` as
 //! sha256 — his scoped-undo matching reads that format — and gains
@@ -40,7 +41,7 @@ const RAW: u8 = b'0';
 const ZSTD: u8 = b'1';
 
 pub fn dir(root: &Path) -> PathBuf {
-    root.join(".sqwai").join("checkpoints").join("blobs")
+    crate::agent::state::checkpoints_dir(root).join("blobs")
 }
 
 /// blake3 of `content`, as the store names it.

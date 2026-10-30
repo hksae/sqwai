@@ -183,7 +183,7 @@ impl ToolCtx {
             plan_limits: crate::config::PlanConfig::default(),
             context_limit: 0,
             cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            shadow_store: crate::config::ShadowStore::Local,
+            shadow_store: crate::config::ShadowStore::default(),
             current_step: None,
             subagent_step: None,
             subagent_write_paths: None,
@@ -403,6 +403,17 @@ impl ToolCtx {
             }
             Err(_) => false,
         }
+    }
+
+    /// Does `p` resolve under `base`? The host's data directory is the one
+    /// tree no shell may write: it holds the event log, plans, checkpoints,
+    /// sessions and media, and none of them have an undo of their own.
+    pub fn resolves_under(&self, p: &str, base: &Path) -> bool {
+        let Ok((_, resolved)) = self.resolve_target(p.trim()) else {
+            return false;
+        };
+        let base = base.canonicalize().unwrap_or_else(|_| base.to_path_buf());
+        resolved.starts_with(&base)
     }
 
     /// True when `p` lies under a directory an "always this session" answer

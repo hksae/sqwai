@@ -110,7 +110,7 @@ pub struct PreImage {
 impl EventLog {
     /// Open or create `events/<session-id>.jsonl`, repairing a partial tail.
     pub fn open(root: &Path, session_id: &str) -> Result<Self> {
-        let dir = root.join(".sqwai").join("events");
+        let dir = crate::agent::state::events_dir(root);
         fs::create_dir_all(&dir).context("creating events directory")?;
         let path = dir.join(format!("{session_id}.jsonl"));
         // Repair and seq-scan under the same per-file lock append holds:
@@ -948,15 +948,13 @@ impl EventLog {
 }
 
 fn events_path(root: &Path, session_id: &str) -> PathBuf {
-    root.join(".sqwai")
-        .join("events")
-        .join(format!("{session_id}.jsonl"))
+    crate::agent::state::events_dir(root).join(format!("{session_id}.jsonl"))
 }
 
-/// Pre-rename tails still live under `.sqwai/journal/`; they are read once
+/// Pre-rename tails still live under `journal/`; they are read once
 /// and removed when their session is next merged.
 fn legacy_events_path(root: &Path, session_id: &str) -> PathBuf {
-    root.join(".sqwai")
+    crate::agent::state::project_dir(root)
         .join("journal")
         .join(format!("{session_id}.jsonl"))
 }
@@ -964,8 +962,8 @@ fn legacy_events_path(root: &Path, session_id: &str) -> PathBuf {
 fn events_session_ids(root: &Path) -> Vec<String> {
     let mut ids = Vec::new();
     for dir in [
-        root.join(".sqwai").join("events"),
-        root.join(".sqwai").join("journal"),
+        crate::agent::state::events_dir(root),
+        crate::agent::state::project_dir(root).join("journal"),
     ] {
         let Ok(entries) = fs::read_dir(dir) else {
             continue;

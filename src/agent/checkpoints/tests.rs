@@ -11,24 +11,24 @@ fn changed_since_head_attributes_unrecorded_writes() {
         .unwrap();
     let root = dir.path();
     fs::write(root.join("a.rs"), "fn a() {}\n").unwrap();
-    if shadow(root, ShadowStore::Local).is_none() {
+    if shadow(root, ShadowStore::User).is_none() {
         return; // no git binary: layer 2 absent
     }
-    snapshot_boundary(root, ShadowStore::Local, "s", "base")
+    snapshot_boundary(root, ShadowStore::User, "s", "base")
         .unwrap()
         .expect("first boundary commits");
     // a bash-style write with no event record anywhere
     fs::write(root.join("a.rs"), "fn a() { changed(); }\n").unwrap();
-    let paths = changed_since_head(root, ShadowStore::Local, "s");
+    let paths = changed_since_head(root, ShadowStore::User, "s");
     assert!(
         paths.iter().any(|p| p.ends_with("a.rs")),
         "bash-written change must be attributed: {paths:?}"
     );
     // a clean tree attributes nothing
-    snapshot_boundary(root, ShadowStore::Local, "s", "after")
+    snapshot_boundary(root, ShadowStore::User, "s", "after")
         .unwrap()
         .expect("boundary");
-    assert!(changed_since_head(root, ShadowStore::Local, "s").is_empty());
+    assert!(changed_since_head(root, ShadowStore::User, "s").is_empty());
 }
 
 /// Audit H17: restore joins events-provided paths straight onto the
@@ -72,7 +72,7 @@ fn available_in_respects_the_configured_store() {
     assert!(!available_in(&missing, ShadowStore::Off));
     // the legacy entry point is the local store
     assert_eq!(
-        available_in(&missing, ShadowStore::Local),
+        available_in(&missing, ShadowStore::User),
         available(&missing)
     );
 }
@@ -100,9 +100,13 @@ fn maintenance_drops_only_the_chains_whose_event_log_is_gone() {
         shadow.snapshot(session, "one").unwrap();
     }
     // two of the three still have an event log on disk
-    fs::create_dir_all(root.join(".sqwai/events")).unwrap();
+    fs::create_dir_all(crate::agent::state::events_dir(root)).unwrap();
     for session in ["current", "alive"] {
-        fs::write(root.join(format!(".sqwai/events/{session}.jsonl")), b"").unwrap();
+        fs::write(
+            crate::agent::state::events_dir(root).join(format!("{session}.jsonl")),
+            b"",
+        )
+        .unwrap();
     }
 
     let report = maintain(root, &cfg, "current").unwrap();
@@ -516,7 +520,7 @@ fn restore_accepts_hashes_read_back_from_the_event_log() {
 
     let repo = tmp_repo();
     let dir = repo.path();
-    let sha = snapshot_session(dir, ShadowStore::Local, "test", "pre_mutation")
+    let sha = snapshot_session(dir, ShadowStore::User, "test", "pre_mutation")
         .expect("no shadow repo")
         .expect("snapshot");
     std::fs::write(dir.join("a.txt"), "agent edit\n").unwrap();
@@ -561,7 +565,7 @@ fn restore_leaves_a_file_the_agent_never_wrote_alone() {
     git_in(dir, &["add", "."]);
     git_in(dir, &["commit", "-qm", "add human.txt"]);
 
-    let sha = snapshot_session(dir, ShadowStore::Local, "test", "pre_mutation a.txt")
+    let sha = snapshot_session(dir, ShadowStore::User, "test", "pre_mutation a.txt")
         .expect("no shadow repo")
         .expect("snapshot");
     // the agent rewrites a.txt ...
@@ -600,7 +604,7 @@ fn restore_leaves_a_file_the_agent_never_wrote_alone() {
 fn restore_removes_files_created_after_the_snapshot() {
     let repo = tmp_repo();
     let dir = repo.path();
-    let sha = snapshot_session(dir, ShadowStore::Local, "test", "pre_mutation")
+    let sha = snapshot_session(dir, ShadowStore::User, "test", "pre_mutation")
         .expect("no shadow repo")
         .expect("snapshot");
     std::fs::write(dir.join("generated.rs"), "// agent\n").unwrap();
@@ -627,7 +631,7 @@ fn restore_removes_files_created_after_the_snapshot() {
 fn restore_skips_a_file_edited_after_the_agent_wrote_it() {
     let repo = tmp_repo();
     let dir = repo.path();
-    let sha = snapshot_session(dir, ShadowStore::Local, "test", "pre_mutation a.txt")
+    let sha = snapshot_session(dir, ShadowStore::User, "test", "pre_mutation a.txt")
         .expect("no shadow repo")
         .expect("snapshot");
     std::fs::write(dir.join("a.txt"), "agent edit\n").unwrap();
@@ -659,7 +663,7 @@ fn restore_skips_a_file_edited_after_the_agent_wrote_it() {
 fn restore_without_a_recorded_hash_puts_the_file_back() {
     let repo = tmp_repo();
     let dir = repo.path();
-    let sha = snapshot_session(dir, ShadowStore::Local, "test", "pre_bash")
+    let sha = snapshot_session(dir, ShadowStore::User, "test", "pre_bash")
         .expect("no shadow repo")
         .expect("snapshot");
     std::fs::write(dir.join("a.txt"), "touched by a shell command\n").unwrap();
@@ -689,7 +693,7 @@ fn snapshot_and_restore_revert_edits_and_creations() {
     fs::write(dir.join("a.txt"), "changed\n").unwrap();
     fs::write(dir.join("new.txt"), "created\n").unwrap();
 
-    let sha = snapshot_session(dir, ShadowStore::Local, "test", "test")
+    let sha = snapshot_session(dir, ShadowStore::User, "test", "test")
         .expect("no shadow repo")
         .expect("snapshot");
 
@@ -777,7 +781,7 @@ fn restore_paths_handles_windows_backslash_targets() {
     let dir = repo.path();
     std::fs::create_dir_all(dir.join("src")).unwrap();
     std::fs::write(dir.join("src").join("foo.rs"), "original\n").unwrap();
-    let sha = snapshot_session(dir, ShadowStore::Local, "test", "pre_mutation")
+    let sha = snapshot_session(dir, ShadowStore::User, "test", "pre_mutation")
         .expect("no shadow repo")
         .expect("snapshot");
     std::fs::write(dir.join("src").join("foo.rs"), "agent modified\n").unwrap();
@@ -804,7 +808,7 @@ fn session_chains_do_not_interleave() {
     let dir = repo.path();
     let snap = |session: &str, label: &str, content: &str| {
         std::fs::write(dir.join("a.txt"), content).unwrap();
-        snapshot_session(dir, ShadowStore::Local, session, label)
+        snapshot_session(dir, ShadowStore::User, session, label)
             .expect("no shadow repo")
             .expect("snapshot")
     };
@@ -812,7 +816,7 @@ fn session_chains_do_not_interleave() {
     snap("bbb", "bbb-1", "b1\n");
     snap("aaa", "aaa-2", "a2\n");
 
-    let shadow = shadow_repo(dir, ShadowStore::Local).expect("shadow repo");
+    let shadow = shadow_repo(dir, ShadowStore::User).expect("shadow repo");
     let labels = |session: &str| {
         shadow
             .commit_log(session)
@@ -902,7 +906,7 @@ fn bash_file_diffs_records_layer1_blobs_and_hashes_for_scoped_undo() {
     let repo = tmp_repo();
     let dir = repo.path();
     fs::write(dir.join("keep_delete.txt"), "before bash deleted me\n").unwrap();
-    let sha = snapshot_session(dir, ShadowStore::Local, "s-bash", "pre_bash")
+    let sha = snapshot_session(dir, ShadowStore::User, "s-bash", "pre_bash")
         .expect("no shadow repo")
         .expect("snapshot");
 
@@ -911,7 +915,7 @@ fn bash_file_diffs_records_layer1_blobs_and_hashes_for_scoped_undo() {
     fs::write(dir.join("b.txt"), "created by bash\n").unwrap();
     fs::remove_file(dir.join("keep_delete.txt")).unwrap();
 
-    let diffs = bash_file_diffs(dir, ShadowStore::Local, &sha);
+    let diffs = bash_file_diffs(dir, ShadowStore::User, &sha);
     assert_eq!(diffs.len(), 3, "diffs: {diffs:?}");
 
     let mut events = EventLog::open(dir, "s-bash").unwrap();

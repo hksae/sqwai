@@ -11,7 +11,7 @@ pub struct ProjectLock {
 
 impl ProjectLock {
     pub fn acquire(root: &Path, force: bool) -> Result<Self> {
-        let lock_dir = root.join(".sqwai").join("lock");
+        let lock_dir = crate::agent::state::lock_dir(root);
         fs::create_dir_all(&lock_dir)
             .with_context(|| format!("cannot create lock directory {}", lock_dir.display()))?;
 
@@ -191,7 +191,7 @@ mod tests {
     #[test]
     fn stale_locks_from_dead_pids_are_pruned() {
         let root = tempdir().unwrap();
-        let lock_dir = root.path().join(".sqwai").join("lock");
+        let lock_dir = crate::agent::state::lock_dir(root.path());
         fs::create_dir_all(&lock_dir).unwrap();
         // A lock file with an unreachable PID
         let stale_path = lock_dir.join("stale.lock");

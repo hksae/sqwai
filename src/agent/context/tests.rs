@@ -284,9 +284,9 @@ fn anchor_degrades_without_plan_or_events() {
 #[test]
 fn anchor_ignores_completed_plans() {
     let root = temp_root("done-plan");
-    std::fs::create_dir_all(root.join(".sqwai/plans")).unwrap();
+    std::fs::create_dir_all(crate::plan::plans_dir(&root)).unwrap();
     std::fs::write(
-        root.join(".sqwai/plans/p.json"),
+        crate::plan::plans_dir(&root).join("p.json"),
         r#"{"version":1,"id":"p","status":"completed","created":"t",
             "sessions":["s1"],
             "goal":{"text":"ship it","source":"user","created":"t"},
@@ -1031,10 +1031,7 @@ fn anchor_says_when_the_session_was_idle() {
         events
             .append("user_msg", serde_json::json!({"chars": 2}))
             .unwrap();
-        let path = root
-            .join(".sqwai")
-            .join("events")
-            .join(format!("{name}.jsonl"));
+        let path = crate::agent::state::events_dir(&root).join(format!("{name}.jsonl"));
         let ts = (chrono::Local::now() - chrono::Duration::hours(offset_hours)).to_rfc3339();
         let lines: Vec<String> = std::fs::read_to_string(&path)
             .unwrap()

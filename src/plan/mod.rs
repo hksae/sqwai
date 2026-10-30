@@ -218,7 +218,7 @@ pub struct StepCounts {
 // ---------------------------------------------------------------- storage
 
 pub fn plans_dir(root: &Path) -> PathBuf {
-    root.join(".sqwai").join("plans")
+    crate::agent::state::plans_dir(root)
 }
 
 const CROCKFORD: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";

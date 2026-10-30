@@ -2398,12 +2398,11 @@ mod tests {
     #[test]
     fn host_owned_state_is_invisible_to_grep_and_glob() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join(".sqwai").join("plans")).unwrap();
-        std::fs::write(
-            dir.path().join(".sqwai").join("plans").join("secret.json"),
-            "host_secret_marker_xyz",
-        )
-        .unwrap();
+        // plans moved to the data dir, but `.sqwai` still holds host-owned
+        // files (exports, spill, skills) that a sweep must not read
+        let exports = dir.path().join(".sqwai").join("exports");
+        std::fs::create_dir_all(&exports).unwrap();
+        std::fs::write(exports.join("secret.md"), "host_secret_marker_xyz").unwrap();
         std::fs::write(dir.path().join("visible.txt"), "plain content").unwrap();
         let mut ctx = ToolCtx::new(dir.path());
         // grep must not match inside host-owned state (pre-fix: leaked on
