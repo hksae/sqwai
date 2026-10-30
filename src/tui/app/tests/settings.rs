@@ -663,20 +663,20 @@ fn approval_long_subject_expands_on_request() {
 }
 
 #[test]
-fn ask_mode_test_cycles_ten_dialogs_and_sends_nothing() {
+fn ask_mode_test_cycles_eleven_dialogs_and_sends_nothing() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.cfg.ui.experimental_test = true;
     app.command("test ask-mode");
     assert!(app.test_approval_active);
     let mut subjects = Vec::new();
-    for _ in 0..10 {
+    for _ in 0..11 {
         match app.cur_menu() {
             Some(Menu::Approval { subject, .. }) => subjects.push(subject.clone()),
             _ => panic!("expected an approval dialog"),
         }
         app.approval_decide(ApprovalDecision::RunOnce);
     }
-    assert_eq!(subjects.len(), 10);
+    assert_eq!(subjects.len(), 11);
     assert!(app.cur_menu().is_none(), "the sequence must end");
     assert!(!app.test_approval_active);
     assert!(app.agent.is_none(), "the test must not reach an agent");
@@ -687,6 +687,10 @@ fn ask_mode_test_cycles_ten_dialogs_and_sends_nothing() {
     assert!(
         subjects.iter().any(|s| s.contains("write src/parser.rs")),
         "the write summary is part of the run: {subjects:?}"
+    );
+    assert!(
+        subjects.iter().any(|s| s.lines().count() >= 50),
+        "the long script is part of the run: {subjects:?}"
     );
 }
 

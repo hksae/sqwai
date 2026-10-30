@@ -1588,7 +1588,7 @@ impl App {
 
 /// Wrap an approval subject into display lines, 68 columns each. Blank lines
 /// are dropped so indentation in a command does not eat the preview.
-fn approval_subject_lines(subject: &str) -> Vec<String> {
+pub(super) fn approval_subject_lines(subject: &str) -> Vec<String> {
     let mut lines = Vec::new();
     for raw_line in subject.lines() {
         let raw_line = raw_line.trim_end_matches('\r');

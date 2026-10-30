@@ -477,7 +477,7 @@ impl App {
     }
 
     fn test_ask_mode_approvals() -> Vec<TestApproval> {
-        vec![
+        let mut approvals = vec![
             TestApproval {
                 subject: "git status --short".into(),
                 reason: "ask mode".into(),
@@ -538,7 +538,18 @@ impl App {
                 grant: "npm publish *".into(),
                 allow_always: true,
             },
-        ]
+        ];
+        let long_script = (1..=50)
+            .map(|i| format!("cargo test --test case_{i:02} -- --nocapture"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        approvals.push(TestApproval {
+            subject: long_script,
+            reason: "ask mode".into(),
+            grant: "cargo test *".into(),
+            allow_always: true,
+        });
+        approvals
     }
 
     pub(super) fn clear_test_ask_mode(&mut self) {

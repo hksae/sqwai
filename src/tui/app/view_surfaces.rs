@@ -16,6 +16,69 @@ use unicode_width::UnicodeWidthStr;
 use crate::config::EffortLevel;
 use crate::tui::theme::Theme;
 
+/// Frames (50ms each) one command line stays the approval shimmer's active
+/// line. One second per line keeps a long command readable while the crest
+/// still completes a full sweep on each line.
+const APPROVAL_LINE_TICKS: usize = 20;
+
+/// When the approval menu is open: how many command lines are visible, which
+/// one shimmers, and the wave tick inside that line. The phase starts at zero
+/// when the dialog opens, so it does not inherit the global spinner tick.
+fn approval_highlight(app: &App) -> Option<(usize, usize, usize)> {
+    let Some(Menu::Approval {
+        subject, expanded, ..
+    }) = app.cur_menu()
+    else {
+        return None;
+    };
+    let total = super::menu_rows::approval_subject_lines(subject).len();
+    let tick = app
+        .approval_opened_at
+        .map(|t| (t.elapsed().as_millis() / 50) as usize)
+        .unwrap_or(0);
+    Some(approval_frame(tick, total, *expanded))
+}
+
+/// Map a tick since the dialog opened to (visible lines, active line, wave
+/// tick). The active line changes every `APPROVAL_LINE_TICKS`; the wave tick
+/// runs a full shimmer period inside that dwell, so each line gets a complete
+/// crest before the next one starts.
+fn approval_frame(tick: usize, total: usize, expanded: bool) -> (usize, usize, usize) {
+    let shown = if expanded { total } else { total.min(4) };
+    let active = (tick / APPROVAL_LINE_TICKS) % shown.max(1);
+    let wave = (tick % APPROVAL_LINE_TICKS)
+        * (crate::tui::shimmer::SHIMMER_PERIOD_TICKS / APPROVAL_LINE_TICKS);
+    (shown, active, wave)
+}
+
+/// One approval subject row: the active line shimmers, the others keep the
+/// plain warning style. A one-line subject carries its reason as a second
+/// span; that span stays dim and is not part of the wave.
+fn approval_subject_spans(
+    line: Line<'static>,
+    cur: bool,
+    active: bool,
+    wave: usize,
+) -> Vec<Span<'static>> {
+    let mut spans = line.spans;
+    if active && !spans.is_empty() {
+        let text = spans[0].content.to_string();
+        let mut shimmered = crate::tui::shimmer::shimmer_warn_spans(&text, wave);
+        if cur {
+            for span in &mut shimmered {
+                span.style = span.style.add_modifier(Modifier::BOLD);
+            }
+        }
+        spans.splice(0..1, shimmered);
+    }
+    if cur {
+        for span in &mut spans {
+            span.style = span.style.add_modifier(Modifier::BOLD);
+        }
+    }
+    spans
+}
+
 impl App {
     pub(super) fn form_hover_band(
         line: Line<'static>,
@@ -992,6 +1055,7 @@ impl App {
                 cell.set_symbol("S");
             }
         }
+        let approval_state = approval_highlight(self);
         let paint = |i: usize, k: u16, slf: &mut Self, buf: &mut Buffer| {
             let Some(y) = row_y(k) else {
                 return;
@@ -1038,13 +1102,10 @@ impl App {
                 paint_field(slf, buf, area, y, rail);
             } else {
                 let avail = area.width.saturating_sub(2 + rail) as usize;
-                let mut spans: Vec<Span> = if i < head.saturating_sub(2)
-                    && matches!(slf.cur_menu(), Some(Menu::Approval { .. }))
-                    && !matches!(action, MenuAction::ApprovalExpand)
+                let mut spans: Vec<Span> = if let Some((shown, active, wave)) = approval_state
+                    && i < shown
                 {
-                    let row_text: String =
-                        line.spans.iter().map(|sp| sp.content.as_ref()).collect();
-                    crate::tui::shimmer::shimmer_warn_spans(&row_text, slf.spinner_tick)
+                    approval_subject_spans(line, cur, i == active, wave)
                 } else if i == 0
                     && let Some(Menu::ConfirmDelete { label, .. }) = slf.cur_menu()
                 {
@@ -1312,5 +1373,22 @@ impl App {
         self.ef_click = Some((ef_x0, ef_x0 + cols(&ef_label) as u16));
         spans.push(Span::styled(" ".to_string(), Theme::base()));
         spans
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn approval_shimmer_starts_at_zero_and_moves_one_line_at_a_time() {
+        assert_eq!(approval_frame(0, 50, false), (4, 0, 0));
+        assert_eq!(approval_frame(19, 50, false), (4, 0, 38));
+        assert_eq!(approval_frame(20, 50, false), (4, 1, 0));
+        assert_eq!(approval_frame(79, 50, false), (4, 3, 38));
+        assert_eq!(approval_frame(80, 50, false), (4, 0, 0));
+        // expanding shows every line; a short subject still shimmers on 0
+        assert_eq!(approval_frame(0, 50, true).0, 50);
+        assert_eq!(approval_frame(0, 1, false), (1, 0, 0));
     }
 }
