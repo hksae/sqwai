@@ -22,7 +22,7 @@ use crate::agent::tools::{self, ToolCtx};
 use crate::plan;
 use loop_ask::{ask_user, bash_call, mutating_tool_gate, run_tool_blocking};
 use loop_compact::{
-    CompactionPrefix, compact_history, plan_hint_for_summary, record_compaction,
+    CompactionPrefix, CompactionReason, compact_history, plan_hint_for_summary, record_compaction,
 };
 use loop_subagent::{
     SUBAGENT_TIMEOUT_SECS, adopt_in_progress_step, run_subagent, run_subagent_batch,
@@ -1016,7 +1016,7 @@ async fn run_agent(
             &mut messages,
             &mut summary,
             &policy,
-            true,
+            CompactionReason::Manual,
             &plan_hint,
             Some(compact_focus.as_str()).filter(|s| !s.trim().is_empty()),
             Some(&prefix),
@@ -1035,6 +1035,7 @@ async fn run_agent(
                 "summarized": outcome.summarized,
                 "summary": summary.as_deref().unwrap_or(""),
             });
+            loop_compact::record_gate_fields(&mut fields, &outcome.gate);
             loop_compact::record_trim_fields(&mut fields, outcome.trimmed.as_ref());
             let _ = writer.append("compaction", fields);
         }
@@ -1205,10 +1206,14 @@ async fn run_agent(
     let mut next_id: u64 = 0;
     // prompt size of the last request, as reported by the provider
     let mut prompt_size: u64 = 0;
-    // One forced compaction per oversized request, reset after every turn that
-    // gets through: without the guard a request that stays too large would
-    // compact in a loop.
-    let mut compacted_for_overflow = false;
+    // A bounded ladder of forced compactions per oversized request, reset
+    // after every turn that gets through: without the guard a request that
+    // stays too large would compact in a loop, and with a single shot the
+    // second refusal had nowhere to go but out. Each attempt halves-then-thirds
+    // the tail it may keep, which is the only knob that makes an already
+    // compacted transcript smaller.
+    let mut overflow_cuts: u32 = 0;
+    const OVERFLOW_CUTS_MAX: u32 = 3;
 
     let refresh_anchor_in_system =
         |sys: &mut Vec<SystemPart>, root: &std::path::Path, session_id: &str| {
@@ -1305,7 +1310,7 @@ async fn run_agent(
             &mut messages,
             &mut summary,
             &policy,
-            false,
+            CompactionReason::Pressure,
             &plan_hint,
             None,
             Some(&prefix),
@@ -1496,11 +1501,13 @@ async fn run_agent(
                     continue;
                 }
 
-                // A request that does not fit gets one compaction and one more
-                // try, which is the only thing that can make it fit.
-                // Asking the same oversized request again cannot.
-                if failure.class == Some(ErrorClass::ContextOverflow) && !compacted_for_overflow {
-                    compacted_for_overflow = true;
+                // A request that does not fit gets the ladder above: compaction
+                // and one more try, which is the only thing that can make it
+                // fit. Asking the same oversized request again cannot.
+                if failure.class == Some(ErrorClass::ContextOverflow)
+                    && overflow_cuts < OVERFLOW_CUTS_MAX
+                {
+                    overflow_cuts += 1;
                     let overflow_msgs_before = messages.len();
                     let overflow_plan_hint = plan_hint_for_summary(&root, &session_id);
                     let prefix = CompactionPrefix {
@@ -1513,7 +1520,9 @@ async fn run_agent(
                         &mut messages,
                         &mut summary,
                         &policy,
-                        true,
+                        CompactionReason::Overflow {
+                            tail_budget: policy.tail_budget() / u64::from(overflow_cuts),
+                        },
                         &overflow_plan_hint,
                         None,
                         Some(&prefix),
@@ -1605,7 +1614,7 @@ async fn run_agent(
                     // H7). The continuation refusal belonged to the OLD
                     // provider; the fallback may well support references
                     // (audit M8).
-                    compacted_for_overflow = false;
+                    overflow_cuts = 0;
                     continuation_usable = true;
                     continue;
                 }
@@ -1614,7 +1623,7 @@ async fn run_agent(
                 break;
             }
         };
-        compacted_for_overflow = false;
+        overflow_cuts = 0;
 
         if let Some(usage) = turn.usage {
             turn_tokens_used = turn_tokens_used

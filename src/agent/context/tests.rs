@@ -442,6 +442,39 @@ fn split_for_summary_adaptive_force_compacts_a_short_conversation() {
     assert!(older.is_empty());
 }
 
+#[test]
+fn a_tail_larger_than_its_budget_is_still_kept() {
+    // A live 256k session carried ~1 MB of read results in one turn against a
+    // tail budget of 12,800 tokens. Every cut that fit the budget left nothing
+    // behind, so the transcript became its own summary: 29 messages in, 1 out,
+    // and the next request ran at 4% of the window with every file the model
+    // had read gone. An unaffordable tail is stage 4's problem to bound by
+    // dropping whole turns from the front — the split must never answer with
+    // an empty keep.
+    let mut messages: Vec<Message> = Vec::new();
+    for i in 0..10 {
+        messages.push(user(&format!("ask {i}")));
+        messages.push(Message::new(Role::Assistant, "done"));
+    }
+    messages.push(user("read the whole project"));
+    messages.push(Message::new(Role::Assistant, &"x".repeat(200_000)));
+
+    let (older, keep) = split_for_summary_adaptive(&messages, 4, false, 1_000);
+    assert!(
+        !older.is_empty(),
+        "the earlier turns are still summarizable"
+    );
+    assert!(
+        !keep.is_empty(),
+        "a tail over budget must survive the split, not collapse to nothing"
+    );
+    assert_eq!(
+        keep.last().map(|m| m.content.as_str()),
+        Some("x".repeat(200_000).as_str()),
+        "the newest message is the one the model is answering from"
+    );
+}
+
 /// The provider is the only true meter of its own window, and the byte guess is
 /// not close: a live request of 736,839 bytes came back billed as 209,553
 /// prompt tokens while bytes over four read it as 184,209 — under the 204,800

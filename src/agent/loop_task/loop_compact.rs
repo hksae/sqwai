@@ -21,6 +21,74 @@ pub(crate) fn plan_hint_for_summary(root: &std::path::Path, session_id: &str) ->
     hint
 }
 
+/// Why a compaction ran. Recorded on the event: a cut that looks premature is
+/// only explainable by what fired it, and the three callers differ in exactly
+/// that — `/compact` is the user asking, `Overflow` is the provider refusing,
+/// `Pressure` is the gate below deciding the next request would not fit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CompactionReason {
+    Pressure,
+    Manual,
+    /// The provider refused the request for size. The tail allowance shrinks
+    /// with each attempt: a cut that did not make the request fit needs a
+    /// smaller tail, not the same cut repeated — one shot per oversized
+    /// request was a dead turn whenever the first compaction came up short.
+    Overflow {
+        tail_budget: u64,
+    },
+}
+
+impl CompactionReason {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Pressure => "pressure",
+            Self::Manual => "manual",
+            Self::Overflow { .. } => "overflow",
+        }
+    }
+
+    /// Manual and overflow cuts shrink the kept tail when `keep_turns` would
+    /// leave nothing to summarize; the pressure gate never does.
+    fn force(self) -> bool {
+        self != Self::Pressure
+    }
+
+    /// The tail this cut may keep. The pressure gate and `/compact` take the
+    /// policy's; an overflow attempt passes the previous allowance divided by
+    /// the attempt number.
+    fn tail_budget(self, policy: &context::Policy) -> u64 {
+        match self {
+            Self::Overflow { tail_budget } => tail_budget,
+            _ => policy.tail_budget(),
+        }
+    }
+}
+
+/// What the gate saw when it fired, recorded beside the cut so a later reading
+/// of the session answers "why" without reconstructing the arithmetic from the
+/// message list — which is how a compaction that was three times overdue came
+/// to look three times premature.
+#[derive(Debug, Clone)]
+pub struct CompactionGate {
+    pub trigger: &'static str,
+    /// Tokens the gate priced the wire at, before the cut.
+    pub priced: u64,
+    /// `Policy::budget()` that price was judged against.
+    pub budget: u64,
+    /// The same price taken again on the compacted transcript: where this is
+    /// still over `budget`, the hard trim below is what saved the request.
+    pub priced_after: u64,
+    pub context_limit: u64,
+    pub bytes_per_token: u64,
+    /// Whether `priced` came from the provider's own meter (`true`) or from a
+    /// byte estimate (`false`).
+    pub anchored: bool,
+    pub tail_budget: u64,
+    /// Messages kept verbatim by the split. Zero here is total collapse: the
+    /// transcript became the summary and nothing else.
+    pub tail_kept: usize,
+}
+
 /// EventLog-first compaction record: tokens and messages
 /// before/after, whether a summary was written, and its text
 /// (secret-screened by `append`). The `/compact` path already wrote
@@ -45,9 +113,27 @@ pub(crate) fn record_compaction(
         "summarized": outcome.summarized,
         "summary": summary_text,
     });
+    record_gate_fields(&mut fields, &outcome.gate);
     // The one loss the summary cannot describe: it was written before the cut.
     record_trim_fields(&mut fields, outcome.trimmed.as_ref());
     let _ = writer.append("compaction", fields);
+}
+
+/// Attach the gate's own numbers to a compaction record. Shared with the
+/// `/compact` path, which writes its own richer event.
+pub(crate) fn record_gate_fields(fields: &mut serde_json::Value, gate: &CompactionGate) {
+    let Some(map) = fields.as_object_mut() else {
+        return;
+    };
+    map.insert("trigger".into(), gate.trigger.into());
+    map.insert("priced".into(), gate.priced.into());
+    map.insert("budget".into(), gate.budget.into());
+    map.insert("priced_after".into(), gate.priced_after.into());
+    map.insert("context_limit".into(), gate.context_limit.into());
+    map.insert("bpt".into(), gate.bytes_per_token.into());
+    map.insert("anchored".into(), gate.anchored.into());
+    map.insert("tail_budget".into(), gate.tail_budget.into());
+    map.insert("tail_kept".into(), gate.tail_kept.into());
 }
 
 /// Attach the hard-trim report to a compaction record. Shared with the
@@ -180,7 +266,7 @@ pub(crate) fn compaction_request(
 /// 3. if the summary could not be obtained, summarize locally;
 /// 4. hard-trim if the history still does not fit.
 ///
-/// Returns `(before, after, summarized_by_the_model)` when something changed.
+/// Returns what the cut did, including the numbers the gate fired on.
 /// A failure never propagates: stage 4 always leaves a usable transcript.
 ///
 /// Pressure is judged on the WIRE, not the raw store: aged-out tool results are
@@ -199,11 +285,12 @@ pub(crate) async fn compact_history(
     messages: &mut Vec<Message>,
     summary: &mut Option<String>,
     policy: &context::Policy,
-    force: bool,
+    reason: CompactionReason,
     plan_hint: &str,
     focus: Option<&str>,
     prefix: Option<&CompactionPrefix<'_>>,
 ) -> Option<CompactionOutcome> {
+    let force = reason.force();
     let measured = |m: &[Message]| context::estimated_tokens(m);
     let mut wire = crate::agent::tool_output::Wire {
         context_limit: policy.context_limit,
@@ -234,13 +321,16 @@ pub(crate) async fn compact_history(
             tokens
         }
     };
+    let gate_budget = policy.budget();
+    let tail_budget = reason.tail_budget(policy);
+    let priced_before = priced(messages, &wire);
 
     // No per-turn pruning by design (Codex shape): what the model read
     // stays verbatim until real pressure. Silently rewriting old tool
     // output taught the model to re-read the same files in circles —
     // the prune note even instructed it to. History shrinks only below,
     // on pressure, via summary or hard trim.
-    if !force && policy.pressure(priced(messages, &wire)) == context::Pressure::Ok {
+    if !force && policy.pressure(priced_before) == context::Pressure::Ok {
         // Pressure is fine: history is untouched, report nothing.
         return None;
     }
@@ -249,12 +339,8 @@ pub(crate) async fn compact_history(
     // tool call can never be separated from its results. `force` (manual
     // `/compact`) also shrinks the kept tail when the configured keep_turns
     // would leave nothing to summarize.
-    let (older, keep) = context::split_for_summary_adaptive(
-        messages,
-        policy.keep_turns(),
-        force,
-        policy.tail_budget(),
-    );
+    let (older, keep) =
+        context::split_for_summary_adaptive(messages, policy.keep_turns(), force, tail_budget);
     let older: Vec<Message> = older.to_vec();
     let keep: Vec<Message> = keep.to_vec();
     let keep_len = keep.len();
@@ -324,8 +410,9 @@ pub(crate) async fn compact_history(
     // keeps its share of the window, and the drop is reported: it is the one
     // fact the summary, written before the cut, cannot carry.
     let mut trimmed = None;
-    if policy.pressure(priced(messages, &wire)) != context::Pressure::Ok {
-        let budget = policy.budget().saturating_sub(if wire.measured.is_none() {
+    let priced_after = priced(messages, &wire);
+    if policy.pressure(priced_after) != context::Pressure::Ok {
+        let budget = gate_budget.saturating_sub(if wire.measured.is_none() {
             fixed_tokens
         } else {
             0
@@ -343,6 +430,17 @@ pub(crate) async fn compact_history(
         after,
         summarized,
         trimmed,
+        gate: CompactionGate {
+            trigger: reason.label(),
+            priced: priced_before,
+            budget: gate_budget,
+            priced_after,
+            context_limit: policy.context_limit,
+            bytes_per_token: policy.bytes_per_token,
+            anchored: wire.measured.is_some(),
+            tail_budget,
+            tail_kept: keep_len,
+        },
     })
 }
 
@@ -353,6 +451,7 @@ pub struct CompactionOutcome {
     pub after: u64,
     pub summarized: bool,
     pub trimmed: Option<context::TrimReport>,
+    pub gate: CompactionGate,
 }
 
 /// Tokens the fixed part of the request occupies: system parts plus tool

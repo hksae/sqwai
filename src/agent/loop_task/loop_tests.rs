@@ -1,5 +1,6 @@
 use super::loop_compact::{
-    CompactionOutcome, CompactionPrefix, compact_history, compaction_request, record_compaction,
+    CompactionGate, CompactionOutcome, CompactionPrefix, CompactionReason, compact_history,
+    compaction_request, record_compaction,
 };
 use super::loop_subagent::{SUBAGENT_TIMEOUT_SECS, adopt_in_progress_step};
 use super::*;
@@ -745,7 +746,7 @@ async fn compact_history_leaves_full_history_alone_without_pressure() {
         &mut messages,
         &mut summary,
         &policy,
-        false,
+        CompactionReason::Pressure,
         "",
         None,
         None,
@@ -797,7 +798,7 @@ async fn compact_history_trims_a_long_plain_transcript() {
         &mut messages,
         &mut summary,
         &policy,
-        false,
+        CompactionReason::Pressure,
         "",
         None,
         None,
@@ -839,7 +840,7 @@ async fn compact_history_fires_repeatedly_as_history_grows() {
             &mut messages,
             &mut summary,
             &policy,
-            false,
+            CompactionReason::Pressure,
             "",
             None,
             None,
@@ -904,7 +905,7 @@ async fn compact_history_trims_a_single_prompt_tool_loop() {
             &mut messages,
             &mut summary,
             &policy,
-            false,
+            CompactionReason::Pressure,
             "",
             None,
             None,
@@ -932,6 +933,17 @@ async fn compact_history_trims_a_single_prompt_tool_loop() {
 
 #[test]
 fn compaction_record_carries_tokens_and_summary() {
+    let gate = |trigger: &'static str| CompactionGate {
+        trigger,
+        priced: 210_000,
+        budget: 204_800,
+        priced_after: 12_000,
+        context_limit: 256_000,
+        bytes_per_token: 3,
+        anchored: true,
+        tail_budget: 25_600,
+        tail_kept: 7,
+    };
     let root = std::env::temp_dir().join(format!("sqwai-compact-rec-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
@@ -947,6 +959,7 @@ fn compaction_record_carries_tokens_and_summary() {
                 span: "user → assistant".into(),
                 paths: vec!["src/a.rs".into()],
             }),
+            gate: gate("pressure"),
         },
         40,
         10,
@@ -960,6 +973,7 @@ fn compaction_record_carries_tokens_and_summary() {
             after: 1,
             summarized: false,
             trimmed: None,
+            gate: gate("manual"),
         },
         1,
         1,
@@ -979,6 +993,17 @@ fn compaction_record_carries_tokens_and_summary() {
     assert_eq!(c.fields["trimmed_msgs"], 12);
     assert_eq!(c.fields["trimmed_span"], "user → assistant");
     assert_eq!(c.fields["trimmed_paths"][0], "src/a.rs");
+    // What the gate saw is as much a fact of the cut as what survived it: a
+    // session read must answer "why did this fire" without re-deriving it.
+    assert_eq!(c.fields["trigger"], "pressure");
+    assert_eq!(c.fields["priced"], 210_000);
+    assert_eq!(c.fields["budget"], 204_800);
+    assert_eq!(c.fields["priced_after"], 12_000);
+    assert_eq!(c.fields["context_limit"], 256_000);
+    assert_eq!(c.fields["bpt"], 3);
+    assert_eq!(c.fields["anchored"], true);
+    assert_eq!(c.fields["tail_budget"], 25_600);
+    assert_eq!(c.fields["tail_kept"], 7);
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -1004,7 +1029,7 @@ async fn a_big_prefix_makes_a_small_transcript_compact() {
         &mut messages,
         &mut summary,
         &context::Policy::with_compaction(16_000, 0.08, 2, 0.80),
-        false,
+        CompactionReason::Pressure,
         "",
         None,
         Some(&prefix),
@@ -1028,7 +1053,7 @@ async fn a_big_prefix_makes_a_small_transcript_compact() {
         &mut messages,
         &mut summary,
         &context::Policy::with_compaction(40_000, 0.08, 2, 0.80),
-        false,
+        CompactionReason::Pressure,
         "",
         None,
         Some(&empty),
@@ -1062,7 +1087,7 @@ async fn compact_history_summarizes_through_the_model() {
         &mut messages,
         &mut summary,
         &policy,
-        false,
+        CompactionReason::Pressure,
         "",
         None,
         None,
@@ -1099,7 +1124,7 @@ async fn compact_history_never_stacks_two_summaries() {
         &mut messages,
         &mut summary,
         &policy,
-        false,
+        CompactionReason::Pressure,
         "",
         None,
         None,
@@ -1113,7 +1138,7 @@ async fn compact_history_never_stacks_two_summaries() {
         &mut messages,
         &mut summary,
         &policy,
-        true,
+        CompactionReason::Manual,
         "",
         None,
         None,
@@ -1143,7 +1168,7 @@ async fn compact_history_falls_back_to_local_summary() {
         &mut messages,
         &mut summary,
         &policy,
-        false,
+        CompactionReason::Pressure,
         "",
         None,
         None,
@@ -1181,7 +1206,7 @@ async fn compact_history_retries_a_blown_summary_budget() {
         &mut messages,
         &mut summary,
         &policy,
-        false,
+        CompactionReason::Pressure,
         "",
         None,
         None,
@@ -1213,7 +1238,7 @@ async fn compact_history_truncates_without_retry_near_the_cap() {
         &mut messages,
         &mut summary,
         &policy,
-        false,
+        CompactionReason::Pressure,
         "",
         None,
         None,

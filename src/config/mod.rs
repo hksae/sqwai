@@ -1491,7 +1491,7 @@ impl ShadowStore {
 }
 
 fn default_compaction_threshold() -> f64 {
-    0.80
+    0.88
 }
 fn default_compaction_keep_turns() -> usize {
     4

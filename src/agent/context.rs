@@ -372,7 +372,7 @@ pub struct Policy {
     pub anchor_ratio: Option<f64>,
     pub keep_turns: Option<usize>,
     /// Fraction of the context at which compaction triggers
-    /// (`[compaction].threshold`, 0.80). Combined with the reserve below:
+    /// (`[compaction].threshold`, 0.88). Combined with the reserve below:
     /// the trigger is whichever bites first, so a large reserve on a small
     /// model still leaves room for the answer.
     pub threshold: Option<f64>,
@@ -465,12 +465,22 @@ impl Policy {
     /// Upper bound for the verbatim tail. `keep_turns` counts turns, and one
     /// user turn can hide hundreds of tool steps, so a tail chosen by turns
     /// alone can be larger than the whole budget — and then `hard_trim` cuts
-    /// it blind. A twentieth of the window, kept between 6k and 32k tokens.
+    /// it blind. A tenth of the window, kept between 12k and 64k tokens.
+    ///
+    /// The floor is not cosmetic: the tail has to be able to hold the largest
+    /// turn the wire can legitimately carry, or compaction has no cut that
+    /// both fits and keeps something. A live 256k session measured a single
+    /// turn at 1 MB of tool results against a twentieth-of-window tail of
+    /// 12,800 tokens: nothing fit, so the tail came back empty and the whole
+    /// transcript became its summary — 29 messages in, 1 out, the model's
+    /// next request at 4% of the window with every file it had read gone.
+    /// Entry caps keep the turn small; this keeps the tail affordable when
+    /// they cannot.
     pub fn tail_budget(&self) -> u64 {
         if self.context_limit == 0 {
             return u64::MAX;
         }
-        (self.context_limit / 20).clamp(6_000, 32_000)
+        (self.context_limit / 10).clamp(12_000, 64_000)
     }
 }
 
@@ -667,11 +677,11 @@ pub fn split_for_summary_adaptive(
 /// Pull the verbatim tail under `budget` by advancing the cut to the next safe
 /// boundary. `None` means the tail already fits (or the cut could not move),
 /// and the caller keeps the turn-count choice.
-fn fit_tail<'a>(
-    messages: &'a [Message],
+fn fit_tail(
+    messages: &[Message],
     start: usize,
     budget: u64,
-) -> Option<(&'a [Message], &'a [Message])> {
+) -> Option<(&[Message], &[Message])> {
     if start == 0 || estimated_tokens(&messages[start..]) <= budget {
         return None;
     }
@@ -681,6 +691,14 @@ fn fit_tail<'a>(
     }
     while cut < messages.len() && !is_safe_cut(messages, cut) {
         cut += 1;
+    }
+    // A cut that leaves nothing is not a smaller tail, it is no tail: the
+    // transcript becomes its own summary and every byte the model read is gone.
+    // Report "cannot fit" instead and let the caller keep the turn-based tail,
+    // which is over budget but real — stage 4 bounds it by dropping whole
+    // turns from the front, oldest first.
+    if cut >= messages.len() {
+        return None;
     }
     (cut > start).then(|| messages.split_at(cut))
 }
