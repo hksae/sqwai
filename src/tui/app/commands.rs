@@ -409,6 +409,11 @@ impl App {
             mode.as_str()
         );
         self.approval_mode = mode;
+        // The live cell is what a running agent reads before its next tool
+        // call; the session field is what the next launch restores.
+        self.approval_switch.set(mode);
+        self.session.approval = Some(mode);
+        self.session.save().ok();
         self.approval_blend = Some((from, Instant::now()));
         self.status(&what, StatusKind::Info);
         self.dirty = true;

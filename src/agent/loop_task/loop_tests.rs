@@ -66,6 +66,7 @@ async fn test_provider_fallback_chain_switch_on_failure() {
         session_id: "test-fallback-sess".into(),
         blocked_patterns: vec![],
         approval_mode: Default::default(),
+        approval_switch: None,
         approval_grants: Default::default(),
         web_allow_hosts: vec![],
         context_limit: 10000,
@@ -161,6 +162,7 @@ async fn partial_stream_failure_does_not_fall_back() {
         session_id: "test-partial-sess".into(),
         blocked_patterns: vec![],
         approval_mode: Default::default(),
+        approval_switch: None,
         approval_grants: Default::default(),
         web_allow_hosts: vec![],
         context_limit: 10000,
@@ -1231,6 +1233,7 @@ async fn esc_between_tool_calls_stops_the_batch() {
         session_id: "test-esc-sess".into(),
         blocked_patterns: vec![],
         approval_mode: Default::default(),
+        approval_switch: None,
         approval_grants: Default::default(),
         web_allow_hosts: vec![],
         context_limit: 10000,
@@ -1330,6 +1333,7 @@ async fn ask_webfetch_prompts_without_always_before_fetching() {
         session_id: "test-netask-sess".into(),
         blocked_patterns: vec![],
         approval_mode: crate::config::ApprovalMode::Ask,
+        approval_switch: None,
         approval_grants: Default::default(),
         web_allow_hosts: vec![],
         context_limit: 10_000,
@@ -1766,6 +1770,7 @@ async fn same_turn_subagent_calls_overlap() {
         session_id: "test-subbatch-sess".into(),
         blocked_patterns: vec![],
         approval_mode: Default::default(),
+        approval_switch: None,
         approval_grants: Default::default(),
         web_allow_hosts: vec![],
         context_limit: 10000,
@@ -1881,6 +1886,7 @@ async fn parallel_read_only_batch_merges_read_state_before_following_mutation() 
         session_id: "test-parallel-ro".into(),
         blocked_patterns: vec![],
         approval_mode: Default::default(),
+        approval_switch: None,
         approval_grants: Default::default(),
         web_allow_hosts: vec![],
         context_limit: 10000,
@@ -1989,6 +1995,7 @@ async fn closing_a_plan_does_not_end_the_run_by_itself() {
         session_id: session_id.into(),
         blocked_patterns: vec![],
         approval_mode: Default::default(),
+        approval_switch: None,
         approval_grants: Default::default(),
         web_allow_hosts: vec![],
         context_limit: 10000,
@@ -2103,4 +2110,128 @@ fn history_ids_are_read_from_both_sides_of_the_pair() {
     let ids = history_call_ids(&messages);
     assert!(ids.contains("a"), "{ids:?}");
     assert!(ids.contains("b"), "{ids:?}");
+}
+
+/// The approval axis is live: the TUI flips one cell and the very next tool
+/// call of the same run observes the new mode. The classifier's verdict
+/// record carries the mode, so it is the proof — no dialog is involved.
+struct FlipOnSecondRequest {
+    inner: MockTestProvider,
+    switch: crate::config::ApprovalSwitch,
+    to: crate::config::ApprovalMode,
+    seen: std::sync::atomic::AtomicUsize,
+}
+
+impl crate::providers::Provider for FlipOnSecondRequest {
+    fn stream_chat(
+        &self,
+        req: crate::providers::ChatRequest,
+    ) -> futures::stream::BoxStream<'static, crate::providers::StreamResult> {
+        if self
+            .seen
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            == 1
+        {
+            self.switch.set(self.to);
+        }
+        self.inner.stream_chat(req)
+    }
+}
+
+#[tokio::test]
+async fn shifting_the_mode_mid_run_reaches_the_next_tool_call() {
+    use crate::config::{ApprovalMode, ApprovalSwitch};
+    let switch = ApprovalSwitch::new(ApprovalMode::Auto);
+    let inner = MockTestProvider {
+        events: std::sync::Mutex::new(vec![
+            vec![Ok(StreamEvent::ToolCall(crate::providers::ToolCallReq::new(
+                "c1",
+                "bash",
+                serde_json::json!({"command": "echo one"}),
+            )))],
+            vec![Ok(StreamEvent::ToolCall(crate::providers::ToolCallReq::new(
+                "c2",
+                "bash",
+                serde_json::json!({"command": "echo two"}),
+            )))],
+            vec![Ok(StreamEvent::Text("done".into()))],
+        ]),
+    };
+    let provider = std::sync::Arc::new(FlipOnSecondRequest {
+        inner,
+        switch: switch.clone(),
+        to: ApprovalMode::Full,
+        seen: Default::default(),
+    });
+    let temp_dir =
+        std::env::temp_dir().join(format!("sqwai-test-live-mode-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let session = "live-mode-sess";
+    let input = AgentInput {
+        provider: provider.clone(),
+        model_id: "m".into(),
+        model_key: "primary".into(),
+        effort: None,
+        effort_support: crate::config::EffortSupport::default(),
+        max_tokens: None,
+        system: vec![],
+        messages: vec![Message::new(Role::User, "go")],
+        root: temp_dir.clone(),
+        session_id: session.into(),
+        blocked_patterns: vec![],
+        approval_mode: ApprovalMode::Auto,
+        approval_switch: Some(switch.clone()),
+        approval_grants: Default::default(),
+        web_allow_hosts: vec![],
+        context_limit: 10000,
+        vision: true,
+        pdf: false,
+        tools: Default::default(),
+        limits: Default::default(),
+        active_skills: vec![],
+        read_ledger: Default::default(),
+        enable_tools: true,
+        background_baselines: false,
+        read_only: false,
+        previous_response_id: None,
+        summary: None,
+        mcp: Default::default(),
+        skills: Default::default(),
+        compact_only: false,
+        compact_focus: String::new(),
+        compaction: Default::default(),
+        plan_limits: Default::default(),
+        shadow_store: crate::config::ShadowStore::Off,
+        subagent_depth: 0,
+        parent_step: None,
+        parent_session: None,
+        fallback_chain: vec![],
+    };
+    let mut handle = spawn_agent(input);
+    while let Some(ev) = handle.rx.recv().await {
+        match ev {
+            AgentEvent::Completed(Ok(_)) => break,
+            AgentEvent::Completed(Err(e)) => panic!("unexpected error: {e}"),
+            _ => {}
+        }
+    }
+    let modes: Vec<String> = crate::agent::events::EventLog::records_for(&temp_dir, session)
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.kind == "verdict")
+        .filter_map(|r| {
+            r.fields
+                .get("mode")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        })
+        .collect();
+    assert_eq!(
+        modes,
+        vec!["auto".to_string(), "full".to_string()],
+        "the second call must run under the mode the user switched to"
+    );
+    assert_eq!(switch.get(), ApprovalMode::Full);
+    let _ = std::fs::remove_dir_all(&temp_dir);
 }

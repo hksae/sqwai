@@ -333,6 +333,10 @@ pub struct AgentInput {
     /// when tool calls need a confirmation dialog ([safety].approval_mode);
     /// governs prompts only, the deny-side gates hold in every mode
     pub approval_mode: crate::config::ApprovalMode,
+    /// live axis shared with the TUI: when present it wins over
+    /// `approval_mode`, and every tool call re-reads it, so Shift+Tab during
+    /// a run applies to the next command rather than the next turn
+    pub approval_switch: Option<crate::config::ApprovalSwitch>,
     /// "always allow this session" answers from earlier turns of this
     /// session; the TUI carries them across per-turn `run_agent` spawns
     pub approval_grants: SessionGrants,
@@ -853,6 +857,7 @@ async fn run_agent(
         session_id,
         blocked_patterns,
         approval_mode,
+        approval_switch,
         approval_grants,
         web_allow_hosts,
         mut context_limit,
@@ -879,6 +884,11 @@ async fn run_agent(
         parent_session,
         mut fallback_chain,
     } = input;
+    // The approval axis is live when the caller handed a switch: the TUI
+    // flips it on Shift+Tab and every tool call re-reads it below.
+    let approval_live = approval_switch
+        .unwrap_or_else(|| crate::config::ApprovalSwitch::new(approval_mode));
+    let mut approval_mode = approval_mode;
     let events_session = parent_session.clone().unwrap_or_else(|| session_id.clone());
     let events_agent = if parent_session.is_some() {
         session_id.clone()
@@ -1818,6 +1828,12 @@ async fn run_agent(
                     break;
                 }
                 tool_calls_used += 1;
+                // Shift+Tab during a run applies from this call on: the
+                // frozen copy from run start described a mode the user may
+                // have left minutes ago. `outside_all` is the same flag the
+                // file-tool jail reads.
+                approval_mode = approval_live.get();
+                ctx.outside_all = approval_mode == ApprovalMode::Full;
                 if !parallel_outcomes.contains_key(&call_index)
                     && !ctx.cancel.load(std::sync::atomic::Ordering::Relaxed)
                 {

@@ -332,6 +332,7 @@ impl App {
             session_id: self.session.id.to_string(),
             blocked_patterns: self.cfg.safety.blocked_patterns.clone(),
             approval_mode: self.approval_mode,
+            approval_switch: Some(self.approval_switch.clone()),
             approval_grants: self.approval_grants.clone(),
             web_allow_hosts: self.cfg.web.allow_hosts.clone(),
             context_limit: self.session.context_limit,
@@ -481,6 +482,7 @@ impl App {
             session_id: self.session.id.to_string(),
             blocked_patterns: Vec::new(),
             approval_mode: self.approval_mode,
+            approval_switch: Some(self.approval_switch.clone()),
             approval_grants: self.approval_grants.clone(),
             web_allow_hosts: Vec::new(),
             context_limit: self.session.context_limit,
@@ -543,6 +545,16 @@ impl App {
         }
         self.context_bootstrap_pending = true;
         self.session = s;
+        // The session's own mode, not this window's: a reopened session picks
+        // up where it left off. A save from before the field existed keeps
+        // whatever the window is in now, and adopts it from here on.
+        let mode = self.session.approval.unwrap_or(self.approval_mode);
+        self.approval_mode = mode;
+        self.approval_switch.set(mode);
+        if mode == crate::config::ApprovalMode::Full {
+            self.full_access_unlocked = true;
+        }
+        self.session.approval = Some(mode);
         self.load_active_skills_from_session();
         self.resume_notice_armed = !self.session.messages.is_empty();
         crate::providers::set_conversation_id(&self.session.id.to_string());
@@ -630,6 +642,9 @@ impl App {
         self.run_undo_maintenance();
         let ctx = self.session.context_limit;
         self.session = Session::new(self.cfg.last_model.clone(), ctx);
+        // A new session inherits the mode this window is in: the config
+        // default set the tone for the launch, not for every new chat.
+        self.session.approval = Some(self.approval_mode);
         self.session.project = Some(self.project_root.clone());
         self.active_skills.clear();
         crate::providers::set_conversation_id(&self.session.id.to_string());

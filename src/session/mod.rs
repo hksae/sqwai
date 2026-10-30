@@ -154,6 +154,12 @@ pub struct Session {
     /// plan this session works on, if any
     #[serde(default)]
     pub plan_id: Option<String>,
+    /// Approval axis this session last ran with. `None` marks a save from
+    /// before the field existed (or a session that never toggled): those
+    /// start from `[safety].approval_mode`, and switching windows keeps the
+    /// mode the other session was already using.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval: Option<crate::config::ApprovalMode>,
     /// step this session currently holds. Set on `plan start`,
     /// cleared on `finish`/`block`/`cancel`; mirrored from the agent loop
     /// via `StepCurrent` events. `None` means idle.
@@ -249,6 +255,7 @@ impl Session {
             last_message_at: None,
             pinned: false,
             plan_id: None,
+            approval: None,
             current_step_id: None,
             last_response_id: None,
             last_response_model: None,
@@ -862,6 +869,30 @@ mod tests {
         assert!(!path.exists());
         assert!(Session::load_from(&path).is_err());
         assert!(Session::delete_at(&path).is_err());
+    }
+
+    /// The approval axis is remembered with the session: a reopened session
+    /// resumes in the mode it was left in, and a legacy save (no field) does
+    /// not invent one.
+    #[test]
+    fn approval_mode_round_trips_with_the_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("approval.json");
+        let mut s = Session::new("m".into(), 1000);
+        assert_eq!(s.approval, None, "a new session has no stored mode");
+        s.approval = Some(crate::config::ApprovalMode::Full);
+        s.save_to(&path).unwrap();
+        let back = Session::load_from(&path).unwrap();
+        assert_eq!(back.approval, Some(crate::config::ApprovalMode::Full));
+
+        // legacy JSON without the field loads as None, not as a default mode
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let mut value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        value.as_object_mut().unwrap().remove("approval");
+        std::fs::write(&path, serde_json::to_string(&value).unwrap()).unwrap();
+        let legacy = Session::load_from(&path).unwrap();
+        assert_eq!(legacy.approval, None);
+        Session::delete_at(&path).unwrap();
     }
 
     #[test]

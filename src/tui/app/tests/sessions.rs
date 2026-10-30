@@ -1347,3 +1347,36 @@ fn undo_arms_one_host_line_about_the_reverted_files() {
         "the note must not ride a second request: {texts2:?}"
     );
 }
+
+/// Approval is remembered per session: the mode the window is in is stored
+/// with the session, a reopened session restores its own, and a new session
+/// inherits the mode the window is in now.
+#[test]
+fn approval_mode_is_remembered_per_session() {
+    use crate::config::ApprovalMode;
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.startup = false;
+    app.set_approval_mode(ApprovalMode::Full);
+    assert_eq!(app.session.approval, Some(ApprovalMode::Full));
+    assert_eq!(app.approval_switch.get(), ApprovalMode::Full);
+
+    // a new session carries the current mode
+    assert!(app.start_new_session());
+    assert_eq!(app.session.approval, Some(ApprovalMode::Full));
+
+    // reopening a session that stored its own mode restores it
+    let mut other = Session::new(app.cfg.last_model.clone(), 1000);
+    other.approval = Some(ApprovalMode::Ask);
+    app.apply_session(other);
+    assert_eq!(app.approval_mode, ApprovalMode::Ask);
+    assert_eq!(app.approval_switch.get(), ApprovalMode::Ask);
+    assert_eq!(app.session.approval, Some(ApprovalMode::Ask));
+
+    // a legacy session (no stored mode) keeps the window's mode
+    app.set_approval_mode(ApprovalMode::Auto);
+    let mut legacy = Session::new(app.cfg.last_model.clone(), 1000);
+    legacy.approval = None;
+    app.apply_session(legacy);
+    assert_eq!(app.approval_mode, ApprovalMode::Auto);
+    assert_eq!(app.session.approval, Some(ApprovalMode::Auto));
+}

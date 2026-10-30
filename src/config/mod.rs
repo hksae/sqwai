@@ -157,6 +157,50 @@ impl ApprovalMode {
             Self::Full => Self::Ask,
         }
     }
+    fn to_u8(self) -> u8 {
+        match self {
+            Self::Ask => 0,
+            Self::Auto => 1,
+            Self::Full => 2,
+        }
+    }
+    fn from_u8(v: u8) -> Self {
+        match v {
+            0 => Self::Ask,
+            2 => Self::Full,
+            _ => Self::Auto,
+        }
+    }
+}
+
+/// The approval axis as one value the TUI and a running agent share.
+///
+/// The mode has to reach the tool call that is about to run, not the next
+/// turn: pressing Shift+Tab mid-run while the agent is grinding through a
+/// plan must change what the very next command does. A copy of the enum
+/// taken at run start cannot do that, so both sides hold the same cell.
+#[derive(Debug, Clone)]
+pub struct ApprovalSwitch(std::sync::Arc<std::sync::atomic::AtomicU8>);
+
+impl ApprovalSwitch {
+    pub fn new(mode: ApprovalMode) -> Self {
+        Self(std::sync::Arc::new(std::sync::atomic::AtomicU8::new(
+            mode.to_u8(),
+        )))
+    }
+    pub fn get(&self) -> ApprovalMode {
+        ApprovalMode::from_u8(self.0.load(std::sync::atomic::Ordering::Relaxed))
+    }
+    pub fn set(&self, mode: ApprovalMode) {
+        self.0
+            .store(mode.to_u8(), std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+impl Default for ApprovalSwitch {
+    fn default() -> Self {
+        Self::new(ApprovalMode::default())
+    }
 }
 
 fn is_false(b: &bool) -> bool {

@@ -316,9 +316,13 @@ pub struct App {
     test_approval_seen: usize,
     test_approval_active: bool,
     /// Approval axis (ask/auto/full) — the status chip, cycled with
-    /// Shift+Tab. Session-local by design: never persisted, every
-    /// launch starts from `[safety].approval_mode`.
+    /// Shift+Tab. Remembered per session: the mode a session last ran with is
+    /// saved with it and restored when it is opened again.
     approval_mode: crate::config::ApprovalMode,
+    /// The same value as one cell, shared with a running agent so a
+    /// Shift+Tab mid-run reaches the next tool call rather than the next
+    /// turn. `approval_mode` is the TUI's mirror for rendering.
+    approval_switch: crate::config::ApprovalSwitch,
     /// Full access was enabled once in this app run: the confirm dialog
     /// steps aside for the rest of the run (Shift+Tab cycling must stay
     /// fluid), but a restart asks again — the flag never leaves the
@@ -671,7 +675,9 @@ impl App {
     }
 
     pub fn new(cfg: Config, session: Session, startup: bool, read_only: bool) -> Result<Self> {
-        let approval_mode = cfg.safety.approval_mode;
+        // A session remembers the mode it last ran with; a fresh or legacy
+        // save starts from the config.
+        let approval_mode = session.approval.unwrap_or(cfg.safety.approval_mode);
         let (image_jobs_tx, image_jobs_rx) = std::sync::mpsc::channel();
         let model_key = session.model_key.clone();
         let model_cfg = cfg
@@ -778,6 +784,7 @@ impl App {
             thinking_open: false,
             thinking_idx: None,
             approval_mode,
+            approval_switch: crate::config::ApprovalSwitch::new(approval_mode),
             full_access_unlocked: approval_mode == ApprovalMode::Full,
             approval_grants: Default::default(),
             startup,

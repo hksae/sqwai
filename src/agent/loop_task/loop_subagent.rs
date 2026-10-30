@@ -644,7 +644,10 @@ pub(crate) async fn run_subagent(
         session_id: child_session.clone(),
         blocked_patterns: blocked_patterns.to_vec(),
         web_allow_hosts: web_allow_hosts.to_vec(),
+        // a child keeps the mode it was spawned under: a live Shift+Tab
+        // in the parent must not widen a running child
         approval_mode,
+        approval_switch: None,
         approval_grants: super::SessionGrants::default(),
         context_limit,
         vision,
