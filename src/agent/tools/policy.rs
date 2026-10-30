@@ -78,14 +78,64 @@ pub(crate) fn bash_scope_hit(ctx: &ToolCtx, scope: &[String], command: &str) -> 
 /// boundary, asked as an approval rather than refused. Targets are the
 /// same tokens the subagent scope gate sees, null sinks filtered,
 /// resolution shared with the write jail.
+///
+/// Segments are walked in order so a `cd` updates the directory the following
+/// relative targets belong to: `cd /elsewhere && rm x` deletes
+/// `/elsewhere/x`, and resolving `x` against the project root called that
+/// deletion safe while the snapshot, scoped to the root, never held the file.
 pub(crate) fn first_outside_target(ctx: &ToolCtx, command: &str) -> Option<String> {
-    bash_write_targets(command)
-        .into_iter()
-        .filter(|t| !is_null_sink(t))
-        .find(|t| {
-            let bare = t.trim().trim_matches(|c| c == '"' || c == '\'');
-            !bare.is_empty() && ctx.outside_uncovered(bare)
-        })
+    let mut base: Option<String> = None;
+    for segment in command.split([';', '\n', '&', '|']) {
+        let mut words = segment.split_whitespace();
+        let head = words
+            .next()
+            .unwrap_or("")
+            .trim_matches(|c| c == '"' || c == '\'');
+        if head == "cd" || head == "pushd" {
+            if let Some(dir) = words.next() {
+                base = Some(chdir_base(base.as_deref(), dir));
+            }
+            continue;
+        }
+        for target in bash_write_targets(segment) {
+            if is_null_sink(&target) {
+                continue;
+            }
+            let bare = target.trim().trim_matches(|c| c == '"' || c == '\'');
+            if bare.is_empty() {
+                continue;
+            }
+            let resolved = if is_absolute_like(bare) {
+                bare.to_string()
+            } else {
+                match &base {
+                    Some(base) => format!("{base}/{bare}"),
+                    None => bare.to_string(),
+                }
+            };
+            if ctx.outside_uncovered(&resolved) {
+                return Some(resolved);
+            }
+        }
+    }
+    None
+}
+
+/// The directory a `cd`/`pushd` argument names, given where the command
+/// already was: an absolute spelling replaces the base, a relative one joins
+/// it. Quote characters come off first — the shell never sees them.
+fn chdir_base(base: Option<&str>, dir: &str) -> String {
+    let dir = dir.trim_matches(|c| c == '"' || c == '\'');
+    match base {
+        Some(base) if !is_absolute_like(dir) => format!("{base}/{dir}"),
+        _ => dir.to_string(),
+    }
+}
+
+/// Absolute in either spelling the shells accept: a Windows path with a drive
+/// or UNC root, or a POSIX `/c/...` path Git Bash passes through.
+fn is_absolute_like(p: &str) -> bool {
+    Path::new(p).is_absolute() || p.starts_with('/') || p.starts_with('\\')
 }
 
 /// Raw write-target tokens of a shell command: redirect destinations and
@@ -114,77 +164,80 @@ fn bash_write_targets(command: &str) -> Vec<String> {
         }
     }
     // operands of mutating shapes, per command segment (quoting blanked so
-    // a narrated "we need tee" is not a tee invocation)
-    for segment in blanked.split([';', '\n']) {
-        // pipelines run left to right; each stage is its own command
-        for stage in segment.split('|') {
-            let words: Vec<&str> = stage
-                .split(|c: char| c.is_whitespace() || c == '(' || c == ')')
-                .filter(|w| !w.is_empty() && *w != "&")
-                .collect();
-            // binary is the first word past the transparent wrappers —
-            // the SAME list the safety AST walk strips (audit H2: the
-            // desynced copy here let `nohup mv` escape the scope) — and
-            // past VAR= assignments and the wrapper's flags/numeric args
-            let idx = crate::agent::safety::effective_command_index(&words);
-            let binary = words.get(idx).map(|w| w.rsplit('/').next().unwrap_or(w));
-            let operands: Vec<&str> = words[idx + 1..].to_vec();
-            let non_flag: Vec<&str> = operands
-                .iter()
-                .filter(|w| !w.starts_with('-') && !w.contains('='))
-                .copied()
-                .collect();
-            match binary {
-                Some("tee") => targets.extend(non_flag.iter().map(|s| s.to_string())),
-                Some("cp" | "mv" | "install" | "rsync" | "ln") => {
-                    if let Some(last) = non_flag.last() {
-                        targets.push(last.to_string());
-                    }
+    // a narrated "we need tee" is not a tee invocation). `&` and `|` split
+    // too: `cd x && rm y` and `cp a b | tee c` are chains of commands, and a
+    // chain read as one segment hides every write past its first word.
+    for segment in blanked.split([';', '\n', '&', '|']) {
+        let words: Vec<&str> = segment
+            .split(|c: char| c.is_whitespace() || c == '(' || c == ')')
+            .filter(|w| !w.is_empty() && *w != "&")
+            .collect();
+        // `a && b` splits into two separators, so one segment is empty
+        if words.is_empty() {
+            continue;
+        }
+        // binary is the first word past the transparent wrappers —
+        // the SAME list the safety AST walk strips (audit H2: the
+        // desynced copy here let `nohup mv` escape the scope) — and
+        // past VAR= assignments and the wrapper's flags/numeric args
+        let idx = crate::agent::safety::effective_command_index(&words);
+        let binary = words.get(idx).map(|w| w.rsplit('/').next().unwrap_or(w));
+        let operands: Vec<&str> = words[idx + 1..].to_vec();
+        let non_flag: Vec<&str> = operands
+            .iter()
+            .filter(|w| !w.starts_with('-') && !w.contains('='))
+            .copied()
+            .collect();
+        match binary {
+            Some("tee") => targets.extend(non_flag.iter().map(|s| s.to_string())),
+            Some("cp" | "mv" | "install" | "rsync" | "ln") => {
+                if let Some(last) = non_flag.last() {
+                    targets.push(last.to_string());
                 }
-                Some("dd") => {
-                    for w in operands {
-                        if let Some(path) = w.strip_prefix("of=") {
-                            targets.push(path.to_string());
-                        }
-                    }
-                }
-                Some("truncate" | "mkdir" | "rmdir" | "rm" | "touch") => {
-                    targets.extend(non_flag.iter().map(|s| s.to_string()));
-                }
-                Some("sed") => {
-                    if operands.iter().any(|w| w.starts_with("-i")) {
-                        // POSIX: the first non-flag operand is the script —
-                        // with or without -e in front of it — so
-                        // `sed -i s/a/b/ f.rs` writes f.rs alone. A `-f`
-                        // script file is the exception: then every remaining
-                        // operand is a file.
-                        let script_from_file = operands.iter().any(|w| w.starts_with("-f"));
-                        let files: &[&str] = if script_from_file {
-                            &non_flag
-                        } else {
-                            non_flag.get(1..).unwrap_or(&[])
-                        };
-                        targets.extend(files.iter().map(|s| s.to_string()));
-                    }
-                }
-                Some("patch") => {
-                    targets.extend(
-                        non_flag
-                            .iter()
-                            .filter(|w| w.contains('/'))
-                            .map(|s| s.to_string()),
-                    );
-                }
-                Some("git") => {
-                    // `git apply` scatters writes the tokens cannot
-                    // enumerate; any path operand outside fails below
-                    let mut ops = non_flag.iter().peekable();
-                    if ops.peek() == Some(&&"apply") {
-                        targets.extend(ops.filter(|w| w.contains('/')).map(|s| s.to_string()));
-                    }
-                }
-                _ => {}
             }
+            Some("dd") => {
+                for w in operands {
+                    if let Some(path) = w.strip_prefix("of=") {
+                        targets.push(path.to_string());
+                    }
+                }
+            }
+            Some("truncate" | "mkdir" | "rmdir" | "rm" | "touch") => {
+                targets.extend(non_flag.iter().map(|s| s.to_string()));
+            }
+            Some("sed") => {
+                if operands.iter().any(|w| w.starts_with("-i")) {
+                    // POSIX: the first non-flag operand is the script —
+                    // with or without -e in front of it — so
+                    // `sed -i s/a/b/ f.rs` writes f.rs alone. A `-f`
+                    // script file is the exception: then every remaining
+                    // operand is a file.
+                    let script_from_file = operands.iter().any(|w| w.starts_with("-f"));
+                    let files: &[&str] = if script_from_file {
+                        &non_flag
+                    } else {
+                        non_flag.get(1..).unwrap_or(&[])
+                    };
+                    targets.extend(files.iter().map(|s| s.to_string()));
+                }
+            }
+            Some("patch") => {
+                targets.extend(
+                    non_flag
+                        .iter()
+                        .filter(|w| w.contains('/'))
+                        .map(|s| s.to_string()),
+                );
+            }
+            Some("git") => {
+                // `git apply` scatters writes the tokens cannot
+                // enumerate; any path operand outside fails below
+                let mut ops = non_flag.iter().peekable();
+                if ops.peek() == Some(&&"apply") {
+                    targets.extend(ops.filter(|w| w.contains('/')).map(|s| s.to_string()));
+                }
+            }
+            _ => {}
         }
     }
     // A null sink carries nothing into the tree: `2>/dev/null` is not a

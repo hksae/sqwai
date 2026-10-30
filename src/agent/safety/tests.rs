@@ -765,6 +765,9 @@ fn git_force_and_clean_in_any_flag_position_and_script_interpreters_are_caught()
         "git push origin main -f",
         "git -C repo push origin main --force-with-lease",
         "git push origin :old-branch",
+        // a plain push publishes commits to a shared remote; no snapshot
+        // takes them back
+        "git push origin main",
         "git clean -fd",
         "git clean -f",
         "git stash clear",
@@ -787,10 +790,10 @@ fn git_force_and_clean_in_any_flag_position_and_script_interpreters_are_caught()
 
     // Safe git and script commands remain Safe
     for cmd in [
-        "git push origin main",
         "git clean -n",
         "git stash list",
         "git branch -a",
+        "git push --dry-run origin main",
         "python3 script.py",
         "node build.js",
         "echo ok | tee build.log",
@@ -1015,4 +1018,194 @@ fn inline_code_behind_a_flag_cluster_is_classified_as_code() {
             "false positive on a script or benign inline code: {cmd}"
         );
     }
+}
+
+/// The corpus audit's pinned rows: every command below came out of the live
+/// session store (pids and user paths masked) and was judged against one
+/// standard — irreversible outside `/undo`'s reach. What `/undo` holds is a
+/// checkpoint of the project tree and the blobs behind host writes, so the
+/// rows that ask are the ones whose effect lands somewhere else: another
+/// process, another machine setting, another project, a server.
+///
+/// Changing a row is a policy change, not a refactor. The reads sit here to
+/// keep the mutating verbs from turning `nvidia-smi -q` or `grep "reg add"`
+/// into approval noise.
+#[test]
+fn the_corpus_table_keeps_its_verdicts() {
+    const ROWS: &[(&str, Option<&str>)] = &[
+        // forced process termination — the process's state is unrecoverable
+        (
+            "Stop-Process -Id 4242 -Force",
+            Some("kills a running process"),
+        ),
+        (
+            "powershell -NoProfile -Command 'Stop-Process -Id 4242 -Force'",
+            Some("kills a running process"),
+        ),
+        ("taskkill /PID 4242 /F", Some("kills a running process")),
+        (
+            "cmd //c \"taskkill /PID 4242 /F\"",
+            Some("kills a running process"),
+        ),
+        ("kill -9 4242", Some("kills a running process")),
+        ("pkill -f node", Some("kills a running process")),
+        ("fuser -k 8080/tcp", Some("kills a running process")),
+        // machine settings that outlive the app
+        ("nvidia-smi -lgc 2100,2100", Some("changes machine state")),
+        ("nvidia-smi -pl 35", Some("changes machine state")),
+        (
+            "powercfg /setdcvalueindex SCHEME_CURRENT SUB_PROCESSOR PROCTHROTTLEMAX 60",
+            Some("changes machine state"),
+        ),
+        (
+            "reg add HKCU\\Software\\Probe /v Mode /d 1 /f",
+            Some("changes machine state"),
+        ),
+        (
+            "setx PATH \"%PATH%;C:\\\\tools\"",
+            Some("changes machine state"),
+        ),
+        ("Restart-Computer -Force", Some("changes machine state")),
+        ("systemctl stop nginx", Some("changes machine state")),
+        // container state lives outside the project
+        ("docker rm -f web", Some("destroys container state")),
+        ("docker volume rm data", Some("destroys container state")),
+        // elevation raises a UAC prompt and runs the body as admin
+        (
+            "powershell -NoProfile -Command \"Start-Process powershell -Verb RunAs -Wait\"",
+            Some("privilege/system control"),
+        ),
+        ("shutdown /s /t 0", Some("privilege/system control")),
+        // outward: a remote no snapshot can roll back
+        ("git push", Some("publishes to a remote")),
+        (
+            "git push --set-upstream origin topic",
+            Some("publishes to a remote"),
+        ),
+        (
+            "git push --force origin master",
+            Some("forceful git operation"),
+        ),
+        ("gh pr merge 5 --squash", Some("mutates a remote")),
+        (
+            "curl -X POST https://api.example.com/items -d @payload.json",
+            Some("mutates a remote"),
+        ),
+        ("npm publish", Some("publishes a package")),
+        // safe: reads, project-local work undo can reach, ordinary builds
+        ("nvidia-smi --query-gpu=clocks.gr --format=csv", None),
+        (
+            "powercfg /q SCHEME_CURRENT SUB_PROCESSOR PROCTHROTTLEMAX",
+            None,
+        ),
+        ("reg query HKLM\\SOFTWARE\\Asus /v Mode", None),
+        ("gh pr view 5 --json title", None),
+        ("curl -s https://example.com -o /tmp/x.html", None),
+        ("rm -f perf.txt", None),
+        ("git checkout -- src/main.rs", None),
+        ("grep -rn \"reg add\" src/", None),
+        ("cargo check --all-targets", None),
+        ("ls -la src", None),
+    ];
+    for (cmd, want) in ROWS {
+        let got = classify(cmd);
+        match (got, *want) {
+            (Verdict::Safe, None) => {}
+            (Verdict::NeedsApproval(reason), Some(want)) => {
+                assert_eq!(reason, want, "reason changed for: {cmd}");
+            }
+            (got, want) => panic!("{cmd}: got {got:?}, wanted {want:?}"),
+        }
+    }
+}
+
+/// Dev harness for the session corpus, not a check of behavior: reads the/// commands mined out of the local session store, runs the real classifier over
+/// each, and writes the verdict table next to it. `notes/` is gitignored, so the
+/// corpus is raw local data and this runs only when someone has mined it — the
+/// expectations that survived the audit live in the table tests above.
+#[test]
+#[ignore]
+fn classify_session_corpus() {
+    fn one_line(cmd: &str) -> String {
+        cmd.replace('\\', "\\\\")
+            .replace('\n', "\\n")
+            .replace('\t', "\\t")
+            .replace('\r', "\\r")
+    }
+    fn label(v: Verdict) -> (&'static str, &'static str) {
+        match v {
+            Verdict::Safe => ("safe", ""),
+            Verdict::NeedsApproval(r) => ("approval", r),
+            Verdict::Blocked(r) => ("blocked", r),
+        }
+    }
+    fn rank(v: &str) -> u8 {
+        match v {
+            "safe" => 0,
+            "approval" => 1,
+            _ => 2,
+        }
+    }
+
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("notes/safety-corpus");
+    let corpus = std::env::var_os("SQWAI_CORPUS")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| dir.join("commands.jsonl"));
+    if !corpus.exists() {
+        println!("no corpus at {}", corpus.display());
+        return;
+    }
+    let text = std::fs::read_to_string(&corpus).unwrap();
+
+    struct Row {
+        verdict: &'static str,
+        reason: &'static str,
+        count: u64,
+        powershell: &'static str,
+        cmd: String,
+    }
+    let mut rows: Vec<Row> = Vec::new();
+    for line in text.lines() {
+        let Ok(rec) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let Some(cmd) = rec["command"].as_str() else {
+            continue;
+        };
+        let (verdict, reason) = label(classify_for(ShellKind::Bash, cmd));
+        let (pw, _) = label(classify_for(ShellKind::PowerShell, cmd));
+        rows.push(Row {
+            verdict,
+            reason,
+            count: rec["count"].as_u64().unwrap_or(1),
+            powershell: pw,
+            cmd: one_line(cmd),
+        });
+    }
+    rows.sort_by(|a, b| {
+        rank(a.verdict)
+            .cmp(&rank(b.verdict))
+            .then_with(|| a.reason.cmp(b.reason))
+            .then_with(|| b.count.cmp(&a.count))
+    });
+
+    let mut out = String::from("verdict\treason\tcount\tpowershell_verdict\tcommand\n");
+    let mut tally: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    let mut disagreement = 0usize;
+    for r in &rows {
+        *tally.entry(r.verdict).or_default() += 1;
+        if r.verdict != r.powershell {
+            disagreement += 1;
+        }
+        out.push_str(&format!(
+            "{}\t{}\t{}\t{}\t{}\n",
+            r.verdict, r.reason, r.count, r.powershell, r.cmd
+        ));
+    }
+    std::fs::write(dir.join("classified.tsv"), out).unwrap();
+    println!(
+        "corpus: {} unique commands, {:?}, shell-identity disagreements {disagreement}",
+        rows.len(),
+        tally
+    );
 }

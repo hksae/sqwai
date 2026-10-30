@@ -202,15 +202,21 @@ async fn safe_mutating_bash_on_clean_tree_skips_snapshot_but_stays_revertible() 
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// Same command, clean session: no gate involved (git push then fails
-/// on its own — no remote — proving the gate let it through).
+/// Same shape, clean session: no gate involved. The command is a version probe
+/// of a transport — egress-shaped for the trust gate, Safe for the classifier —
+/// so anything that asks here is the gate misfiring, not a safety verdict.
 #[tokio::test]
 async fn trust_gate_stays_quiet_without_taint() {
     let dir = std::env::temp_dir().join(format!("sqwai-trust-clean-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let (call, mut ctx, tx_agent, _rx_ui, _tx_ui, mut rx_agent) =
+    let (_push, mut ctx, tx_agent, _rx_ui, _tx_ui, mut rx_agent) =
         bash_call_parts(&dir, "clean-sess");
+    let call = crate::providers::ToolCallReq::new(
+        "c1",
+        "bash",
+        serde_json::json!({"command": "rsync --version"}),
+    );
     let mut always_allow = Vec::new();
     let mut next_id = 0u64;
     let outcome = bash_call(
@@ -294,21 +300,32 @@ async fn trust_gate_prompts_with_reason_and_honors_deny() {
 }
 
 /// one dialog per (session, egress kind). After the user answers for
-/// a push, the next push in the same session runs without asking, and the
-/// answer is in the event log — so it survives a resume.
+/// a transport, the next transport in the same session runs without asking, and
+/// the answer is in the event log — so it survives a resume.
+///
+/// The command is a version probe, not `git push` or an upload: those carry
+/// their own classifier verdict now, so a second one would ask again for that
+/// reason and the egress ack would never be what is measured. `rsync --version`
+/// is egress-shaped for the gate and Safe for the classifier.
 #[tokio::test]
 async fn an_approved_egress_kind_does_not_ask_again() {
     let (dir, session) = tainted_project("ack");
-    let (call, mut ctx, tx_agent, mut rx_ui, tx_ui, mut rx_agent) = bash_call_parts(&dir, &session);
+    let (_push, mut ctx, tx_agent, mut rx_ui, tx_ui, mut rx_agent) =
+        bash_call_parts(&dir, &session);
+    let call = crate::providers::ToolCallReq::new(
+        "c1",
+        "bash",
+        serde_json::json!({"command": "rsync --version"}),
+    );
     let mut events =
         Some(crate::agent::events::EventLog::open(&dir, &session).expect("events opens"));
     let mut no_target: Option<std::path::PathBuf> = None;
     let mut always_allow = Vec::new();
     let mut next_id = 0u64;
-    // first push: the dialog runs and the user answers once. Each run is
+    // first transport: the dialog runs and the user answers once. Each run is
     // scoped so the future's borrows end before the next call reuses the
     // same parts.
-    let asked = {
+    let first = {
         let future = bash_call(
             &call,
             &mut ctx,
@@ -324,7 +341,7 @@ async fn an_approved_egress_kind_does_not_ask_again() {
         );
         let mut asked = false;
         tokio::pin!(future);
-        let _ = loop {
+        let out = loop {
             tokio::select! {
                 out = &mut future => break out,
                 ev = rx_ui.recv() => {
@@ -341,19 +358,23 @@ async fn an_approved_egress_kind_does_not_ask_again() {
                 }
             }
         };
-        asked
+        (asked, out)
     };
-    assert!(asked, "the first tainted push must ask");
+    assert!(
+        first.0,
+        "the first tainted transport must ask: {}",
+        first.1.output
+    );
     assert_eq!(
         crate::agent::trust::acked_egress(&dir, &session),
-        vec!["git push".to_string()],
+        vec!["remote transport".to_string()],
         "the answer must be recorded"
     );
-    // second push, same kind, different spelling: no dialog
+    // second transport, same kind, different spelling: no dialog
     let second = crate::providers::ToolCallReq::new(
         "c2",
         "bash",
-        serde_json::json!({"command": "git push origin HEAD"}),
+        serde_json::json!({"command": "ssh -G example.com"}),
     );
     let asked_again = {
         let future = bash_call(

@@ -293,8 +293,10 @@ fn inline_code_arguments(cmd: &str) -> Vec<String> {
                     && body.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
                     && body.contains('c')
             } else {
-                // `cmd /c ...`
-                command_basename(head) == "cmd" && word.eq_ignore_ascii_case("/c")
+                // `cmd /c ...`; Git Bash rewrites the flag to `//c`, and the
+                // body is code in either spelling
+                command_basename(head) == "cmd"
+                    && (word.eq_ignore_ascii_case("/c") || word.eq_ignore_ascii_case("//c"))
             } || word.eq_ignore_ascii_case("-command");
             if is_code_flag {
                 if let Some(code) = words.get(i + 1) {
@@ -599,6 +601,7 @@ fn heuristic_classify(shell: ShellKind, cmd: &str) -> Verdict {
         "sudo ",
         "doas ",
         "su root",
+        "pkexec ",
         "shutdown",
         "reboot",
         "poweroff",
@@ -608,10 +611,38 @@ fn heuristic_classify(shell: ShellKind, cmd: &str) -> Verdict {
         "taskkill /f /im winlogon",
         "net user ",
         "net localgroup",
+        // `Start-Process ... -Verb RunAs` is the Windows elevation shape: it
+        // raises a UAC prompt and runs the body as administrator, and the body
+        // arrives as one quoted argument no other layer reads.
+        "-verb runas",
+        "runas /user",
     ] {
         if lower.contains(w) {
             return Verdict::NeedsApproval("privilege/system control");
         }
+    }
+
+    // --- machine state the snapshots cannot hold -------------------------
+    // A killed process, a stopped service or a locked GPU clock outlives the
+    // conversation: `/undo` restores files under the project root and nothing
+    // else. Only the mutating verbs match — `nvidia-smi -q`, `powercfg /q`
+    // and `reg query` are reads and stay Safe.
+    if kills_a_process(&lower) {
+        return Verdict::NeedsApproval("kills a running process");
+    }
+    if changes_machine_state(&lower) {
+        return Verdict::NeedsApproval("changes machine state");
+    }
+    if destroys_container_state(&lower) {
+        return Verdict::NeedsApproval("destroys container state");
+    }
+
+    // --- bytes leaving for a remote that a snapshot cannot reach ----------
+    // A POST, an upload flag or a `-Method PUT` sends data somewhere no local
+    // checkpoint covers. Fetches stay Safe — the trust gate still weighs those
+    // against session taint.
+    if sends_upload(cmd) || gh_mutates_remote(&lower) {
+        return Verdict::NeedsApproval("mutates a remote");
     }
 
     // --- dynamic code execution -----------------------------------------
@@ -751,6 +782,14 @@ fn check_git_destructive(lower: &str) -> Option<&'static str> {
                 if forceful {
                     return Some("forceful git operation");
                 }
+                // A plain push publishes commits to a shared remote: no local
+                // snapshot can take them back, and the corpus showed it sitting
+                // in the Safe set next to force-push, which already asked.
+                // `--dry-run` sends nothing, so it stays a read.
+                if args.iter().any(|a| *a == "--dry-run" || *a == "-n") {
+                    continue;
+                }
+                return Some("publishes to a remote");
             }
             "reset" => {
                 if args.iter().any(|a| *a == "--hard" || *a == "--merge") {
@@ -814,6 +853,265 @@ fn check_git_destructive(lower: &str) -> Option<&'static str> {
         }
     }
     None
+}
+
+/// Command segments, each split into quote-trimmed words, with the head word
+/// and the words behind it.
+///
+/// A PowerShell body arrives as one quoted argument (`'Stop-Process -Id 6176'`)
+/// and a shell-word tokenizer keeps it whole, so the verbs inside hid from the
+/// text layer. The body is still judged at its own head — the inline-code
+/// recursion in [`classify_for_depth`] hands it here as a command in its own
+/// right, and a scan that treats every token as a head turns `grep "reg add"`
+/// into an approval.
+fn segment_heads(command: &str) -> Vec<(&str, Vec<&str>)> {
+    command
+        .split([';', '|', '&', '\n', '(', ')'])
+        .filter_map(|segment| {
+            let words: Vec<&str> = segment
+                .split_whitespace()
+                .map(|w| {
+                    w.trim_matches(|c: char| matches!(c, '"' | '\'' | '`' | '{' | '}' | '[' | ']'))
+                })
+                .filter(|w| !w.is_empty())
+                .collect();
+            if words.is_empty() {
+                return None;
+            }
+            let idx = effective_command_index(&words);
+            Some((words[idx], words[idx + 1..].to_vec()))
+        })
+        .collect()
+}
+
+/// Termination of a running process. The state a process holds is gone with
+/// it and no file snapshot brings it back; a graceful `kill` stays the
+/// caller's business, but the force and whole-name forms ask first.
+fn kills_a_process(lower: &str) -> bool {
+    for (head, rest) in segment_heads(lower) {
+        match command_basename(head) {
+            "taskkill" | "stop-process" | "pkill" | "killall" => return true,
+            "kill" => {
+                let signal = rest.first().copied().unwrap_or("");
+                let force = matches!(signal, "-9" | "-kill" | "-sigkill")
+                    || (signal == "-s"
+                        && matches!(rest.get(1).copied(), Some("kill" | "9" | "sigkill")));
+                if force {
+                    return true;
+                }
+            }
+            "fuser" if rest.iter().any(|arg| arg.starts_with("-k")) => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Machine state a file snapshot cannot restore: GPU clocks and power caps,
+/// power schemes, the registry, service definitions.
+fn changes_machine_state(lower: &str) -> bool {
+    for (head, rest) in segment_heads(lower) {
+        let any = |set: &[&str]| rest.iter().any(|arg| set.contains(arg));
+        match command_basename(head) {
+            "setx" | "restart-computer" | "stop-computer" => return true,
+            "nvidia-smi" => {
+                // `-q` and `--query-gpu` are reads; every flag below writes a
+                // clock, power or compute-mode setting that survives the app.
+                if any(&[
+                    "-lgc", "-rgc", "-lmc", "-rmc", "-pl", "-plp", "-pm", "-ac", "-rac", "-gom",
+                    "-c", "-e", "-r",
+                ]) {
+                    return true;
+                }
+            }
+            "powercfg" => {
+                if rest.iter().any(|arg| {
+                    arg.starts_with("/set")
+                        || arg.starts_with("-set")
+                        || arg.starts_with("/change")
+                        || arg.starts_with("-change")
+                        || arg.starts_with("/attributes")
+                        || arg.starts_with("-attributes")
+                        || *arg == "/hibernate"
+                        || *arg == "-hibernate"
+                        || arg.contains("restoredefaultschemes")
+                }) {
+                    return true;
+                }
+            }
+            "reg" => {
+                if rest.first().is_some_and(|verb| {
+                    matches!(
+                        *verb,
+                        "add" | "delete" | "import" | "load" | "restore" | "copy"
+                    )
+                }) {
+                    return true;
+                }
+            }
+            "sc" | "systemctl" | "service" => {
+                if any(&[
+                    "create", "delete", "config", "stop", "start", "disable", "enable", "mask",
+                    "failure", "sdset",
+                ]) {
+                    return true;
+                }
+            }
+            "net" => {
+                if rest.first().is_some_and(|verb| {
+                    matches!(
+                        *verb,
+                        "stop" | "start" | "user" | "localgroup" | "share" | "use"
+                    )
+                }) {
+                    return true;
+                }
+            }
+            "schtasks" => {
+                if any(&["/create", "/change", "/run", "/delete", "/end"]) {
+                    return true;
+                }
+            }
+            "wsl" if any(&["--shutdown", "--unregister", "--terminate"]) => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Container and image removal: the container's own filesystem and its
+/// volumes live outside the project, so no snapshot holds them.
+fn destroys_container_state(lower: &str) -> bool {
+    for (head, rest) in segment_heads(lower) {
+        let verb = rest.first().copied().unwrap_or("");
+        let sub = rest.get(1).copied().unwrap_or("");
+        match command_basename(head) {
+            "docker" | "podman" => {
+                if matches!(verb, "rm" | "rmi" | "kill" | "prune" | "down")
+                    || (matches!(verb, "volume" | "system" | "network" | "container")
+                        && matches!(sub, "rm" | "prune"))
+                    || (verb == "compose" && matches!(sub, "down" | "rm"))
+                {
+                    return true;
+                }
+            }
+            "docker-compose" => {
+                if matches!(verb, "down" | "rm") {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Upload shapes, read per command rather than across the whole line: the
+/// flags belong to the downloader that owns them, so `curl … | tr -d '\r'` is
+/// not an upload and a commit message that mentions `curl -d` sends nothing.
+///
+/// The original case is kept: `-T` uploads and `-t` does not, `-F` posts a form
+/// and `-f` fails quietly.
+fn sends_upload(command: &str) -> bool {
+    const CURL_FLAGS: &[&str] = &[
+        "--data",
+        "--data-binary",
+        "--data-raw",
+        "--data-ascii",
+        "--upload",
+        "--post-data",
+        "--post-file",
+        "--form",
+        "-T",
+        "-F",
+    ];
+    for (head, rest) in segment_heads(command) {
+        let head = command_basename(head);
+        let is = |name: &str| head.eq_ignore_ascii_case(name);
+        if is("curl") || is("wget") {
+            if rest.iter().any(|a| CURL_FLAGS.contains(a)) {
+                return true;
+            }
+            // `-d` is curl's data flag and wget's debug flag
+            if is("curl") && rest.contains(&"-d") {
+                return true;
+            }
+        }
+        if is("curl")
+            || is("wget")
+            || is("iwr")
+            || is("irm")
+            || is("invoke-webrequest")
+            || is("invoke-restmethod")
+        {
+            let method_writes = rest.iter().enumerate().any(|(i, arg)| {
+                matches!(
+                    *arg,
+                    "-X" | "-x" | "--request" | "--method" | "-Method" | "-method"
+                ) && rest.get(i + 1).is_some_and(|m| {
+                    m.eq_ignore_ascii_case("post")
+                        || m.eq_ignore_ascii_case("put")
+                        || m.eq_ignore_ascii_case("patch")
+                        || m.eq_ignore_ascii_case("delete")
+                })
+            });
+            if method_writes {
+                return true;
+            }
+        }
+        if (is("iwr") || is("irm") || is("invoke-webrequest") || is("invoke-restmethod"))
+            && rest
+                .iter()
+                .any(|a| a.eq_ignore_ascii_case("-Body") || a.eq_ignore_ascii_case("-InFile"))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// `gh` verbs that change something on the forge. A plain `gh pr view` is a
+/// read; the verbs below publish, merge, close or delete and cannot be undone
+/// locally.
+fn gh_mutates_remote(lower: &str) -> bool {
+    for (head, rest) in segment_heads(lower) {
+        if command_basename(head) != "gh" {
+            continue;
+        }
+        for (i, arg) in rest.iter().enumerate() {
+            if matches!(
+                *arg,
+                "create"
+                    | "merge"
+                    | "close"
+                    | "delete"
+                    | "edit"
+                    | "comment"
+                    | "upload"
+                    | "publish"
+                    | "transfer"
+                    | "archive"
+                    | "reopen"
+                    | "rename"
+                    | "ready"
+            ) {
+                return true;
+            }
+            // `gh api` writes through an HTTP verb instead of a subcommand
+            if matches!(*arg, "-x" | "--method")
+                && rest
+                    .get(i + 1)
+                    .is_some_and(|m| matches!(*m, "post" | "put" | "patch" | "delete"))
+            {
+                return true;
+            }
+            // `gh workflow run` triggers a remote job; `gh run list` stays a read
+            if *arg == "run" && rest.first().is_some_and(|sub| *sub == "workflow") {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn check_find_destructive(lower: &str) -> bool {

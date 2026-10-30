@@ -2716,3 +2716,47 @@ fn turn_result_bytes_counts_only_this_turns_results() {
     assert_eq!(turn_result_bytes(&messages, from), 6);
     assert_eq!(turn_result_bytes(&messages, messages.len()), 0);
 }
+
+/// The boundary gate has to read a command's own `cd`: `cd /elsewhere && rm x`
+/// deletes `/elsewhere/x`, and the snapshot `/undo` restores is rooted at the
+/// project. Resolving `x` against the project root called that deletion an
+/// inside write, so it ran with no prompt and nothing could restore the file.
+#[test]
+fn a_cd_moves_the_targets_of_the_outside_check() {
+    let (ctx, dir) = proj();
+    let outside = std::env::temp_dir().join(format!(
+        "sqwai-outside-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&outside).unwrap();
+    let spell = |p: &Path| p.to_string_lossy().replace('\\', "/");
+
+    // chained behind a cd, the relative write lands outside the project
+    let hit = first_outside_target(&ctx, &format!("cd {} && rm -f perf.txt", spell(&outside)));
+    assert_eq!(
+        hit.as_deref(),
+        Some(format!("{}/perf.txt", spell(&outside)).as_str()),
+        "a chained delete outside the root must reach the boundary gate"
+    );
+    // the same shapes inside the project stay silent
+    assert_eq!(first_outside_target(&ctx, "rm -f perf.txt"), None);
+    assert_eq!(
+        first_outside_target(&ctx, "cd src && rm -f snippet.txt"),
+        None
+    );
+    assert_eq!(
+        first_outside_target(&ctx, "cargo build && echo ok > build.log"),
+        None
+    );
+    // a relative cd stays rooted at the project, not at the process cwd
+    assert_eq!(
+        first_outside_target(&ctx, "cd .. && rm -f sibling.txt"),
+        Some("../sibling.txt".into())
+    );
+
+    fs::remove_dir_all(&dir).ok();
+    fs::remove_dir_all(&outside).ok();
+}
