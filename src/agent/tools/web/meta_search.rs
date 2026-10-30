@@ -106,90 +106,27 @@ pub async fn run_meta_search(
         .build()
         .map_err(|e| format!("client error: {e}"))?;
 
-    let mut provider_lists: Vec<Vec<RawSearchHit>> = Vec::new();
-
-    match category {
-        SearchCategory::Auto => {
-            // General web only. The engines infer the query's language on
-            // their own; code sources are a deliberate choice (`code`,
-            // `docs`, `packages`, `discussions`), not something to guess at
-            // from the query text — a Russian question about a Rust error is
-            // both, and "looks like code" is a heuristic that silently
-            // drops half the sources.
-            let (sp, bing, ddg) = tokio::join!(
-                cap_provider(search_startpage(&client, query), per_provider),
-                cap_provider(search_bing(&client, query), per_provider),
-                cap_provider(search_duckduckgo(&client, query), per_provider),
-            );
-            provider_lists.extend([sp, bing, ddg]);
-        }
-        SearchCategory::Docs => {
-            let docs_q = if query.to_ascii_lowercase().contains("doc") {
-                query.to_string()
-            } else {
-                format!("{query} documentation")
-            };
-            let (sp, bing, ddg, crates, wiki) = tokio::join!(
-                cap_provider(search_startpage(&client, &docs_q), per_provider),
-                cap_provider(search_bing(&client, &docs_q), per_provider),
-                cap_provider(search_duckduckgo(&client, &docs_q), per_provider),
-                cap_provider(search_crates_io(&api_client, query, 4), per_provider),
-                cap_provider(search_wikipedia(&api_client, query, 3), per_provider),
-            );
-            provider_lists.extend([sp, bing, ddg, crates, wiki]);
-        }
-        SearchCategory::Code => {
-            let (gh, so, sp, bing, crates) = tokio::join!(
-                cap_provider(
-                    search_github_with_fallback(&api_client, &client, query, 8),
-                    per_provider
-                ),
-                cap_provider(search_stackoverflow(&api_client, query, 8), per_provider),
-                cap_provider(search_startpage(&client, query), per_provider),
-                cap_provider(search_bing(&client, query), per_provider),
-                cap_provider(search_crates_io(&api_client, query, 4), per_provider),
-            );
-            provider_lists.extend([gh, so, sp, bing, crates]);
-        }
-        SearchCategory::Packages => {
-            let (pkgs, gh, sp, bing) = tokio::join!(
-                cap_provider(search_packages(&api_client, query, 6), per_provider),
-                cap_provider(
-                    search_github_with_fallback(&api_client, &client, query, 5),
-                    per_provider
-                ),
-                cap_provider(search_startpage(&client, query), per_provider),
-                cap_provider(search_bing(&client, query), per_provider),
-            );
-            provider_lists.extend([pkgs, gh, sp, bing]);
-        }
-        SearchCategory::Discussions => {
-            let (hn, so, gh, sp, bing) = tokio::join!(
-                cap_provider(search_hackernews(&api_client, query, 6), per_provider),
-                cap_provider(search_stackoverflow(&api_client, query, 6), per_provider),
-                cap_provider(
-                    search_github_issues_with_fallback(&api_client, &client, query, 5),
-                    per_provider
-                ),
-                cap_provider(search_startpage(&client, query), per_provider),
-                cap_provider(search_bing(&client, query), per_provider),
-            );
-            provider_lists.extend([hn, so, gh, sp, bing]);
-        }
-        SearchCategory::Papers => {
-            let (arxiv, wiki, sp, bing) = tokio::join!(
-                cap_provider(search_arxiv(&api_client, query, 6), per_provider),
-                cap_provider(search_wikipedia(&api_client, query, 4), per_provider),
-                cap_provider(search_startpage(&client, query), per_provider),
-                cap_provider(search_bing(&client, query), per_provider),
-            );
-            provider_lists.extend([arxiv, wiki, sp, bing]);
-        }
+        let mut merged = fuse_and_rank(
+        gather(&client, &api_client, query, category, per_provider).await,
+        query,
+        category,
+        count,
+    );
+    // Quotes turn a search into an exact-phrase match; when the phrase is too
+    // specific the whole set comes back empty, and the model reads that as
+    // "this does not exist". One retry without the quotes costs nothing.
+    if merged.is_empty()
+        && let Some(relaxed) = without_quotes(query)
+    {
+        merged = fuse_and_rank(
+            gather(&client, &api_client, &relaxed, category, per_provider).await,
+            &relaxed,
+            category,
+            count,
+        );
     }
-
-    let merged = fuse_and_rank(provider_lists, query, category, count);
     if merged.is_empty() {
-        return Ok("No search results found.".into());
+        return Ok(no_results_note(query, category));
     }
 
     let mut out = String::new();
@@ -209,10 +146,13 @@ pub async fn run_meta_search(
 
     if deep {
         let deep_budget = count.min(3);
-        let deep_excerpts =
+        let (deep_excerpts, pages) =
             fetch_deep_excerpts(&merged, query, deep_budget, allow_hosts).await;
         if !deep_excerpts.is_empty() {
-            out.push_str("\n## Deep Page Excerpts\n\n");
+            out.push_str(&format!(
+                "\n## Deep Page Excerpts — {pages} page(s), {} KB\n\n",
+                deep_excerpts.len() / 1024
+            ));
             out.push_str(&deep_excerpts);
             out.push_str(
                 "\n\n*[Pages above are cached locally — call `webfetch(url, section=\"...\", query=\"...\")` for instant section access]*",
@@ -221,6 +161,132 @@ pub async fn run_meta_search(
     }
 
     Ok(out.trim().to_string())
+}
+
+/// Which engines answer a query of this kind.
+async fn gather(
+    client: &Client,
+    api_client: &Client,
+    query: &str,
+    category: SearchCategory,
+    per_provider: Duration,
+) -> Vec<Vec<RawSearchHit>> {
+    let mut provider_lists: Vec<Vec<RawSearchHit>> = Vec::new();
+
+    match category {
+        SearchCategory::Auto => {
+            // General web only. The engines infer the query's language on
+            // their own; code sources are a deliberate choice (`code`,
+            // `docs`, `packages`, `discussions`), not something to guess at
+            // from the query text — a Russian question about a Rust error is
+            // both, and "looks like code" is a heuristic that silently
+            // drops half the sources.
+            let (sp, bing, ddg) = tokio::join!(
+                cap_provider(search_startpage(client, query), per_provider),
+                cap_provider(search_bing(client, query), per_provider),
+                cap_provider(search_duckduckgo(client, query), per_provider),
+            );
+            provider_lists.extend([sp, bing, ddg]);
+        }
+        SearchCategory::Docs => {
+            let docs_q = if query.to_ascii_lowercase().contains("doc") {
+                query.to_string()
+            } else {
+                format!("{query} documentation")
+            };
+            let (sp, bing, ddg, crates, wiki) = tokio::join!(
+                cap_provider(search_startpage(client, &docs_q), per_provider),
+                cap_provider(search_bing(client, &docs_q), per_provider),
+                cap_provider(search_duckduckgo(client, &docs_q), per_provider),
+                cap_provider(search_crates_io(api_client, query, 4), per_provider),
+                cap_provider(search_wikipedia(api_client, query, 3), per_provider),
+            );
+            provider_lists.extend([sp, bing, ddg, crates, wiki]);
+        }
+        SearchCategory::Code => {
+            let (gh, so, sp, bing, crates) = tokio::join!(
+                cap_provider(
+                    search_github_with_fallback(api_client, client, query, 8),
+                    per_provider
+                ),
+                cap_provider(search_stackoverflow(api_client, query, 8), per_provider),
+                cap_provider(search_startpage(client, query), per_provider),
+                cap_provider(search_bing(client, query), per_provider),
+                cap_provider(search_crates_io(api_client, query, 4), per_provider),
+            );
+            provider_lists.extend([gh, so, sp, bing, crates]);
+        }
+        SearchCategory::Packages => {
+            let (pkgs, gh, sp, bing) = tokio::join!(
+                cap_provider(search_packages(api_client, query, 6), per_provider),
+                cap_provider(
+                    search_github_with_fallback(api_client, client, query, 5),
+                    per_provider
+                ),
+                cap_provider(search_startpage(client, query), per_provider),
+                cap_provider(search_bing(client, query), per_provider),
+            );
+            provider_lists.extend([pkgs, gh, sp, bing]);
+        }
+        SearchCategory::Discussions => {
+            let (hn, so, gh, sp, bing) = tokio::join!(
+                cap_provider(search_hackernews(api_client, query, 6), per_provider),
+                cap_provider(search_stackoverflow(api_client, query, 6), per_provider),
+                cap_provider(
+                    search_github_issues_with_fallback(api_client, client, query, 5),
+                    per_provider
+                ),
+                cap_provider(search_startpage(client, query), per_provider),
+                cap_provider(search_bing(client, query), per_provider),
+            );
+            provider_lists.extend([hn, so, gh, sp, bing]);
+        }
+        SearchCategory::Papers => {
+            let (arxiv, wiki, sp, bing) = tokio::join!(
+                cap_provider(search_arxiv(api_client, query, 6), per_provider),
+                cap_provider(search_wikipedia(api_client, query, 4), per_provider),
+                cap_provider(search_startpage(client, query), per_provider),
+                cap_provider(search_bing(client, query), per_provider),
+            );
+            provider_lists.extend([arxiv, wiki, sp, bing]);
+        }
+    }
+
+    provider_lists
+}
+
+/// Drop quote characters from a query, or `None` when the query has none.
+fn without_quotes(query: &str) -> Option<String> {
+    let collapsed = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let cleaned: String = query
+        .chars()
+        .filter(|c| !matches!(c, '"' | '\'' | '«' | '»' | '“' | '”'))
+        .collect();
+    let cleaned = collapsed(&cleaned);
+    (!cleaned.is_empty() && cleaned != collapsed(query)).then_some(cleaned)
+}
+
+/// An empty set with the reason it may be empty: the model used to read "No
+/// search results found." as "the fact does not exist" and spent the next call
+/// rephrasing the same query.
+fn no_results_note(query: &str, category: SearchCategory) -> String {
+    let engines = match category {
+        SearchCategory::Auto => "startpage, bing, duckduckgo",
+        SearchCategory::Docs => "startpage, bing, duckduckgo, crates.io, wikipedia",
+        SearchCategory::Code => "github, stackoverflow, startpage, bing, crates.io",
+        SearchCategory::Packages => "crates.io, npm, pypi, github, startpage, bing",
+        SearchCategory::Discussions => "hacker news, stackoverflow, github issues, startpage, bing",
+        SearchCategory::Papers => "arxiv, wikipedia, startpage, bing",
+    };
+    let quoted = query.contains(['"', '«', '»', '\'']);
+    format!(
+        "No search results from {engines}.{} Quoted or very specific wording can empty the set — retry with fewer words, or with an explicit `category`.",
+        if quoted {
+            " The same query without quotes was tried too."
+        } else {
+            ""
+        }
+    )
 }
 
 /// Merge multi-engine search lists via Reciprocal Rank Fusion (RRF) + BM25 + Domain Boosts,
@@ -403,7 +469,7 @@ async fn fetch_deep_excerpts(
     query: &str,
     max_pages: usize,
     allow_hosts: &[String],
-) -> String {
+) -> (String, usize) {
     let targets: Vec<(usize, Url)> = hits
         .iter()
         .enumerate()
@@ -417,12 +483,12 @@ async fn fetch_deep_excerpts(
         .collect();
 
     if targets.is_empty() {
-        return String::new();
+        return (String::new(), 0);
     }
 
     let Ok(deep_client) = super::client(4, crate::providers::USER_AGENT, allow_hosts.to_vec())
     else {
-        return String::new();
+        return (String::new(), 0);
     };
 
     let futs = targets.into_iter().map(|(page_rank, url)| {
@@ -449,7 +515,8 @@ async fn fetch_deep_excerpts(
     let fetched: Vec<(Url, ranker::CachedPage, usize)> =
         futures::future::join_all(futs).await.into_iter().flatten().collect();
 
-    extract_global_deep_excerpts(&fetched, query, 6_000)
+    let pages = fetched.len();
+    (extract_global_deep_excerpts(&fetched, query, 6_000), pages)
 }
 
 // ── Web Search Providers (Startpage, Bing, DuckDuckGo) ───────────────────────
@@ -1398,6 +1465,31 @@ mod tests {
         let merged = fuse_and_rank(vec![relevant, junk], "серость кот мем", SearchCategory::Auto, 10);
         assert_eq!(merged.len(), 1, "{merged:#?}");
         assert!(merged[0].url.contains("serost"), "{merged:#?}");
+    }
+
+    /// Quotes make some engines search for an exact phrase; the retry drops
+    /// them once, and only when there is something to drop.
+    #[test]
+    fn quotes_are_dropped_once_and_only_when_present() {
+        assert_eq!(
+            without_quotes("\"серость\" \"кот\" мем").as_deref(),
+            Some("серость кот мем")
+        );
+        assert_eq!(without_quotes("мем «серость» кот").as_deref(), Some("мем серость кот"));
+        assert_eq!(without_quotes("серость кот мем"), None);
+        assert_eq!(without_quotes("\"\""), None, "nothing left to search");
+    }
+
+    /// "No results" must carry the reason: which engines ran, and that quotes
+    /// were already retried without.
+    #[test]
+    fn an_empty_set_names_the_engines_and_the_quote_retry() {
+        let note = no_results_note("\"серость\" кот", SearchCategory::Auto);
+        assert!(note.contains("startpage"), "{note}");
+        assert!(note.contains("without quotes"), "{note}");
+        let plain = no_results_note("серость кот", SearchCategory::Code);
+        assert!(plain.contains("github"), "{plain}");
+        assert!(!plain.contains("without quotes"), "{plain}");
     }
 
     /// The floor must not turn a weak answer into no answer: when every hit
