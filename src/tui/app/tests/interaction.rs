@@ -899,6 +899,49 @@ fn chat_link_click_resolves_and_fires_gracefully() {
         "open failed: no browser in tests",
         "link click fires the opener"
     );
+    // the dim URL text is the same link: clicking it fires too
+    app.toast = None;
+    let url_col = row_text.find("(https").unwrap();
+    let url_col = row_text[..url_col].chars().count();
+    app.click_at(abs, url_col);
+    assert_eq!(
+        toast_text(&app),
+        "open failed: no browser in tests",
+        "clicking the URL text fires the opener"
+    );
+}
+
+#[test]
+fn a_link_wrapped_over_several_rows_stays_clickable() {
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.startup = false;
+    let url = "https://example.com/very/long/path/%D0%B1%D1%80%D0%BE-%D1%82%D1%8B-%D1%83%D0%BC%D1%80%D0%B5%D1%88%D1%8C.png";
+    app.push_segment(Segment::Assistant {
+        text: format!("Вот он: [открыть картинку мема]({url})"),
+        live: false,
+    });
+    render_to_string(&mut app, 40, 30);
+    let abs = app
+        .cache_lines
+        .iter()
+        .position(|line| {
+            let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            text.contains("%D1%8C")
+        })
+        .expect("a continuation row carrying URL bytes");
+    let row_text: String = app.cache_lines[abs]
+        .spans
+        .iter()
+        .map(|s| s.content.as_ref())
+        .collect();
+    let byte = row_text.find('%').unwrap();
+    let char_col = row_text[..byte].chars().count();
+    app.click_at(abs, char_col);
+    assert_eq!(
+        toast_text(&app),
+        "open failed: no browser in tests",
+        "a click anywhere on the wrapped URL fires"
+    );
 }
 
 #[test]

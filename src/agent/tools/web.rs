@@ -166,7 +166,7 @@ pub async fn fetch(args: &Value, ctx: &mut super::ToolCtx, allow_hosts: &[String
                 "webfetch selector requires an HTML page; drop the selector for plain text",
             );
         };
-        match select_fragments(raw_html, sel) {
+        match select_fragments(raw_html, sel, Some(&url)) {
             Ok(fragments) => return Outcome::ok(truncate(&fragments)),
             Err(e) => return Outcome::err(format!("webfetch: {e}")),
         }
@@ -197,8 +197,12 @@ fn project_page(
 
 /// Extract the structured Markdown/text of every element matching a CSS selector,
 /// one block per element. Errors on a malformed selector or when nothing matches.
-fn select_fragments(html: &str, selector: &str) -> Result<String, String> {
-    markdown::extract_selector_markdown(html, selector, None)
+fn select_fragments(
+    html: &str,
+    selector: &str,
+    base_url: Option<&reqwest::Url>,
+) -> Result<String, String> {
+    markdown::extract_selector_markdown(html, selector, base_url)
 }
 
 pub async fn search(args: &Value, tools: &crate::config::ToolsConfig) -> Outcome {
@@ -223,7 +227,23 @@ pub async fn search(args: &Value, tools: &crate::config::ToolsConfig) -> Outcome
         .and_then(Value::as_u64)
         .unwrap_or(tools.web.timeout_secs)
         .clamp(1, 60);
-    let category = meta_search::SearchCategory::parse(args.get("category").and_then(Value::as_str));
+    let category = match args
+        .get("category")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|raw| !raw.is_empty())
+    {
+        Some(raw) => match meta_search::SearchCategory::parse_exact(raw) {
+            Some(category) => category,
+            None => {
+                return Outcome::err(format!(
+                    "websearch: unknown category '{raw}'; use auto, docs, code, packages, \
+discussions or papers"
+                ));
+            }
+        },
+        None => meta_search::SearchCategory::Auto,
+    };
     // Deep search fetches every top result: ~5 KB of transcript per hit, which
     // is the most expensive thing an agent can do on a page it may never read.
     let deep = args.get("deep").and_then(Value::as_bool).unwrap_or(false);
@@ -483,18 +503,54 @@ mod tests {
             <p>outside text</p>
         </body></html>"#;
 
-        let out = select_fragments(html, "td").unwrap();
+        let out = select_fragments(html, "td", None).unwrap();
         assert!(out.contains("alpha"), "{}", out);
         assert!(out.contains("2"), "{}", out);
         assert!(!out.contains("outside"), "{}", out);
         assert!(out.contains("\n\n"), "{}", out);
 
-        let out = select_fragments(html, "tr td:first-child").unwrap();
+        let out = select_fragments(html, "tr td:first-child", None).unwrap();
         assert!(out.contains("alpha") && out.contains("beta"), "{}", out);
         assert!(!out.contains("\n1"), "{}", out);
 
-        assert!(select_fragments(html, "td[").is_err());
-        assert!(select_fragments(html, ".does-not-exist").is_err());
+        assert!(select_fragments(html, "td[", None).is_err());
+        assert!(select_fragments(html, ".does-not-exist", None).is_err());
+    }
+
+    #[test]
+    fn selector_reports_media_and_metadata_attributes() {
+        // `img`, `meta` and `source` carry no text: a text-only extraction
+        // reported "matched nothing" on pages that were full of images, and
+        // the model kept retrying selectors that could never work.
+        let html = r#"<html><head>
+            <meta property="og:image" content="https://cdn.example/pic.png">
+            </head><body>
+            <figure><img data-src="/img/cat.png" alt="grey cat"><figcaption>cap</figcaption></figure>
+            <img src="https://cdn.example/direct.jpg">
+            <a href="/page"><img src="/thumb.png"></a>
+            <video><source src="/clip.mp4" type="video/mp4"></video>
+        </body></html>"#;
+        let base = reqwest::Url::parse("https://site.example/article").unwrap();
+
+        let out = select_fragments(html, "img", Some(&base)).unwrap();
+        assert!(out.contains("![grey cat](https://site.example/img/cat.png)"), "{out}");
+        assert!(out.contains("![image](https://cdn.example/direct.jpg)"), "{out}");
+        assert!(out.contains("![image](https://site.example/thumb.png)"), "{out}");
+
+        let out = select_fragments(html, "meta[property='og:image']", Some(&base)).unwrap();
+        assert!(out.contains("og:image: https://cdn.example/pic.png"), "{out}");
+
+        // a wrapper that holds media reports the caption and the images
+        let out = select_fragments(html, "figure", Some(&base)).unwrap();
+        assert!(out.contains("cap"), "{out}");
+        assert!(out.contains("https://site.example/img/cat.png"), "{out}");
+
+        let out = select_fragments(html, "source", Some(&base)).unwrap();
+        assert!(out.contains("source: https://site.example/clip.mp4"), "{out}");
+
+        // image-wrapped anchors keep their target
+        let out = select_fragments(html, "a", Some(&base)).unwrap();
+        assert!(out.contains("https://site.example/page"), "{out}");
     }
 
     #[test]
@@ -906,6 +962,20 @@ let y = 2;</pre></td>
         let l1 = url_inflight_lock("https://www.example.com/docs/hashmap/?utm_source=x#top");
         let l2 = url_inflight_lock("https://example.com/docs/hashmap");
         assert!(Arc::ptr_eq(&l1, &l2));
+    }
+
+    #[tokio::test]
+    async fn an_unknown_category_is_an_error_not_auto() {
+        // `category: "images"` used to run as general web: the model read
+        // unrelated pages as image results and kept rephrasing.
+        let out = search(
+            &json!({"query": "grey cat meme", "category": "images"}),
+            &crate::config::ToolsConfig::default(),
+        )
+        .await;
+        assert!(!out.ok, "{}", out.output);
+        assert!(out.output.contains("unknown category 'images'"), "{}", out.output);
+        assert!(out.output.contains("papers"), "{}", out.output);
     }
 
     #[tokio::test]

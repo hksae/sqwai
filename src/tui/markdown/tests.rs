@@ -626,75 +626,156 @@ fn col_of(spans: &[Span<'_>], needle: &str) -> usize {
         .unwrap_or(usize::MAX)
 }
 
+/// URL a click at `(row, column)` would open, if any.
+fn hit_at(hits: &[LinkHit], row: usize, column: usize) -> Option<String> {
+    hits.iter()
+        .find(|hit| hit.row == row && (hit.start..hit.end).contains(&column))
+        .map(|hit| hit.url.clone())
+}
+
 #[test]
-fn link_hit_resolves_label_parens_and_autolinks() {
-    // md link: click on the label opens the adjacent parens URL
+fn link_hit_resolves_labels_urls_and_autolinks() {
+    // md link: the label opens the adjacent parens URL
     let row = inline("see [docs](https://example.com/x) now", Theme::base());
+    let hits = link_hits(&[row.as_slice()]);
     assert_eq!(
-        link_url_at(&row, None, col_of(&row, "docs")),
+        hit_at(&hits, 0, col_of(&row, "docs")),
         Some("https://example.com/x".to_string())
     );
-    // click on plain text: nothing
-    assert_eq!(link_url_at(&row, None, 0), None);
-    // click on the dim parens (not link-styled): nothing
-    assert_eq!(link_url_at(&row, None, col_of(&row, "(https")), None);
+    // the dim parens are the same link: clicking the URL works too
+    assert_eq!(
+        hit_at(&hits, 0, col_of(&row, "(https") + 1),
+        Some("https://example.com/x".to_string())
+    );
+    // plain text: nothing
+    assert_eq!(hit_at(&hits, 0, 0), None);
     // autolink: click on the URL itself
     let auto = inline("go <https://example.com> ok", Theme::base());
+    let hits = link_hits(&[auto.as_slice()]);
     assert_eq!(
-        link_url_at(&auto, None, col_of(&auto, "https")),
+        hit_at(&hits, 0, col_of(&auto, "https")),
         Some("https://example.com".to_string())
     );
     // bare URL in code text is literal, never a link
     let code = inline("run `https://example.com` ok", Theme::base());
-    assert_eq!(link_url_at(&code, None, col_of(&code, "https")), None);
+    assert!(link_hits(&[code.as_slice()]).is_empty());
+    // exotic schemes never resolve, even when styled as links
+    let evil = inline("[x](javascript:alert(1))", Theme::base());
+    assert!(link_hits(&[evil.as_slice()]).is_empty());
 }
 
 #[test]
-fn link_hit_never_guesses_across_links_or_rows() {
-    // two links one row: each label binds its own parens
+fn link_hit_keeps_each_label_with_its_own_target() {
     let row = inline(
         "[a](https://a.example/1) [b](https://b.example/2)",
         Theme::base(),
     );
     let text: String = row.iter().map(|s| s.content.as_ref()).collect();
-    let a_col = text.find('a').unwrap();
-    let b_col = text.find(" b (").unwrap() + 1;
+    let hits = link_hits(&[row.as_slice()]);
     assert_eq!(
-        link_url_at(&row, None, a_col),
+        hit_at(&hits, 0, text.find('a').unwrap()),
         Some("https://a.example/1".to_string())
     );
     assert_eq!(
-        link_url_at(&row, None, b_col),
+        hit_at(&hits, 0, text.find(" b (").unwrap() + 1),
         Some("https://b.example/2".to_string())
     );
-    // label at the row edge, parens opening the next row (wrap ate the space)
-    let full = inline("[long label](https://example.com/deep)", Theme::base());
-    let full_text: String = full.iter().map(|s| s.content.as_ref()).collect();
-    let cut = full_text.find("(https").unwrap();
-    let (h1, h2) = full_text.split_at(cut);
-    let top = vec![Span::styled(
-        h1.to_string(),
-        Style::new()
-            .fg(Theme::ACCENT())
-            .add_modifier(Modifier::UNDERLINED),
-    )];
-    let bottom = vec![Span::styled(h2.to_string(), Theme::base())];
-    assert_eq!(
-        link_url_at(&top, Some(&bottom), col_of(&top, "label")),
-        Some("https://example.com/deep".to_string())
+}
+
+#[test]
+fn a_url_wrapped_over_many_rows_stays_clickable() {
+    // the live case: a percent-encoded tenor link is far longer than a row
+    let url = "https://media.tenor.com/AHEu9byRhIkAAAAN/%D0%B1%D1%80%D0%BE-%D1%82%D1%8B-%D1%83%D0%BC%D1%80%D0%B5%D1%88%D1%8C-%D0%B1%D1%80%D0%BE.png";
+    let md = format!("Вот он: [открыть картинку мема]({url})");
+    let hl = Highlighter::new();
+    let width = 30;
+    let (rows, _) = wrap_tagged(
+        render(&md, width, &hl)
+            .into_iter()
+            .map(|line| (line, None))
+            .collect(),
+        width,
     );
-    // autolink cut at the row edge with text ahead: abstain, never glue
-    let edge = vec![Span::styled(
-        "https://example.com".to_string(),
+    assert!(rows.len() >= 4, "must actually wrap: {}", rows.len());
+    let slices: Vec<&[Span<'_>]> = rows.iter().map(|l| l.spans.as_slice()).collect();
+    let hits = link_hits(&slices);
+    // the label
+    let label_row = rows
+        .iter()
+        .position(|l| line_text_pub(l).contains("открыть"))
+        .expect("label row");
+    let label_text = line_text_pub(&rows[label_row]);
+    let label_col = label_text.find("открыть").unwrap();
+    let label_col = label_text[..label_col].chars().count();
+    assert_eq!(hit_at(&hits, label_row, label_col), Some(url.to_string()));
+    // every row carrying URL bytes, not just the first
+    let url_rows: Vec<usize> = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| {
+            let text = line_text_pub(l);
+            text.contains("tenor")
+                || text.contains("%D0")
+                || text.contains("AAAAN")
+                || text.contains(".png")
+        })
+        .map(|(row, _)| row)
+        .collect();
+    assert!(url_rows.len() >= 2, "url must span rows: {url_rows:?}");
+    for row in url_rows {
+        let text = line_text_pub(&rows[row]);
+        let col = text.chars().position(|c| c != ' ').expect("non-blank row");
+        assert_eq!(
+            hit_at(&hits, row, col),
+            Some(url.to_string()),
+            "row {row} is not clickable: {text:?}"
+        );
+    }
+}
+
+#[test]
+fn quote_rail_and_padding_do_not_break_a_wrapped_url() {
+    let url = "https://example.com/a/very/long/path/that/wraps/over/several/rows/in/a/quote";
+    let md = format!("> [label]({url})");
+    let hl = Highlighter::new();
+    let width = 24;
+    let (rows, _) = wrap_tagged(
+        render(&md, width, &hl)
+            .into_iter()
+            .map(|line| (line, None))
+            .collect(),
+        width,
+    );
+    assert!(rows.iter().all(|l| line_text_pub(l).contains('▐')));
+    let slices: Vec<&[Span<'_>]> = rows.iter().map(|l| l.spans.as_slice()).collect();
+    let hits = link_hits(&slices);
+    let target_row = rows
+        .iter()
+        .position(|l| line_text_pub(l).contains("path"))
+        .expect("a continuation row");
+    let text = line_text_pub(&rows[target_row]);
+    let byte = text.find("path").unwrap();
+    let col = text[..byte].chars().count();
+    assert_eq!(hit_at(&hits, target_row, col), Some(url.to_string()));
+}
+
+#[test]
+fn a_link_never_pairs_with_a_paragraph_two_rows_away() {
+    // label run then a blank row then literal parens in another paragraph:
+    // the renderer's adjacency cannot cross a paragraph, and neither may we
+    let label = Span::styled(
+        "label",
         Style::new()
             .fg(Theme::ACCENT())
             .add_modifier(Modifier::UNDERLINED),
-    )];
-    let ahead = vec![Span::styled("more text".to_string(), Theme::base())];
-    assert_eq!(link_url_at(&edge, Some(&ahead), 8), None);
-    // exotic schemes never resolve, even when styled as links
-    let evil = inline("[x](javascript:alert(1))", Theme::base());
-    assert_eq!(link_url_at(&evil, None, 0), None);
+    );
+    let rows: Vec<Vec<Span<'_>>> = vec![
+        vec![label],
+        vec![],
+        vec![Span::styled("(https://example.com/x)", Theme::base())],
+    ];
+    let slices: Vec<&[Span<'_>]> = rows.iter().map(|r| r.as_slice()).collect();
+    assert!(link_hits(&slices).is_empty());
 }
 
 #[test]

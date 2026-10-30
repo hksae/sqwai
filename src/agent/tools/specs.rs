@@ -327,7 +327,7 @@ instructions.",
                     },
                     "selector": {
                         "type": "string",
-                        "description": "optional CSS selector to extract only matching HTML elements"
+                        "description": "optional CSS selector; matched elements are returned as Markdown, and media/metadata elements (img, source, iframe, meta, link) report their URL or content"
                     },
                     "timeout": {"type": "integer", "minimum": 1, "maximum": 60}
                 },

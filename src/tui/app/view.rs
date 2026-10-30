@@ -1196,26 +1196,26 @@ impl App {
     /// borders (`╭` opens, `╰` closes). Tables use `┌`-corners, so a `│`
     /// heuristic can no longer mistake a table row for code.
     /// View-aware: resolves the id in the currently shown transcript.
-    /// URL under a cursor inside one assistant row, if the cursor sits on a
-    /// link. Geometry only: the row must belong to this segment (a wrapped
-    /// label may spill parens onto the next row, but never into the next
-    /// segment), the rest is the renderer's adjacency rule — see
-    /// `markdown::link_url_at`.
+    /// URL under a cursor inside one assistant segment, if the cursor sits
+    /// on a link. A long URL wraps over several rows and the label with it,
+    /// so the whole segment is glued back before hit-testing — see
+    /// `markdown::link_hits`.
     pub(super) fn link_at_row(
         &self,
         seg_idx: usize,
         abs_row: usize,
         char_col: usize,
     ) -> Option<String> {
-        if self.cache_rowseg.get(abs_row) != Some(&Some(seg_idx)) {
+        let (start, end) = self.seg_row_range(seg_idx)?;
+        if abs_row < start || abs_row >= end {
             return None;
         }
-        let row = self.cache_lines.get(abs_row)?;
-        let same_seg = self.cache_rowseg.get(abs_row + 1) == Some(&Some(seg_idx));
-        let next = same_seg
-            .then(|| self.cache_lines.get(abs_row + 1))
-            .flatten();
-        crate::tui::markdown::link_url_at(&row.spans, next.map(|l| l.spans.as_slice()), char_col)
+        let rows = self.cache_lines.get(start..end)?;
+        let slices: Vec<&[Span<'_>]> = rows.iter().map(|line| line.spans.as_slice()).collect();
+        let hit = crate::tui::markdown::link_hits(&slices)
+            .into_iter()
+            .find(|hit| hit.row == abs_row - start && (hit.start..hit.end).contains(&char_col))?;
+        Some(hit.url)
     }
 
     fn code_block_index(&self, seg: u64, abs_row: usize) -> Option<usize> {

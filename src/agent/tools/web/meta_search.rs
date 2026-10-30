@@ -30,20 +30,20 @@ pub enum SearchCategory {
 }
 
 impl SearchCategory {
-    pub fn parse(raw: Option<&str>) -> Self {
-        match raw
-            .unwrap_or("auto")
-            .trim()
-            .to_ascii_lowercase()
-            .as_str()
-        {
+    /// Known category, or `None` for a word this tool does not have. An
+    /// unknown word must not fall back to `auto`: a model that asked for
+    /// `images` and silently got general web reads the junk as an image
+    /// search and keeps going.
+    pub fn parse_exact(raw: &str) -> Option<Self> {
+        Some(match raw.trim().to_ascii_lowercase().as_str() {
+            "auto" | "" => Self::Auto,
             "docs" | "doc" | "documentation" => Self::Docs,
             "code" | "repo" | "repos" | "github" => Self::Code,
             "packages" | "package" | "pkg" | "crates" | "npm" | "pypi" => Self::Packages,
             "discussions" | "discussion" | "forum" | "hn" | "reddit" => Self::Discussions,
             "papers" | "paper" | "arxiv" | "research" | "wiki" => Self::Papers,
-            _ => Self::Auto,
-        }
+            _ => return None,
+        })
     }
 }
 

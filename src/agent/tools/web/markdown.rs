@@ -57,6 +57,11 @@ pub fn html_to_markdown(html: &str, base_url: Option<&Url>) -> ExtractedDoc {
 }
 
 /// Extract plain text or Markdown for a specific CSS selector.
+///
+/// Some elements carry their content entirely in attributes — `img`,
+/// `source`, `iframe`, `meta`, `link`. Rendering those as text yields
+/// nothing, which read as "no match" even on a page full of images, so a
+/// matched element with no text contributes its URL/metadata instead.
 pub fn extract_selector_markdown(
     html: &str,
     selector_str: &str,
@@ -69,9 +74,18 @@ pub fn extract_selector_markdown(
     for element in doc.select(&parsed) {
         let mut conv = DomConverter::new(base_url);
         conv.walk_element(element);
-        let rendered = conv.finish();
-        if !rendered.is_empty() {
-            blocks.push(rendered);
+        let mut block = conv.finish().trim().to_string();
+        let attributes = attribute_lines(element, base_url);
+        if !attributes.is_empty() {
+            if block.is_empty() {
+                block = attributes.join("\n");
+            } else {
+                block.push_str("\n\n");
+                block.push_str(&attributes.join("\n"));
+            }
+        }
+        if !block.is_empty() {
+            blocks.push(block);
         }
         if blocks.len() >= 200 {
             break;
@@ -79,11 +93,97 @@ pub fn extract_selector_markdown(
     }
     if blocks.is_empty() {
         Err(format!(
-            "selector '{selector_str}' matched nothing (or only empty elements)"
+            "selector '{selector_str}' matched no elements with text, media or metadata"
         ))
     } else {
         Ok(blocks.join("\n\n"))
     }
+}
+
+/// URL and metadata lines held by an element (and, for a wrapper like
+/// `figure`, by its descendants), absolute-ized so they can be used as-is.
+fn attribute_lines(root: ElementRef<'_>, base_url: Option<&Url>) -> Vec<String> {
+    const MAX_LINES: usize = 30;
+    let mut out: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut add = |line: Option<String>| {
+        if let Some(line) = line
+            && out.len() < MAX_LINES
+            && seen.insert(line.clone())
+        {
+            out.push(line);
+        }
+        out.len() >= MAX_LINES
+    };
+    let mut full = add(attribute_line(root, base_url));
+    let media = matches!(
+        root.value().name(),
+        "img" | "source" | "video" | "audio" | "iframe" | "embed"
+    );
+    if !media {
+        // a wrapper matched: report every media element it holds
+        for (scanned, node) in root.descendants().filter_map(ElementRef::wrap).enumerate() {
+            if scanned >= 2_000 || full {
+                break;
+            }
+            full = add(attribute_line(node, base_url));
+        }
+    }
+    out
+}
+
+/// The URL/metadata content of one element, when attributes are all it has.
+fn attribute_line(element: ElementRef<'_>, base_url: Option<&Url>) -> Option<String> {
+    let value = element.value();
+    let attr = |name: &str| value.attr(name).map(str::trim).filter(|v| !v.is_empty());
+    match value.name() {
+        "img" => media_src(value, base_url).map(|src| {
+            let alt = attr("alt").map(collapse_inline_ws).unwrap_or_default();
+            if alt.is_empty() {
+                format!("![image]({src})")
+            } else {
+                format!("![{alt}]({src})")
+            }
+        }),
+        "source" | "video" | "audio" | "iframe" | "embed" => {
+            media_src(value, base_url).map(|src| format!("{}: {src}", value.name()))
+        }
+        "meta" => {
+            let name = attr("property")
+                .or_else(|| attr("name"))
+                .or_else(|| attr("http-equiv"));
+            match (name, attr("content")) {
+                (Some(name), Some(content)) => Some(format!("{name}: {content}")),
+                _ => None,
+            }
+        }
+        "link" => match (attr("rel"), attr("href")) {
+            (Some(rel), Some(href)) => Some(format!("{rel}: {}", resolve_url(base_url, href))),
+            _ => None,
+        },
+        // an image-wrapped anchor renders as its child; keep the target
+        "a" if element.text().all(|t| t.trim().is_empty()) => {
+            attr("href").map(|href| resolve_url(base_url, href))
+        }
+        _ => None,
+    }
+}
+
+/// Best available image/media URL: the plain attribute first, then the
+/// lazy-loading variants, then the first `srcset` candidate.
+fn media_src(value: &scraper::node::Element, base_url: Option<&Url>) -> Option<String> {
+    let attr = |name: &str| value.attr(name).map(str::trim).filter(|v| !v.is_empty());
+    let raw = attr("src")
+        .or_else(|| attr("data-src"))
+        .or_else(|| attr("data-original"))
+        .or_else(|| attr("data-lazy-src"))
+        .or_else(|| attr("srcset"))
+        .or_else(|| attr("data-srcset"))?;
+    let first = raw.split(',').next().unwrap_or(raw).split_whitespace().next()?;
+    if first.starts_with("data:") || first.is_empty() {
+        return None;
+    }
+    Some(resolve_url(base_url, first))
 }
 
 fn extract_title(doc: &Html) -> Option<String> {

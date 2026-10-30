@@ -1327,102 +1327,131 @@ fn is_link_style(style: Style) -> bool {
     style.fg == Some(Theme::ACCENT()) && style.add_modifier.contains(Modifier::UNDERLINED)
 }
 
-/// URL under a cursor inside one wrapped row. Styles carry no URLs, so the
-/// cursor must sit on a link-styled run and the target must be adjacent:
-/// an `<autolink>` URL under the cursor, or `(url)` parens right after the
-/// label (same row, or opening the next one when the label fills its row).
-/// Anything ambiguous — two links one row, a URL cut at the row edge, a
-/// bare URL in code text — resolves to nothing: a click must never open
-/// the wrong address. Only `http(s)` targets resolve, so exotic schemes
-/// from untrusted model output cannot reach the opener.
-pub fn link_url_at(row: &[Span<'_>], next: Option<&[Span<'_>]>, char_col: usize) -> Option<String> {
-    let text: String = row.iter().map(|s| s.content.as_ref()).collect();
-    let chars: Vec<char> = text.chars().collect();
-    // per-char link mask over the row
-    let mut mask = vec![false; chars.len()];
-    let mut i = 0;
-    for span in row {
-        let link = is_link_style(span.style);
-        for _ in span.content.chars() {
-            if i < mask.len() {
-                mask[i] = link;
-            }
-            i += 1;
-        }
-    }
-    if char_col >= mask.len() || !mask[char_col] {
-        return None;
-    }
-    // maximal link-styled run around the cursor (a label with nested
-    // emphasis is several spans, all link-styled)
-    let mut start = char_col;
-    while start > 0 && mask[start - 1] {
-        start -= 1;
-    }
-    let mut end = char_col;
-    while end + 1 < mask.len() && mask[end + 1] {
-        end += 1;
-    }
-    let run: String = chars[start..=end].iter().collect();
-    // autolink: the run IS the URL. A run cut at the row edge may continue
-    // on the next row — gluing is a guess either way, so abstain.
-    if run.starts_with("http://") || run.starts_with("https://") {
-        if end + 1 == chars.len()
-            && next.is_some_and(|n| {
-                n.iter()
-                    .flat_map(|s| s.content.chars())
-                    .next()
-                    .is_some_and(|c| !c.is_whitespace())
-            })
-        {
-            return None;
-        }
-        return clean_url(&run);
-    }
-    // label: ` (url)` follows on this row, or opens the next one when the
-    // label runs to the row edge (wrap eats the separating space)
-    let after: String = chars[end + 1..].iter().collect();
-    let after = after.trim_start();
-    if let Some(rest) = after.strip_prefix('(') {
-        return paren_url(rest).and_then(|u| clean_url(&u));
-    }
-    if !after.is_empty() {
-        return None;
-    }
-    let ahead: String = next?.iter().map(|s| s.content.as_ref()).collect();
-    let rest = ahead.trim_start().strip_prefix('(')?;
-    paren_url(rest).and_then(|u| clean_url(&u))
+/// One clickable range on a wrapped chat row. Columns are char indexes in
+/// that row (the same unit `screen_col_to_char` yields); `end` is exclusive.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkHit {
+    pub row: usize,
+    pub start: usize,
+    pub end: usize,
+    pub url: String,
 }
 
-/// Balanced `(...)` scan: nested parens in the URL survive, the match ends
-/// at the paren that closes the opener.
-fn paren_url(s: &str) -> Option<String> {
-    let mut depth = 1u32;
-    let mut out = String::new();
-    let mut chars = s.chars();
-    while let Some(c) = chars.next() {
-        match c {
-            '(' => {
-                depth += 1;
-                out.push(c);
-            }
-            ')' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(out);
-                }
-                out.push(c);
-            }
-            '\\' => {
-                // an escaped char is literal text, never a delimiter
-                if let Some(next) = chars.next() {
-                    out.push(next);
-                }
-            }
-            _ => out.push(c),
+/// Clickable link ranges over the wrapped rows of one assistant segment.
+///
+/// Rows are soft-wrapped slices of the segment's logical lines, and a real
+/// URL is routinely longer than a row: resolving only the pressed row and
+/// its neighbour made every long link (any percent-encoded Cyrillic URL)
+/// silently dead. The rows are glued back here, dropping only what wrap
+/// itself adds — quote rails, list indent, right padding — none of which
+/// can occur inside a URL.
+///
+/// Ambiguity is still resolved by abstaining: a link-styled run must be
+/// followed by `(url)` on its row or the next one, and only `http(s)`
+/// targets resolve, so exotic schemes from untrusted model output cannot
+/// reach the opener. The label and the dim URL text are both clickable.
+pub fn link_hits(rows: &[&[Span<'_>]]) -> Vec<LinkHit> {
+    let mut chars: Vec<char> = Vec::new();
+    let mut link: Vec<bool> = Vec::new();
+    // (row, char column in the original row) for every glued char
+    let mut place: Vec<(usize, usize)> = Vec::new();
+    for (row, spans) in rows.iter().enumerate() {
+        let styled: Vec<(Style, char)> = spans
+            .iter()
+            .flat_map(|s| s.content.chars().map(move |c| (s.style, c)))
+            .collect();
+        let decorated = |c: char| matches!(c, ' ' | '│' | '▐');
+        let lead = styled
+            .iter()
+            .position(|(_, c)| !decorated(*c))
+            .unwrap_or(styled.len());
+        let tail = styled
+            .iter()
+            .rposition(|(_, c)| !decorated(*c))
+            .map_or(lead, |at| at + 1);
+        for (col, (style, c)) in styled.into_iter().enumerate().take(tail).skip(lead) {
+            chars.push(c);
+            link.push(is_link_style(style));
+            place.push((row, col));
         }
     }
-    None
+
+    let mut hits: Vec<LinkHit> = Vec::new();
+    let mut push = |start: usize, end: usize, url: &str| {
+        let mut at = start;
+        while at < end {
+            let (row, col) = place[at];
+            let mut next = at + 1;
+            while next < end && place[next].0 == row {
+                next += 1;
+            }
+            hits.push(LinkHit {
+                row,
+                start: col,
+                end: col + (next - at),
+                url: url.to_string(),
+            });
+            at = next;
+        }
+    };
+
+    let mut i = 0;
+    while i < chars.len() {
+        if !link[i] {
+            i += 1;
+            continue;
+        }
+        // maximal link-styled run (a label with nested emphasis is several
+        // spans, all link-styled)
+        let start = i;
+        while i < chars.len() && link[i] {
+            i += 1;
+        }
+        let end = i;
+        let run: String = chars[start..end].iter().collect();
+        // autolink: the run IS the URL
+        if run.starts_with("http://") || run.starts_with("https://") {
+            if let Some(url) = clean_url(&run) {
+                push(start, end, &url);
+            }
+            continue;
+        }
+        // label: the renderer writes " (url)" right after it; wrapping can
+        // eat the space and split the URL, but never the adjacency
+        let mut paren = end;
+        if paren < chars.len() && chars[paren] == ' ' {
+            paren += 1;
+        }
+        if paren >= chars.len() || chars[paren] != '(' {
+            continue;
+        }
+        // the target opens on the label's row or the next one; anything
+        // further apart belongs to another paragraph
+        if place[paren].0 > place[end - 1].0 + 1 {
+            continue;
+        }
+        let mut depth = 0usize;
+        let mut close = None;
+        for (q, c) in chars.iter().enumerate().skip(paren) {
+            match c {
+                '(' => depth += 1,
+                ')' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        close = Some(q);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(close) = close else { continue };
+        let url: String = chars[paren + 1..close].iter().collect();
+        let Some(url) = clean_url(&url) else { continue };
+        push(start, end, &url);
+        push(paren, close + 1, &url);
+    }
+    hits
 }
 
 /// Second lock (the first is adjacency above): only web targets resolve.
