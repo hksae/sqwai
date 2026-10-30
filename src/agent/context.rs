@@ -749,9 +749,6 @@ pub fn transcript(messages: &[Message]) -> String {
         if is_summary_message(message) {
             continue;
         }
-        if message.role == Role::Tool && crate::agent::tool_output::is_stub(&message.content) {
-            continue;
-        }
         let label = match message.role {
             Role::User => "User",
             Role::Assistant => "Agent",
@@ -951,9 +948,7 @@ fn summary_message(summary: &str) -> String {
         "<conversation-summary>\n{summary}\n</conversation-summary>\n\
          This is the summarized earlier part of our conversation. Continue the \
          task from here. The durable project plan is in your system block, and \
-         tool results covered by this summary are cleared from the request — \
-         recall_result returns what this session still holds, without \
-         re-running the tool."
+         the files the summarized work read are still on disk unchanged."
     )
 }
 
@@ -1118,9 +1113,6 @@ pub fn local_summary(messages: &[Message], existing: Option<&str>) -> String {
         // a previous summary block rides via `existing`, never inline —
         // otherwise every fallback nests the old tags one level deeper
         if previous.is_some() && is_summary_message(message) {
-            continue;
-        }
-        if message.role == Role::Tool && crate::agent::tool_output::is_stub(&message.content) {
             continue;
         }
         let label = match message.role {

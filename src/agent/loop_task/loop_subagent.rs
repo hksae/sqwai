@@ -657,7 +657,6 @@ pub(crate) async fn run_subagent(
             active_skills.to_vec()
         },
         // a child has its own transcript, so the parent's cleared prefix means nothing here
-        cleared_floor: 0,
         read_ledger: Default::default(),
         enable_tools: true,
         // subagent baselines stay synchronous: short tasks, and progress

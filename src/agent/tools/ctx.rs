@@ -68,7 +68,6 @@ pub struct ToolCtx {
     /// hidden from the model. The wire clears a prefix of the pool, and a large
     /// new result would otherwise fill the fresh window sooner and hand old
     /// results back — so this only ever grows.
-    pub cleared_floor: usize,
     /// What each file looked like when the model last saw it whole, plus its
     /// own edits since. This lives in the session, not the run: a live GTA
     /// session's two full re-reads of `main.js` both happened on the first
@@ -178,7 +177,6 @@ impl ToolCtx {
             files_read: HashMap::new(),
             read_windows: HashMap::new(),
             web_pages: HashMap::new(),
-            cleared_floor: 0,
             read_ledger: ReadLedger::default(),
             visible_calls: None,
             checkpoints: Vec::new(),
@@ -608,7 +606,6 @@ impl ToolCtx {
             }
         }
         self.read_ledger.merge(child.read_ledger);
-        self.cleared_floor = self.cleared_floor.max(child.cleared_floor);
         for (url, page) in child.web_pages {
             let slot = self.web_pages.entry(url).or_default();
             for item in page.items {

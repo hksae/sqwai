@@ -29,7 +29,6 @@ fn plain_input(
         limits: Default::default(),
         active_skills: vec![],
         read_ledger: Default::default(),
-        cleared_floor: 0,
         enable_tools: true,
         background_baselines: false,
         read_only: false,
@@ -182,7 +181,6 @@ async fn every_request_records_usage_and_wire_shape() {
         ("cached", serde_json::json!(31_000)),
         ("written", serde_json::json!(9_000)),
         ("transport", serde_json::json!("stateless")),
-        ("cleared", serde_json::json!(0)),
     ] {
         assert_eq!(
             request.fields.get(key),
@@ -276,7 +274,6 @@ fn limited_input(
         limits,
         active_skills: vec![],
         read_ledger: Default::default(),
-        cleared_floor: 0,
         enable_tools: true,
         background_baselines: false,
         read_only: false,

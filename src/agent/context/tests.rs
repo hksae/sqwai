@@ -540,27 +540,6 @@ fn the_anchored_gate_grows_with_the_transcript() {
 }
 
 #[test]
-fn wire_estimated_tokens_counts_cleared_results_as_stubs() {
-    // Aged-out tool output is already a stub on the wire; counting raw stored
-    // bytes would keep firing compaction long after the request stopped growing.
-    let mut messages = Vec::new();
-    for i in 0..40 {
-        messages.push(Message::tool_result(
-            format!("c{i}"),
-            "x".repeat(8 * 1024),
-            false,
-        ));
-    }
-    let raw = estimated_tokens(&messages);
-    let wire = wire_estimated_tokens(&messages, &crate::agent::tool_output::Wire::default());
-    assert!(wire < raw, "wire {wire} must be below raw {raw}");
-    assert!(
-        wire < raw / 4,
-        "most of the pool is stubbed on the wire: wire={wire} raw={raw}"
-    );
-}
-
-#[test]
 fn summary_prompt_names_the_kept_tail() {
     let prompt = summary_short_prompt(Some("earlier"), "", None, false, 3);
     assert!(prompt.contains("3 message(s) stay verbatim"), "{prompt}");
@@ -717,11 +696,11 @@ fn summary_short_prompt_points_at_messages_above() {
     assert!(retry.contains("no durable plan"));
 }
 
-/// The summary is all that survives of the tool output a compaction clears from
+/// The summary is all that survives of the tool output a compaction drops from
 /// the request, so it opens with where the work stands, names the paths that
-/// carry it, and keeps the identifiers verbatim. The tail line used to send the
-/// model to re-read files whose bytes `recall_result` still holds — that is the
-/// promise the cleared wire now depends on.
+/// carry it, and keeps the identifiers verbatim. The block handed back after
+/// the cut promises only what the host can still deliver: the files on disk,
+/// not bytes the transcript no longer carries.
 #[test]
 fn the_summary_leads_with_the_state_and_keeps_the_numbers() {
     let input = summary_short_input(&[user("do it")], None, "", None, false);
@@ -745,7 +724,8 @@ fn the_summary_leads_with_the_state_and_keeps_the_numbers() {
     let applied = apply_summary("facts", &[user("next")]);
     let text = &applied[0].content;
     assert!(!text.contains("re-read a file"), "{text}");
-    assert!(text.contains("recall_result"), "{text}");
+    assert!(!text.contains("recall_result"), "{text}");
+    assert!(text.contains("still on disk unchanged"), "{text}");
 }
 
 #[test]
@@ -953,7 +933,7 @@ fn anchor_restores_files_on_redo_and_lists_recent_reads_and_blockers() {
 }
 
 #[test]
-fn anchor_tracks_fused_paths_hard_trim_deducts_summary_head_and_local_summary_skips_stubs() {
+fn anchor_tracks_fused_paths_hard_trim_deducts_summary_head_and_local_summary_keeps_silent_calls() {
     let root = temp_root("anchor-fused-reads");
     std::fs::remove_dir_all(&root).ok();
     std::fs::create_dir_all(&root).unwrap();
@@ -1007,19 +987,11 @@ fn anchor_tracks_fused_paths_hard_trim_deducts_summary_head_and_local_summary_sk
             serde_json::json!({"file_path": "src/main.rs"}),
         ),
     ]);
-    let cleared_stub = Message::tool_result(
-        "c1",
-        "[output cleared] read src/main.rs · 20 KB of output removed",
-        false,
-    );
-    let summary = local_summary(&[silent_assistant, cleared_stub], None);
+    let tool_row = Message::tool_result("c1", "1\tfn main() {}", false);
+    let summary = local_summary(&[silent_assistant, tool_row], None);
     assert!(
         summary.contains("Agent called read"),
         "silent assistant tool calls must be preserved in local_summary: {summary}"
-    );
-    assert!(
-        !summary.contains("[output cleared]"),
-        "cleared stubs must be skipped in local_summary: {summary}"
     );
 }
 

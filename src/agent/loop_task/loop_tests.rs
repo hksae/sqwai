@@ -75,7 +75,6 @@ async fn test_provider_fallback_chain_switch_on_failure() {
         limits: Default::default(),
         active_skills: vec![],
         read_ledger: Default::default(),
-        cleared_floor: 0,
         enable_tools: false,
         background_baselines: false,
         read_only: false,
@@ -171,7 +170,6 @@ async fn partial_stream_failure_does_not_fall_back() {
         limits: Default::default(),
         active_skills: vec![],
         read_ledger: Default::default(),
-        cleared_floor: 0,
         enable_tools: false,
         background_baselines: false,
         read_only: false,
@@ -366,65 +364,6 @@ fn repeat_verdict_covers_argument_free_tools() {
         repeat_verdict(&messages, &nap, "diff --git a/src/x.rs"),
         RepeatVerdict::Fresh
     ));
-}
-
-#[test]
-fn repeat_verdict_and_read_windows_ignore_outputs_cleared_from_wire() {
-    use crate::providers::ToolCallReq;
-    let diff = |id: &str| ToolCallReq::new(id, "git_diff", serde_json::json!({}));
-    let big = "x".repeat(8 * 1024);
-    let mut messages = vec![
-        Message::new(Role::User, "start"),
-        Message::new(Role::Assistant, "").with_tool_calls(vec![diff("old_1")]),
-        Message::tool_result("old_1", &big, false),
-        Message::new(Role::Assistant, "").with_tool_calls(vec![diff("old_2")]),
-        Message::tool_result("old_2", &big, false),
-    ];
-    // Push enough other tool outputs (>128 KB fallback trigger) so old_1 and old_2
-    // are cleared on the wire.
-    for i in 0..38 {
-        let id = format!("fill_{i}");
-        messages.push(
-            Message::new(Role::Assistant, "").with_tool_calls(vec![ToolCallReq::new(
-                id.clone(),
-                "read",
-                serde_json::json!({"file_path": format!("f{i}.rs")}),
-            )]),
-        );
-        messages.push(Message::tool_result(id, "y".repeat(8 * 1024), false));
-    }
-    assert!(crate::agent::tool_output::is_cleared(&messages, "old_1", &crate::agent::tool_output::Wire::default()));
-    assert!(crate::agent::tool_output::is_cleared(&messages, "old_2", &crate::agent::tool_output::Wire::default()));
-    assert!(
-        matches!(
-            repeat_verdict(&messages, &diff("new_1"), &big),
-            RepeatVerdict::Fresh
-        ),
-        "cleared results are no longer visible on the wire, so re-running must be Fresh"
-    );
-
-    // Likewise, a read window attributed to a cleared call_id is evicted by
-    // retain_visible_read_windows so fs::read serves the file again.
-    let mut ctx = crate::agent::tools::ToolCtx::new(std::env::temp_dir());
-    let path = std::env::temp_dir().join("sqwai_test_read_evict.rs");
-    ctx.current_call_id = Some("old_1".into());
-    ctx.note_read_window(&path, 1, 100, "hash1".into());
-    ctx.current_call_id = None;
-    assert_eq!(ctx.read_range_served(&path, "hash1", 1, 50), Some((1, 100)));
-
-    let cleared = crate::agent::tool_output::cleared_indices(&messages, &crate::agent::tool_output::Wire::default());
-    let visible: std::collections::HashSet<String> = messages
-        .iter()
-        .enumerate()
-        .filter(|(idx, m)| m.role == Role::Tool && !cleared.contains(idx))
-        .filter_map(|(_, m)| m.tool_call_id.clone())
-        .collect();
-    ctx.retain_visible_read_windows(&visible);
-    assert_eq!(
-        ctx.read_range_served(&path, "hash1", 1, 50),
-        None,
-        "cleared read window must be evicted so read serves the file fresh"
-    );
 }
 
 /// the turn, with progress events bracketing each run.
@@ -1301,7 +1240,6 @@ async fn esc_between_tool_calls_stops_the_batch() {
         limits: Default::default(),
         active_skills: vec![],
         read_ledger: Default::default(),
-        cleared_floor: 0,
         enable_tools: true,
         background_baselines: false,
         read_only: false,
@@ -1401,7 +1339,6 @@ async fn ask_webfetch_prompts_without_always_before_fetching() {
         limits: Default::default(),
         active_skills: vec![],
         read_ledger: Default::default(),
-        cleared_floor: 0,
         enable_tools: true,
         background_baselines: false,
         read_only: false,
@@ -1838,7 +1775,6 @@ async fn same_turn_subagent_calls_overlap() {
         limits: Default::default(),
         active_skills: vec![],
         read_ledger: Default::default(),
-        cleared_floor: 0,
         enable_tools: true,
         background_baselines: false,
         read_only: false,
@@ -1954,7 +1890,6 @@ async fn parallel_read_only_batch_merges_read_state_before_following_mutation() 
         limits: Default::default(),
         active_skills: vec![],
         read_ledger: Default::default(),
-        cleared_floor: 0,
         enable_tools: true,
         background_baselines: false,
         read_only: false,
@@ -1994,80 +1929,6 @@ async fn parallel_read_only_batch_merges_read_state_before_following_mutation() 
     assert_eq!(
         std::fs::read_to_string(root.join("a.txt")).unwrap(),
         "new a\n"
-    );
-}
-
-/// The cleared prefix is a session fact, not a run fact: `ToolCtx` is rebuilt
-/// per user submit, so a floor that only lived there restarted at zero on every
-/// message and let 41 already-hidden results return to the wire in a live run
-/// (+20k tokens for a 27-character message). A run may raise the floor, never
-/// quietly lower it.
-#[tokio::test]
-async fn a_turn_starts_where_the_session_left_the_clear_boundary() {
-    let provider = std::sync::Arc::new(MockTestProvider {
-        events: std::sync::Mutex::new(vec![vec![Ok(crate::providers::StreamEvent::Text(
-            "done".into(),
-        ))]]),
-    });
-    let temp_dir = std::env::temp_dir().join(format!("sqwai-test-floor-{}", std::process::id()));
-    let _ = std::fs::create_dir_all(&temp_dir);
-    let input = AgentInput {
-        provider,
-        model_id: "m".into(),
-        model_key: "primary".into(),
-        effort: None,
-        effort_support: crate::config::EffortSupport::default(),
-        max_tokens: None,
-        system: vec![],
-        messages: vec![Message::new(Role::User, "go")],
-        root: temp_dir.clone(),
-        session_id: "test-floor-sess".into(),
-        blocked_patterns: vec![],
-        approval_mode: Default::default(),
-        approval_grants: Default::default(),
-        web_allow_hosts: vec![],
-        context_limit: 10000,
-        vision: true,
-        pdf: true,
-        tools: Default::default(),
-        limits: Default::default(),
-        active_skills: vec![],
-        read_ledger: Default::default(),
-        cleared_floor: 225,
-        enable_tools: false,
-        background_baselines: false,
-        read_only: false,
-        previous_response_id: None,
-        summary: None,
-        mcp: Default::default(),
-        skills: Default::default(),
-        compact_only: false,
-        compact_focus: String::new(),
-        compaction: Default::default(),
-        plan_limits: Default::default(),
-        shadow_store: crate::config::ShadowStore::Off,
-        subagent_depth: 0,
-        parent_step: None,
-        parent_session: None,
-        fallback_chain: vec![],
-    };
-
-    let mut handle = spawn_agent(input);
-    let mut carried = None;
-    while let Some(ev) = handle.rx.recv().await {
-        if let AgentEvent::Completed(Ok(outcome)) = ev {
-            carried = Some(outcome.cleared_floor);
-            break;
-        }
-        if let AgentEvent::Completed(Err(e)) = ev {
-            panic!("unexpected agent error: {e}");
-        }
-    }
-    let _ = std::fs::remove_dir_all(&temp_dir);
-    assert_eq!(
-        carried,
-        Some(225),
-        "the run must hand back the boundary it was given"
     );
 }
 
@@ -2137,7 +1998,6 @@ async fn closing_a_plan_does_not_end_the_run_by_itself() {
         limits: Default::default(),
         active_skills: vec![],
         read_ledger: Default::default(),
-        cleared_floor: 0,
         enable_tools: true,
         background_baselines: false,
         read_only: false,

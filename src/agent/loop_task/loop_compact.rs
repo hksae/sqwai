@@ -295,10 +295,6 @@ pub(crate) async fn compact_history(
     let mut wire = crate::agent::tool_output::Wire {
         context_limit: policy.context_limit,
         bytes_per_token: policy.bytes_per_token,
-        // The run's clear floor is not passed down: compaction judges pressure,
-        // and pricing the wire as if nothing had been cleared yet estimates it
-        // larger than it is — which triggers earlier, never later.
-        cleared_floor: 0,
         measured: policy.measured,
     };
     // Takes the wire as an argument: the gate below re-prices the transcript
@@ -346,13 +342,11 @@ pub(crate) async fn compact_history(
     let keep_len = keep.len();
     let mut summarized = false;
     if !older.is_empty() {
-        let mut wire_history = messages.clone();
-        crate::agent::tool_output::trim_for_wire(&mut wire_history, &wire);
-        let wire_older = &wire_history[..older.len().min(wire_history.len())];
+        let wire_older = &messages[..older.len().min(messages.len())];
         let (request, cache_aware) = compaction_request(
             prefix,
             wire_older,
-            &wire_history,
+            messages,
             keep_len,
             summary.as_deref(),
             plan_hint,
@@ -379,7 +373,7 @@ pub(crate) async fn compact_history(
             let (retry_request, _) = compaction_request(
                 prefix,
                 wire_older,
-                &wire_history,
+                messages,
                 keep_len,
                 summary.as_deref(),
                 plan_hint,

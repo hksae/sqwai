@@ -415,9 +415,6 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
         "plan" => plan_op(ctx, args),
         // direct dispatch never answers "unknown tool"
         "ask_user" => Outcome::err("ask_user is served by the agent loop, not by the dispatcher"),
-        "recall_result" => {
-            Outcome::err("recall_result is served by the agent loop, not by the dispatcher")
-        }
         "skill" => skill_op(ctx, args),
         other => Outcome::err(format!("unknown tool '{other}'")),
     }

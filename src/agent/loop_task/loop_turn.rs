@@ -61,16 +61,10 @@ pub(crate) fn turn_transport(
     crate::providers::select_transport(caps, previous_response_id)
 }
 
-#[cfg(test)]
+/// The transcript as it leaves: everything the session holds, minus the
+/// reasoning ciphertext older than the turn the model is answering. Tool
+/// results are never rewritten here — they were bounded once, at the door.
 pub(crate) fn request_messages(messages: &[Message], transport: ContextTransport) -> Vec<Message> {
-    request_messages_for_wire(messages, transport, &crate::agent::tool_output::Wire::default())
-}
-
-pub(crate) fn request_messages_for_wire(
-    messages: &[Message],
-    transport: ContextTransport,
-    wire: &crate::agent::tool_output::Wire,
-) -> Vec<Message> {
     let mut out = if transport != ContextTransport::PreviousResponse {
         messages.to_vec()
     } else {
@@ -84,10 +78,6 @@ pub(crate) fn request_messages_for_wire(
     // Replayed reasoning is priced like tool output: shaped on the way to the
     // wire, never in the session, where a resumed turn can still want it.
     crate::agent::tool_output::prune_wire_reasoning(&mut out);
-    // Old tool output is trimmed here, on the way to the wire — never in the
-    // session, where every result stays whole and can be handed back by
-    // `recall`. The store and the request are different objects on purpose.
-    crate::agent::tool_output::trim_for_wire(&mut out, wire);
     out
 }
 

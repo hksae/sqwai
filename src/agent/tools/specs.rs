@@ -401,22 +401,6 @@ its way, and do not load one whose body is already in this conversation.",
             }),
         },
         ToolDef {
-            name: "recall_result",
-            kind: Kind::ReadOnly,
-            description: "Return a cleared tool result by the `call_id` in its `[output cleared]` \
-stub. Optional `query` or `offset`/`limit` for part of a large result.",
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "call_id": {"type": "string", "description": "the call_id named by a [output cleared] stub"},
-                    "query": {"type": "string", "description": "optional case-insensitive substring to filter matching lines (±2 lines context)"},
-                    "offset": {"type": "integer", "description": "optional 1-based start line"},
-                    "limit": {"type": "integer", "description": "optional max lines to return (default 200 when query/offset is used)"}
-                },
-                "required": ["call_id"]
-            }),
-        },
-        ToolDef {
             name: "plan",
             kind: Kind::Mutating,
             description: "Manage the host plan for multi-step work. `create` sets the goal plus \
