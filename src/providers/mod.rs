@@ -540,6 +540,14 @@ pub struct RequestBreakdown {
     /// read them, summarize them, or clear them the way it can a tool result.
     pub reasoning_bytes: u64,
     pub total_bytes: u64,
+    /// Whether this request carried the whole transcript. A continuation
+    /// (`previous_response_id`) sends only what the provider has never seen, so
+    /// its bytes and its billed tokens describe a tail — not how full the
+    /// window is. The context view reads this before it lets such a request
+    /// replace the meter: a 120k-token conversation must not read as 4%
+    /// because the next call was a continuation.
+    #[serde(default)]
+    pub whole_transcript: bool,
     pub system_tokens: u64,
     pub skills_tokens: u64,
     pub history_tokens: u64,
@@ -551,6 +559,7 @@ pub struct RequestBreakdown {
 impl RequestBreakdown {
     pub fn from_request(req: &ChatRequest) -> Self {
         let mut out = Self::default();
+        out.whole_transcript = req.context_transport == ContextTransport::Stateless;
         for part in &req.system {
             let bytes = part.text.len() as u64;
             match part.section {
@@ -1562,6 +1571,7 @@ mod system_layout_tests {
     #[test]
     fn breakdown_rows_take_the_providers_token_count() {
         let mut b = RequestBreakdown {
+            whole_transcript: true,
             system_bytes: 25_471,
             system_tokens: 6_368,
             skills_bytes: 1_837,

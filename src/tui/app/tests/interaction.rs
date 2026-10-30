@@ -2231,6 +2231,7 @@ fn context_menu_shows_parts_legend_and_honest_gaps() {
     };
 
     app.session.last_breakdown = Some(crate::providers::RequestBreakdown {
+        whole_transcript: true,
         system_bytes: 4_000,
         skills_bytes: 1_200,
         history_bytes: 8_000,

@@ -41,7 +41,16 @@ pub fn observe_bytes_per_token(total_bytes: u64, prompt_tokens: u64) -> Option<u
     if prompt_tokens < RATIO_SAMPLE_TOKENS || total_bytes == 0 {
         return None;
     }
-    Some((total_bytes / prompt_tokens).clamp(MIN_BYTES_PER_TOKEN, MAX_BYTES_PER_TOKEN))
+    // Rounded, not truncated: the ratio decides how many tokens the provider
+    // will charge for the bytes the gate is counting, and flooring it biased the
+    // whole estimate toward "full". A live session measured 456,931 bytes at
+    // 120,930 tokens — 3.78 — and the truncated 3 priced the next request at
+    // 205,914 tokens, firing a compaction that the real ratio put at 60% of the
+    // window rather than the 80% the threshold says.
+    Some(
+        ((total_bytes as f64 / prompt_tokens as f64).round() as u64)
+            .clamp(MIN_BYTES_PER_TOKEN, MAX_BYTES_PER_TOKEN),
+    )
 }
 
 /// What the provider billed for one request, next to the bytes the host put on
@@ -279,5 +288,19 @@ mod tests {
             priced(&wire) > priced(&messages) / 6,
             "the carried turn's ciphertext was not counted at all"
         );
+    }
+
+    #[test]
+    fn the_observed_ratio_rounds_instead_of_truncating() {
+        // 456,931 bytes billed at 120,930 tokens is 3.78 bytes per token. The
+        // truncated 3 priced the following request at 205,914 tokens and fired a
+        // compaction the real ratio put at 60% of the window, not 80%.
+        assert_eq!(observe_bytes_per_token(456_931, 120_930), Some(4));
+        assert_eq!(observe_bytes_per_token(15_000, 4_000), Some(4));
+        assert_eq!(observe_bytes_per_token(12_000, 4_000), Some(3));
+        // the floor still catches a request denser than any prose
+        assert_eq!(observe_bytes_per_token(8_000, 4_000), Some(3));
+        // and a sample too small to say anything about the shape is not used
+        assert_eq!(observe_bytes_per_token(40_000, 10), None);
     }
 }

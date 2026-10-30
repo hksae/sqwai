@@ -454,14 +454,29 @@ impl Session {
         // Some providers emit a second usage event for output with zero input:
         // keep the prompt size of the request that actually reported one.
         if u.prompt_tokens > 0 {
-            self.last_usage = Some(*u);
-            // The pair lands together. This is the first moment both numbers for
-            // the same request are in hand, so the rows are re-expressed in what
-            // the provider billed and only then become the breakdown the context
-            // view reads.
-            if let Some(mut breakdown) = self.pending_breakdown.take() {
-                breakdown.rescale_to_prompt_tokens(u.prompt_tokens);
-                self.last_breakdown = Some(breakdown);
+            match self.pending_breakdown.take() {
+                // A continuation bills the tail it sent, not the context the
+                // provider holds. Publishing that reading is how a 120k-token
+                // conversation shows up as 4%: the pair is published only for a
+                // request that carried the whole transcript.
+                Some(b) if !b.whole_transcript => {}
+                Some(mut breakdown) => {
+                    self.last_usage = Some(*u);
+                    // The pair lands together. This is the first moment both
+                    // numbers for the same request are in hand, so the rows are
+                    // re-expressed in what the provider billed and only then
+                    // become the breakdown the context view reads.
+                    breakdown.rescale_to_prompt_tokens(u.prompt_tokens);
+                    self.last_breakdown = Some(breakdown);
+                }
+                // A usage event with no breakdown in flight is still the
+                // provider's own count of its window, so it is still the meter.
+                None => {
+                    self.last_usage = Some(*u);
+                    if let Some(breakdown) = self.last_breakdown.as_mut() {
+                        breakdown.rescale_to_prompt_tokens(u.prompt_tokens);
+                    }
+                }
             }
         } else if let Some(prev) = self.last_usage.as_mut() {
             prev.completion_tokens += u.completion_tokens;
@@ -1145,6 +1160,7 @@ mod tests {
     fn usage_event_re_prices_the_breakdown_rows() {
         let mut s = Session::new("m".into(), 1000);
         s.pending_breakdown = Some(crate::providers::RequestBreakdown {
+            whole_transcript: true,
             history_bytes: 400,
             history_tokens: 100,
             reasoning_bytes: 3_600,
@@ -1174,6 +1190,52 @@ mod tests {
             "and keep their shares of it"
         );
         assert_eq!(b.history_bytes, 400, "raw bytes are never rewritten");
+    }
+
+    #[test]
+    fn a_continuation_never_replaces_the_whole_transcript_meter() {
+        let mut s = Session::new("m".into(), 100_000);
+        s.pending_breakdown = Some(crate::providers::RequestBreakdown {
+            history_bytes: 400_000,
+            history_tokens: 100_000,
+            total_bytes: 400_000,
+            whole_transcript: true,
+            ..Default::default()
+        });
+        s.add_usage(&Usage {
+            prompt_tokens: 100_000,
+            completion_tokens: 5,
+            ..Default::default()
+        });
+        assert_eq!(s.context_tokens_used(), 100_000);
+
+        // The next call sends the one message the provider has not seen and is
+        // billed for that tail. Reading it as occupancy is what made a full
+        // conversation show up as 4% in the status bar.
+        s.pending_breakdown = Some(crate::providers::RequestBreakdown {
+            history_bytes: 33_000,
+            history_tokens: 8_000,
+            total_bytes: 33_000,
+            whole_transcript: false,
+            ..Default::default()
+        });
+        s.add_usage(&Usage {
+            prompt_tokens: 10_000,
+            completion_tokens: 7,
+            ..Default::default()
+        });
+        assert_eq!(
+            s.context_tokens_used(),
+            100_000,
+            "a continuation's tail is not a context reading"
+        );
+        assert_eq!(
+            s.last_breakdown.unwrap().total_bytes,
+            400_000,
+            "and its rows stay with the request they were built from"
+        );
+        assert!(s.pending_breakdown.is_none(), "the tail pair is spent");
+        assert_eq!(s.usage.completion_tokens, 12, "billing still accumulates");
     }
 
     #[test]
