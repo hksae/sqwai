@@ -310,18 +310,12 @@ impl ToolCtx {
     }
 
     /// resolve a user-supplied path inside the project; rejects escapes and
-    /// host-owned state under `.sqwai/`. Reading is the permissive
-    /// direction: spilled tool output under `.sqwai/spill/` stays reachable,
-    /// because a pointer the host handed out has to be one the model can
-    /// follow. Mutations go through
-    /// [`resolve_writable`](Self::resolve_writable), which does not.
+    /// host-owned state under `.sqwai/`. Inside `.sqwai/` the model may use
+    /// `skills/`, `config.toml` and the `spill/` scratch directory — read,
+    /// write or delete; the plan and checkpoints live outside the project
+    /// now and never resolve here.
     pub fn resolve(&self, p: &str) -> Result<PathBuf, String> {
-        self.resolve_parts(p, false).map(|(joined, _)| joined)
-    }
-
-    /// [`resolve`](Self::resolve) for an op that is about to change the file.
-    pub fn resolve_writable(&self, p: &str) -> Result<PathBuf, String> {
-        self.resolve_parts(p, true).map(|(joined, _)| joined)
+        self.resolve_parts(p).map(|(joined, _)| joined)
     }
 
     /// Canonical project-relative spelling (forward-slashed) of what `p`
@@ -331,7 +325,7 @@ impl ToolCtx {
     /// [`resolve`](Self::resolve), and treated as a write target — which is
     /// what scope gates are deciding about.
     pub fn resolve_scope_rel(&self, p: &str) -> Result<String, String> {
-        self.resolve_parts(p, true)
+        self.resolve_parts(p)
             .map(|(_, rel)| rel.to_string_lossy().replace('\\', "/"))
     }
 
@@ -451,7 +445,7 @@ impl ToolCtx {
     /// [`resolve_scope_rel`](Self::resolve_scope_rel): returns the
     /// display spelling (uncanonicalized join) and the canonical
     /// project-relative path the security decisions run on.
-    fn resolve_parts(&self, p: &str, mutating: bool) -> Result<(PathBuf, PathBuf), String> {
+    fn resolve_parts(&self, p: &str) -> Result<(PathBuf, PathBuf), String> {
         let (joined, resolved) = self.resolve_target(p)?;
         let Ok(relative) = resolved.strip_prefix(&self.root_canon) else {
             // the jail is a prompt, not a wall: full access resolves every
@@ -468,7 +462,7 @@ impl ToolCtx {
         };
         // Plan and checkpoints are host-owned state. Enforcing it here is what
         // makes their guarantees rather than requests.
-        if let Some(denied) = host_owned_denial(relative, mutating) {
+        if let Some(denied) = host_owned_denial(relative) {
             return Err(denied);
         }
         // The display spelling is `joined`, not `resolved`: the whole display
@@ -973,10 +967,11 @@ const STATE_DIR: &str = ".sqwai";
 /// Deny message when `relative` points at host-owned state, `None` otherwise.
 /// `relative` must already be relative to the canonicalized project root, so a
 /// symlink pointing into `.sqwai/` cannot slip past this check.
-/// `mutating` is whether the caller is about to change the file: spilled tool
-/// output may be read back but never written, because a file the model plants
-/// in the spill dir would come to look like its own past evidence.
-fn host_owned_denial(relative: &Path, mutating: bool) -> Option<String> {
+///
+/// The jail is direction-blind: whatever stays open is open for reads and
+/// writes alike, because none of it is host state any more — `spill/` is the
+/// model's own scratch, `skills/` and `config.toml` its inputs and settings.
+fn host_owned_denial(relative: &Path) -> Option<String> {
     use std::path::Component;
     let mut components = relative.components();
     match components.next() {
@@ -985,13 +980,12 @@ fn host_owned_denial(relative: &Path, mutating: bool) -> Option<String> {
     }
     let allowed = match components.next() {
         Some(Component::Normal(second)) if second == "skills" || second == "config.toml" => true,
-        // `.sqwai/spill/<file>`: read-only access is allowed so the model can
-        // inspect spilled output, while mutations stay blocked. The directory
-        // itself stays unlistable: the model only follows pointers the host
-        // handed out, never browses the spill area.
-        Some(Component::Normal(second)) if second == "spill" && !mutating => {
-            matches!(components.next(), Some(Component::Normal(_)))
-        }
+        // `.sqwai/spill/...`: the model's own scratch. The host spills
+        // oversized tool output here and the model may read, rewrite or
+        // delete it — nothing in that directory is user data or host state.
+        // Sweeps still skip `.sqwai`, so it follows pointers instead of
+        // browsing the area.
+        Some(Component::Normal(second)) if second == "spill" => true,
         // `.sqwai` itself: listing or writing the directory is not allowed
         _ => false,
     };
@@ -1001,8 +995,7 @@ fn host_owned_denial(relative: &Path, mutating: bool) -> Option<String> {
     Some(format!(
         "path '{}' is host-owned state: the plan and checkpoints are reachable only through \
          their own tools (plan). Inside {STATE_DIR}/ the file tools may use skills/, \
-         config.toml and spilled-output files named in truncation pointers (read only) — \
-         nothing else.",
+         config.toml and the spill/ scratch directory — nothing else.",
         relative.display()
     ))
 }
@@ -1082,7 +1075,7 @@ mod outside_jail_tests {
     fn rooted_paths_without_a_drive_refuse_instead_of_phantom_joining() {
         let dir = tempfile::tempdir().unwrap();
         let ctx = ToolCtx::new(dir.path().join("proj"));
-        let err = ctx.resolve_writable("/tmp/notes.txt").unwrap_err();
+        let err = ctx.resolve("/tmp/notes.txt").unwrap_err();
         assert!(err.contains("no drive"), "{err}");
     }
 
@@ -1095,17 +1088,17 @@ mod outside_jail_tests {
         std::fs::create_dir_all(&outside).unwrap();
         let mut ctx = ToolCtx::new(&root);
         // nothing approved: both directions refuse
-        assert!(ctx.resolve_writable("../other/a.txt").is_err());
+        assert!(ctx.resolve("../other/a.txt").is_err());
         assert!(ctx.resolve("../other/a.txt").is_err());
         // full access resolves everything
         ctx.outside_all = true;
-        assert!(ctx.resolve_writable("../other/a.txt").is_ok());
+        assert!(ctx.resolve("../other/a.txt").is_ok());
         assert!(ctx.resolve("../other/a.txt").is_ok());
         // an approved directory opens exactly its subtree; the grant is
         // stored canonicalized, the same shape resolve_target produces
         ctx.outside_all = false;
         ctx.outside_roots.push(outside.canonicalize().unwrap());
-        assert!(ctx.resolve_writable("../other/a.txt").is_ok());
+        assert!(ctx.resolve("../other/a.txt").is_ok());
         assert!(ctx.resolve("../other/a.txt").is_ok());
         assert!(ctx.resolve("../third/b.txt").is_err());
     }

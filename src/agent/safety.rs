@@ -493,15 +493,20 @@ fn scan_protected_tokens(lower: &str) -> Verdict {
             // Allowed exceptions:
             // 1. .sqwai/skills or .sqwai/skills/ or .sqwai/skills/...
             // 2. .sqwai/config.toml
-            // (Both must not contain ".." path traversal)
+            // 3. .sqwai/spill/... — the model's own scratch: the host spills
+            //    oversized tool output there and the model may rewrite it
+            // (All must not contain ".." path traversal)
             let is_skills = rest_norm == "/skills"
                 || rest_norm == "/skills/"
                 || rest_norm.starts_with("/skills/");
             let is_config = rest_norm == "/config.toml";
+            let is_spill = rest_norm == "/spill"
+                || rest_norm == "/spill/"
+                || rest_norm.starts_with("/spill/");
 
             let has_traversal = rest_norm.contains("..");
 
-            if (is_skills || is_config) && !has_traversal {
+            if (is_skills || is_config || is_spill) && !has_traversal {
                 continue;
             }
 

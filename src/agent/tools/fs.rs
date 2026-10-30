@@ -1,5 +1,5 @@
-//! File tool handlers. Reads and listings pass through `ToolCtx::resolve`
-//! (project-jail), mutations through `resolve_writable`, every mutation
+//! File tool handlers. Reads, listings and mutations all pass through
+//! `ToolCtx::resolve` (project-jail); every mutation
 //! snapshots first, and a whole-file overwrite or `replace_all` edit needs a
 //! read taken earlier in the session — a single exact edit is self-validating
 //! and only needs the file to be non-stale.
@@ -27,7 +27,7 @@ fn existing(ctx: &ToolCtx, p: &str) -> Result<PathBuf, String> {
 /// `.sqwai/spill/` be opened but not written, so a result the model plants in
 /// the spill dir cannot come back later as its own past evidence.
 fn existing_writable(ctx: &ToolCtx, p: &str) -> Result<PathBuf, String> {
-    let p = ctx.resolve_writable(p)?;
+    let p = ctx.resolve(p)?;
     if !p.exists() {
         return err(format!("file not found: {}", p.display()));
     }
@@ -681,7 +681,7 @@ fn restore_bom(edited: String, had_bom: bool) -> String {
 pub(super) fn write_file(ctx: &mut ToolCtx, raw: &str, content: &str) -> Outcome {
     let exists = {
         // probe without failing when missing
-        ctx.resolve_writable(raw)
+        ctx.resolve(raw)
             .map(|p| p.exists())
             .unwrap_or(false)
     };
@@ -704,7 +704,7 @@ pub(super) fn write_file(ctx: &mut ToolCtx, raw: &str, content: &str) -> Outcome
             had_bom = split_bom(text).1;
         }
     }
-    let p = match ctx.resolve_writable(raw) {
+    let p = match ctx.resolve(raw) {
         Ok(p) => p,
         Err(e) => return Outcome::err(e),
     };
@@ -2449,8 +2449,10 @@ mod tests {
             named.output
         );
 
-        // and naming one file does not turn the spill dir into a listing
-        let other = grep(
+        // naming the directory reaches the files inside it: spill is the
+        // model's own scratch now, so it is open like any other directory;
+        // only the project-wide sweep still skips it
+        let area = grep(
             &mut ctx,
             "spilled_marker_xyz",
             Some(".sqwai/spill"),
@@ -2458,7 +2460,30 @@ mod tests {
             0,
             &serde_json::Value::Null,
         );
-        assert!(!other.ok, "the spill dir itself stays closed");
+        assert!(
+            area.ok && area.output.contains(":1: spilled_marker_xyz"),
+            "an explicitly named spill dir is searchable: {}",
+            area.output
+        );
+    }
+
+    /// Spill is the model's scratch: writable, deletable, listable. The rest
+    /// of `.sqwai` stays closed — exports and the directory root included.
+    #[test]
+    fn spill_is_writable_while_the_rest_of_host_state_stays_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".sqwai").join("spill")).unwrap();
+        std::fs::create_dir_all(dir.path().join(".sqwai").join("exports")).unwrap();
+        let mut ctx = ToolCtx::new(dir.path());
+
+        let written = write_file(&mut ctx, ".sqwai/spill/read-1.txt", "the model's own scratch\n");
+        assert!(written.ok, "{}", written.output);
+        assert!(dir.path().join(".sqwai/spill/read-1.txt").exists());
+
+        let root = write_file(&mut ctx, ".sqwai/notes.txt", "x");
+        assert!(!root.ok, "the .sqwai root stays closed: {}", root.output);
+        let exports = write_file(&mut ctx, ".sqwai/exports/a.md", "x");
+        assert!(!exports.ok, "exports stay host-owned: {}", exports.output);
     }
 
     #[test]

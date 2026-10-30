@@ -635,6 +635,11 @@ fn sqwai_allowed_exceptions_pass() {
         "type .sqwai\\config.toml",
         "cat \".sqwai/config.toml\"",
         "echo \"[safety]\" > .sqwai/config.toml",
+        // spill is the model's own scratch: readable, writable, deletable
+        "cat .sqwai/spill/read-1.txt",
+        "echo more >> .sqwai/spill/read-1.txt",
+        "rm .sqwai/spill/read-1.txt",
+        "ls .sqwai/spill",
     ];
 
     for cmd in allowed_cases {

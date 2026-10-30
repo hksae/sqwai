@@ -486,25 +486,17 @@ fn read_output_reports_totals_and_spills_when_truncated() {
         g.output
     );
 
-    // Reading is all the jail grants here. A file the model planted in the
-    // spill dir would come back later looking like its own past evidence.
-    for (tool, args) in [
-        ("write", json!({"file_path": spill, "content": "planted"})),
-        (
-            "edit",
-            json!({"file_path": spill, "old_string": "line 0", "new_string": "planted"}),
-        ),
-    ] {
-        let o = execute(&mut ctx, tool, &args);
-        assert!(
-            !o.ok,
-            "{tool} into the spill dir must be refused: {}",
-            o.output
-        );
-    }
-    // the directory itself stays unlistable: the pointer names a file
+    // Spill is the model's own scratch: it may rewrite what it was handed
+    // and list the directory. The rest of `.sqwai` stays closed (pinned in
+    // `spill_is_writable_while_the_rest_of_host_state_stays_closed`).
+    let rewrite = execute(
+        &mut ctx,
+        "write",
+        &json!({"file_path": spill, "content": "line 0\nrewritten\n"}),
+    );
+    assert!(rewrite.ok, "spill is writable scratch: {}", rewrite.output);
     let ls = execute(&mut ctx, "ls", &json!({"path": ".sqwai/spill"}));
-    assert!(!ls.ok, "the spill dir must not be browsable: {}", ls.output);
+    assert!(ls.ok, "the spill dir is browsable scratch: {}", ls.output);
     fs::remove_dir_all(&dir).ok();
 }
 
