@@ -307,32 +307,7 @@ async fn fetch_standard_http(
     allow_hosts: &[String],
     need_raw_html: bool,
 ) -> Result<FetchedDocument, String> {
-    let response = client
-        .get(url.clone())
-        .header(
-            reqwest::header::ACCEPT,
-            "text/markdown, text/x-markdown, text/plain;q=0.95, text/html;q=0.9, application/xhtml+xml;q=0.8, */*;q=0.5",
-        )
-        .header(reqwest::header::ACCEPT_LANGUAGE, "en-US,en;q=0.9")
-        .send()
-        .await
-        .map_err(|e| {
-            // reqwest's own line stops at "error sending request for url (...)",
-            // which tells the model nothing about whether to retry: the cause
-            // (DNS, refused, TLS, closed) is one level down the chain.
-            use std::error::Error as _;
-            let cause = e
-                .source()
-                .and_then(|src| src.source())
-                .or_else(|| e.source())
-                .map(|src| src.to_string())
-                .unwrap_or_default();
-            if cause.is_empty() {
-                format!("webfetch request failed: {e}")
-            } else {
-                format!("webfetch request failed: {e}: {cause}")
-            }
-        })?;
+    let response = send_with_one_retry(client, url).await?;
 
     let status = response.status();
     if !status.is_success() {
@@ -349,28 +324,131 @@ async fn fetch_standard_http(
 
     let header_alt_md = extract_link_header_markdown(response.headers(), &final_url);
 
-    if response
-        .content_length()
-        .is_some_and(|n| n as usize > max_body_bytes())
-    {
-        return Err("webfetch response is too large (maximum 1.5 MB)".into());
-    }
-
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|e| format!("webfetch read failed: {e}"))?;
-    if bytes.len() > max_body_bytes() {
-        return Err("webfetch response is too large (maximum 1.5 MB)".into());
-    }
-
+    // A page over the cap is still worth what fits in it: the old hard error
+    // threw away the whole download, and the biggest pages are the ones a
+    // model wants most (leaderboards, long docs). Read up to the cap, keep the
+    // prefix, and say so.
+    let cap = max_body_bytes();
+    let (bytes, truncated) = read_capped(response, cap).await?;
     let raw = String::from_utf8_lossy(&bytes).into_owned();
+
+    let mut doc = standard_document(
+        &raw,
+        &content_type,
+        final_url,
+        need_raw_html,
+        header_alt_md,
+        client,
+        allow_hosts,
+    )
+    .await?;
+    if truncated {
+        // Leading, not trailing: the projection may drop the tail section,
+        // and the one thing that must survive is the fact that the page was
+        // cut — otherwise the model reads a short page as the whole page.
+        doc.markdown = format!(
+            "*[page truncated at {} KB — only the beginning was read; webfetch cannot reach the rest of it]*\n\n{}",
+            cap / 1024,
+            doc.markdown
+        );
+    }
+    Ok(doc)
+}
+
+/// One retry for the two statuses that mean "not now" rather than "never":
+/// 429 and 503. `Retry-After` is honoured when it is a number of seconds and
+/// capped, because a page that says "wait an hour" is a page we skip.
+async fn send_with_one_retry(client: &Client, url: &Url) -> Result<reqwest::Response, String> {
+    let mut attempt = 0u8;
+    loop {
+        let response = client
+            .get(url.clone())
+            .header(
+                reqwest::header::ACCEPT,
+                "text/markdown, text/x-markdown, text/plain;q=0.95, text/html;q=0.9, application/xhtml+xml;q=0.8, */*;q=0.5",
+            )
+            .header(reqwest::header::ACCEPT_LANGUAGE, "en-US,en;q=0.9")
+            .send()
+            .await
+            .map_err(describe_send_error)?;
+        let status = response.status().as_u16();
+        if attempt == 0 && matches!(status, 429 | 503) {
+            let wait = retry_after(response.headers()).min(std::time::Duration::from_secs(5));
+            tokio::time::sleep(wait).await;
+            attempt = 1;
+            continue;
+        }
+        return Ok(response);
+    }
+}
+
+fn retry_after(headers: &reqwest::header::HeaderMap) -> std::time::Duration {
+    headers
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .map(std::time::Duration::from_secs)
+        .unwrap_or(std::time::Duration::from_secs(1))
+}
+
+/// reqwest's own line stops at "error sending request for url (...)"; the
+/// cause (DNS, refused, TLS, closed) is one level down the chain.
+fn describe_send_error(e: reqwest::Error) -> String {
+    use std::error::Error as _;
+    let cause = e
+        .source()
+        .and_then(|src| src.source())
+        .or_else(|| e.source())
+        .map(|src| src.to_string())
+        .unwrap_or_default();
+    if cause.is_empty() {
+        format!("webfetch request failed: {e}")
+    } else {
+        format!("webfetch request failed: {e}: {cause}")
+    }
+}
+
+/// Read at most `cap` bytes. The response keeps streaming past the cap; the
+/// rest is dropped instead of buffered, so a multi-megabyte page cannot
+/// cost more than the cap.
+async fn read_capped(
+    mut response: reqwest::Response,
+    cap: usize,
+) -> Result<(Vec<u8>, bool), String> {
+    let mut bytes: Vec<u8> = Vec::with_capacity(cap.min(64 * 1024));
+    let mut truncated = false;
+    loop {
+        match response.chunk().await {
+            Ok(Some(chunk)) => {
+                if bytes.len() + chunk.len() > cap {
+                    bytes.extend_from_slice(&chunk[..cap - bytes.len()]);
+                    truncated = true;
+                    break;
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            Ok(None) => break,
+            Err(e) => return Err(format!("webfetch read failed: {e}")),
+        }
+    }
+    Ok((bytes, truncated))
+}
+
+async fn standard_document(
+    raw: &str,
+    content_type: &str,
+    final_url: Url,
+    need_raw_html: bool,
+    header_alt_md: Option<String>,
+    client: &Client,
+    allow_hosts: &[String],
+) -> Result<FetchedDocument, String> {
 
     // 1. Native Markdown response (Cloudflare Markdown for Agents / Mintlify / raw .md).
     if !need_raw_html
         && (content_type.contains("text/markdown") || content_type.contains("text/x-markdown"))
     {
-        let normalized = markdown::normalize_markdown(&raw);
+        let normalized = markdown::normalize_markdown(raw);
         return Ok(FetchedDocument {
             title: None,
             markdown: normalized,
@@ -381,10 +459,10 @@ async fn fetch_standard_http(
 
     // 2. JSON response: pretty-print if compact so it's readable.
     if !need_raw_html && content_type.contains("application/json") {
-        let formatted = serde_json::from_str::<Value>(&raw)
+        let formatted = serde_json::from_str::<Value>(raw)
             .ok()
             .and_then(|v| serde_json::to_string_pretty(&v).ok())
-            .unwrap_or_else(|| raw.clone());
+            .unwrap_or_else(|| raw.to_string());
         return Ok(FetchedDocument {
             title: None,
             markdown: format!("```json\n{formatted}\n```"),
@@ -395,13 +473,17 @@ async fn fetch_standard_http(
 
     let is_html = content_type.contains("text/html")
         || content_type.contains("application/xhtml")
-        || super::looks_like_html(&raw);
+        || super::looks_like_html(raw);
 
     if !is_html {
         return Ok(FetchedDocument {
             title: None,
-            markdown: raw.clone(),
-            raw_html: if need_raw_html { Some(raw) } else { None },
+            markdown: raw.to_string(),
+            raw_html: if need_raw_html {
+                Some(raw.to_string())
+            } else {
+                None
+            },
             final_url,
         });
     }
@@ -411,7 +493,7 @@ async fn fetch_standard_http(
         && final_url
             .host_str()
             .is_some_and(|h| h.contains("stackoverflow.com") || h.contains("stackexchange.com"))
-        && let Some(so_md) = extract_stackoverflow_dom(&raw, &final_url)
+        && let Some(so_md) = extract_stackoverflow_dom(raw, &final_url)
     {
         return Ok(FetchedDocument {
             title: None,
@@ -426,7 +508,7 @@ async fn fetch_standard_http(
         mut markdown,
         alternate_markdown_url,
         llms_txt_url,
-    } = markdown::html_to_markdown(&raw, Some(&final_url));
+    } = markdown::html_to_markdown(raw, Some(&final_url));
 
     // Ensure `docs.rs` / rustdoc `.item-decl` type/function signature and `where` bounds
     // are always present right at the top of the Markdown before `.docblock`.
@@ -434,7 +516,7 @@ async fn fetch_standard_http(
         && final_url
             .host_str()
             .is_some_and(|h| h.contains("docs.rs") || h.contains("doc.rust-lang.org"))
-        && let Some(sig_block) = extract_rustdoc_item_decl(&raw)
+        && let Some(sig_block) = extract_rustdoc_item_decl(raw)
         && !markdown.contains(&sig_block)
     {
         if let Some(nl_pos) = markdown.find('\n') {
@@ -477,10 +559,22 @@ async fn fetch_standard_http(
         }
     }
 
+    // A page whose HTML yields almost no text is either tiny or painted by
+    // JavaScript; either way a retry cannot add anything, and the model has to
+    // know that before it spends another call on the same URL.
+    if !need_raw_html && markdown.chars().filter(|c| !c.is_whitespace()).count() < 200 {
+        markdown.push_str(
+            "\n\n*[this page carries almost no readable text — it is very short or rendered by JavaScript, so webfetch cannot see its content; retrying this URL will not help]*",
+        );
+    }
     Ok(FetchedDocument {
         title,
         markdown,
-        raw_html: if need_raw_html { Some(raw) } else { None },
+        raw_html: if need_raw_html {
+            Some(raw.to_string())
+        } else {
+            None
+        },
         final_url,
     })
 }
@@ -1339,5 +1433,121 @@ fn from_hex(b: u8) -> Option<u8> {
         b'a'..=b'f' => Some(b - b'a' + 10),
         b'A'..=b'F' => Some(b - b'A' + 10),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Serve one canned HTTP/1.1 response per connection, in order.
+    fn serve(
+        responses: Vec<String>,
+    ) -> (String, Arc<AtomicUsize>, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let seen = Arc::new(AtomicUsize::new(0));
+        let counter = seen.clone();
+        let handle = std::thread::spawn(move || {
+            for response in responses {
+                let Some(stream) = crate::providers::accept_bounded(
+                    &listener,
+                    std::time::Duration::from_secs(10),
+                ) else {
+                    return;
+                };
+                let mut reader = BufReader::new(&stream);
+                let mut line = String::new();
+                loop {
+                    line.clear();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                        break;
+                    }
+                }
+                let mut out = stream;
+                write!(out, "{response}").unwrap();
+                out.flush().ok();
+                counter.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        (format!("http://{addr}/"), seen, handle)
+    }
+
+    fn http_200(body: &str) -> String {
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    fn http_429() -> String {
+        "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 0\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string()
+    }
+
+    fn test_client() -> Client {
+        crate::agent::tools::web::client(5, "sqwai-test", Vec::new()).unwrap()
+    }
+
+    /// A page over the cap used to be a hard error and the whole download was
+    /// thrown away — on exactly the big pages a model wants (leaderboards).
+    /// What fits is returned, with a marker saying the rest is missing.
+    #[tokio::test]
+    async fn an_oversized_page_returns_its_prefix_instead_of_nothing() {
+        let body = format!(
+            "<html><body><p>{}</p></body></html>",
+            "word ".repeat(2000)
+        );
+        let (base, _seen, handle) = serve(vec![http_200(&body)]);
+        let url = Url::parse(&base).unwrap();
+        let old = max_body_bytes();
+        set_max_body_bytes(2048);
+        let doc = fetch_smart(&test_client(), &url, &[], false).await.unwrap();
+        set_max_body_bytes(old);
+        assert!(
+            doc.markdown.contains("page truncated at 2 KB"),
+            "the cut must be named: {}",
+            doc.markdown
+        );
+        assert!(
+            doc.markdown.contains("word"),
+            "the prefix must survive: {}",
+            doc.markdown
+        );
+        handle.join().ok();
+    }
+
+    /// 429 means "not now", not "never": one retry, honouring Retry-After.
+    #[tokio::test]
+    async fn a_429_is_retried_once() {
+        let (base, seen, handle) = serve(vec![
+            http_429(),
+            http_200("<html><body><p>hello there, a real page with readable text.</p></body></html>"),
+        ]);
+        let url = Url::parse(&base).unwrap();
+        let doc = fetch_smart(&test_client(), &url, &[], false).await.unwrap();
+        assert_eq!(seen.load(Ordering::SeqCst), 2, "one retry, no more");
+        assert!(doc.markdown.contains("hello there"), "{}", doc.markdown);
+        handle.join().ok();
+    }
+
+    /// A shell page is not content: say so instead of returning an empty
+    /// document the model reads as "nothing useful here, try again".
+    #[tokio::test]
+    async fn a_javascript_shell_says_it_has_no_readable_text() {
+        let (base, _seen, handle) =
+            serve(vec![http_200("<html><body><div id=\"root\"></div></body></html>")]);
+        let url = Url::parse(&base).unwrap();
+        let doc = fetch_smart(&test_client(), &url, &[], false).await.unwrap();
+        assert!(
+            doc.markdown.contains("rendered by JavaScript"),
+            "{}",
+            doc.markdown
+        );
+        handle.join().ok();
     }
 }
