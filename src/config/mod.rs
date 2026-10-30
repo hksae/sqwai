@@ -122,8 +122,12 @@ pub enum ApprovalMode {
     /// runs. This is the behavior the app has always had.
     #[default]
     Auto,
-    /// Nothing asks. Dangerous commands run without a dialog — the undo
-    /// checkpoints still insure them, and the deny-side gates still block.
+    /// Nothing asks: every command, edit and outside path runs without a
+    /// dialog. The pre-run snapshot still insures mutations **inside the
+    /// project**, and the deny-side gates still refuse — but effects outside
+    /// the project (other directories, machine state, network egress) are
+    /// neither asked about nor recoverable, and a subagent spawned here
+    /// inherits this mode without inheriting the ability to ask.
     Full,
 }
 

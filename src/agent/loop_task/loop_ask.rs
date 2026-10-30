@@ -493,8 +493,9 @@ pub(crate) async fn bash_call(
     }
 
     // Full mode runs everything the hard gates let through without a
-    // dialog; `needs_approval` stays set so the pre-run checkpoint still
-    // insures the dangerous ones.
+    // dialog; `needs_approval` stays set so a dangerous command still takes
+    // its pre-run snapshot — of the project tree, which is all the snapshot
+    // covers: an effect outside the root is not insured by it.
     if let Some(reason) = &needs_approval
         && mode != ApprovalMode::Full
         && !grants_cover_command(always_allow, &command, reason)
