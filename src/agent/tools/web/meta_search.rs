@@ -110,28 +110,18 @@ pub async fn run_meta_search(
 
     match category {
         SearchCategory::Auto => {
-            let include_pkgs = looks_like_package_query(query);
-            let (sp, bing, ddg, so, gh, pkgs) = tokio::join!(
+            // General web only. The engines infer the query's language on
+            // their own; code sources are a deliberate choice (`code`,
+            // `docs`, `packages`, `discussions`), not something to guess at
+            // from the query text — a Russian question about a Rust error is
+            // both, and "looks like code" is a heuristic that silently
+            // drops half the sources.
+            let (sp, bing, ddg) = tokio::join!(
                 cap_provider(search_startpage(&client, query), per_provider),
                 cap_provider(search_bing(&client, query), per_provider),
                 cap_provider(search_duckduckgo(&client, query), per_provider),
-                cap_provider(search_stackoverflow(&api_client, query, 6), per_provider),
-                cap_provider(
-                    search_github_with_fallback(&api_client, &client, query, 5),
-                    per_provider
-                ),
-                cap_provider(
-                    async {
-                        if include_pkgs {
-                            search_packages(&api_client, query, 3).await
-                        } else {
-                            Vec::new()
-                        }
-                    },
-                    per_provider
-                )
             );
-            provider_lists.extend([sp, bing, ddg, so, gh, pkgs]);
+            provider_lists.extend([sp, bing, ddg]);
         }
         SearchCategory::Docs => {
             let docs_q = if query.to_ascii_lowercase().contains("doc") {
@@ -231,22 +221,6 @@ pub async fn run_meta_search(
     }
 
     Ok(out.trim().to_string())
-}
-
-fn looks_like_package_query(query: &str) -> bool {
-    let words: Vec<&str> = query.split_whitespace().collect();
-    if words.len() <= 2 {
-        return true;
-    }
-    let lower = query.to_ascii_lowercase();
-    for kw in [
-        "crate", "crates", "cargo", "rust", "npm", "pypi", "pip", "package", "version", "docs.rs",
-    ] {
-        if lower.contains(kw) {
-            return true;
-        }
-    }
-    false
 }
 
 /// Merge multi-engine search lists via Reciprocal Rank Fusion (RRF) + BM25 + Domain Boosts,
@@ -358,20 +332,34 @@ pub fn fuse_and_rank(
         }
     }
 
-    let mut results: Vec<MergedSearchHit> = map
-        .into_values()
-        .map(|mut item| {
-            let bm25 = score_search_hit(&item.title, &item.snippet, &item.url, query);
-            let dom_boost = domain_quality_boost(&item.url, category);
-            let agreement_bonus = if item.sources.len() >= 2 {
-                (item.sources.len() - 1) as f64 * 0.014
-            } else {
-                0.0
-            };
-            item.score += (bm25 * 0.008) + dom_boost + agreement_bonus;
-            item
-        })
-        .collect();
+    // A result that shares no word with the query is not a result. Without
+    // this floor the top ten was whatever one engine returned: a search
+    // endpoint answering a Russian query with hiring ads, appliance stores or
+    // porn links filled every slot on RRF alone, and the model spent calls
+    // chasing pages that were never about the query. The floor is per result,
+    // not per engine — no language or category is guessed.
+    //
+    // If nothing at all matches, the zero-overlap hits are kept: an empty
+    // answer is worse than a weak one, and the model can still judge them.
+    let q_tokens = ranker::tokenize_for_bm25(query);
+    let mut matched: Vec<MergedSearchHit> = Vec::new();
+    let mut unmatched: Vec<MergedSearchHit> = Vec::new();
+    for mut item in map.into_values() {
+        let bm25 = score_search_hit(&item.title, &item.snippet, &item.url, query);
+        let dom_boost = domain_quality_boost(&item.url, category);
+        let agreement_bonus = if item.sources.len() >= 2 {
+            (item.sources.len() - 1) as f64 * 0.014
+        } else {
+            0.0
+        };
+        item.score += (bm25 * 0.008) + dom_boost + agreement_bonus;
+        if q_tokens.is_empty() || bm25 > 0.0 {
+            matched.push(item);
+        } else {
+            unmatched.push(item);
+        }
+    }
+    let mut results = if matched.is_empty() { unmatched } else { matched };
 
     results.sort_by(|a, b| {
         b.score
@@ -466,17 +454,24 @@ async fn fetch_deep_excerpts(
 
 // ── Web Search Providers (Startpage, Bing, DuckDuckGo) ───────────────────────
 
+/// Startpage form for a query. No language pin: `language=english` +
+/// `lui=english` restricted every search to English by construction, which is
+/// wrong for any query typed in another language. The engine reads the query.
+fn startpage_form(query: &str) -> Vec<(&'static str, &str)> {
+    vec![("query", query), ("cat", "web")]
+}
+
+/// Bing query pairs. No `cc=en` and no `_EDGE_*` market cookies: they pinned
+/// the market to the United States regardless of the query.
+fn bing_query_pairs(query: &str) -> Vec<(&'static str, &str)> {
+    vec![("q", query), ("pq", query)]
+}
+
 async fn search_startpage(client: &Client, query: &str) -> Vec<RawSearchHit> {
     let Ok(resp) = client
         .post("https://www.startpage.com/sp/search")
         .header(reqwest::header::REFERER, "https://www.startpage.com/")
-        .header(reqwest::header::ACCEPT_LANGUAGE, "en-US,en;q=0.9")
-        .form(&[
-            ("query", query),
-            ("cat", "web"),
-            ("language", "english"),
-            ("lui", "english"),
-        ])
+        .form(&startpage_form(query))
         .send()
         .await
     else {
@@ -556,12 +551,7 @@ pub fn parse_startpage_results(html: &str, max_count: usize) -> Vec<RawSearchHit
 async fn search_bing(client: &Client, query: &str) -> Vec<RawSearchHit> {
     let Ok(resp) = client
         .get("https://www.bing.com/search")
-        .query(&[("q", query), ("pq", query), ("cc", "en")])
-        .header(reqwest::header::ACCEPT_LANGUAGE, "en-US,en;q=0.9")
-        .header(
-            reqwest::header::COOKIE,
-            "_EDGE_CD=m=en-us&u=en-us; _EDGE_S=mkt=en-us&ui=en-us",
-        )
+        .query(&bing_query_pairs(query))
         .send()
         .await
     else {
@@ -1342,5 +1332,97 @@ fn truncate_str(s: &str, max_chars: usize) -> String {
         let mut out: String = s.chars().take(max_chars).collect();
         out.push('…');
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Forcing `language=english`/`lui=english` emptied Startpage for every
+    /// non-English query: ten "no results" in one live session, each answered
+    /// by rephrasing. The engine reads the query's own language.
+    #[test]
+    fn startpage_form_does_not_pin_a_language() {
+        let form = startpage_form("мем серость кот");
+        assert!(
+            form.iter().all(|(k, _)| *k != "language" && *k != "lui"),
+            "{form:?}"
+        );
+        assert!(
+            form.iter().any(|(k, v)| *k == "query" && *v == "мем серость кот"),
+            "{form:?}"
+        );
+    }
+
+    /// `cc=en` plus `_EDGE_*` market cookies pinned Bing to the United States:
+    /// a Russian query came back with hiring ads and appliance stores.
+    fn hit(title: &str, url: &str, snippet: &str, source: &'static str) -> RawSearchHit {
+        RawSearchHit {
+            title: title.to_string(),
+            url: url.to_string(),
+            snippet: snippet.to_string(),
+            source,
+            badge: None,
+            boost: 0.0,
+            repo_url: None,
+        }
+    }
+
+    /// The live failure this floor exists for: a Russian query answered by an
+    /// engine with unrelated pages ("Summer Place Apartment Homes", hiring
+    /// ads, porn links). They matched none of the query words and still took
+    /// the top slots on rank fusion alone.
+    #[test]
+    fn hits_sharing_no_word_with_the_query_are_dropped() {
+        let relevant = vec![hit(
+            "Мем «Серость» — кот из TikTok",
+            "https://example.org/serost",
+            "Серость — серый кот из тиктока, мем 2026 года",
+            "ddg",
+        )];
+        let junk = vec![
+            hit(
+                "Summer Place Apartment Homes",
+                "https://summerplace.example/",
+                "Apartments for rent in the United States",
+                "bing",
+            ),
+            hit(
+                "15 of the Best Self-Employed Jobs",
+                "https://jobs.example/",
+                "Careers and hiring advice",
+                "bing",
+            ),
+        ];
+        let merged = fuse_and_rank(vec![relevant, junk], "серость кот мем", SearchCategory::Auto, 10);
+        assert_eq!(merged.len(), 1, "{merged:#?}");
+        assert!(merged[0].url.contains("serost"), "{merged:#?}");
+    }
+
+    /// The floor must not turn a weak answer into no answer: when every hit
+    /// misses, they stay.
+    #[test]
+    fn an_all_junk_result_set_still_reaches_the_model() {
+        let junk = vec![hit(
+            "Summer Place Apartment Homes",
+            "https://summerplace.example/",
+            "Apartments for rent",
+            "bing",
+        )];
+        let merged = fuse_and_rank(vec![junk], "серость кот мем", SearchCategory::Auto, 10);
+        assert_eq!(merged.len(), 1, "an empty answer is worse than a weak one");
+    }
+
+    #[test]
+    fn bing_query_does_not_pin_a_country() {
+        let pairs = bing_query_pairs("серость кот мем");
+        assert!(pairs.iter().all(|(k, _)| *k != "cc"), "{pairs:?}");
+        assert!(
+            pairs
+                .iter()
+                .any(|(k, v)| *k == "q" && *v == "серость кот мем"),
+            "{pairs:?}"
+        );
     }
 }
