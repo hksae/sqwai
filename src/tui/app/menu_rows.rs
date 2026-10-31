@@ -32,6 +32,7 @@ impl App {
         match menu {
             Menu::Settings => self.build_settings_rows(),
             Menu::UndoShadow => self.build_undo_shadow_rows(),
+            Menu::SearchProvider => self.build_search_provider_rows(),
             Menu::UndoList => self.build_undo_list_rows(),
             Menu::EditScalar(..)
             | Menu::EditSessionTitle { .. }
@@ -120,8 +121,8 @@ impl App {
             ),
             (
                 "search provider",
-                ScalarSetting::SearchProvider.current(&self.cfg),
-                MenuAction::EditScalar(ScalarSetting::SearchProvider),
+                self.cfg.web.search_provider.as_str().to_string(),
+                MenuAction::OpenSearchProvider,
             ),
         ];
         if self.cfg.web.search_provider != crate::config::SearchProvider::Off {
@@ -301,6 +302,27 @@ impl App {
             }
         }
         self.menu_sel = sel_before;
+    }
+
+    fn build_search_provider_rows(&mut self) {
+        let current = self.cfg.web.search_provider;
+        for provider in crate::config::SearchProvider::ALL {
+            let style = if provider == current {
+                Theme::brand_ink()
+            } else {
+                Style::new().fg(Theme::FG())
+            };
+            let mut spans = vec![Span::styled(provider.as_str().to_string(), style)];
+            if provider != crate::config::SearchProvider::Off {
+                let has_key = self.cfg.search_config().provider == provider
+                    && self.cfg.search_config().api_key.is_some();
+                spans.push(Span::styled(
+                    if has_key { "  key set" } else { "  key missing" },
+                    Theme::dim(),
+                ));
+            }
+            self.menu_rows.push(row(Line::from(spans), MenuAction::SetSearchProvider(provider)));
+        }
     }
 
     fn build_undo_shadow_rows(&mut self) {

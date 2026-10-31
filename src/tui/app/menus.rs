@@ -216,6 +216,8 @@ pub(super) enum Menu {
     EditScalar(ScalarSetting),
     /// picker for `[undo].shadow`
     UndoShadow,
+    /// picker for `[web].search_provider`
+    SearchProvider,
     /// `/undo list`: interactive checkpoint & redo history picker
     UndoList,
     /// single-field form to rename a session
@@ -358,6 +360,8 @@ pub(super) enum MenuAction {
     CycleUndoShadow,
     OpenUndoShadow,
     SetUndoShadow(crate::config::ShadowStore),
+    OpenSearchProvider,
+    SetSearchProvider(crate::config::SearchProvider),
     UndoCount(usize),
     RedoCount(usize),
     ToggleSkillsAutoLoad,
@@ -380,7 +384,6 @@ pub(super) enum ScalarSetting {
     WebResults,
     WebTimeoutSecs,
     WebFetchBytes,
-    SearchProvider,
     SearchKey,
     SearchBaseUrl,
     LimitMaxToolCalls,
@@ -575,7 +578,6 @@ impl ScalarSetting {
             Self::WebResults => "web results",
             Self::WebTimeoutSecs => "web timeout secs",
             Self::WebFetchBytes => "web fetch bytes",
-            Self::SearchProvider => "search provider",
             Self::SearchKey => "search key",
             Self::SearchBaseUrl => "search base url",
             Self::LimitMaxToolCalls => "max tool calls per turn",
@@ -603,7 +605,6 @@ impl ScalarSetting {
             Self::WebResults => cfg.tools.web.results.to_string(),
             Self::WebTimeoutSecs => cfg.tools.web.timeout_secs.to_string(),
             Self::WebFetchBytes => human_bytes(cfg.tools.web.fetch_bytes as u64),
-            Self::SearchProvider => cfg.web.search_provider.as_str().to_string(),
             // a row, not an editor: the key itself only appears once opened
             Self::SearchKey => {
                 if cfg.search_config().api_key.is_some() {
@@ -765,19 +766,6 @@ impl ScalarSetting {
                 &mut cfg.undo.shadow_max_bytes,
                 def.undo.shadow_max_bytes,
             ),
-            Self::SearchProvider => match crate::config::SearchProvider::from_name(raw) {
-                Some(provider) => {
-                    cfg.web.search_provider = provider;
-                    if provider == crate::config::SearchProvider::Off {
-                        "search provider = off".to_string()
-                    } else if cfg.search_config().api_key.is_some() {
-                        format!("search provider = {}", provider.as_str())
-                    } else {
-                        format!("search provider = {} (key missing)", provider.as_str())
-                    }
-                }
-                None => "unknown provider: use off, deepseek or tavily".to_string(),
-            },
             Self::SearchKey => {
                 let provider = cfg.web.search_provider;
                 let Some(key_name) = provider.key_name() else {
@@ -851,6 +839,7 @@ impl App {
                 | Some(Menu::Settings)
                 | Some(Menu::EditScalar(..))
                 | Some(Menu::UndoShadow)
+                | Some(Menu::SearchProvider)
                 | Some(Menu::UndoList)
                 | Some(Menu::Providers)
                 | Some(Menu::EditProvider { .. })
@@ -896,6 +885,13 @@ impl App {
             self.menu_sel = crate::config::ShadowStore::ALL
                 .iter()
                 .position(|s| *s == cur)
+                .unwrap_or(0);
+        }
+        if matches!(self.cur_menu(), Some(Menu::SearchProvider)) {
+            let cur = self.cfg.web.search_provider;
+            self.menu_sel = crate::config::SearchProvider::ALL
+                .iter()
+                .position(|provider| *provider == cur)
                 .unwrap_or(0);
         }
         if matches!(self.cur_menu(), Some(Menu::EditProvider { name: None })) {
@@ -1018,6 +1014,10 @@ impl App {
                     .menu_rows
                     .iter()
                     .position(|(_, a)| matches!(a, MenuAction::OpenUndoShadow)),
+                Some(Menu::SearchProvider) => self
+                    .menu_rows
+                    .iter()
+                    .position(|(_, a)| matches!(a, MenuAction::OpenSearchProvider)),
                 _ => None,
             };
             if let Some(idx) = pos {
@@ -1577,6 +1577,7 @@ impl App {
         match &self.cur_menu() {
             Some(Menu::Settings) => " Config ".into(),
             Some(Menu::UndoShadow) => " Config · undo shadow ".into(),
+            Some(Menu::SearchProvider) => " Config · search provider ".into(),
             Some(Menu::UndoList) => " Undo / Redo checkpoints ".into(),
             Some(Menu::Providers) => " Providers ".into(),
             Some(Menu::Models { provider }) => format!(" Models · {provider} "),

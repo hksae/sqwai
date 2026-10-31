@@ -1082,20 +1082,13 @@ pub enum SearchProvider {
 }
 
 impl SearchProvider {
+    pub const ALL: [Self; 3] = [Self::Off, Self::Deepseek, Self::Tavily];
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Off => "off",
             Self::Deepseek => "deepseek",
             Self::Tavily => "tavily",
-        }
-    }
-
-    pub fn from_name(raw: &str) -> Option<Self> {
-        match raw.trim().to_ascii_lowercase().as_str() {
-            "off" | "none" | "" => Some(Self::Off),
-            "deepseek" => Some(Self::Deepseek),
-            "tavily" => Some(Self::Tavily),
-            _ => None,
         }
     }
 

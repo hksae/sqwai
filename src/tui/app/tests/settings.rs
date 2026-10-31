@@ -1034,3 +1034,27 @@ async fn session_save_called_only_after_first_message() {
         "session should have at least one message after submit"
     );
 }
+
+/// The search provider is a pick-one menu, not a text field: the list names
+/// the valid values and carries each provider's key state.
+#[test]
+fn search_provider_is_chosen_from_a_list() {
+    use crate::config::SearchProvider;
+    use crate::tui::app::menus::{Menu, MenuAction};
+
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.startup = false;
+    app.open_menu(Menu::SearchProvider);
+    let labels: Vec<&str> = app
+        .menu_rows
+        .iter()
+        .filter_map(|(_, action)| match action {
+            MenuAction::SetSearchProvider(provider) => Some(provider.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(labels, vec!["off", "deepseek", "tavily"]);
+
+    app.run_action(MenuAction::SetSearchProvider(SearchProvider::Tavily));
+    assert_eq!(app.cfg.web.search_provider, SearchProvider::Tavily);
+}

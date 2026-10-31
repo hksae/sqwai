@@ -59,6 +59,23 @@ impl App {
             MenuAction::OpenControls => self.open_menu(Menu::Controls),
             MenuAction::CycleUndoShadow => self.cycle_undo_shadow(),
             MenuAction::OpenUndoShadow => self.open_menu(Menu::UndoShadow),
+            MenuAction::OpenSearchProvider => self.open_menu(Menu::SearchProvider),
+            MenuAction::SetSearchProvider(provider) => {
+                self.cfg.web.search_provider = provider;
+                self.cfg.save().ok();
+                let message = if provider == crate::config::SearchProvider::Off {
+                    "search provider = off".to_string()
+                } else if self.cfg.search_config().api_key.is_some() {
+                    format!("search provider = {}", provider.as_str())
+                } else {
+                    format!(
+                        "search provider = {} (add its key below)",
+                        provider.as_str()
+                    )
+                };
+                self.status(&message, StatusKind::Ok);
+                self.menu_back();
+            }
             MenuAction::SetUndoShadow(shadow) => {
                 self.cfg.undo.shadow = shadow;
                 self.cfg.save().ok();
