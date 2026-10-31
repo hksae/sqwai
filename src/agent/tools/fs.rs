@@ -1555,6 +1555,9 @@ pub(super) fn glob(
         if !path.is_file() {
             continue;
         }
+        if crate::config::is_host_secret_path(path) {
+            continue;
+        }
         if path == host_owned || path.starts_with(&host_owned) {
             continue;
         }
@@ -1883,6 +1886,9 @@ pub(super) fn grep(
     for entry in WalkBuilder::new(&base_dir).hidden(false).build().flatten() {
         let entry_path = entry.path();
         if !entry_path.is_file() {
+            continue;
+        }
+        if crate::config::is_host_secret_path(entry_path) {
             continue;
         }
         if entry_path.starts_with(&host_owned) && !(spill_named && entry_path.starts_with(&spill)) {

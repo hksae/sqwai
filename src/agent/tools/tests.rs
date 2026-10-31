@@ -2780,3 +2780,42 @@ fn a_write_into_the_data_dir_is_host_state() {
     fs::remove_dir_all(&dir).ok();
     fs::remove_dir_all(&state).ok();
 }
+
+/// The provider key store is host-only: file tools refuse the path, and a
+/// shell command that names it is refused whichever direction it reads.
+#[test]
+fn the_provider_key_store_is_host_only() {
+    let (mut ctx, dir) = proj();
+    // outside reads are otherwise jail-refused; the key store must stay
+    // refused even where every other path resolves
+    ctx.outside_all = true;
+    let keys = crate::config::keys_path().unwrap();
+    let spell = |p: &Path| p.to_string_lossy().replace('\\', "/");
+    let abs = spell(&keys);
+
+    let err = match ctx.resolve(&abs) {
+        Ok(_) => panic!("the key store must not resolve"),
+        Err(e) => e,
+    };
+    assert!(err.contains("host-only"), "{err}");
+    // config.toml stays reachable: it no longer holds a key
+    let config = crate::config::config_path().unwrap();
+    assert!(ctx.resolve(&spell(&config)).is_ok());
+
+    assert!(first_host_secret_target(&format!("cat {abs}")).is_some());
+    assert!(
+        first_host_secret_target(&format!("cp \"{}\" ./copy", abs.replace('/', "\\"))).is_some()
+    );
+    if std::env::var("APPDATA").is_ok() {
+        assert!(first_host_secret_target("cat $APPDATA/sqwai/config/keys.toml").is_some());
+        assert!(first_host_secret_target("type %APPDATA%\\sqwai\\config\\keys.toml").is_some());
+    }
+    // the basename alone is an ordinary project file, not the store
+    assert_eq!(first_host_secret_target("rg keys.toml src"), None);
+    assert_eq!(
+        first_host_secret_target("cat \"$APPDATA/sqwai/config/config.toml\""),
+        None
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}

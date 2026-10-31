@@ -58,7 +58,6 @@ fn jitter_test_app() -> App {
         compaction: Default::default(),
         plan: Default::default(),
         verify: Default::default(),
-        secrets: Default::default(),
         undo: Default::default(),
     };
     let session = Session::new("p/m".into(), 1000);

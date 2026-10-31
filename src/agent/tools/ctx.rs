@@ -373,6 +373,13 @@ impl ToolCtx {
         for name in tail.iter().rev() {
             resolved.push(name);
         }
+        if crate::config::is_host_secret_path(&resolved) {
+            return Err(format!(
+                "'{}' is the host-only provider key store — a key that enters a tool \
+                 result lives in the transcript forever; edit it through /config",
+                resolved.display()
+            ));
+        }
         Ok((joined, resolved))
     }
 

@@ -1301,3 +1301,106 @@ fn builtin_catalog_keys_are_qualified() {
         "catalog keys must name their provider"
     );
 }
+
+fn keyed_provider(key: Option<&str>) -> ProviderConfig {
+    ProviderConfig {
+        format: WireFormat::Openai,
+        base_url: "https://api.example/v1".to_string(),
+        api_key: key.map(str::to_string),
+        api_key_env: None,
+        continuation: false,
+        models: Default::default(),
+    }
+}
+
+fn load_dir(dir: &Path) -> Config {
+    match Config::load_from_dir(dir) {
+        Ok(cfg) => cfg,
+        Err(e) => panic!("load failed: {e}"),
+    }
+}
+
+/// Pre-split configs carried the key inline. The first load moves it into
+/// keys.toml and rewrites config.toml without it: the file the agent may read
+/// must not hold a live credential.
+#[test]
+fn inline_keys_move_to_the_host_only_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = Config::default();
+    cfg.providers
+        .insert("pateway".to_string(), keyed_provider(None));
+    cfg.save_to_dir(dir.path()).unwrap();
+
+    let path = dir.path().join("config.toml");
+    let raw = std::fs::read_to_string(&path).unwrap();
+    let legacy = raw.replace(
+        "[providers.pateway]",
+        "[providers.pateway]\napi_key = \"sk-legacy\"",
+    );
+    assert!(legacy.contains("sk-legacy"));
+    std::fs::write(&path, legacy).unwrap();
+
+    let loaded = load_dir(dir.path());
+    assert_eq!(
+        loaded.providers["pateway"].api_key.as_deref(),
+        Some("sk-legacy")
+    );
+    let rewritten = std::fs::read_to_string(&path).unwrap();
+    assert!(!rewritten.contains("sk-legacy"), "{rewritten}");
+    let store = std::fs::read_to_string(dir.path().join("keys.toml")).unwrap();
+    assert!(store.contains("sk-legacy"), "{store}");
+}
+
+/// The store, not a stale inline copy, is what a provider gets; clearing a
+/// key removes its entry while entries for unknown providers survive.
+#[test]
+fn the_key_store_wins_and_survives_partial_edits() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = Config::default();
+    cfg.providers
+        .insert("pateway".to_string(), keyed_provider(None));
+    cfg.save_to_dir(dir.path()).unwrap();
+    std::fs::write(
+        dir.path().join("keys.toml"),
+        "[keys]\npateway = \"sk-store\"\nnot-configured = \"sk-keep\"\n",
+    )
+    .unwrap();
+
+    let mut loaded = load_dir(dir.path());
+    assert_eq!(
+        loaded.providers["pateway"].api_key.as_deref(),
+        Some("sk-store")
+    );
+
+    loaded.providers.get_mut("pateway").unwrap().api_key = None;
+    loaded.save_to_dir(dir.path()).unwrap();
+    let store = std::fs::read_to_string(dir.path().join("keys.toml")).unwrap();
+    assert!(!store.contains("pateway"), "{store}");
+    assert!(store.contains("sk-keep"), "a hand-kept entry must survive: {store}");
+
+    let config_raw = std::fs::read_to_string(dir.path().join("config.toml")).unwrap();
+    assert!(!config_raw.contains("sk-store"), "{config_raw}");
+}
+
+#[cfg(unix)]
+#[test]
+fn the_key_store_is_user_only() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = Config::default();
+    cfg.providers
+        .insert("pateway".to_string(), keyed_provider(Some("sk-live")));
+    cfg.save_to_dir(dir.path()).unwrap();
+    let mode = std::fs::metadata(dir.path().join("keys.toml"))
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o600);
+}
+
+#[test]
+fn only_the_key_store_is_host_only() {
+    assert!(is_host_secret_path(&keys_path().unwrap()));
+    assert!(!is_host_secret_path(&config_path().unwrap()));
+}

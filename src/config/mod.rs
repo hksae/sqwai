@@ -279,7 +279,9 @@ impl EffortControl {
 pub struct ProviderConfig {
     pub format: WireFormat,
     pub base_url: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Never written: keys live in `keys.toml` (host-only). Still read from
+    /// the file so a pre-split config migrates its inline keys on first load.
+    #[serde(default, skip_serializing)]
     pub api_key: Option<String>,
     /// name of the env variable holding the key; overrides the implicit
     /// `<PROVIDER>_API_KEY` convention
@@ -1385,42 +1387,12 @@ pub struct VerifyConfig {
     pub commands: std::collections::BTreeMap<String, String>,
 }
 
-/// `[secrets]` — files the host must not read into durable state.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SecretsConfig {
-    /// glob patterns the project indexer skips entirely
-    #[serde(default = "default_secrets_exclude_globs")]
-    pub exclude_globs: Vec<String>,
-}
-
-impl Default for SecretsConfig {
-    fn default() -> Self {
-        Self {
-            exclude_globs: default_secrets_exclude_globs(),
-        }
-    }
-}
-
 fn default_plan_max_steps() -> usize {
     24
 }
 
 fn default_plan_nudge_after() -> usize {
     8
-}
-
-fn default_secrets_exclude_globs() -> Vec<String> {
-    [
-        ".env*",
-        "*.pem",
-        "*.key",
-        "id_*",
-        "*credentials*",
-        "*secret*",
-    ]
-    .iter()
-    .map(|pattern| (*pattern).to_string())
-    .collect()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1596,8 +1568,6 @@ pub struct Config {
     #[serde(default)]
     pub verify: VerifyConfig,
     #[serde(default)]
-    pub secrets: SecretsConfig,
-    #[serde(default)]
     pub undo: UndoConfig,
 }
 
@@ -1662,7 +1632,6 @@ impl Default for Config {
             compaction: CompactionConfig::default(),
             plan: PlanConfig::default(),
             verify: VerifyConfig::default(),
-            secrets: SecretsConfig::default(),
             undo: UndoConfig::default(),
         }
     }
@@ -1855,7 +1824,11 @@ impl Config {
     }
 
     pub fn load() -> std::result::Result<Self, LoadError> {
-        let path = config_path()?;
+        Self::load_from_dir(&config_dir()?)
+    }
+
+    fn load_from_dir(dir: &Path) -> std::result::Result<Self, LoadError> {
+        let path = dir.join("config.toml");
         if !path.exists() {
             return Err(LoadError::Missing(path));
         }
@@ -1864,7 +1837,30 @@ impl Config {
         cfg.fold_models();
         cfg.apply_builtins();
         cfg.migrate_last_model();
+        cfg.attach_keys(dir);
         Ok(cfg)
+    }
+
+    /// Fill `api_key` from the host-only key store. A pre-split config that
+    /// still carries inline keys is migrated once: the keys move out and
+    /// `config.toml` is rewritten without them, so the file the agent may
+    /// read no longer contains a live credential.
+    fn attach_keys(&mut self, dir: &Path) {
+        let stored = read_keys(dir);
+        // any inline key found on disk must leave it, even when the store
+        // already holds the same provider: config.toml may be read and shared
+        let mut rewrite = false;
+        for (name, provider) in self.providers.iter_mut() {
+            if provider.api_key.is_some() {
+                rewrite = true;
+            }
+            if let Some(key) = stored.get(name) {
+                provider.api_key = Some(key.clone());
+            }
+        }
+        if rewrite {
+            let _ = self.save_to_dir(dir);
+        }
     }
 
     /// Resolve which model new sessions open with: explicit `last_model`
@@ -1890,16 +1886,31 @@ impl Config {
         #[cfg(test)]
         return Ok(());
         #[allow(unreachable_code)]
-        {
-            let path = config_path()?;
-            let save_cfg = self.without_pristine_builtins().for_file();
+        self.save_to_dir(&config_dir()?)
+    }
 
-            atomic_write(
-                &path,
-                &toml::to_string_pretty(&save_cfg).context("serializing config")?,
-            )?;
-            Ok(())
+    /// Write both files: `config.toml` never carries a key, `keys.toml`
+    /// carries nothing else. Entries in the store whose provider is unknown
+    /// (a key kept for a provider that is not configured yet) survive, while
+    /// a provider whose key was cleared loses its entry.
+    fn save_to_dir(&self, dir: &Path) -> Result<()> {
+        let save_cfg = self.without_pristine_builtins().for_file();
+        atomic_write(
+            &dir.join("config.toml"),
+            &toml::to_string_pretty(&save_cfg).context("serializing config")?,
+        )?;
+        let mut keys = read_keys(dir);
+        for (name, provider) in self.providers.iter() {
+            match provider.api_key.as_deref().filter(|k| !k.is_empty()) {
+                Some(key) => {
+                    keys.insert(name.clone(), key.to_string());
+                }
+                None => {
+                    keys.remove(name);
+                }
+            }
         }
+        write_keys(dir, &keys)
     }
 
     /// Copy of this config with pristine built-in entries removed, for
@@ -2285,6 +2296,108 @@ pub fn config_dir() -> Result<PathBuf> {
 
 pub fn config_path() -> Result<PathBuf> {
     Ok(config_dir()?.join("config.toml"))
+}
+
+/// Provider keys live in their own file: `config.toml` is readable by the
+/// agent and safe to share, and the file tools refuse this one path in every
+/// mode. Same directory, same TOML parser, one `[keys]` table.
+pub fn keys_path() -> Result<PathBuf> {
+    Ok(config_dir()?.join("keys.toml"))
+}
+
+/// Exact-path test for the host-only key store, tolerant of symlinks and of
+/// Windows case. Used by the file tools, the search walks and the shell gate.
+pub fn is_host_secret_path(path: &Path) -> bool {
+    // prefilter for the search walks: every file passes through here, and a
+    // name compare is free where canonicalizing each one is not
+    if path
+        .file_name()
+        .is_none_or(|name| !name.eq_ignore_ascii_case("keys.toml"))
+    {
+        return false;
+    }
+    static STORE: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    let Some(store) = STORE.get_or_init(|| keys_path().ok()).as_deref() else {
+        return false;
+    };
+    same_file(path, store)
+}
+
+#[cfg(windows)]
+fn same_file(a: &Path, b: &Path) -> bool {
+    // `canonicalize` answers with a verbatim `\\?\C:\...` path while a file
+    // that does not exist yet keeps the plain spelling; strip the prefix and
+    // fold case, or the two sides never meet.
+    fn normalize(p: &Path) -> String {
+        let raw = p
+            .canonicalize()
+            .unwrap_or_else(|_| p.to_path_buf())
+            .to_string_lossy()
+            .into_owned();
+        let raw = raw
+            .strip_prefix(r"\\?\UNC\")
+            .map(|rest| format!(r"\\{rest}"))
+            .or_else(|| raw.strip_prefix(r"\\?\").map(str::to_string))
+            .unwrap_or(raw);
+        raw.to_ascii_lowercase()
+    }
+    normalize(a) == normalize(b)
+}
+
+#[cfg(not(windows))]
+fn same_file(a: &Path, b: &Path) -> bool {
+    let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    canon(a) == canon(b)
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct KeysFile {
+    #[serde(default)]
+    keys: BTreeMap<String, String>,
+}
+
+fn read_keys(dir: &Path) -> BTreeMap<String, String> {
+    let path = dir.join("keys.toml");
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        return BTreeMap::new();
+    };
+    toml::from_str::<KeysFile>(&raw)
+        .map(|file| file.keys)
+        .unwrap_or_default()
+}
+
+fn write_keys(dir: &Path, keys: &BTreeMap<String, String>) -> Result<()> {
+    let path = dir.join("keys.toml");
+    if keys.is_empty() {
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e).context("removing empty key store"),
+        }
+        return Ok(());
+    }
+    let body = toml::to_string_pretty(&KeysFile { keys: keys.clone() })
+        .context("serializing keys")?;
+    atomic_write_private(&path, &body)
+}
+
+/// The key store is written user-only on Unix; Windows inherits the per-user
+/// ACL of `%APPDATA%`. No encryption: a key sitting next to the file it
+/// encrypts is theatre, and the local threat is the agent, not a second user.
+fn atomic_write_private(path: &std::path::Path, content: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension(format!("tmp.{}", uuid::Uuid::new_v4()));
+    std::fs::write(&tmp, content).context("writing temp keys")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
+            .context("setting key file mode")?;
+    }
+    std::fs::rename(&tmp, path).context("installing keys")?;
+    Ok(())
 }
 
 pub fn data_dir() -> Result<PathBuf> {

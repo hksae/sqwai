@@ -380,6 +380,16 @@ pub(crate) async fn bash_call(
         ));
     }
 
+    // -0.4 provider keys: the key store is host-only. A shell command that
+    // names it is refused in every mode, read or write — one file, exact
+    // spellings, no content inspection.
+    if let Some(target) = tools::first_host_secret_target(&command) {
+        return tools::Outcome::err(format!(
+            "command blocked: '{target}' is the host-only provider key store \
+             (keys.toml); keys never enter the transcript"
+        ));
+    }
+
     // What the classifier said about this command, recorded whether or not a
     // dialog followed. AUTO's whole contract is "the classifier is the floor",
     // and a floor nobody can see is a guess: a command that passed as `safe`

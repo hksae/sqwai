@@ -102,6 +102,33 @@ pub(crate) fn first_host_state_target(ctx: &ToolCtx, command: &str) -> Option<St
         .find(|target| ctx.resolves_under(target, &base))
 }
 
+/// The host-only key store named anywhere in a command, read or write: a
+/// shell pipeline has no per-open hook, so the only mechanical check is the
+/// path itself. Matched in the spellings a shell actually produces — the
+/// absolute path in both separator styles and the `$APPDATA`/`%APPDATA%`
+/// forms — never by basename, which could be an ordinary project file.
+pub(crate) fn first_host_secret_target(command: &str) -> Option<String> {
+    let keys = crate::config::keys_path().ok()?;
+    let abs = keys.to_string_lossy().replace('\\', "/");
+    let win = abs.replace('/', "\\");
+    let mut forms = vec![abs.clone(), win];
+    let appdata = std::env::var("APPDATA").unwrap_or_default();
+    if !appdata.is_empty() {
+        let app = appdata.replace('\\', "/");
+        if let Some(rest) = abs.strip_prefix(&app) {
+            for prefix in ["%APPDATA%", "$APPDATA", "${APPDATA}", "$env:APPDATA"] {
+                forms.push(format!("{prefix}{rest}"));
+                forms.push(format!("{prefix}{}", rest.replace('/', "\\")));
+            }
+        }
+    }
+    let lower = command.to_ascii_lowercase();
+    forms
+        .iter()
+        .find(|form| !form.is_empty() && lower.contains(&form.to_ascii_lowercase()))
+        .cloned()
+}
+
 /// Write targets of a shell command in the order they run, each resolved
 /// against the directory the command has changed into by that point.
 ///

@@ -1877,7 +1877,6 @@ fn session_recovery_with_deleted_or_broken_plan_id() {
         compaction: Default::default(),
         plan: Default::default(),
         verify: Default::default(),
-        secrets: Default::default(),
         undo: Default::default(),
     };
 

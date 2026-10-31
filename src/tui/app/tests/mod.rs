@@ -98,7 +98,6 @@ fn test_app(url: String) -> App {
         compaction: Default::default(),
         plan: Default::default(),
         verify: Default::default(),
-        secrets: Default::default(),
         undo: Default::default(),
     };
     let session = Session::new("p/m".into(), 1000);
@@ -215,7 +214,6 @@ async fn real_zen_smoke() {
         compaction: Default::default(),
         plan: Default::default(),
         verify: Default::default(),
-        secrets: Default::default(),
         undo: Default::default(),
     };
     let mut app = App::new(cfg, Session::new("p/m".into(), 1_000_000), false, false).unwrap();
