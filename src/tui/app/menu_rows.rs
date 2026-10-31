@@ -33,6 +33,7 @@ impl App {
             Menu::Settings => self.build_settings_rows(),
             Menu::UndoShadow => self.build_undo_shadow_rows(),
             Menu::SearchProvider => self.build_search_provider_rows(),
+            Menu::EditSearchProvider { provider } => self.build_edit_search_provider_rows(provider),
             Menu::UndoList => self.build_undo_list_rows(),
             Menu::EditScalar(..)
             | Menu::EditSessionTitle { .. }
@@ -119,27 +120,7 @@ impl App {
                 ScalarSetting::OutlineMaxFileBytes.current(&self.cfg),
                 MenuAction::EditScalar(ScalarSetting::OutlineMaxFileBytes),
             ),
-            (
-                "search provider",
-                self.cfg.web.search_provider.as_str().to_string(),
-                MenuAction::OpenSearchProvider,
-            ),
         ];
-        if !matches!(
-            self.cfg.web.search_provider,
-            crate::config::SearchProvider::Off | crate::config::SearchProvider::Hosted
-        ) {
-            tool_rows.push((
-                "search key",
-                ScalarSetting::SearchKey.current(&self.cfg),
-                MenuAction::EditScalar(ScalarSetting::SearchKey),
-            ));
-            tool_rows.push((
-                "search base url",
-                ScalarSetting::SearchBaseUrl.current(&self.cfg),
-                MenuAction::EditScalar(ScalarSetting::SearchBaseUrl),
-            ));
-        }
         tool_rows.extend([
             (
                 "web results",
@@ -336,6 +317,44 @@ impl App {
                 MenuAction::None,
             ));
         }
+    }
+
+    fn build_edit_search_provider_rows(&mut self, provider: crate::config::SearchProvider) {
+        if provider == crate::config::SearchProvider::Hosted {
+            self.menu_rows.push(row(
+                Line::from(vec![Span::styled(
+                    "the model provider runs web_search itself; no settings",
+                    Theme::dim(),
+                )]),
+                MenuAction::None,
+            ));
+            return;
+        }
+        let key_state = if self.cfg.search_config().api_key.is_some() {
+            "set"
+        } else {
+            "missing"
+        };
+        self.menu_rows.push(row(
+            Line::from(vec![
+                Span::styled("key", Style::new().fg(Theme::FG())),
+                Span::styled(format!("  {key_state}"), Theme::dim()),
+            ]),
+            MenuAction::EditScalar(ScalarSetting::SearchKey),
+        ));
+        let base = self
+            .cfg
+            .web
+            .search_base_url
+            .clone()
+            .unwrap_or_else(|| "default".to_string());
+        self.menu_rows.push(row(
+            Line::from(vec![
+                Span::styled("base url", Style::new().fg(Theme::FG())),
+                Span::styled(format!("  {base}"), Theme::dim()),
+            ]),
+            MenuAction::EditScalar(ScalarSetting::SearchBaseUrl),
+        ));
     }
 
     fn build_undo_shadow_rows(&mut self) {

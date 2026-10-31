@@ -228,6 +228,7 @@ impl App {
             }
             "/sessions" => self.open_menu(Menu::Sessions),
             "/providers" => self.open_menu(Menu::Providers),
+            "/providers-search" => self.open_menu(Menu::SearchProvider),
             "/models" => self.open_menu(Menu::Models {
                 provider: self.model_cfg.provider.clone(),
             }),

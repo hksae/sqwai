@@ -19,8 +19,8 @@ static GITHUB_SEARCH_COOLDOWN_UNTIL: AtomicU64 = AtomicU64::new(0);
 fn unavailable_note(provider: &str, reason: &str) -> String {
     format!(
         "Search unavailable: {provider} — {reason}. This is the search backend failing, not an \
-empty answer; rephrasing the same question now will not help. Fix the key or provider in \
-/config, retry later, or use `webfetch` on a known URL."
+empty answer; rephrasing the same question now will not help. Fix the key or provider with \
+/providers-search, retry later, or use `webfetch` on a known URL."
     )
 }
 
@@ -34,7 +34,7 @@ fn hosted_note() -> String {
 /// No provider chosen at all. Developer categories keep working, the general
 /// web does not.
 fn not_configured_note() -> String {
-    "Web search is not configured. Pick a provider and its key in /config \
+    "Web search is not configured. Pick a provider and its key with /providers-search \
 (tavily has a free tier; deepseek uses the DeepSeek API key), or use `webfetch` on a known URL. \
 The developer categories still work without a provider: code, docs, packages, discussions, papers."
         .to_string()
@@ -1190,7 +1190,7 @@ mod tests {
         assert!(note.contains("rephrasing"), "{note}");
         assert!(note.contains("webfetch"), "{note}");
         let off = not_configured_note();
-        assert!(off.contains("/config"), "{off}");
+        assert!(off.contains("/providers-search"), "{off}");
         assert!(off.contains("webfetch"), "{off}");
     }
 }

@@ -31,6 +31,7 @@ pub(super) const COMMANDS: &[&str] = &[
     "/new",
     "/plan",
     "/providers",
+    "/providers-search",
     "/redo",
     "/sessions",
     "/skill",
@@ -218,6 +219,8 @@ pub(super) enum Menu {
     UndoShadow,
     /// picker for `[web].search_provider`
     SearchProvider,
+    /// settings of one search backend (key, base url)
+    EditSearchProvider { provider: crate::config::SearchProvider },
     /// `/undo list`: interactive checkpoint & redo history picker
     UndoList,
     /// single-field form to rename a session
@@ -360,7 +363,6 @@ pub(super) enum MenuAction {
     CycleUndoShadow,
     OpenUndoShadow,
     SetUndoShadow(crate::config::ShadowStore),
-    OpenSearchProvider,
     SetSearchProvider(crate::config::SearchProvider),
     UndoCount(usize),
     RedoCount(usize),
@@ -840,6 +842,7 @@ impl App {
                 | Some(Menu::EditScalar(..))
                 | Some(Menu::UndoShadow)
                 | Some(Menu::SearchProvider)
+                | Some(Menu::EditSearchProvider { .. })
                 | Some(Menu::UndoList)
                 | Some(Menu::Providers)
                 | Some(Menu::EditProvider { .. })
@@ -1015,10 +1018,6 @@ impl App {
                     .menu_rows
                     .iter()
                     .position(|(_, a)| matches!(a, MenuAction::OpenUndoShadow)),
-                Some(Menu::SearchProvider) => self
-                    .menu_rows
-                    .iter()
-                    .position(|(_, a)| matches!(a, MenuAction::OpenSearchProvider)),
                 _ => None,
             };
             if let Some(idx) = pos {
@@ -1371,6 +1370,13 @@ impl App {
         }
     }
 
+    pub(super) fn surface_search_provider(&self) -> Option<crate::config::SearchProvider> {
+        match self.menu_row_at(self.menu_sel) {
+            Some((_, MenuAction::SetSearchProvider(provider))) => Some(*provider),
+            _ => None,
+        }
+    }
+
     pub(super) fn surf_field(&mut self) -> &mut TextArea<'static> {
         match self.cur_menu() {
             Some(Menu::Models { .. }) => &mut self.model_search,
@@ -1578,7 +1584,10 @@ impl App {
         match &self.cur_menu() {
             Some(Menu::Settings) => " Config ".into(),
             Some(Menu::UndoShadow) => " Config · undo shadow ".into(),
-            Some(Menu::SearchProvider) => " Search provider ".into(),
+            Some(Menu::SearchProvider) => " Search providers ".into(),
+            Some(Menu::EditSearchProvider { provider }) => {
+                format!(" Search provider · {} ", provider.as_str())
+            }
             Some(Menu::UndoList) => " Undo / Redo checkpoints ".into(),
             Some(Menu::Providers) => " Providers ".into(),
             Some(Menu::Models { provider }) => format!(" Models · {provider} "),

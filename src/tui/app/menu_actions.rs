@@ -59,7 +59,6 @@ impl App {
             MenuAction::OpenControls => self.open_menu(Menu::Controls),
             MenuAction::CycleUndoShadow => self.cycle_undo_shadow(),
             MenuAction::OpenUndoShadow => self.open_menu(Menu::UndoShadow),
-            MenuAction::OpenSearchProvider => self.open_menu(Menu::SearchProvider),
             MenuAction::SetSearchProvider(provider) => {
                 self.cfg.web.search_provider = provider;
                 self.cfg.save().ok();

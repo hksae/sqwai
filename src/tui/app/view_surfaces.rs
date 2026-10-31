@@ -130,6 +130,7 @@ impl App {
                 | Some(Menu::EditScalar(..))
                 | Some(Menu::UndoShadow)
                 | Some(Menu::SearchProvider)
+                | Some(Menu::EditSearchProvider { .. })
                 | Some(Menu::UndoList)
                 | Some(Menu::Providers)
                 | Some(Menu::EditProvider { .. })
@@ -766,6 +767,7 @@ impl App {
             Some(Menu::UndoShadow) => (0, 3, ""),
             Some(Menu::Providers) => (1, dyn_win, "providers"),
             Some(Menu::SearchProvider) => (1, dyn_win, "providers"),
+            Some(Menu::EditSearchProvider { .. }) => (0, 3, ""),
             Some(Menu::EditProvider { .. }) => (0, 5, ""),
             Some(Menu::ProviderFormat { .. }) => (0, 3, ""),
             Some(Menu::Models { .. }) => (1, dyn_win, "models"),
@@ -817,7 +819,12 @@ impl App {
                 ("esc", "back".to_string()),
             ],
             Some(Menu::SearchProvider) => vec![
+                ("ctrl+e", "settings".to_string()),
                 ("enter", "use".to_string()),
+                ("esc", "back".to_string()),
+            ],
+            Some(Menu::EditSearchProvider { .. }) => vec![
+                ("enter", "edit".to_string()),
                 ("esc", "back".to_string()),
             ],
             Some(Menu::Providers) => vec![

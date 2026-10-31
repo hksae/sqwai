@@ -1089,3 +1089,71 @@ fn search_provider_surface_filters_while_typing() {
         .collect();
     assert_eq!(labels, vec![SearchProvider::Tavily.as_str()], "{labels:?}");
 }
+
+/// Search configuration lives behind /providers-search, not in /config:
+/// the command opens the list, ctrl+e opens the selected provider's settings.
+#[test]
+fn search_provider_surface_opens_from_its_command() {
+    use crate::config::SearchProvider;
+    use crate::tui::app::menus::{Menu, MenuAction};
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.startup = false;
+    app.command("providers-search");
+    assert!(matches!(app.cur_menu(), Some(Menu::SearchProvider)));
+
+    // /config no longer carries search rows
+    app.open_menu(Menu::Settings);
+    let settings_text: String = app
+        .menu_rows
+        .iter()
+        .map(|(line, _)| {
+            line.spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!settings_text.contains("search provider"), "{settings_text}");
+    app.menu_back();
+
+    app.menu_sel = app
+        .menu_rows
+        .iter()
+        .position(|(_, action)| {
+            matches!(action, MenuAction::SetSearchProvider(SearchProvider::Tavily))
+        })
+        .expect("tavily row");
+    let (tx, rx) = std::sync::mpsc::channel();
+    tx.send(Event::Key(KeyEvent::new(
+        KeyCode::Char('e'),
+        KeyModifiers::CONTROL,
+    )))
+    .unwrap();
+    app.poll_input(&rx).unwrap();
+
+    assert!(
+        matches!(
+            app.cur_menu(),
+            Some(Menu::EditSearchProvider {
+                provider: SearchProvider::Tavily
+            })
+        ),
+        "ctrl+e must open the selected provider's settings"
+    );
+    assert_eq!(app.cfg.web.search_provider, SearchProvider::Tavily);
+    let rows: Vec<String> = app
+        .menu_rows
+        .iter()
+        .map(|(line, _)| {
+            line.spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<String>()
+        })
+        .collect();
+    assert!(rows.iter().any(|row| row.starts_with("key")), "{rows:?}");
+    assert!(rows.iter().any(|row| row.starts_with("base url")), "{rows:?}");
+}

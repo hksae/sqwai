@@ -750,6 +750,15 @@ impl App {
                         {
                             self.start_builtin_update(true);
                         }
+                        KeyCode::Char('e')
+                            if ctrl && matches!(self.cur_menu(), Some(Menu::SearchProvider)) =>
+                        {
+                            if let Some(provider) = self.surface_search_provider() {
+                                self.cfg.web.search_provider = provider;
+                                self.cfg.save().ok();
+                                self.open_menu(Menu::EditSearchProvider { provider });
+                            }
+                        }
                         // the provider's settings and api key are edited from
                         // the provider list on the same chord Models uses
                         KeyCode::Char('e')
