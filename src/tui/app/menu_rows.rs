@@ -335,33 +335,32 @@ impl App {
             ));
             return;
         }
+        // same row shape as Providers: label, then the value in dim — a key
+        // is bullets here and plain only once its own editor is open
+        let field_row = |label: &'static str, value: String, action: MenuAction| {
+            let mut spans = vec![Span::styled(label, Style::new().fg(Theme::FG()))];
+            if !value.is_empty() {
+                spans.push(Span::styled(format!(" {value}"), Theme::dim()));
+            }
+            row(Line::from(spans), action)
+        };
         if provider.key_name().is_some() {
-            let key_state = if self.cfg.search_config().api_key.is_some() {
-                "set"
-            } else {
-                "missing"
-            };
-            self.menu_rows.push(row(
-                Line::from(vec![
-                    Span::styled("key", Style::new().fg(Theme::FG())),
-                    Span::styled(format!("  {key_state}"), Theme::dim()),
-                ]),
-                MenuAction::EditScalar(ScalarSetting::SearchKey),
+            let masked = super::forms::FormField::mask_value(
+                &self.cfg.search_key_for(provider).unwrap_or_default(),
+            );
+            self.menu_rows.push(field_row(
+                "key",
+                masked,
+                MenuAction::EditScalar(ScalarSetting::SearchKey(provider)),
             ));
         }
-        let base = self
-            .cfg
-            .web
-            .search_base_url
-            .clone()
-            .unwrap_or_else(|| "default".to_string());
-        self.menu_rows.push(row(
-            Line::from(vec![
-                Span::styled("base url", Style::new().fg(Theme::FG())),
-                Span::styled(format!("  {base}"), Theme::dim()),
-            ]),
-            MenuAction::EditScalar(ScalarSetting::SearchBaseUrl),
-        ));
+        if provider == self.cfg.web.search_provider {
+            self.menu_rows.push(field_row(
+                "base url",
+                self.cfg.web.search_base_url.clone().unwrap_or_default(),
+                MenuAction::EditScalar(ScalarSetting::SearchBaseUrl),
+            ));
+        }
     }
 
     fn build_undo_shadow_rows(&mut self) {

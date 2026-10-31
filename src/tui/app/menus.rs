@@ -386,7 +386,7 @@ pub(super) enum ScalarSetting {
     WebResults,
     WebTimeoutSecs,
     WebFetchBytes,
-    SearchKey,
+    SearchKey(crate::config::SearchProvider),
     SearchBaseUrl,
     LimitMaxToolCalls,
     LimitMaxTokens,
@@ -580,7 +580,7 @@ impl ScalarSetting {
             Self::WebResults => "web results",
             Self::WebTimeoutSecs => "web timeout secs",
             Self::WebFetchBytes => "web fetch bytes",
-            Self::SearchKey => "search key",
+            Self::SearchKey(_) => "key",
             Self::SearchBaseUrl => "search base url",
             Self::LimitMaxToolCalls => "max tool calls per turn",
             Self::LimitMaxTokens => "max tokens per turn",
@@ -607,14 +607,10 @@ impl ScalarSetting {
             Self::WebResults => cfg.tools.web.results.to_string(),
             Self::WebTimeoutSecs => cfg.tools.web.timeout_secs.to_string(),
             Self::WebFetchBytes => human_bytes(cfg.tools.web.fetch_bytes as u64),
-            // a row, not an editor: the key itself only appears once opened
-            Self::SearchKey => {
-                if cfg.search_config().api_key.is_some() {
-                    "set".to_string()
-                } else {
-                    "missing".to_string()
-                }
-            }
+            // a row, not an editor: bullets here, plain once opened
+            Self::SearchKey(provider) => super::forms::FormField::mask_value(
+                &cfg.search_key_for(provider).unwrap_or_default(),
+            ),
             Self::SearchBaseUrl => cfg
                 .web
                 .search_base_url
@@ -644,7 +640,7 @@ impl ScalarSetting {
             Self::WebFetchBytes => cfg.tools.web.fetch_bytes.to_string(),
             Self::LimitMaxTokens => cfg.limits.max_tokens_per_turn.to_string(),
             Self::UndoShadowMaxBytes => cfg.undo.shadow_max_bytes.to_string(),
-            Self::SearchKey => cfg.search_config().api_key.unwrap_or_default(),
+            Self::SearchKey(provider) => cfg.search_key_for(provider).unwrap_or_default(),
             Self::SearchBaseUrl => cfg.web.search_base_url.clone().unwrap_or_default(),
             _ => self.current(cfg),
         }
@@ -768,18 +764,17 @@ impl ScalarSetting {
                 &mut cfg.undo.shadow_max_bytes,
                 def.undo.shadow_max_bytes,
             ),
-            Self::SearchKey => {
-                let provider = cfg.web.search_provider;
-                let Some(key_name) = provider.key_name() else {
-                    return "choose a search provider first".to_string();
-                };
+            Self::SearchKey(provider) => {
+                if provider.key_name().is_none() {
+                    return format!("{} has no key to set", provider.as_str());
+                }
                 let raw = raw.trim();
                 if raw.is_empty() {
-                    cfg.keys.remove(key_name);
-                    format!("{} search key cleared", provider.as_str())
+                    cfg.set_search_key(provider, None);
+                    format!("{} key cleared", provider.as_str())
                 } else {
-                    cfg.keys.insert(key_name.to_string(), raw.to_string());
-                    format!("{} search key set", provider.as_str())
+                    cfg.set_search_key(provider, Some(raw.to_string()));
+                    format!("{} key set", provider.as_str())
                 }
             }
             Self::SearchBaseUrl => {

@@ -1991,6 +1991,46 @@ impl Config {
         self.search_config_for(self.web.search_provider)
     }
 
+    /// The key one search backend would use, without building its config.
+    pub fn search_key_for(&self, provider: SearchProvider) -> Option<String> {
+        let stored = |name: &str| self.keys.get(name).cloned();
+        match provider {
+            SearchProvider::Off
+            | SearchProvider::Hosted
+            | SearchProvider::Exa
+            | SearchProvider::Parallel
+            | SearchProvider::Random => None,
+            SearchProvider::Deepseek => stored("deepseek-search")
+                .or_else(|| {
+                    self.providers
+                        .get("deepseek")
+                        .and_then(|p| p.effective_api_key("deepseek"))
+                })
+                .or_else(|| env_nonempty("DEEPSEEK_API_KEY")),
+            SearchProvider::Tavily => {
+                stored("tavily").or_else(|| env_nonempty("TAVILY_API_KEY"))
+            }
+            SearchProvider::Firecrawl => {
+                stored("firecrawl").or_else(|| env_nonempty("FIRECRAWL_API_KEY"))
+            }
+        }
+    }
+
+    /// Store or clear one backend's key without touching the active choice.
+    pub fn set_search_key(&mut self, provider: SearchProvider, key: Option<String>) {
+        let Some(name) = provider.key_name() else {
+            return;
+        };
+        match key.filter(|key| !key.trim().is_empty()) {
+            Some(key) => {
+                self.keys.insert(name.to_string(), key.trim().to_string());
+            }
+            None => {
+                self.keys.remove(name);
+            }
+        }
+    }
+
     fn search_config_for(&self, provider: SearchProvider) -> SearchConfig {
         let base_url = self
             .web
@@ -1999,7 +2039,6 @@ impl Config {
             .map(str::trim)
             .filter(|url| !url.is_empty())
             .map(str::to_string);
-        let stored = |name: &str| self.keys.get(name).cloned();
         let (api_key, alternatives) = match provider {
             SearchProvider::Off
             | SearchProvider::Hosted
@@ -2018,24 +2057,9 @@ impl Config {
                 .map(|provider| self.search_config_for(provider))
                 .collect(),
             ),
-            SearchProvider::Deepseek => (
-                stored("deepseek-search")
-                    .or_else(|| {
-                        self.providers
-                            .get("deepseek")
-                            .and_then(|p| p.effective_api_key("deepseek"))
-                    })
-                    .or_else(|| env_nonempty("DEEPSEEK_API_KEY")),
-                Vec::new(),
-            ),
-            SearchProvider::Tavily => (
-                stored("tavily").or_else(|| env_nonempty("TAVILY_API_KEY")),
-                Vec::new(),
-            ),
-            SearchProvider::Firecrawl => (
-                stored("firecrawl").or_else(|| env_nonempty("FIRECRAWL_API_KEY")),
-                Vec::new(),
-            ),
+            SearchProvider::Deepseek
+            | SearchProvider::Tavily
+            | SearchProvider::Firecrawl => (self.search_key_for(provider), Vec::new()),
         };
         SearchConfig {
             provider,

@@ -819,7 +819,7 @@ impl App {
                 ("esc", "back".to_string()),
             ],
             Some(Menu::SearchProvider) => vec![
-                ("ctrl+e", "settings".to_string()),
+                ("ctrl+e", "edit".to_string()),
                 ("enter", "use".to_string()),
                 ("esc", "back".to_string()),
             ],

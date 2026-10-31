@@ -1144,9 +1144,10 @@ fn search_provider_surface_opens_from_its_command() {
                 provider: SearchProvider::Tavily
             })
         ),
-        "ctrl+e must open the selected provider's settings"
+        "ctrl+e must open the selected provider's editor"
     );
-    assert_eq!(app.cfg.web.search_provider, SearchProvider::Tavily);
+    // ctrl+e edits only; the active choice moves on Enter alone
+    assert_eq!(app.cfg.web.search_provider, SearchProvider::Off);
     let rows: Vec<String> = app
         .menu_rows
         .iter()
@@ -1158,5 +1159,56 @@ fn search_provider_surface_opens_from_its_command() {
         })
         .collect();
     assert!(rows.iter().any(|row| row.starts_with("key")), "{rows:?}");
+    assert!(
+        !rows.iter().any(|row| row.starts_with("base url")),
+        "the global base url row belongs to the active provider: {rows:?}"
+    );
+
+    // a stored key shows as bullets on the row, never as its value
+    app.cfg.keys.insert("tavily".into(), "tvly-secret".into());
+    app.build_menu_rows();
+    let rows: String = app
+        .menu_rows
+        .iter()
+        .map(|(line, _)| {
+            line.spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("
+");
+    assert!(rows.contains("key ••••••••••"), "{rows}");
+    assert!(!rows.contains("tvly-secret"), "{rows}");
+
+    // making it active brings the base url row in, still on ctrl+e
+    app.menu_back();
+    app.run_action(MenuAction::SetSearchProvider(SearchProvider::Tavily));
+    app.command("providers-search");
+    app.menu_sel = app
+        .menu_rows
+        .iter()
+        .position(|(_, action)| {
+            matches!(action, MenuAction::SetSearchProvider(SearchProvider::Tavily))
+        })
+        .expect("tavily row");
+    let (tx, rx) = std::sync::mpsc::channel();
+    tx.send(Event::Key(KeyEvent::new(
+        KeyCode::Char('e'),
+        KeyModifiers::CONTROL,
+    )))
+    .unwrap();
+    app.poll_input(&rx).unwrap();
+    let rows: Vec<String> = app
+        .menu_rows
+        .iter()
+        .map(|(line, _)| {
+            line.spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<String>()
+        })
+        .collect();
     assert!(rows.iter().any(|row| row.starts_with("base url")), "{rows:?}");
 }

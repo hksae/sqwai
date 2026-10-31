@@ -754,8 +754,8 @@ impl App {
                             if ctrl && matches!(self.cur_menu(), Some(Menu::SearchProvider)) =>
                         {
                             if let Some(provider) = self.surface_search_provider() {
-                                self.cfg.web.search_provider = provider;
-                                self.cfg.save().ok();
+                                // ctrl+e edits only: the active choice moves
+                                // on Enter alone
                                 self.open_menu(Menu::EditSearchProvider { provider });
                             }
                         }
