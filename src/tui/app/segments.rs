@@ -152,6 +152,23 @@ impl App {
     }
 
     /// Render persisted messages as chat segments (used on start and on resume).
+    /// Tool row for a provider-executed call: it already ran on the
+    /// provider's side, so it restores finished and unnamed by any call id.
+    fn restored_provider_tool(tool: &crate::providers::ProviderTool) -> Segment {
+        Segment::Tool {
+            name: tool.name.clone(),
+            args: tool.summary.clone(),
+            call_id: None,
+            ok: Some(true),
+            output: String::new(),
+            diff: None,
+            preview: Vec::new(),
+            preview_total: 0,
+            expanded: false,
+            ask: None,
+        }
+    }
+
     pub(super) fn load_history_segments(&mut self) {
         // Tool calls and their results are part of the durable provider
         // transcript. Keep the rendered row keyed by call id so batched calls
@@ -205,6 +222,14 @@ impl App {
                     if !m.thinking.is_empty() {
                         self.push_segment(Self::restored_thinking(&m.thinking, m.thinking_ms));
                     }
+                    if !m.provider_tools.is_empty() {
+                        // the provider searched for this answer; its rows live
+                        // in the same work run the live path painted them in
+                        work_start.get_or_insert(self.segments.len());
+                        for tool in &m.provider_tools {
+                            self.push_segment(Self::restored_provider_tool(tool));
+                        }
+                    }
                     if let Some(seg_start) = work_start.take() {
                         // A saved session is never streaming: historical work
                         // must begin folded, even if it ended with an error.
@@ -228,6 +253,9 @@ impl App {
                     let trimmed = m.content.trim();
                     if !trimmed.is_empty() {
                         self.push_segment(Segment::Commentary(trimmed.to_string()));
+                    }
+                    for tool in &m.provider_tools {
+                        self.push_segment(Self::restored_provider_tool(tool));
                     }
                     for call in &m.tool_calls {
                         if call.name == "subagent" {

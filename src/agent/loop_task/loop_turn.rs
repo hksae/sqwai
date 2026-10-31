@@ -107,6 +107,9 @@ pub(crate) struct TurnOutcome {
     /// read-only tool calls already spawned in the background mid-stream while
     /// the LLM was still generating subsequent tool calls
     pub(crate) prefetched: std::collections::HashMap<usize, PrefetchedToolHandle>,
+    /// provider-executed tool calls this turn ran itself (hosted web search),
+    /// display only: stored on the message so a reload rebuilds their rows
+    pub(crate) provider_tools: Vec<crate::providers::ProviderTool>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -143,7 +146,8 @@ pub(crate) async fn run_turn_with_prefetch(
         let mut reasoning_open: Option<Instant> = None;
         let mut reasoning_ms = 0u64;
         let mut calls: Vec<ToolCallReq> = Vec::new();
-        let mut provider_tools = 0u32;
+        let mut provider_tool_seq = 0u32;
+        let mut provider_tools: Vec<crate::providers::ProviderTool> = Vec::new();
         let mut provider_state: Option<serde_json::Value> = None;
         let mut prefetched: std::collections::HashMap<usize, PrefetchedToolHandle> =
             std::collections::HashMap::new();
@@ -251,8 +255,12 @@ pub(crate) async fn run_turn_with_prefetch(
                 Ok(StreamEvent::ProviderTool { name, summary }) => {
                     // display only: the provider already ran it, so the row
                     // opens and closes at once and never enters `calls`
-                    provider_tools += 1;
-                    let call_id = format!("provider-tool-{provider_tools}");
+                    provider_tool_seq += 1;
+                    provider_tools.push(crate::providers::ProviderTool {
+                        name: name.clone(),
+                        summary: summary.clone(),
+                    });
+                    let call_id = format!("provider-tool-{provider_tool_seq}");
                     let _ = tx
                         .send(AgentEvent::ToolStart {
                             name: name.clone(),
@@ -294,6 +302,7 @@ pub(crate) async fn run_turn_with_prefetch(
                 usage,
                 provider_state,
                 prefetched,
+                provider_tools,
             });
         };
         for (_, h) in prefetched {

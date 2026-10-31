@@ -1380,3 +1380,32 @@ fn approval_mode_is_remembered_per_session() {
     assert_eq!(app.approval_mode, ApprovalMode::Auto);
     assert_eq!(app.session.approval, Some(ApprovalMode::Auto));
 }
+
+/// A hosted web search ran inside the model's response; its row must come
+/// back with the transcript, not vanish on reload.
+#[test]
+fn load_history_restores_hosted_web_search_rows() {
+    use crate::providers::{Message, ProviderTool, Role};
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.session.messages = vec![
+        Message::new(Role::User, "поищи мем"),
+        Message::new(Role::Assistant, "Нашёл.").with_provider_tools(vec![ProviderTool {
+            name: "web_search".into(),
+            summary: "эль дрифто автобус".into(),
+        }]),
+    ];
+    app.clear_segments();
+    app.load_history_segments();
+    let tool = app
+        .segments
+        .iter()
+        .find_map(|segment| match segment {
+            Segment::Tool {
+                name, args, ok, ..
+            } if name == "web_search" => Some((args.clone(), *ok)),
+            _ => None,
+        })
+        .expect("hosted search row restored");
+    assert_eq!(tool.0, "эль дрифто автобус");
+    assert_eq!(tool.1, Some(true), "it already finished on the provider side");
+}

@@ -165,6 +165,12 @@ pub struct DocumentAttachment {
     pub range: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderTool {
+    pub name: String,
+    pub summary: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub role: Role,
@@ -199,6 +205,11 @@ pub struct Message {
     /// row shows no clock rather than an invented one.
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub thinking_ms: u64,
+    /// Provider-executed tool calls this turn ran itself (hosted web search).
+    /// Display only: they never go on the wire, but a restored session
+    /// rebuilds their rows so the search stays visible in history.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provider_tools: Vec<ProviderTool>,
 }
 
 fn is_zero_u64(v: &u64) -> bool {
@@ -218,6 +229,7 @@ impl Message {
             provider_state: None,
             thinking: String::new(),
             thinking_ms: 0,
+            provider_tools: Vec::new(),
         }
     }
 
@@ -237,6 +249,7 @@ impl Message {
             provider_state: None,
             thinking: String::new(),
             thinking_ms: 0,
+            provider_tools: Vec::new(),
         }
     }
 
@@ -265,6 +278,11 @@ impl Message {
     pub fn with_thinking(mut self, thinking: String, ms: u64) -> Self {
         self.thinking = thinking;
         self.thinking_ms = ms;
+        self
+    }
+
+    pub fn with_provider_tools(mut self, tools: Vec<ProviderTool>) -> Self {
+        self.provider_tools = tools;
         self
     }
 }

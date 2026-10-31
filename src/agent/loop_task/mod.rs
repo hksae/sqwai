@@ -1675,7 +1675,8 @@ async fn run_agent(
             messages.push(
                 Message::new(Role::Assistant, text)
                     .with_provider_state(turn.provider_state)
-                    .with_thinking(turn.reasoning_text, turn.reasoning_ms),
+                    .with_thinking(turn.reasoning_text, turn.reasoning_ms)
+                    .with_provider_tools(turn.provider_tools),
             );
             // A turn that ends right after closing a plan, with no plan open,
             // is where autonomous work dies: the closed plan was the only
@@ -1707,7 +1708,8 @@ async fn run_agent(
             Message::new(Role::Assistant, turn.text)
                 .with_tool_calls(turn.calls.clone())
                 .with_provider_state(turn.provider_state)
-                .with_thinking(turn.reasoning_text, turn.reasoning_ms),
+                .with_thinking(turn.reasoning_text, turn.reasoning_ms)
+                .with_provider_tools(turn.provider_tools),
         );
         // Where this turn's results start: the entry caps measure the turn's
         // total from here, so a burst of separately legal reads cannot add a
