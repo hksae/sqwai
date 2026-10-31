@@ -889,7 +889,8 @@ impl App {
         }
         if matches!(self.cur_menu(), Some(Menu::SearchProvider)) {
             let cur = self.cfg.web.search_provider;
-            self.menu_sel = crate::config::SearchProvider::ALL
+            // row 0 is the Search field, so the list starts at 1
+            self.menu_sel = 1 + crate::config::SearchProvider::ALL
                 .iter()
                 .position(|provider| *provider == cur)
                 .unwrap_or(0);

@@ -313,7 +313,6 @@ impl App {
         ));
         let current = self.cfg.web.search_provider;
         let q = self.prov_search.lines().join("").to_lowercase();
-        let search = self.cfg.search_config();
         for provider in crate::config::SearchProvider::ALL {
             if !q.is_empty() && !provider.as_str().contains(&q) {
                 continue;
@@ -323,15 +322,10 @@ impl App {
             } else {
                 Style::new().fg(Theme::FG())
             };
-            let mut spans = vec![Span::styled(provider.as_str().to_string(), style)];
-            if provider != crate::config::SearchProvider::Off {
-                let has_key = search.provider == provider && search.api_key.is_some();
-                spans.push(Span::styled(
-                    if has_key { "  key set" } else { "  key missing" },
-                    Theme::dim(),
-                ));
-            }
-            self.menu_rows.push(row(Line::from(spans), MenuAction::SetSearchProvider(provider)));
+            self.menu_rows.push(row(
+                Line::from(vec![Span::styled(provider.as_str().to_string(), style)]),
+                MenuAction::SetSearchProvider(provider),
+            ));
         }
         if self.menu_rows.len() == 1 {
             self.menu_rows.push(row(

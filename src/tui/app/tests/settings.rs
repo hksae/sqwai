@@ -1058,3 +1058,34 @@ fn search_provider_is_chosen_from_a_list() {
     app.run_action(MenuAction::SetSearchProvider(SearchProvider::Tavily));
     assert_eq!(app.cfg.web.search_provider, SearchProvider::Tavily);
 }
+
+/// The Search row on the provider surface filters as it types, like the
+/// Providers screen it copies.
+#[test]
+fn search_provider_surface_filters_while_typing() {
+    use crate::config::SearchProvider;
+    use crate::tui::app::menus::{Menu, MenuAction};
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.startup = false;
+    app.open_menu(Menu::SearchProvider);
+    app.run_action(MenuAction::FocusSearch);
+    let send = |app: &mut App, code: KeyCode| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(Event::Key(KeyEvent::new(code, KeyModifiers::empty())))
+            .unwrap();
+        app.poll_input(&rx).unwrap();
+    };
+    send(&mut app, KeyCode::Char('t'));
+
+    let labels: Vec<&str> = app
+        .menu_rows
+        .iter()
+        .filter_map(|(_, action)| match action {
+            MenuAction::SetSearchProvider(provider) => Some(provider.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(labels, vec![SearchProvider::Tavily.as_str()], "{labels:?}");
+}

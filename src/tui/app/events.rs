@@ -821,6 +821,7 @@ impl App {
                                 self.cur_menu(),
                                 Some(
                                     Menu::Providers
+                                        | Menu::SearchProvider
                                         | Menu::Models { .. }
                                         | Menu::Sessions
                                         | Menu::Settings
@@ -837,6 +838,7 @@ impl App {
                                 self.cur_menu(),
                                 Some(
                                     Menu::Providers
+                                        | Menu::SearchProvider
                                         | Menu::Models { .. }
                                         | Menu::Sessions
                                         | Menu::Settings
