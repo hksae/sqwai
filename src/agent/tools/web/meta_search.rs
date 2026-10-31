@@ -1,12 +1,10 @@
 //! Multi-Source Meta-Search Engine with Reciprocal Rank Fusion (RRF),
-//! per-provider hard timeouts, GitHub rate-limit fallback, package-to-repo
-//! cross-linking, and global cross-page BM25 Deep Extraction.
+//! per-provider hard timeouts, GitHub rate-limit fallback and package-to-repo
+//! cross-linking.
 
-use super::ranker::{
-    self, canonicalize_url, extract_global_deep_excerpts, put_cached_page, score_search_hit,
-};
+use super::ranker::{self, canonicalize_url, score_search_hit};
 use super::router;
-use reqwest::{Client, Url};
+use reqwest::Client;
 use scraper::{Html, Selector};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -87,8 +85,6 @@ pub async fn run_meta_search(
     count: usize,
     timeout_secs: u64,
     category: SearchCategory,
-    deep: bool,
-    allow_hosts: &[String],
 ) -> Result<String, String> {
     // Individual provider budget: 2.5s default (up to 4s if user explicitly requested a long timeout),
     // preventing a single stalled TLS handshake from blocking the whole meta-search.
@@ -144,22 +140,6 @@ pub async fn run_meta_search(
         ));
     }
 
-    if deep {
-        let deep_budget = count.min(3);
-        let (deep_excerpts, pages) =
-            fetch_deep_excerpts(&merged, query, deep_budget, allow_hosts).await;
-        if !deep_excerpts.is_empty() {
-            out.push_str(&format!(
-                "\n## Deep Page Excerpts — {pages} page(s), {} KB\n\n",
-                deep_excerpts.len() / 1024
-            ));
-            out.push_str(&deep_excerpts);
-            out.push_str(
-                "\n\n*[Pages above are cached locally — call `webfetch(url, section=\"...\", query=\"...\")` for instant section access]*",
-            );
-        }
-    }
-
     Ok(out.trim().to_string())
 }
 
@@ -181,12 +161,11 @@ async fn gather(
             // from the query text — a Russian question about a Rust error is
             // both, and "looks like code" is a heuristic that silently
             // drops half the sources.
-            let (sp, bing, ddg) = tokio::join!(
+            let (sp, brave) = tokio::join!(
                 cap_provider(search_startpage(client, query), per_provider),
-                cap_provider(search_bing(client, query), per_provider),
-                cap_provider(search_duckduckgo(client, query), per_provider),
+                cap_provider(search_brave(client, query), per_provider),
             );
-            provider_lists.extend([sp, bing, ddg]);
+            provider_lists.extend([sp, brave]);
         }
         SearchCategory::Docs => {
             let docs_q = if query.to_ascii_lowercase().contains("doc") {
@@ -194,42 +173,41 @@ async fn gather(
             } else {
                 format!("{query} documentation")
             };
-            let (sp, bing, ddg, crates, wiki) = tokio::join!(
+            let (sp, brave, crates, wiki) = tokio::join!(
                 cap_provider(search_startpage(client, &docs_q), per_provider),
-                cap_provider(search_bing(client, &docs_q), per_provider),
-                cap_provider(search_duckduckgo(client, &docs_q), per_provider),
+                cap_provider(search_brave(client, &docs_q), per_provider),
                 cap_provider(search_crates_io(api_client, query, 4), per_provider),
                 cap_provider(search_wikipedia(api_client, query, 3), per_provider),
             );
-            provider_lists.extend([sp, bing, ddg, crates, wiki]);
+            provider_lists.extend([sp, brave, crates, wiki]);
         }
         SearchCategory::Code => {
-            let (gh, so, sp, bing, crates) = tokio::join!(
+            let (gh, so, sp, brave, crates) = tokio::join!(
                 cap_provider(
                     search_github_with_fallback(api_client, client, query, 8),
                     per_provider
                 ),
                 cap_provider(search_stackoverflow(api_client, query, 8), per_provider),
                 cap_provider(search_startpage(client, query), per_provider),
-                cap_provider(search_bing(client, query), per_provider),
+                cap_provider(search_brave(client, query), per_provider),
                 cap_provider(search_crates_io(api_client, query, 4), per_provider),
             );
-            provider_lists.extend([gh, so, sp, bing, crates]);
+            provider_lists.extend([gh, so, sp, brave, crates]);
         }
         SearchCategory::Packages => {
-            let (pkgs, gh, sp, bing) = tokio::join!(
+            let (pkgs, gh, sp, brave) = tokio::join!(
                 cap_provider(search_packages(api_client, query, 6), per_provider),
                 cap_provider(
                     search_github_with_fallback(api_client, client, query, 5),
                     per_provider
                 ),
                 cap_provider(search_startpage(client, query), per_provider),
-                cap_provider(search_bing(client, query), per_provider),
+                cap_provider(search_brave(client, query), per_provider),
             );
-            provider_lists.extend([pkgs, gh, sp, bing]);
+            provider_lists.extend([pkgs, gh, sp, brave]);
         }
         SearchCategory::Discussions => {
-            let (hn, so, gh, sp, bing) = tokio::join!(
+            let (hn, so, gh, sp, brave) = tokio::join!(
                 cap_provider(search_hackernews(api_client, query, 6), per_provider),
                 cap_provider(search_stackoverflow(api_client, query, 6), per_provider),
                 cap_provider(
@@ -237,18 +215,18 @@ async fn gather(
                     per_provider
                 ),
                 cap_provider(search_startpage(client, query), per_provider),
-                cap_provider(search_bing(client, query), per_provider),
+                cap_provider(search_brave(client, query), per_provider),
             );
-            provider_lists.extend([hn, so, gh, sp, bing]);
+            provider_lists.extend([hn, so, gh, sp, brave]);
         }
         SearchCategory::Papers => {
-            let (arxiv, wiki, sp, bing) = tokio::join!(
+            let (arxiv, wiki, sp, brave) = tokio::join!(
                 cap_provider(search_arxiv(api_client, query, 6), per_provider),
                 cap_provider(search_wikipedia(api_client, query, 4), per_provider),
                 cap_provider(search_startpage(client, query), per_provider),
-                cap_provider(search_bing(client, query), per_provider),
+                cap_provider(search_brave(client, query), per_provider),
             );
-            provider_lists.extend([arxiv, wiki, sp, bing]);
+            provider_lists.extend([arxiv, wiki, sp, brave]);
         }
     }
 
@@ -271,12 +249,12 @@ fn without_quotes(query: &str) -> Option<String> {
 /// rephrasing the same query.
 fn no_results_note(query: &str, category: SearchCategory) -> String {
     let engines = match category {
-        SearchCategory::Auto => "startpage, bing, duckduckgo",
-        SearchCategory::Docs => "startpage, bing, duckduckgo, crates.io, wikipedia",
-        SearchCategory::Code => "github, stackoverflow, startpage, bing, crates.io",
-        SearchCategory::Packages => "crates.io, npm, pypi, github, startpage, bing",
-        SearchCategory::Discussions => "hacker news, stackoverflow, github issues, startpage, bing",
-        SearchCategory::Papers => "arxiv, wikipedia, startpage, bing",
+        SearchCategory::Auto => "startpage, brave",
+        SearchCategory::Docs => "startpage, brave, crates.io, wikipedia",
+        SearchCategory::Code => "github, stackoverflow, startpage, brave, crates.io",
+        SearchCategory::Packages => "crates.io, npm, pypi, github, startpage, brave",
+        SearchCategory::Discussions => "hacker news, stackoverflow, github issues, startpage, brave",
+        SearchCategory::Papers => "arxiv, wikipedia, startpage, brave",
     };
     let quoted = query.contains(['"', '«', '»', '\'']);
     format!(
@@ -464,74 +442,13 @@ fn domain_quality_boost(url: &str, category: SearchCategory) -> f64 {
     boost
 }
 
-async fn fetch_deep_excerpts(
-    hits: &[MergedSearchHit],
-    query: &str,
-    max_pages: usize,
-    allow_hosts: &[String],
-) -> (String, usize) {
-    let targets: Vec<(usize, Url)> = hits
-        .iter()
-        .enumerate()
-        .filter(|(_, h)| {
-            let u = h.url.to_ascii_lowercase();
-            !u.contains("youtube.com/watch") && !u.ends_with(".pdf")
-        })
-        .filter_map(|(rank, h)| Url::parse(&h.url).ok().map(|u| (rank, u)))
-        .filter(|(_, u)| crate::config::url_host_allowed(u, allow_hosts).is_ok())
-        .take(max_pages)
-        .collect();
-
-    if targets.is_empty() {
-        return (String::new(), 0);
-    }
-
-    let Ok(deep_client) = super::client(4, crate::providers::USER_AGENT, allow_hosts.to_vec())
-    else {
-        return (String::new(), 0);
-    };
-
-    let futs = targets.into_iter().map(|(page_rank, url)| {
-        let client = deep_client.clone();
-        async move {
-            if let Some(cached) = ranker::get_cached_page(url.as_str()) {
-                return Some((url, cached, page_rank));
-            }
-            let doc = tokio::time::timeout(
-                Duration::from_millis(3_500),
-                router::fetch_smart(&client, &url, allow_hosts, false),
-            )
-            .await
-            .ok()?
-            .ok()?;
-            if doc.markdown.trim().len() < 40 {
-                return None;
-            }
-            let cached = put_cached_page(doc.final_url.as_str(), doc.title, doc.markdown);
-            Some((url, cached, page_rank))
-        }
-    });
-
-    let fetched: Vec<(Url, ranker::CachedPage, usize)> =
-        futures::future::join_all(futs).await.into_iter().flatten().collect();
-
-    let pages = fetched.len();
-    (extract_global_deep_excerpts(&fetched, query, 6_000), pages)
-}
-
-// ── Web Search Providers (Startpage, Bing, DuckDuckGo) ───────────────────────
+// ── Web Search Providers (Startpage, Brave) ──────────────────────────────────
 
 /// Startpage form for a query. No language pin: `language=english` +
 /// `lui=english` restricted every search to English by construction, which is
 /// wrong for any query typed in another language. The engine reads the query.
 fn startpage_form(query: &str) -> Vec<(&'static str, &str)> {
     vec![("query", query), ("cat", "web")]
-}
-
-/// Bing query pairs. No `cc=en` and no `_EDGE_*` market cookies: they pinned
-/// the market to the United States regardless of the query.
-fn bing_query_pairs(query: &str) -> Vec<(&'static str, &str)> {
-    vec![("q", query), ("pq", query)]
 }
 
 async fn search_startpage(client: &Client, query: &str) -> Vec<RawSearchHit> {
@@ -615,10 +532,18 @@ pub fn parse_startpage_results(html: &str, max_count: usize) -> Vec<RawSearchHit
     hits
 }
 
-async fn search_bing(client: &Client, query: &str) -> Vec<RawSearchHit> {
+/// Brave Search. Plain server-rendered HTML, and the one general engine that
+/// kept answering when Startpage served its captcha. Brave infers the
+/// query's language on its own; no market or language pin is sent.
+async fn search_brave(client: &Client, query: &str) -> Vec<RawSearchHit> {
+    // Brave challenges a browser UA whose TLS/HTTP fingerprint is not a real
+    // browser (the search returned 429 for every Chrome-UA request while the
+    // same host served the app's own UA: the mismatch is the signal it acts
+    // on). The honest UA also keeps the proxy path identical to `webfetch`.
     let Ok(resp) = client
-        .get("https://www.bing.com/search")
-        .query(&bing_query_pairs(query))
+        .get("https://search.brave.com/search")
+        .header(reqwest::header::USER_AGENT, crate::providers::USER_AGENT)
+        .query(&[("q", query), ("source", "web")])
         .send()
         .await
     else {
@@ -633,188 +558,61 @@ async fn search_bing(client: &Client, query: &str) -> Vec<RawSearchHit> {
     if bytes.len() > router::max_body_bytes() {
         return Vec::new();
     }
-    parse_bing_results(&String::from_utf8_lossy(&bytes), 10)
+    parse_brave_results(&String::from_utf8_lossy(&bytes), 10)
 }
 
-pub fn parse_bing_results(html: &str, max_count: usize) -> Vec<RawSearchHit> {
+/// Every organic result is `div.snippet[data-type="web"]` holding the link,
+/// the title and the description. A captcha or consent page has none of
+/// those nodes, so an empty parse is also the "blocked" answer.
+pub fn parse_brave_results(html: &str, max_count: usize) -> Vec<RawSearchHit> {
     let doc = Html::parse_document(html);
-    let Ok(item_sel) = Selector::parse("li.b_algo") else {
+    let Ok(item_sel) = Selector::parse("div.snippet[data-type='web']") else {
         return Vec::new();
     };
-    let Ok(link_sel) = Selector::parse("h2 a") else {
+    let Ok(link_sel) = Selector::parse("a[href]") else {
         return Vec::new();
     };
-    let Ok(desc_sel) = Selector::parse(".b_caption p, p") else {
+    let Ok(title_sel) = Selector::parse("div.title") else {
+        return Vec::new();
+    };
+    let Ok(desc_sel) = Selector::parse("div.generic-snippet") else {
         return Vec::new();
     };
 
     let mut hits = Vec::new();
     for item in doc.select(&item_sel) {
-        let Some(link) = item.select(&link_sel).next() else {
+        let Some(link) = item
+            .select(&link_sel)
+            .find(|a| a.value().attr("href").is_some_and(|h| h.starts_with("http")))
+        else {
             continue;
         };
-        let Some(raw_href) = link.value().attr("href").map(str::trim) else {
-            continue;
-        };
-        if raw_href.starts_with("https://www.bing.com/aclick?") {
+        let href = link.value().attr("href").unwrap_or_default().trim();
+        if href.contains("search.brave.com") {
             continue;
         }
-        let url = unwrap_bing_url(raw_href).unwrap_or_else(|| raw_href.to_string());
-        if !url.starts_with("http") {
-            continue;
+        let mut title = item
+            .select(&title_sel)
+            .next()
+            .map(|t| collapse_ws(&t.text().collect::<String>()))
+            .unwrap_or_default();
+        if title.is_empty() {
+            title = collapse_ws(&link.text().collect::<String>());
         }
-        let title = collapse_ws(&link.text().collect::<String>());
         if title.is_empty() {
             continue;
         }
         let snippet = item
             .select(&desc_sel)
             .next()
-            .map(|p| collapse_ws(&p.text().collect::<String>()))
-            .unwrap_or_default();
-
-        hits.push(RawSearchHit {
-            title,
-            url,
-            snippet,
-            source: "bing",
-            badge: None,
-            boost: 0.0,
-            repo_url: None,
-        });
-        if hits.len() >= max_count {
-            break;
-        }
-    }
-    hits
-}
-
-/// Unwrap Bing's `https://www.bing.com/ck/a?!&&p=...&u=a1<base64url>` redirect URLs.
-pub fn unwrap_bing_url(raw_url: &str) -> Option<String> {
-    let parsed = Url::parse(raw_url).ok()?;
-    let (_, u_val) = parsed.query_pairs().find(|(k, _)| k == "u")?;
-    if u_val.len() <= 2 {
-        return None;
-    }
-    let b64 = &u_val[2..];
-    let bytes = base64url_decode(b64)?;
-    let decoded = String::from_utf8(bytes).ok()?;
-    if decoded.starts_with("http://") || decoded.starts_with("https://") {
-        Some(decoded)
-    } else {
-        None
-    }
-}
-
-fn base64url_decode(input: &str) -> Option<Vec<u8>> {
-    let mut buf = Vec::with_capacity(input.len() * 3 / 4);
-    let mut accum = 0u32;
-    let mut bits = 0u8;
-    for b in input.bytes() {
-        if b == b'=' {
-            break;
-        }
-        let val = match b {
-            b'A'..=b'Z' => b - b'A',
-            b'a'..=b'z' => b - b'a' + 26,
-            b'0'..=b'9' => b - b'0' + 52,
-            b'-' | b'+' => 62,
-            b'_' | b'/' => 63,
-            _ => return None,
-        };
-        accum = (accum << 6) | (val as u32);
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            buf.push(((accum >> bits) & 0xFF) as u8);
-        }
-    }
-    Some(buf)
-}
-
-async fn search_duckduckgo(client: &Client, query: &str) -> Vec<RawSearchHit> {
-    let Ok(resp) = client
-        .post("https://html.duckduckgo.com/html/")
-        .header(reqwest::header::REFERER, "https://html.duckduckgo.com/")
-        .header(reqwest::header::ACCEPT_LANGUAGE, "en-US,en;q=0.9")
-        .header("Sec-Fetch-Dest", "document")
-        .header("Sec-Fetch-Mode", "navigate")
-        .header("Sec-Fetch-Site", "same-origin")
-        .header("Sec-Fetch-User", "?1")
-        .form(&[("q", query), ("b", ""), ("kl", "wt-wt")])
-        .send()
-        .await
-    else {
-        return Vec::new();
-    };
-    if resp.status().as_u16() == 202 || !resp.status().is_success() {
-        return Vec::new();
-    }
-    let Ok(bytes) = resp.bytes().await else {
-        return Vec::new();
-    };
-    if bytes.len() > router::max_body_bytes() {
-        return Vec::new();
-    }
-    let html = String::from_utf8_lossy(&bytes);
-    if is_ddg_captcha(&html) {
-        return Vec::new();
-    }
-    parse_ddg_hits(&html, 10)
-}
-
-pub fn is_ddg_captcha(html: &str) -> bool {
-    html.contains("challenge-form")
-        || html.contains("anomaly-modal")
-        || html.contains("Select all squares containing a duck")
-}
-
-pub fn parse_ddg_hits(html: &str, max_count: usize) -> Vec<RawSearchHit> {
-    let doc = Html::parse_document(html);
-    let Ok(item_sel) = Selector::parse("div.result, div.web-result") else {
-        return Vec::new();
-    };
-    let Ok(title_sel) = Selector::parse("a.result__a") else {
-        return Vec::new();
-    };
-    let Ok(snip_sel) = Selector::parse(".result__snippet") else {
-        return Vec::new();
-    };
-
-    let mut hits = Vec::new();
-    for item in doc.select(&item_sel) {
-        if item
-            .value()
-            .attr("class")
-            .is_some_and(|c| c.contains("result--ad"))
-        {
-            continue;
-        }
-        let Some(a) = item.select(&title_sel).next() else {
-            continue;
-        };
-        let Some(raw_href) = a.value().attr("href").map(str::trim) else {
-            continue;
-        };
-        let url = super::unwrap_duckduckgo_url(raw_href);
-        if !url.starts_with("http") || url.starts_with("https://duckduckgo.com/y.js?") {
-            continue;
-        }
-        let title = collapse_ws(&a.text().collect::<String>());
-        if title.is_empty() {
-            continue;
-        }
-        let snippet = item
-            .select(&snip_sel)
-            .next()
             .map(|s| collapse_ws(&s.text().collect::<String>()))
             .unwrap_or_default();
 
         hits.push(RawSearchHit {
             title,
-            url,
+            url: href.to_string(),
             snippet,
-            source: "ddg",
+            source: "brave",
             badge: None,
             boost: 0.0,
             repo_url: None,
@@ -911,7 +709,7 @@ fn mark_github_rate_limited() {
 
 /// Query GitHub Search API (using `GITHUB_TOKEN`/`GH_TOKEN` if present); if GitHub
 /// returns 403/429 (10 req/min unauthenticated limit), transparently fall back to
-/// `site:github.com <query>` via Bing/Startpage.
+/// `site:github.com <query>` via Brave/Startpage.
 async fn search_github_with_fallback(
     api_client: &Client,
     web_client: &Client,
@@ -953,7 +751,7 @@ async fn search_site_github_fallback(
     limit: usize,
 ) -> Vec<RawSearchHit> {
     let site_q = format!("site:github.com {query}");
-    let mut hits = search_bing(web_client, &site_q).await;
+    let mut hits = search_brave(web_client, &site_q).await;
     if hits.is_empty() {
         hits = search_startpage(web_client, &site_q).await;
     }
@@ -1422,8 +1220,7 @@ mod tests {
         );
     }
 
-    /// `cc=en` plus `_EDGE_*` market cookies pinned Bing to the United States:
-    /// a Russian query came back with hiring ads and appliance stores.
+    /// One engine hit, for the ranking tests.
     fn hit(title: &str, url: &str, snippet: &str, source: &'static str) -> RawSearchHit {
         RawSearchHit {
             title: title.to_string(),
@@ -1446,20 +1243,20 @@ mod tests {
             "Мем «Серость» — кот из TikTok",
             "https://example.org/serost",
             "Серость — серый кот из тиктока, мем 2026 года",
-            "ddg",
+            "brave",
         )];
         let junk = vec![
             hit(
                 "Summer Place Apartment Homes",
                 "https://summerplace.example/",
                 "Apartments for rent in the United States",
-                "bing",
+                "brave",
             ),
             hit(
                 "15 of the Best Self-Employed Jobs",
                 "https://jobs.example/",
                 "Careers and hiring advice",
-                "bing",
+                "brave",
             ),
         ];
         let merged = fuse_and_rank(vec![relevant, junk], "серость кот мем", SearchCategory::Auto, 10);
@@ -1500,21 +1297,41 @@ mod tests {
             "Summer Place Apartment Homes",
             "https://summerplace.example/",
             "Apartments for rent",
-            "bing",
+            "brave",
         )];
         let merged = fuse_and_rank(vec![junk], "серость кот мем", SearchCategory::Auto, 10);
         assert_eq!(merged.len(), 1, "an empty answer is worse than a weak one");
     }
 
+    /// Brave's organic results, and nothing from its news/video rails.
     #[test]
-    fn bing_query_does_not_pin_a_country() {
-        let pairs = bing_query_pairs("серость кот мем");
-        assert!(pairs.iter().all(|(k, _)| *k != "cc"), "{pairs:?}");
-        assert!(
-            pairs
-                .iter()
-                .any(|(k, v)| *k == "q" && *v == "серость кот мем"),
-            "{pairs:?}"
-        );
+    fn brave_results_parse_link_title_and_snippet() {
+        let html = r#"
+            <div class="snippet svelte-x" data-pos="1" data-type="web">
+              <div class="result-body"><div class="result-content">
+                <a href="https://vc.ru/ai/2856648-mem-kotost" class="l1">
+                  <div class="title search-snippet-title">Мем котость: что это такое</div>
+                </a>
+                <div class="generic-snippet"><div class="content"><span class="t-secondary">April 7, 2026 -</span> Мем котость, кот Куки и Меллстрой</div></div>
+              </div></div>
+            </div>
+            <div class="snippet" data-type="news">
+              <a href="https://news.example/story">News rail item</a>
+            </div>
+        "#;
+        let hits = parse_brave_results(html, 5);
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0].url, "https://vc.ru/ai/2856648-mem-kotost");
+        assert!(hits[0].title.contains("котость"), "{:?}", hits[0].title);
+        assert!(hits[0].snippet.contains("Куки"), "{:?}", hits[0].snippet);
+        assert_eq!(hits[0].source, "brave");
+    }
+
+    /// A captcha/consent page has no result nodes: the parser must answer
+    /// with nothing rather than with chrome.
+    #[test]
+    fn a_brave_challenge_page_yields_no_hits() {
+        let html = "<html><body><div class='challenge'>Verify you are human</div></body></html>";
+        assert!(parse_brave_results(html, 5).is_empty());
     }
 }

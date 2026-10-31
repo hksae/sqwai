@@ -117,7 +117,7 @@ pub async fn fetch(args: &Value, ctx: &mut super::ToolCtx, allow_hosts: &[String
         .unwrap_or(false);
 
     // Fast path: if no raw CSS selector is requested and the page is already in
-    // our session LRU cache (from an earlier webfetch or deep websearch), serve
+    // our session LRU cache (from an earlier webfetch), serve
     // the requested section/query projection immediately in 0ms.
     if selector.is_none()
         && !force_refresh
@@ -172,7 +172,7 @@ pub async fn fetch(args: &Value, ctx: &mut super::ToolCtx, allow_hosts: &[String
         }
     }
 
-    let cached = ranker::put_cached_page(url.as_str(), doc.title, doc.markdown);
+    let cached = ranker::put_cached_page(url.as_str(), doc.markdown);
     // Fresh bytes: the section numbering of the previous document is gone, and
     // with it any claim that the model has already read this page.
     ctx.reset_web_page(&canonical);
@@ -244,11 +244,8 @@ discussions or papers"
         },
         None => meta_search::SearchCategory::Auto,
     };
-    // Deep search fetches every top result: ~5 KB of transcript per hit, which
-    // is the most expensive thing an agent can do on a page it may never read.
-    let deep = args.get("deep").and_then(Value::as_bool).unwrap_or(false);
 
-    match meta_search::run_meta_search(query, count, timeout, category, deep, &[]).await {
+    match meta_search::run_meta_search(query, count, timeout, category).await {
         Ok(output) => Outcome::ok(truncate(&output)),
         Err(err) => Outcome::err(format!("websearch {err}")),
     }
@@ -265,24 +262,6 @@ pub(crate) fn looks_like_html(raw: &str) -> bool {
         || head.contains("<body")
         || head.contains("<head")
         || head.contains("<div")
-}
-
-pub(crate) fn unwrap_duckduckgo_url(raw: &str) -> String {
-    let candidate = if raw.starts_with("//") {
-        format!("https:{raw}")
-    } else if raw.starts_with('/') {
-        format!("https://duckduckgo.com{raw}")
-    } else {
-        raw.to_string()
-    };
-
-    if let Ok(parsed) = Url::parse(&candidate)
-        && let Some((_, target)) = parsed.query_pairs().find(|(k, _)| k == "uddg")
-        && !target.is_empty()
-    {
-        return target.into_owned();
-    }
-    raw.to_string()
 }
 
 pub(crate) fn clean_fragment(html: &str) -> String {
@@ -305,16 +284,6 @@ fn html_to_text(html: &str) -> String {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
-}
-
-#[cfg(test)]
-fn parse_search_results(html: &str, count: usize) -> String {
-    let hits = meta_search::parse_ddg_hits(html, count);
-    hits.iter()
-        .enumerate()
-        .map(|(i, h)| format!("{}. {}\n   {}\n   {}", i + 1, h.title, h.url, h.snippet))
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 pub(crate) fn decode_entities(text: &str) -> String {
@@ -441,34 +410,11 @@ mod tests {
     }
 
     #[test]
-    fn parses_search_results_with_markup_and_limits_count() {
-        let html = r#"
-            <div class="result results_links">
-              <a class="result__a" href="https://example.com/?x=1&amp;y=2">First <b>result</b></a>
-              <div class="result__snippet">A useful <b>snippet</b>.</div>
-            </div>
-            <div class="result results_links">
-              <a class="result__a" href="https://second.example/">Second</a>
-              <div class="result__snippet">Another result.</div>
-            </div>
-        "#;
-        let output = parse_search_results(html, 1);
-        assert!(output.contains("1. First result"));
-        assert!(output.contains("https://example.com/?x=1&y=2"));
-        assert!(!output.contains("Second"));
+    fn clean_fragment_strips_markup_inside_snippets() {
         assert_eq!(
             clean_fragment("A useful <b>snippet</b>."),
             "A useful snippet ."
         );
-
-        let ddg_html = r#"
-            <div class="result results_links">
-              <a class="result__a" href="/l/?uddg=https%3A%2F%2Fcrates.io%2Fcrates%2Ftokio&amp;rut=123">Tokio crate</a>
-              <div class="result__snippet">Async runtime.</div>
-            </div>
-        "#;
-        let ddg_output = parse_search_results(ddg_html, 1);
-        assert!(ddg_output.contains("https://crates.io/crates/tokio"));
     }
 
     #[test]
@@ -646,7 +592,6 @@ Configure connection and request timeouts with `Duration::from_secs`.
 
         let page = ranker::put_cached_page(
             "https://example.com/docs/reqwest?utm_source=test#top",
-            Some("Reqwest Docs".into()),
             md.into(),
         );
         // Canonical URL lookup hits cache even without tracking params.
@@ -664,11 +609,7 @@ Configure connection and request timeouts with `Duration::from_secs`.
     #[test]
     fn a_refetch_of_one_page_returns_only_sections_the_model_has_not_seen() {
         let md = "# Overview\n\nIntroductory paragraph.\n\n## Install\n\nAdd reqwest to Cargo.toml.\n\n## Timeouts\n\nConfigure with Duration::from_secs.\n";
-        let page = ranker::put_cached_page(
-            "https://example.com/delta-ledger",
-            Some("Ledger Docs".into()),
-            md.into(),
-        );
+        let page = ranker::put_cached_page("https://example.com/delta-ledger", md.into());
         let mut ctx = crate::agent::tools::ToolCtx::new(std::env::temp_dir());
         ctx.current_call_id = Some("call_1".into());
         let url = page.canonical_url.clone();
@@ -758,30 +699,26 @@ Configure connection and request timeouts with `Duration::from_secs`.
         assert_eq!(sp_hits.len(), 1);
         assert_eq!(sp_hits[0].url, "https://tokio.rs/tokio/tutorial/spawning");
 
-        let bing_html = r#"
-            <li class="b_algo">
-                <h2><a href="https://www.bing.com/ck/a?!&amp;&amp;p=123&amp;u=a1aHR0cHM6Ly90b2tpby5ycy90b2tpby90dXRvcmlhbC9zcGF3bmluZw&amp;ntb=1">Spawning | Tokio Runtime</a></h2>
-                <div class="b_caption"><p>Spawning submits the task to the Tokio scheduler.</p></div>
-            </li>
+        let brave_html = r#"
+            <div class="snippet svelte-1" data-pos="1" data-type="web">
+              <a href="https://tokio.rs/tokio/tutorial/spawning" class="l1">
+                <div class="title">Spawning | Tokio Runtime</div>
+              </a>
+              <div class="generic-snippet"><div class="content">Spawning submits the task to the Tokio scheduler.</div></div>
+            </div>
         "#;
-        let bing_hits = meta_search::parse_bing_results(bing_html, 5);
-        assert_eq!(bing_hits.len(), 1);
-        assert_eq!(bing_hits[0].url, "https://tokio.rs/tokio/tutorial/spawning");
+        let brave_hits = meta_search::parse_brave_results(brave_html, 5);
+        assert_eq!(brave_hits.len(), 1);
+        assert_eq!(brave_hits[0].url, "https://tokio.rs/tokio/tutorial/spawning");
 
         let merged = meta_search::fuse_and_rank(
-            vec![sp_hits, bing_hits],
+            vec![sp_hits, brave_hits],
             "tokio spawn",
             meta_search::SearchCategory::Auto,
             5,
         );
         assert_eq!(merged.len(), 1);
-        assert_eq!(merged[0].sources, vec!["google", "bing"]);
-    }
-
-    #[test]
-    fn ddg_captcha_is_detected_and_rejected() {
-        let captcha = r#"<html><body><form id="challenge-form">Select all squares containing a duck</form></body></html>"#;
-        assert!(meta_search::is_ddg_captcha(captcha));
+        assert_eq!(merged[0].sources, vec!["google", "brave"]);
     }
 
     #[test]
@@ -907,35 +844,7 @@ let y = 2;</pre></td>
         assert!(gh_merged.sources.contains(&"google") && gh_merged.sources.contains(&"crates.io"));
         assert!(gh_merged.badges.contains(&"v0.30.2".to_string()));
 
-        // 4. Breadcrumbs (`<!-- Section: # Struct Tokio / ## fn spawn / ### Panics -->`)
-        //    and Global Cross-Page BM25 Pool lifting Page 3's exact code match over Page 1's generic prose.
-        let page1 = ranker::put_cached_page(
-            "https://example.com/blog/intro",
-            Some("General Intro".into()),
-            "# General Intro\n\nThis blog talks generally about memory management in many languages.".into(),
-        );
-        let page3 = ranker::put_cached_page(
-            "https://example.com/docs/vm",
-            Some("VM Internals".into()),
-            "# Struct Immix\n\nOverview.\n\n## fn alloc_frame\n\nAllocates.\n\n### Safety & Panics\n\n```rust\nImmixAllocator::alloc_frame(size);\n```".into(),
-        );
-        let u1 = Url::parse("https://example.com/blog/intro").unwrap();
-        let u3 = Url::parse("https://example.com/docs/vm").unwrap();
-        let global = ranker::extract_global_deep_excerpts(
-            &[(u1, page1, 0), (u3, page3, 2)],
-            "ImmixAllocator alloc_frame",
-            800,
-        );
-        assert!(
-            global.contains("<!-- Section: # Struct Immix / ## fn alloc_frame / ### Safety & Panics -->"),
-            "missing ancestor breadcrumb comment in:\n{global}"
-        );
-        assert!(
-            global.contains("ImmixAllocator::alloc_frame(size);"),
-            "global BM25 pool must pick Page 3's exact code match:\n{global}"
-        );
-
-        // 5. Package query sanitization strips registry meta-words (`tokio-util crate latest version crates.io` -> `tokio-util`).
+        // 4. Package query sanitization strips registry meta-words (`tokio-util crate latest version crates.io` -> `tokio-util`).
         assert_eq!(
             meta_search::sanitize_package_query("tokio-util crate latest version crates.io"),
             "tokio-util"
@@ -948,7 +857,6 @@ let y = 2;</pre></td>
         // 6. Fuzzy stemmed-token section matching (`section="Feature flags"` -> `## Cargo Features`).
         let crate_page = ranker::put_cached_page(
             "https://crates.io/crates/tokio-util",
-            Some("tokio-util".into()),
             "# Crate tokio-util\n\nOverview.\n\n## Cargo Features\n\n- `rt`\n- `codec`\n\n## README\n\nSome readme.".into(),
         );
         let feat_proj = ranker::project_page_seen(&crate_page, None, Some("Feature flags"), &std::collections::HashSet::new()).text;
@@ -984,8 +892,7 @@ let y = 2;</pre></td>
         let search_out = search(
             &json!({
                 "query": "rust tokio spawn",
-                "count": 5,
-                "deep": true
+                "count": 5
             }),
             &crate::config::ToolsConfig::default(),
         )
@@ -993,7 +900,6 @@ let y = 2;</pre></td>
         assert!(search_out.ok, "search failed: {}", search_out.output);
         println!("=== LIVE META-SEARCH OUTPUT ===\n{}\n", search_out.output);
         assert!(search_out.output.contains("tokio"));
-        assert!(search_out.output.contains("## Deep Page Excerpts"));
 
         // Now fetch a specific section from tokio tutorial (should hit the local LRU cache in 0ms!).
         let fetch_out = fetch(

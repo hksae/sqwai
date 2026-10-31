@@ -36,7 +36,6 @@ pub struct PageSection {
 #[derive(Debug, Clone)]
 pub struct CachedPage {
     pub canonical_url: String,
-    pub title: Option<String>,
     pub markdown: String,
     pub sections: Vec<PageSection>,
     pub fetched_at: Instant,
@@ -58,12 +57,11 @@ pub fn get_cached_page(url: &str) -> Option<CachedPage> {
     None
 }
 
-pub fn put_cached_page(url: &str, title: Option<String>, markdown: String) -> CachedPage {
+pub fn put_cached_page(url: &str, markdown: String) -> CachedPage {
     let canonical_url = canonicalize_url(url);
     let sections = parse_sections(&markdown);
     let page = CachedPage {
         canonical_url: canonical_url.clone(),
-        title,
         markdown,
         sections,
         fetched_at: Instant::now(),
@@ -700,173 +698,6 @@ fn assemble_selected_sections(
         text: trim_middle(out.trim(), MAX_PROJECTED_CHARS),
         served: fresh,
     }
-}
-
-/// Global cross-page BM25 pool ranker for `websearch(deep=true)`:
-/// Scores all sections across all top pages together in one unified BM25 corpus
-/// with a gentle RRF page-rank prior, so a high-signal code block on Page 3
-/// beats generic prose on Page 1 instead of wasting budget per page.
-pub fn extract_global_deep_excerpts(
-    pages: &[(Url, CachedPage, usize)],
-    query: &str,
-    total_budget_chars: usize,
-) -> String {
-    if pages.is_empty() {
-        return String::new();
-    }
-
-    // Build global section pool: `(page_array_idx, section_idx, page_rank)`.
-    let mut pool: Vec<(usize, usize, usize)> = Vec::new();
-    let mut flat_sections: Vec<PageSection> = Vec::new();
-    for (p_idx, (_, page, page_rank)) in pages.iter().enumerate() {
-        let title_prefix = page.title.as_deref().unwrap_or_default();
-        for sec in &page.sections {
-            pool.push((p_idx, sec.index, *page_rank));
-            let mut enriched = sec.clone();
-            if !title_prefix.is_empty() && !enriched.breadcrumb.contains(title_prefix) {
-                enriched.breadcrumb = format!("{title_prefix} / {}", enriched.breadcrumb);
-            }
-            flat_sections.push(enriched);
-        }
-    }
-
-    if flat_sections.is_empty() {
-        return String::new();
-    }
-
-    let mut global_scored = rank_sections(&flat_sections, query);
-    // Apply RRF page-rank prior (`1.15x` for rank 0, `1.075x` for rank 1, `1.05x` for rank 2).
-    for (pool_idx, score) in &mut global_scored {
-        let (_, _, page_rank) = pool[*pool_idx];
-        let page_prior = 1.0 + 0.15 / (1.0 + page_rank as f64);
-        *score *= page_prior;
-    }
-    global_scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-    // If no query tokens matched (rare), fall back to section 0 of each page.
-    if global_scored.is_empty() {
-        for (pool_idx, (_, sec_idx, _)) in pool.iter().enumerate() {
-            if *sec_idx == 0 {
-                global_scored.push((pool_idx, 1.0));
-            }
-        }
-    }
-
-    // Greedily pick the best sections globally up to `total_budget_chars`.
-    // Cap each page at 2 sections and ~55% of total budget so one long forum page
-    // never starves official API documentation pages.
-    let per_page_char_cap = (total_budget_chars * 11) / 20;
-    let mut chosen_per_page: HashMap<usize, Vec<usize>> = HashMap::new();
-    let mut chars_per_page: HashMap<usize, usize> = HashMap::new();
-    let mut used_chars = 0usize;
-
-    for (pool_idx, _) in global_scored {
-        if used_chars >= total_budget_chars {
-            break;
-        }
-        let (p_idx, sec_idx, _) = pool[pool_idx];
-        let page = &pages[p_idx].1;
-        let page_used = *chars_per_page.get(&p_idx).unwrap_or(&0);
-        let entry = chosen_per_page.entry(p_idx).or_default();
-        if entry.len() >= 2 || entry.contains(&sec_idx) || page_used >= per_page_char_cap {
-            continue;
-        }
-
-        // If this is a deep section on an API reference page where an early section (0 or 1)
-        // holds the compact item declaration/signature (`<= 2_400` chars with a code block),
-        // automatically include that signature section so the type/function declaration is kept!
-        if let Some(sig_sec) = page
-            .sections
-            .iter()
-            .take(2)
-            .find(|s| s.index < sec_idx && s.has_code_block && s.char_len <= 2_400)
-            && !entry.contains(&sig_sec.index)
-        {
-            let sig_cost = sig_sec.char_len.min(1_200);
-            if used_chars + sig_cost <= total_budget_chars {
-                entry.push(sig_sec.index);
-                used_chars += sig_cost;
-                *chars_per_page.entry(p_idx).or_insert(0) += sig_cost;
-            }
-        }
-
-        let sec_len = page.sections[sec_idx].char_len.min(2_200);
-        if used_chars + sec_len > total_budget_chars && used_chars >= 1_500 {
-            continue;
-        }
-        entry.push(sec_idx);
-        used_chars += sec_len;
-        *chars_per_page.entry(p_idx).or_insert(0) += sec_len;
-    }
-
-    let mut page_blocks = Vec::new();
-    let mut remaining = total_budget_chars;
-    for (p_idx, (url, page, _)) in pages.iter().enumerate() {
-        let Some(mut sec_indices) = chosen_per_page.remove(&p_idx) else {
-            continue;
-        };
-        if sec_indices.is_empty() || remaining < 150 {
-            continue;
-        }
-        sec_indices.sort_unstable();
-
-        let mut sec_renders = Vec::new();
-        for sec_idx in sec_indices {
-            if remaining < 120 {
-                break;
-            }
-            let sec = &page.sections[sec_idx];
-            let cap = remaining.min(2_400);
-            let body = if sec.char_len <= cap {
-                sec.body.clone()
-            } else {
-                truncate_preserving_code(&sec.body, cap)
-            };
-            let rendered = if sec.breadcrumb.contains(" / ") || sec.heading.contains("(part ") {
-                format!("<!-- Section: {} -->\n{}", sec.breadcrumb, body)
-            } else {
-                body
-            };
-            remaining = remaining.saturating_sub(rendered.chars().count());
-            sec_renders.push(rendered);
-        }
-
-        if !sec_renders.is_empty() {
-            let heading = page.title.as_deref().unwrap_or_else(|| url.as_str());
-            page_blocks.push(format!(
-                "### From [{heading}]({url})\n\n{}",
-                sec_renders.join("\n\n")
-            ));
-        }
-    }
-
-    page_blocks.join("\n\n---\n\n")
-}
-
-fn truncate_preserving_code(text: &str, max_chars: usize) -> String {
-    if text.chars().count() <= max_chars {
-        return text.to_string();
-    }
-    let mut out = String::new();
-    let mut count = 0usize;
-    let mut in_fence = false;
-    for line in text.lines() {
-        let l_len = line.chars().count() + 1;
-        if count + l_len > max_chars.saturating_sub(20) {
-            break;
-        }
-        if line.trim_start().starts_with("```") {
-            in_fence = !in_fence;
-        }
-        out.push_str(line);
-        out.push('\n');
-        count += l_len;
-    }
-    if in_fence {
-        out.push_str("```\n");
-    }
-    out.push_str("…");
-    out
 }
 
 /// Rank `PageSection`s against `query` using Okapi BM25 + heading & code boosts.

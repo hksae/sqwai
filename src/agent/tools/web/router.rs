@@ -41,10 +41,8 @@ pub(crate) fn apply_github_headers(
 /// Result of fetching and converting a URL into clean Markdown.
 #[derive(Debug, Clone)]
 pub struct FetchedDocument {
-    pub title: Option<String>,
     pub markdown: String,
     pub raw_html: Option<String>,
-    pub final_url: Url,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -243,7 +241,7 @@ pub async fn fetch_smart(
         let route = classify_url(url);
         match route {
             DomainRoute::GitHubBlob { owner, repo, rest } => {
-                if let Ok(doc) = fetch_github_blob(client, url, &owner, &repo, &rest).await {
+                if let Ok(doc) = fetch_github_blob(client, &owner, &repo, &rest).await {
                     return Ok(doc);
                 }
             }
@@ -253,28 +251,28 @@ pub async fn fetch_smart(
                 kind,
                 number,
             } => {
-                if let Ok(doc) = fetch_github_issue(client, url, &owner, &repo, kind, number).await
+                if let Ok(doc) = fetch_github_issue(client, &owner, &repo, kind, number).await
                 {
                     return Ok(doc);
                 }
             }
             DomainRoute::GitHubRepo { owner, repo } => {
-                if let Ok(doc) = fetch_github_repo(client, url, &owner, &repo).await {
+                if let Ok(doc) = fetch_github_repo(client, &owner, &repo).await {
                     return Ok(doc);
                 }
             }
             DomainRoute::CratesIo { crate_name } => {
-                if let Ok(doc) = fetch_crates_io(client, url, &crate_name).await {
+                if let Ok(doc) = fetch_crates_io(client, &crate_name).await {
                     return Ok(doc);
                 }
             }
             DomainRoute::NpmPackage { pkg_name } => {
-                if let Ok(doc) = fetch_npm_package(client, url, &pkg_name).await {
+                if let Ok(doc) = fetch_npm_package(client, &pkg_name).await {
                     return Ok(doc);
                 }
             }
             DomainRoute::PyPiPackage { pkg_name } => {
-                if let Ok(doc) = fetch_pypi_package(client, url, &pkg_name).await {
+                if let Ok(doc) = fetch_pypi_package(client, &pkg_name).await {
                     return Ok(doc);
                 }
             }
@@ -290,7 +288,7 @@ pub async fn fetch_smart(
                 }
             }
             DomainRoute::WikipediaArticle { host, title } => {
-                if let Ok(doc) = fetch_wikipedia_article(client, url, &host, &title).await {
+                if let Ok(doc) = fetch_wikipedia_article(client, &host, &title).await {
                     return Ok(doc);
                 }
             }
@@ -450,10 +448,8 @@ async fn standard_document(
     {
         let normalized = markdown::normalize_markdown(raw);
         return Ok(FetchedDocument {
-            title: None,
             markdown: normalized,
             raw_html: None,
-            final_url,
         });
     }
 
@@ -464,10 +460,8 @@ async fn standard_document(
             .and_then(|v| serde_json::to_string_pretty(&v).ok())
             .unwrap_or_else(|| raw.to_string());
         return Ok(FetchedDocument {
-            title: None,
             markdown: format!("```json\n{formatted}\n```"),
             raw_html: None,
-            final_url,
         });
     }
 
@@ -477,14 +471,12 @@ async fn standard_document(
 
     if !is_html {
         return Ok(FetchedDocument {
-            title: None,
             markdown: raw.to_string(),
             raw_html: if need_raw_html {
                 Some(raw.to_string())
             } else {
                 None
             },
-            final_url,
         });
     }
 
@@ -496,15 +488,12 @@ async fn standard_document(
         && let Some(so_md) = extract_stackoverflow_dom(raw, &final_url)
     {
         return Ok(FetchedDocument {
-            title: None,
             markdown: so_md,
             raw_html: None,
-            final_url,
         });
     }
 
     let ExtractedDoc {
-        title,
         mut markdown,
         alternate_markdown_url,
         llms_txt_url,
@@ -551,10 +540,8 @@ async fn standard_document(
         let alt_text = String::from_utf8_lossy(&alt_bytes);
         if !super::looks_like_html(&alt_text) && alt_text.trim().len() >= 64 {
             return Ok(FetchedDocument {
-                title,
                 markdown: markdown::normalize_markdown(&alt_text),
                 raw_html: None,
-                final_url,
             });
         }
     }
@@ -568,14 +555,12 @@ async fn standard_document(
         );
     }
     Ok(FetchedDocument {
-        title,
         markdown,
         raw_html: if need_raw_html {
             Some(raw.to_string())
         } else {
             None
         },
-        final_url,
     })
 }
 
@@ -605,7 +590,6 @@ fn extract_link_header_markdown(
 
 async fn fetch_github_blob(
     client: &Client,
-    original_url: &Url,
     owner: &str,
     repo: &str,
     rest: &str,
@@ -648,16 +632,13 @@ async fn fetch_github_blob(
     };
 
     Ok(FetchedDocument {
-        title: Some(title),
         markdown,
         raw_html: None,
-        final_url: original_url.clone(),
     })
 }
 
 async fn fetch_github_issue(
     client: &Client,
-    original_url: &Url,
     owner: &str,
     repo: &str,
     kind: &str,
@@ -717,16 +698,13 @@ async fn fetch_github_issue(
     }
 
     Ok(FetchedDocument {
-        title: Some(format!("{owner}/{repo}#{number}: {title_str}")),
         markdown: markdown::normalize_markdown(&md),
         raw_html: None,
-        final_url: original_url.clone(),
     })
 }
 
 async fn fetch_github_repo(
     client: &Client,
-    original_url: &Url,
     owner: &str,
     repo: &str,
 ) -> Result<FetchedDocument, String> {
@@ -739,7 +717,6 @@ async fn fetch_github_repo(
     );
 
     let mut md = String::new();
-    let mut title = Some(format!("{owner}/{repo}"));
 
     if let Ok(r_resp) = repo_res
         && r_resp.status().is_success()
@@ -757,9 +734,6 @@ async fn fetch_github_repo(
             .map(|a| a.iter().filter_map(Value::as_str).collect())
             .unwrap_or_default();
 
-        if !desc.is_empty() {
-            title = Some(format!("{owner}/{repo} — {desc}"));
-        }
         md.push_str(&format!("# {owner}/{repo}\n\n"));
         if !desc.is_empty() {
             md.push_str(&format!("> {desc}\n\n"));
@@ -793,16 +767,13 @@ async fn fetch_github_repo(
     }
 
     Ok(FetchedDocument {
-        title,
         markdown: markdown::normalize_markdown(&md),
         raw_html: None,
-        final_url: original_url.clone(),
     })
 }
 
 async fn fetch_crates_io(
     client: &Client,
-    original_url: &Url,
     crate_name: &str,
 ) -> Result<FetchedDocument, String> {
     let api_url = format!("https://crates.io/api/v1/crates/{crate_name}");
@@ -901,16 +872,13 @@ async fn fetch_crates_io(
     }
 
     Ok(FetchedDocument {
-        title: Some(format!("{name} v{version} - crates.io")),
         markdown: markdown::normalize_markdown(&md),
         raw_html: None,
-        final_url: original_url.clone(),
     })
 }
 
 async fn fetch_npm_package(
     client: &Client,
-    original_url: &Url,
     pkg_name: &str,
 ) -> Result<FetchedDocument, String> {
     let encoded = pkg_name.replace('/', "%2F");
@@ -959,16 +927,13 @@ async fn fetch_npm_package(
     }
 
     Ok(FetchedDocument {
-        title: Some(format!("{name} v{latest_ver} - npm")),
         markdown: markdown::normalize_markdown(&md),
         raw_html: None,
-        final_url: original_url.clone(),
     })
 }
 
 async fn fetch_pypi_package(
     client: &Client,
-    original_url: &Url,
     pkg_name: &str,
 ) -> Result<FetchedDocument, String> {
     let api_url = format!("https://pypi.org/pypi/{pkg_name}/json");
@@ -1008,10 +973,8 @@ async fn fetch_pypi_package(
     }
 
     Ok(FetchedDocument {
-        title: Some(format!("{name} v{version} - PyPI")),
         markdown: markdown::normalize_markdown(&md),
         raw_html: None,
-        final_url: original_url.clone(),
     })
 }
 
@@ -1020,7 +983,7 @@ async fn fetch_reddit_thread(
     original_url: &Url,
     json_url: &str,
 ) -> Result<FetchedDocument, String> {
-    if let Ok(doc) = fetch_reddit_json(client, original_url, json_url).await {
+    if let Ok(doc) = fetch_reddit_json(client, json_url).await {
         return Ok(doc);
     }
     fetch_old_reddit_html(client, original_url).await
@@ -1028,7 +991,6 @@ async fn fetch_reddit_thread(
 
 async fn fetch_reddit_json(
     client: &Client,
-    original_url: &Url,
     json_url: &str,
 ) -> Result<FetchedDocument, String> {
     let resp = client
@@ -1110,10 +1072,8 @@ async fn fetch_reddit_json(
     }
 
     Ok(FetchedDocument {
-        title: Some(format!("{title} ({sub})")),
         markdown: markdown::normalize_markdown(&md),
         raw_html: None,
-        final_url: original_url.clone(),
     })
 }
 
@@ -1141,10 +1101,8 @@ async fn fetch_old_reddit_html(
     let md = extract_old_reddit_dom(&html, original_url)
         .ok_or_else(|| "failed to parse old.reddit html".to_string())?;
     Ok(FetchedDocument {
-        title: None,
         markdown: md,
         raw_html: None,
-        final_url: original_url.clone(),
     })
 }
 
@@ -1279,10 +1237,8 @@ async fn fetch_stackexchange_question(
     }
 
     Ok(FetchedDocument {
-        title: Some(title),
         markdown: markdown::normalize_markdown(&md),
         raw_html: None,
-        final_url: original_url.clone(),
     })
 }
 
@@ -1336,7 +1292,6 @@ fn extract_stackoverflow_dom(html: &str, base_url: &Url) -> Option<String> {
 
 async fn fetch_wikipedia_article(
     client: &Client,
-    original_url: &Url,
     host: &str,
     title: &str,
 ) -> Result<FetchedDocument, String> {
@@ -1398,10 +1353,8 @@ async fn fetch_wikipedia_article(
     }
 
     Ok(FetchedDocument {
-        title: Some(format!("{page_title} - Wikipedia")),
         markdown: markdown::normalize_markdown(&md),
         raw_html: None,
-        final_url: original_url.clone(),
     })
 }
 

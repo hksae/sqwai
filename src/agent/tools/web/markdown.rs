@@ -11,7 +11,6 @@ use scraper::{ElementRef, Html, Node, Selector};
 /// Result of parsing an HTML page into structured Markdown.
 #[derive(Debug, Clone)]
 pub struct ExtractedDoc {
-    pub title: Option<String>,
     pub markdown: String,
     /// `<link rel="alternate" type="text/markdown" href="...">` (llms.txt v2).
     pub alternate_markdown_url: Option<String>,
@@ -49,7 +48,6 @@ pub fn html_to_markdown(html: &str, base_url: Option<&Url>) -> ExtractedDoc {
     }
 
     ExtractedDoc {
-        title,
         markdown,
         alternate_markdown_url,
         llms_txt_url,
