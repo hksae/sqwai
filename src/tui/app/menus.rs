@@ -937,7 +937,7 @@ impl App {
             self.session_search = Self::fresh_input(String::new());
             self.session_focus = false;
         }
-        if matches!(self.cur_menu(), Some(Menu::Providers)) {
+        if matches!(self.cur_menu(), Some(Menu::Providers | Menu::SearchProvider)) {
             self.prov_search = Self::fresh_input(String::new());
             self.prov_focus = false;
         }
@@ -1577,7 +1577,7 @@ impl App {
         match &self.cur_menu() {
             Some(Menu::Settings) => " Config ".into(),
             Some(Menu::UndoShadow) => " Config · undo shadow ".into(),
-            Some(Menu::SearchProvider) => " Config · search provider ".into(),
+            Some(Menu::SearchProvider) => " Search provider ".into(),
             Some(Menu::UndoList) => " Undo / Redo checkpoints ".into(),
             Some(Menu::Providers) => " Providers ".into(),
             Some(Menu::Models { provider }) => format!(" Models · {provider} "),

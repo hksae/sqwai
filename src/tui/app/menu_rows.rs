@@ -305,8 +305,19 @@ impl App {
     }
 
     fn build_search_provider_rows(&mut self) {
+        // Same shape as Providers: a Search row, then the list, current
+        // entry in the ink.
+        self.menu_rows.push(row(
+            Line::from(vec![Span::styled("Search", Theme::dim())]),
+            MenuAction::FocusSearch,
+        ));
         let current = self.cfg.web.search_provider;
+        let q = self.prov_search.lines().join("").to_lowercase();
+        let search = self.cfg.search_config();
         for provider in crate::config::SearchProvider::ALL {
+            if !q.is_empty() && !provider.as_str().contains(&q) {
+                continue;
+            }
             let style = if provider == current {
                 Theme::brand_ink()
             } else {
@@ -314,14 +325,19 @@ impl App {
             };
             let mut spans = vec![Span::styled(provider.as_str().to_string(), style)];
             if provider != crate::config::SearchProvider::Off {
-                let has_key = self.cfg.search_config().provider == provider
-                    && self.cfg.search_config().api_key.is_some();
+                let has_key = search.provider == provider && search.api_key.is_some();
                 spans.push(Span::styled(
                     if has_key { "  key set" } else { "  key missing" },
                     Theme::dim(),
                 ));
             }
             self.menu_rows.push(row(Line::from(spans), MenuAction::SetSearchProvider(provider)));
+        }
+        if self.menu_rows.len() == 1 {
+            self.menu_rows.push(row(
+                Line::from(vec![Span::styled("(no matches)", Theme::dim())]),
+                MenuAction::None,
+            ));
         }
     }
 
