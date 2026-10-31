@@ -1307,7 +1307,8 @@ impl App {
 
     fn input_cursor_at(&self, row: u16, col: u16) -> tui_textarea::CursorMove {
         let line = row.saturating_sub(self.last_input.y);
-        let column = col.saturating_sub(self.last_input.x + self.input_marker_w() + 1);
+        // the textarea renders at x + marker_w with no block border
+        let column = col.saturating_sub(self.last_input.x + self.input_marker_w());
         tui_textarea::CursorMove::Jump(line, column)
     }
 

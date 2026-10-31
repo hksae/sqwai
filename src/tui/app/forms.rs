@@ -161,7 +161,7 @@ impl App {
         let widest = self
             .form_fields
             .iter()
-            .map(|f| f.label().chars().count())
+            .map(|f| unicode_width::UnicodeWidthStr::width(f.label()))
             .max()
             .unwrap_or(0);
         (widest as u16 + 4).max(16)

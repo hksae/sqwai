@@ -23,7 +23,12 @@ fn main() -> Result<()> {
     while let Some(a) = it.next() {
         match a.as_str() {
             "--resume" | "-r" => {
-                resume_id = Some(it.next().context("--resume requires a session id")?.clone());
+                let id = it.next().context("--resume requires a session id")?;
+                anyhow::ensure!(
+                    !id.trim().is_empty(),
+                    "--resume requires a session id, not an empty string"
+                );
+                resume_id = Some(id.clone());
             }
             "--version" | "-V" => {
                 println!("sqwai {}", env!("CARGO_PKG_VERSION"));

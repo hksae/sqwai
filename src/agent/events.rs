@@ -1060,19 +1060,29 @@ fn tail_seq(path: &Path) -> Option<u64> {
         return None;
     }
     use std::io::{Read, Seek, SeekFrom};
-    let window = len.min(8192);
-    file.seek(SeekFrom::End(-(window as i64))).ok()?;
-    let mut buf = Vec::new();
-    file.read_to_end(&mut buf).ok()?;
-    let text = String::from_utf8_lossy(&buf);
-    text.lines()
-        .rev()
-        .filter(|line| !line.trim().is_empty())
-        .find_map(|line| {
-            serde_json::from_str::<Record>(line)
-                .ok()
-                .map(|record| record.seq)
-        })
+    // Records are small, but a final line larger than the first window used
+    // to make this return None — then a stale counter could reuse its seq.
+    // Grow until a complete line parses, up to the whole file.
+    let mut window = len.min(8192);
+    loop {
+        file.seek(SeekFrom::End(-(window as i64))).ok()?;
+        let mut buf = Vec::new();
+        file.read_to_end(&mut buf).ok()?;
+        let text = String::from_utf8_lossy(&buf);
+        let found = text
+            .lines()
+            .rev()
+            .filter(|line| !line.trim().is_empty())
+            .find_map(|line| {
+                serde_json::from_str::<Record>(line)
+                    .ok()
+                    .map(|record| record.seq)
+            });
+        if found.is_some() || window >= len {
+            return found;
+        }
+        window = (window.saturating_mul(8)).min(len);
+    }
 }
 
 fn last_seq(path: &Path) -> Result<u64> {

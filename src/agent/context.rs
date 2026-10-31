@@ -527,7 +527,13 @@ pub fn estimated_tokens(messages: &[Message]) -> u64 {
                 + m.tool_calls
                     .iter()
                     .map(|c| c.name.len() as u64 + c.args.to_string().len() as u64)
-                    .sum::<u64>())
+                    .sum::<u64>()
+                // provider-owned reasoning items ride the wire too; leaving
+                // them out let a reasoning-heavy history sail past the gate
+                + m.provider_state
+                    .as_ref()
+                    .map(crate::providers::json_byte_len)
+                    .unwrap_or(0))
             .div_ceil(4)
                 + media_tokens(m)
         })

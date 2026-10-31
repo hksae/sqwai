@@ -15,6 +15,23 @@ fn resync_advances_past_externally_appended_records() {
     assert_eq!(events.append("c", json!({})).unwrap(), 3);
 }
 
+/// The tail look every append makes used to read one fixed window. A record
+/// bigger than that window left no complete line inside it, the scan gave up,
+/// and the handle reused a seq that was already on disk.
+#[test]
+fn a_final_record_larger_than_the_tail_window_still_yields_its_seq() {
+    let root = root();
+    let mut early = EventLog::open(&root, "session").unwrap();
+    let mut late = EventLog::open(&root, "session").unwrap();
+    let big = late
+        .append("tool_result", json!({"summary": "x".repeat(12_000)}))
+        .unwrap();
+    assert_eq!(big, 1, "the big record is the file's only line");
+    let next = early.append("note", json!({"text": "after"})).unwrap();
+    assert_eq!(next, 2, "the stale handle must learn the seq from the tail");
+    fs::remove_dir_all(root).ok();
+}
+
 /// #189: a resync failure is loud and keeps the counter — never a
 /// silent stale reuse of sequence numbers.
 #[test]

@@ -35,6 +35,20 @@ fn document_pages_count_toward_estimated_and_wire_pressure() {
 }
 
 #[test]
+fn provider_owned_state_counts_toward_estimated_and_wire_pressure() {
+    let plain = Message::new(Role::Assistant, "done");
+    let state = serde_json::json!({"blob": "x".repeat(400)});
+    let bytes = crate::providers::json_byte_len(&state);
+    let with_state = plain.clone().with_provider_state(Some(state));
+    let stored =
+        estimated_tokens(std::slice::from_ref(&with_state)) - estimated_tokens(std::slice::from_ref(&plain));
+    assert_eq!(stored, bytes.div_ceil(4));
+    let wire = wire_estimated_tokens(&[with_state], &crate::agent::tool_output::Wire::default())
+        - wire_estimated_tokens(&[plain], &crate::agent::tool_output::Wire::default());
+    assert_eq!(wire, bytes.div_ceil(4));
+}
+
+#[test]
 fn anchor_keeps_event_facts_not_plan_state() {
     let root = temp_root("anchor");
     let mut plan = crate::plan::create(

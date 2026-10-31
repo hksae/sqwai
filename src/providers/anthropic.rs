@@ -244,9 +244,19 @@ pub fn build_body(req: &ChatRequest, default_max_tokens: u32, cache_breakpoints:
                 .and_then(|p| p.get_mut("content"))
                 .and_then(|c| c.as_array_mut())
         {
-            // thinking-first survives the merge: saved thinking goes ahead
-            // of the combined content, the rest extends it as before.
-            arr.splice(..0, thinking_blocks(m, thinking_on));
+            // thinking-first survives the merge: the new message's thinking
+            // joins the leading thinking run, so the merged turn keeps the
+            // original order A,B rather than reversing it.
+            let at = arr
+                .iter()
+                .take_while(|block| {
+                    matches!(
+                        block.get("type").and_then(|t| t.as_str()),
+                        Some("thinking" | "redacted_thinking")
+                    )
+                })
+                .count();
+            arr.splice(at..at, thinking_blocks(m, thinking_on));
             let mut rest = content_blocks(m, false);
             if is_last_user_with_tail {
                 rest.insert(0, json!({"type": "text", "text": super::host_tail(&tail)}));

@@ -2186,7 +2186,7 @@ fn dragging_in_the_composer_selects_text() {
     let mut buf = Buffer::empty(area);
     app.render_into(&mut buf, area);
     let row = app.last_input.y;
-    let col0 = app.last_input.x + app.input_marker_w() + 1;
+    let col0 = app.last_input.x + app.input_marker_w();
 
     let (tx, rx) = std::sync::mpsc::channel();
     let me = |kind: MouseEventKind, col: u16| {
@@ -2203,6 +2203,11 @@ fn dragging_in_the_composer_selects_text() {
     assert!(
         !app.input.is_selecting(),
         "a press alone only moves the cursor"
+    );
+    assert_eq!(
+        app.input.cursor(),
+        (0, 0),
+        "the first cell under the marker is character zero, not one past it"
     );
 
     tx.send(me(MouseEventKind::Drag(MouseButton::Left), col0 + 4))

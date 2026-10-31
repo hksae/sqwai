@@ -42,6 +42,16 @@ impl Registry {
             connections: HashMap::new(),
         };
         for server in config.servers.iter().filter(|server| server.enabled) {
+            // The namespaced tool is `mcp__{server}__{tool}` and the split
+            // takes the first `__`: a server name with the same sequence
+            // would route its tools to a prefix that is not a server.
+            if server.name.contains("__") {
+                crate::providers::log_http(&format!(
+                    "MCP warning: server name '{}' contains '__' and is refused",
+                    server.name
+                ));
+                continue;
+            }
             let connection = match &server.transport {
                 crate::config::McpTransport::Stdio { command, args, env } => {
                     match connect_stdio(command, args, env).await {
@@ -137,6 +147,21 @@ fn split_namespaced(name: &str) -> Option<(&str, &str)> {
     let rest = name.strip_prefix("mcp__")?;
     let (server, tool) = rest.split_once("__")?;
     (!server.is_empty() && !tool.is_empty()).then_some((server, tool))
+}
+
+#[cfg(test)]
+mod split_tests {
+    use super::split_namespaced;
+
+    #[test]
+    fn a_tool_name_may_contain_the_separator() {
+        // the server half is the first segment; the tool keeps the rest
+        assert_eq!(
+            split_namespaced("mcp__server__tool__with__parts"),
+            Some(("server", "tool__with__parts"))
+        );
+        assert_eq!(split_namespaced("mcp__server"), None);
+    }
 }
 
 /// Map a completed MCP call onto a tool outcome. Server-authored bytes are

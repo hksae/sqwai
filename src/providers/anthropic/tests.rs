@@ -703,6 +703,44 @@ fn saved_thinking_stays_home_when_effort_is_off() {
     assert!(b.get("thinking").is_none());
 }
 
+/// Two adjacent assistant turns merge into one; each turn's thinking must
+/// join the leading thinking run rather than land after the first turn's
+/// text, where the API would no longer accept it.
+#[test]
+fn merged_assistant_turns_keep_each_turn_thinking_first() {
+    let mut req = thinking_request();
+    req.messages = vec![
+        Message::new(Role::User, "go"),
+        Message::new(Role::Assistant, "first").with_provider_state(Some(json!({
+            "thinking_blocks": [
+                {"type": "thinking", "thinking": "think A", "signature": "SIG_A"}
+            ]
+        }))),
+        Message::new(Role::Assistant, "second").with_provider_state(Some(json!({
+            "thinking_blocks": [
+                {"type": "thinking", "thinking": "think B", "signature": "SIG_B"}
+            ]
+        }))),
+    ];
+    let b = build_body(&req, 8192, true);
+    let msgs = b["messages"].as_array().unwrap();
+    assert_eq!(msgs.len(), 2, "user + one merged assistant: {msgs:#?}");
+    let content = msgs[1]["content"].as_array().unwrap();
+    let shape: Vec<&str> = content
+        .iter()
+        .map(|block| block["type"].as_str().unwrap_or_default())
+        .collect();
+    assert_eq!(
+        shape,
+        vec!["thinking", "thinking", "text", "text"],
+        "thinking joins the leading run, texts follow: {content:#?}"
+    );
+    assert_eq!(content[0]["thinking"], "think A");
+    assert_eq!(content[1]["thinking"], "think B");
+    assert_eq!(content[2]["text"], "first");
+    assert_eq!(content[3]["text"], "second");
+}
+
 #[test]
 fn mid_history_anchor_stays_stationary_on_user_turns_and_precedes_volatile_tail() {
     // 1. Inside a long tool loop (last_user at index 0, followed by alternating

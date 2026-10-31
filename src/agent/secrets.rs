@@ -32,6 +32,16 @@ fn secret_patterns() -> &'static [Regex] {
             r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{16,}",
             r"(?i)https?://[^\s/@:]+:[^\s/@]+@[^\s]+\b",
             r"(?i)\b[A-Z][A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)[A-Z0-9_]*\s*=\s*[^\s]+\b",
+            r"\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}\b",
+            r"\bSG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\b",
+            r"\bAC[0-9a-f]{32}\b",
+            r"\bGOCSPX-[A-Za-z0-9_-]{16,}\b",
+            r"\bglpat-[A-Za-z0-9_-]{20,}\b",
+            r"\blin_api_[A-Za-z0-9]{20,}\b",
+            r"\bsecret_[A-Za-z0-9]{32,}\b",
+            r"\bntn_[A-Za-z0-9]{32,}\b",
+            r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b",
+            r"\bASIA[0-9A-Z]{16}\b",
         ]
         .into_iter()
         .map(|source| Regex::new(source).unwrap())
@@ -173,6 +183,19 @@ mod tests {
             format!("{}{}", "AIza", "SyDaGmWKa4JsXZ-HjGw7ISLn_3namBGewQe"),
             format!("{}{}", "hf_", "abcdefghijklmnopqrstuvwxyzABCDEFGH"),
             format!("{}{}", "npm_", "abcdefghijklmnopqrstuvwxyz0123456789"),
+            format!("{}{}", "sk_live_", "abcdefghijklmnopqrstuvwx"),
+            format!(
+                "{}{}.{}",
+                "SG.", "abcdefghijklmnopqrstuv", "ABCDEFGHIJKLMNOPQRSTUV"
+            ),
+            format!("{}{}", "AC", "0123456789abcdef0123456789abcdef"),
+            format!("{}{}", "GOCSPX-", "abcdefghijklmnopqrstuvwxyz0123"),
+            format!("{}{}", "glpat-", "abcdefghijklmnopqrst"),
+            format!("{}{}", "lin_api_", "abcdefghijklmnopqrstuvwxyz0123456789"),
+            format!("{}{}", "secret_", "abcdefghijklmnopqrstuvwxyz012345"),
+            format!("{}{}", "ntn_", "abcdefghijklmnopqrstuvwxyz012345"),
+            "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U".to_string(),
+            format!("{}{}", "ASIA", "IOSFODNN7EXAMPLE"),
         ];
         for text in &samples {
             let value = screen(text);

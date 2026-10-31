@@ -2248,3 +2248,26 @@ async fn shifting_the_mode_mid_run_reaches_the_next_tool_call() {
     assert_eq!(switch.get(), ApprovalMode::Full);
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
+
+/// Retries used to fire at exactly the base delay, so every session that
+/// hit the same outage retried in lockstep. The jitter must stay inside
+/// 20% of the base and must actually vary with the clock sample.
+#[test]
+fn backoff_jitter_stays_inside_twenty_percent_and_varies() {
+    use super::loop_turn::{backoff, backoff_with_nanos, base_backoff};
+    let base = base_backoff(3);
+    assert_eq!(base, std::time::Duration::from_secs(8));
+    let mut seen = std::collections::BTreeSet::new();
+    for nanos in 0..=200u32 {
+        let delay = backoff_with_nanos(3, nanos);
+        assert!(delay >= base, "{nanos}: {delay:?} below the base");
+        assert!(
+            delay <= base + std::time::Duration::from_millis(1600),
+            "{nanos}: {delay:?} past 20%"
+        );
+        seen.insert(delay);
+    }
+    assert!(seen.len() > 1, "every sample produced the same delay");
+    let live = backoff(3);
+    assert!((base..=base + std::time::Duration::from_millis(1600)).contains(&live));
+}

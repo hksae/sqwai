@@ -261,7 +261,11 @@ impl App {
                 let hovered = matches!(self.cur_menu(), Some(Menu::EditModel { .. }))
                     && Some(n) == self.form_hover_row;
                 let lstyle = Style::new().fg(Color::White);
-                let prefix = Span::styled(format!(" {:>inner_w$} : ", field.label()), lstyle);
+                // pad by display width, not char count: one CJK label must
+                // not shift every field column next to it
+                let label = field.label();
+                let pad = inner_w.saturating_sub(UnicodeWidthStr::width(label));
+                let prefix = Span::styled(format!(" {}{label} : ", " ".repeat(pad)), lstyle);
                 let row_y = rect.y + 2 + n as u16;
                 // a form field always shows its real value: an api key is bullets
                 // on the provider's row and plain text once its own form is open

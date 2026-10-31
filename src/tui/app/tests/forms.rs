@@ -399,6 +399,16 @@ fn form_label_column_fits_long_setting_names() {
 }
 
 #[test]
+fn form_label_column_measures_display_cells_not_bytes() {
+    use super::super::forms::FormField;
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    // fourteen wide characters are 28 cells but 42 bytes in UTF-8; a byte
+    // count would open a 46-column label gutter the value never fills.
+    app.form_fields = vec![FormField::text(&"键".repeat(14), String::new())];
+    assert_eq!(app.form_label_w(), 32);
+}
+
+#[test]
 fn plan_subcommand_popup_filters_and_inserts() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     // level 2 visible after `/plan `, lists only `/plan delete`

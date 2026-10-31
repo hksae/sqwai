@@ -8,7 +8,8 @@ use tokio::sync::mpsc;
 
 const RETRY_WINDOW: Duration = Duration::from_secs(3600);
 
-pub(crate) fn backoff(attempt: u32) -> Duration {
+/// The base delay for a retry.
+pub(crate) fn base_backoff(attempt: u32) -> Duration {
     let secs = match attempt {
         0 => 1,
         1 => 2,
@@ -19,6 +20,23 @@ pub(crate) fn backoff(attempt: u32) -> Duration {
         _ => 60,
     };
     Duration::from_secs(secs)
+}
+
+/// Base delay plus up to 20% jitter: concurrent sessions that all hit the same
+/// outage must not retry in lockstep. The jitter is not cryptographic — it
+/// only has to break the alignment.
+pub(crate) fn backoff(attempt: u32) -> Duration {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.subsec_nanos())
+        .unwrap_or(0);
+    backoff_with_nanos(attempt, nanos)
+}
+
+pub(crate) fn backoff_with_nanos(attempt: u32, nanos: u32) -> Duration {
+    let base = base_backoff(attempt);
+    let jitter_ms = base.as_millis() as u64 * (nanos as u64 % 201) / 1000;
+    base + Duration::from_millis(jitter_ms)
 }
 
 /// Which part of the local transcript goes on the wire.

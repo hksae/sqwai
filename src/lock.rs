@@ -7,6 +7,8 @@ use uuid::Uuid;
 pub struct ProjectLock {
     path: PathBuf,
     pub read_only: bool,
+    /// `--force` was given while another live instance still held a lock.
+    forced_over_live: bool,
 }
 
 impl ProjectLock {
@@ -33,6 +35,13 @@ impl ProjectLock {
         let my_created = my_meta.and_then(|m| m.created().or_else(|_| m.modified()).ok());
 
         let mut read_only = false;
+        let mut forced_over_live = false;
+        if force {
+            forced_over_live = lock_files(&lock_dir)?.iter().any(|other| {
+                other != &path
+                    && read_pid(other).is_some_and(|pid| pid != std::process::id() && is_pid_alive(pid))
+            });
+        }
         if !force {
             for other_path in lock_files(&lock_dir)? {
                 if other_path == path {
@@ -55,12 +64,21 @@ impl ProjectLock {
 
         writeln!(file, "read_only={read_only}")?;
 
-        Ok(Self { path, read_only })
+        Ok(Self {
+            path,
+            read_only,
+            forced_over_live,
+        })
     }
 
     pub fn status_message(&self) -> Option<String> {
-        self.read_only.then(|| {
-            "another sqwai instance owns this project; plan and state writes are read-only (use --force to override)".into()
+        if self.read_only {
+            return Some(
+                "another sqwai instance owns this project; plan and state writes are read-only (use --force to override)".into(),
+            );
+        }
+        self.forced_over_live.then(|| {
+            "another sqwai instance still holds this project; continuing because --force was given".into()
         })
     }
 }
