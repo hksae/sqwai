@@ -320,28 +320,35 @@ impl App {
     }
 
     fn build_edit_search_provider_rows(&mut self, provider: crate::config::SearchProvider) {
-        if provider == crate::config::SearchProvider::Hosted {
+        if matches!(
+            provider,
+            crate::config::SearchProvider::Hosted | crate::config::SearchProvider::Random
+        ) {
+            let note = if provider == crate::config::SearchProvider::Hosted {
+                "the model provider runs web_search itself; no settings"
+            } else {
+                "tries exa, parallel, then any keyed engine; no settings"
+            };
             self.menu_rows.push(row(
-                Line::from(vec![Span::styled(
-                    "the model provider runs web_search itself; no settings",
-                    Theme::dim(),
-                )]),
+                Line::from(vec![Span::styled(note, Theme::dim())]),
                 MenuAction::None,
             ));
             return;
         }
-        let key_state = if self.cfg.search_config().api_key.is_some() {
-            "set"
-        } else {
-            "missing"
-        };
-        self.menu_rows.push(row(
-            Line::from(vec![
-                Span::styled("key", Style::new().fg(Theme::FG())),
-                Span::styled(format!("  {key_state}"), Theme::dim()),
-            ]),
-            MenuAction::EditScalar(ScalarSetting::SearchKey),
-        ));
+        if provider.key_name().is_some() {
+            let key_state = if self.cfg.search_config().api_key.is_some() {
+                "set"
+            } else {
+                "missing"
+            };
+            self.menu_rows.push(row(
+                Line::from(vec![
+                    Span::styled("key", Style::new().fg(Theme::FG())),
+                    Span::styled(format!("  {key_state}"), Theme::dim()),
+                ]),
+                MenuAction::EditScalar(ScalarSetting::SearchKey),
+            ));
+        }
         let base = self
             .cfg
             .web

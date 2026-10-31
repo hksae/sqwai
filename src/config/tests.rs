@@ -1472,3 +1472,31 @@ fn hosted_search_is_ready_without_a_key() {
     assert!(search.api_key.is_none());
     assert_eq!(SearchProvider::Hosted.key_name(), None);
 }
+
+/// `random` carries every callable engine, is ready without any key (Exa and
+/// Parallel are keyless), and keeps the keyed ones unready until they have one.
+#[test]
+fn random_lists_the_callable_engines_in_order() {
+    let mut cfg = Config::default();
+    cfg.web.search_provider = SearchProvider::Random;
+    let search = cfg.search_config();
+    assert!(search.is_random());
+    assert!(search.is_ready());
+    let order: Vec<SearchProvider> = search
+        .alternatives
+        .iter()
+        .map(|alternative| alternative.provider)
+        .collect();
+    assert_eq!(
+        order,
+        vec![
+            SearchProvider::Exa,
+            SearchProvider::Parallel,
+            SearchProvider::Deepseek,
+            SearchProvider::Tavily,
+            SearchProvider::Firecrawl,
+        ]
+    );
+    assert!(search.alternatives[0].is_ready(), "exa is keyless");
+    assert!(!search.alternatives[2].is_ready(), "deepseek needs a key");
+}

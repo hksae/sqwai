@@ -1072,28 +1072,48 @@ pub struct WebConfig {
 
 /// The search backends `websearch` can call. Selection is manual, one at a
 /// time — the same shape opencode uses, minus the HTML scrapers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SearchProvider {
     #[default]
     Off,
     Deepseek,
     Tavily,
+    /// Keyless public MCP endpoints hosted by the search vendor.
+    Exa,
+    Parallel,
+    Firecrawl,
     /// No separate search API: the model provider's own hosted `web_search`
     /// tool runs inside the request, so search is billed through the model
     /// account and needs no key. Only the Responses wire carries it.
     Hosted,
+    /// Try the available providers in order, keeping the last one that
+    /// answered and skipping any that are cooling down after a 429.
+    Random,
 }
 
 impl SearchProvider {
-    pub const ALL: [Self; 4] = [Self::Off, Self::Deepseek, Self::Tavily, Self::Hosted];
+    pub const ALL: [Self; 8] = [
+        Self::Random,
+        Self::Hosted,
+        Self::Exa,
+        Self::Parallel,
+        Self::Deepseek,
+        Self::Tavily,
+        Self::Firecrawl,
+        Self::Off,
+    ];
 
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Off => "off",
             Self::Deepseek => "deepseek",
             Self::Tavily => "tavily",
+            Self::Exa => "exa",
+            Self::Parallel => "parallel",
+            Self::Firecrawl => "firecrawl",
             Self::Hosted => "hosted",
+            Self::Random => "random",
         }
     }
 
@@ -1105,7 +1125,8 @@ impl SearchProvider {
             Self::Off => None,
             Self::Deepseek => Some("deepseek-search"),
             Self::Tavily => Some("tavily"),
-            Self::Hosted => None,
+            Self::Firecrawl => Some("firecrawl"),
+            Self::Exa | Self::Parallel | Self::Hosted | Self::Random => None,
         }
     }
 }
@@ -1117,6 +1138,9 @@ pub struct SearchConfig {
     pub provider: SearchProvider,
     pub base_url: Option<String>,
     pub api_key: Option<String>,
+    /// For [`SearchProvider::Random`]: the engines to try, in preference
+    /// order, each with its own resolved key. Empty for a fixed provider.
+    pub alternatives: Vec<SearchConfig>,
 }
 
 impl SearchConfig {
@@ -1127,12 +1151,24 @@ impl SearchConfig {
     pub fn is_ready(&self) -> bool {
         match self.provider {
             SearchProvider::Off => false,
-            SearchProvider::Hosted => true,
+            // keyless: hosted runs on the model account, Exa/Parallel on
+            // their public MCP endpoints
+            SearchProvider::Hosted | SearchProvider::Exa | SearchProvider::Parallel => true,
+            // a selection, not an engine: readiness is per alternative
+            SearchProvider::Random => self
+                .alternatives
+                .iter()
+                .any(SearchConfig::is_ready),
             _ => self
                 .api_key
                 .as_deref()
                 .is_some_and(|key| !key.trim().is_empty()),
         }
+    }
+
+    /// Engines `random` may call, in preference order (empty otherwise).
+    pub fn is_random(&self) -> bool {
+        self.provider == SearchProvider::Random
     }
 
     /// True when the search runs inside the model request, not as our tool.
@@ -1952,7 +1988,10 @@ impl Config {
     /// override and a resolved key. The search key wins over the chat
     /// provider's key, which wins over the environment.
     pub fn search_config(&self) -> SearchConfig {
-        let provider = self.web.search_provider;
+        self.search_config_for(self.web.search_provider)
+    }
+
+    fn search_config_for(&self, provider: SearchProvider) -> SearchConfig {
         let base_url = self
             .web
             .search_base_url
@@ -1960,24 +1999,49 @@ impl Config {
             .map(str::trim)
             .filter(|url| !url.is_empty())
             .map(str::to_string);
-        let from_store = provider.key_name().and_then(|name| self.keys.get(name).cloned());
-        let api_key = match provider {
-            SearchProvider::Off | SearchProvider::Hosted => None,
-            SearchProvider::Deepseek => from_store
-                .or_else(|| {
-                    self.providers
-                        .get("deepseek")
-                        .and_then(|p| p.effective_api_key("deepseek"))
-                })
-                .or_else(|| env_nonempty("DEEPSEEK_API_KEY")),
-            SearchProvider::Tavily => {
-                from_store.or_else(|| env_nonempty("TAVILY_API_KEY"))
-            }
+        let stored = |name: &str| self.keys.get(name).cloned();
+        let (api_key, alternatives) = match provider {
+            SearchProvider::Off
+            | SearchProvider::Hosted
+            | SearchProvider::Exa
+            | SearchProvider::Parallel => (None, Vec::new()),
+            SearchProvider::Random => (
+                None,
+                [
+                    SearchProvider::Exa,
+                    SearchProvider::Parallel,
+                    SearchProvider::Deepseek,
+                    SearchProvider::Tavily,
+                    SearchProvider::Firecrawl,
+                ]
+                .into_iter()
+                .map(|provider| self.search_config_for(provider))
+                .collect(),
+            ),
+            SearchProvider::Deepseek => (
+                stored("deepseek-search")
+                    .or_else(|| {
+                        self.providers
+                            .get("deepseek")
+                            .and_then(|p| p.effective_api_key("deepseek"))
+                    })
+                    .or_else(|| env_nonempty("DEEPSEEK_API_KEY")),
+                Vec::new(),
+            ),
+            SearchProvider::Tavily => (
+                stored("tavily").or_else(|| env_nonempty("TAVILY_API_KEY")),
+                Vec::new(),
+            ),
+            SearchProvider::Firecrawl => (
+                stored("firecrawl").or_else(|| env_nonempty("FIRECRAWL_API_KEY")),
+                Vec::new(),
+            ),
         };
         SearchConfig {
             provider,
             base_url,
             api_key,
+            alternatives,
         }
     }
 

@@ -1053,7 +1053,10 @@ fn search_provider_is_chosen_from_a_list() {
             _ => None,
         })
         .collect();
-    assert_eq!(labels, vec!["off", "deepseek", "tavily", "hosted"]);
+    assert_eq!(
+        labels,
+        vec!["random", "hosted", "exa", "parallel", "deepseek", "tavily", "firecrawl", "off"]
+    );
 
     app.run_action(MenuAction::SetSearchProvider(SearchProvider::Tavily));
     assert_eq!(app.cfg.web.search_provider, SearchProvider::Tavily);

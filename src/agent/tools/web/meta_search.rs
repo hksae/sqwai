@@ -1157,6 +1157,7 @@ mod tests {
             provider: crate::config::SearchProvider::Deepseek,
             base_url: None,
             api_key: Some("key".into()),
+            alternatives: Vec::new(),
         };
         let note = no_results_note("\"серость\" кот", SearchCategory::Auto, &search);
         assert!(note.contains("deepseek"), "{note}");

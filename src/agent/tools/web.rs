@@ -3,6 +3,7 @@
 //! DOM Readability HTML-to-Markdown conversion, and section-cached BM25 navigation.
 
 pub mod markdown;
+pub mod mcp_search;
 pub mod meta_search;
 pub mod search_api;
 pub mod ranker;
@@ -889,11 +890,34 @@ let y = 2;</pre></td>
     }
 
     #[tokio::test]
+    #[ignore = "hits the public MCP endpoints; run with --ignored"]
+    async fn live_keyless_exa_and_parallel_smoke() {
+        let exa = mcp_search::exa(
+            "Rust async runtimes Tokio",
+            5,
+            std::time::Duration::from_secs(20),
+            None,
+        )
+        .await;
+        println!("exa: {exa:?}");
+        assert!(exa.is_ok(), "exa failed: {exa:?}");
+        let parallel = mcp_search::parallel(
+            "Rust async runtimes Tokio",
+            5,
+            std::time::Duration::from_secs(20),
+            None,
+        )
+        .await;
+        println!("parallel: {parallel:?}");
+    }
+
+    #[tokio::test]
     async fn hosted_search_names_the_provider_tool() {
         let hosted = crate::config::SearchConfig {
             provider: crate::config::SearchProvider::Hosted,
             base_url: None,
             api_key: None,
+            alternatives: Vec::new(),
         };
         let out = search(
             &json!({"query": "rust tokio spawn", "category": "auto"}),
@@ -920,6 +944,7 @@ let y = 2;</pre></td>
             provider: crate::config::SearchProvider::Deepseek,
             base_url: None,
             api_key: Some(api_key),
+            alternatives: Vec::new(),
         };
         let search_out = search(
             &json!({

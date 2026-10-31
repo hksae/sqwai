@@ -64,6 +64,8 @@ impl App {
                 self.cfg.save().ok();
                 let message = if provider == crate::config::SearchProvider::Off {
                     "search provider = off".to_string()
+                } else if provider == crate::config::SearchProvider::Random {
+                    "search provider = random (exa, parallel, then keyed engines)".to_string()
                 } else if provider == crate::config::SearchProvider::Hosted {
                     let wire = self
                         .cfg
@@ -75,7 +77,9 @@ impl App {
                     } else {
                         "hosted search needs a Responses-wire model".to_string()
                     }
-                } else if self.cfg.search_config().api_key.is_some() {
+                } else if provider.key_name().is_none()
+                    || self.cfg.search_config().api_key.is_some()
+                {
                     format!("search provider = {}", provider.as_str())
                 } else {
                     format!(

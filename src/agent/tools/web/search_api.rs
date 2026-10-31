@@ -4,15 +4,38 @@
 //! captcha or a 429, and both are indistinguishable from "no results" to the
 //! model, which then rephrases forever.
 
+use super::mcp_search;
 use super::meta_search::RawSearchHit;
 use crate::config::{SearchConfig, SearchProvider};
 use serde_json::Value;
-use std::time::Duration;
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant};
 
 const DEEPSEEK_BASE: &str = "https://api.deepseek.com";
 const TAVILY_BASE: &str = "https://api.tavily.com";
+const FIRECRAWL_BASE: &str = "https://api.firecrawl.dev";
+
+/// A rate-limited provider sits out this long before `random` tries it again.
+const COOLDOWN: Duration = Duration::from_secs(60);
+
+static LAST_OK: Mutex<Option<SearchProvider>> = Mutex::new(None);
+static COOLING: LazyLock<Mutex<HashMap<SearchProvider, Instant>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 pub async fn search(
+    cfg: &SearchConfig,
+    query: &str,
+    count: usize,
+    timeout: Duration,
+) -> Result<Vec<RawSearchHit>, String> {
+    if cfg.is_random() {
+        return random_search(cfg, query, count, timeout).await;
+    }
+    search_fixed(cfg, query, count, timeout).await
+}
+
+async fn search_fixed(
     cfg: &SearchConfig,
     query: &str,
     count: usize,
@@ -56,7 +79,99 @@ pub async fn search(
             let text = post(&client, &url, key, &body).await?;
             parse_tavily(&text)
         }
+        SearchProvider::Exa => mcp_search::exa(query, count, timeout, cfg.base_url.as_deref()).await,
+        SearchProvider::Parallel => {
+            mcp_search::parallel(query, count, timeout, cfg.base_url.as_deref()).await
+        }
+        SearchProvider::Firecrawl => {
+            let url = endpoint(cfg.base_url.as_deref(), FIRECRAWL_BASE, "/v2/search");
+            let body = serde_json::json!({
+                "query": query,
+                "limit": count.clamp(1, 20),
+            });
+            let text = post(&client, &url, key, &body).await?;
+            parse_firecrawl(&text)
+        }
+        SearchProvider::Random => unreachable!("random is dispatched above"),
     }
+}
+
+/// Pick a working engine: keep the one that answered last, skip anything in
+/// a 429 cooldown, and fall through to the next candidate on failure. An
+/// engine that answers with no hits does not stop the search either.
+async fn random_search(
+    cfg: &SearchConfig,
+    query: &str,
+    count: usize,
+    timeout: Duration,
+) -> Result<Vec<RawSearchHit>, String> {
+    let last = *LAST_OK.lock().unwrap_or_else(|e| e.into_inner());
+    let candidates = order_candidates(&cfg.alternatives, last);
+    if candidates.is_empty() {
+        return Err(
+            "no search engine is available: add a key for deepseek, tavily or firecrawl, or leave exa/parallel selected"
+                .to_string(),
+        );
+    }
+    let mut failure: Option<String> = None;
+    for candidate in candidates {
+        if cooling(candidate.provider) {
+            continue;
+        }
+        match search_fixed(candidate, query, count, timeout).await {
+            Ok(hits) if !hits.is_empty() => {
+                *LAST_OK.lock().unwrap_or_else(|e| e.into_inner()) = Some(candidate.provider);
+                return Ok(hits);
+            }
+            Ok(_) => {}
+            Err(error) => {
+                if is_rate_limited(&error) {
+                    cool(candidate.provider);
+                }
+                failure.get_or_insert(error);
+            }
+        }
+    }
+    Err(failure.unwrap_or_else(|| {
+        "every search engine is cooling down after a rate limit; retry in a minute".to_string()
+    }))
+}
+
+/// The engines `random` may call: ready ones only, with the last one that
+/// answered moved to the front.
+fn order_candidates(
+    alternatives: &[SearchConfig],
+    last: Option<SearchProvider>,
+) -> Vec<&SearchConfig> {
+    let mut ready: Vec<&SearchConfig> = alternatives
+        .iter()
+        .filter(|alternative| alternative.is_ready())
+        .collect();
+    ready.sort_by_key(|alternative| usize::from(Some(alternative.provider) != last));
+    ready
+}
+
+fn is_rate_limited(error: &str) -> bool {
+    error.contains("HTTP 429") || error.contains("rate-limited")
+}
+
+fn cooling(provider: SearchProvider) -> bool {
+    let mut cooling = COOLING.lock().unwrap_or_else(|e| e.into_inner());
+    match cooling.get(&provider) {
+        Some(until) if *until > Instant::now() => true,
+        Some(_) => {
+            cooling.remove(&provider);
+            false
+        }
+        None => false,
+    }
+}
+
+fn cool(provider: SearchProvider) {
+    COOLING
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(provider, Instant::now() + COOLDOWN);
 }
 
 fn endpoint(base: Option<&str>, default_base: &str, path: &str) -> String {
@@ -137,6 +252,49 @@ pub fn parse_deepseek(body: &str) -> Result<Vec<RawSearchHit>, String> {
         .collect())
 }
 
+pub fn parse_firecrawl(body: &str) -> Result<Vec<RawSearchHit>, String> {
+    let value: Value =
+        serde_json::from_str(body).map_err(|e| format!("firecrawl response is not JSON: {e}"))?;
+    // v2 nests the results under `data.web`; older payloads are a flat array
+    let results = value
+        .pointer("/data/web")
+        .cloned()
+        .or_else(|| value.get("data").cloned())
+        .unwrap_or_default();
+    let Some(results) = results.as_array() else {
+        return Err("firecrawl response has no results".to_string());
+    };
+    Ok(results
+        .iter()
+        .filter_map(|result| {
+            let url = result["url"].as_str()?.trim();
+            if url.is_empty() {
+                return None;
+            }
+            let title = result["title"]
+                .as_str()
+                .map(str::trim)
+                .filter(|title| !title.is_empty())
+                .unwrap_or(url);
+            let snippet = result["description"]
+                .as_str()
+                .or_else(|| result["snippet"].as_str())
+                .or_else(|| result["markdown"].as_str())
+                .map(str::trim)
+                .unwrap_or_default();
+            Some(RawSearchHit {
+                title: title.to_string(),
+                url: url.to_string(),
+                snippet: snippet.chars().take(600).collect(),
+                source: "firecrawl",
+                badge: None,
+                boost: 0.0,
+                repo_url: None,
+            })
+        })
+        .collect())
+}
+
 pub fn parse_tavily(body: &str) -> Result<Vec<RawSearchHit>, String> {
     let value: Value =
         serde_json::from_str(body).map_err(|e| format!("tavily response is not JSON: {e}"))?;
@@ -199,6 +357,50 @@ mod tests {
         assert_eq!(hits[0].snippet, "bus meme");
         assert_eq!(hits[0].source, "tavily");
         assert!(parse_tavily("{}").is_err());
+    }
+
+    #[test]
+    fn firecrawl_reads_both_response_shapes() {
+        let v2 = r#"{"success":true,"data":{"web":[
+            {"url":"https://example.org/a","title":"A","description":"first"}
+        ]}}"#;
+        let hits = parse_firecrawl(v2).unwrap();
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0].source, "firecrawl");
+        assert_eq!(hits[0].snippet, "first");
+
+        let flat = r#"{"data":[{"url":"https://example.org/b","title":"B","markdown":"body"}]}"#;
+        let hits = parse_firecrawl(flat).unwrap();
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0].snippet, "body");
+    }
+
+    /// `random` keeps the engine that answered last in front, drops engines
+    /// without a key, and never invents an order.
+    #[test]
+    fn random_orders_ready_engines_with_the_last_winner_first() {
+        let config = |provider, key: Option<&str>| SearchConfig {
+            provider,
+            base_url: None,
+            api_key: key.map(str::to_string),
+            alternatives: Vec::new(),
+        };
+        let alternatives = vec![
+            config(SearchProvider::Exa, None),
+            config(SearchProvider::Deepseek, None),
+            config(SearchProvider::Firecrawl, Some("k")),
+        ];
+        let order: Vec<SearchProvider> = order_candidates(&alternatives, None)
+            .into_iter()
+            .map(|alt| alt.provider)
+            .collect();
+        assert_eq!(order, vec![SearchProvider::Exa, SearchProvider::Firecrawl]);
+
+        let order: Vec<SearchProvider> = order_candidates(&alternatives, Some(SearchProvider::Firecrawl))
+            .into_iter()
+            .map(|alt| alt.provider)
+            .collect();
+        assert_eq!(order, vec![SearchProvider::Firecrawl, SearchProvider::Exa]);
     }
 
     #[test]
