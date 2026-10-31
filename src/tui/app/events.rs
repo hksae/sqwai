@@ -750,6 +750,13 @@ impl App {
                         {
                             self.start_builtin_update(true);
                         }
+                        KeyCode::Char('t')
+                            if ctrl && matches!(self.cur_menu(), Some(Menu::SearchProvider)) =>
+                        {
+                            if let Some(provider) = self.surface_search_provider() {
+                                self.check_search_provider(provider);
+                            }
+                        }
                         KeyCode::Char('e')
                             if ctrl && matches!(self.cur_menu(), Some(Menu::SearchProvider)) =>
                         {

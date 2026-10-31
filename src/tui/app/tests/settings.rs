@@ -1212,3 +1212,25 @@ fn search_provider_surface_opens_from_its_command() {
         .collect();
     assert!(rows.iter().any(|row| row.starts_with("base url")), "{rows:?}");
 }
+
+/// ctrl+t probes the selected search backend without selecting it. Off and
+/// hosted answer immediately: there is nothing to call.
+#[test]
+fn search_provider_test_handles_off_and_hosted_without_network() {
+    use crate::config::SearchProvider;
+    use crate::tui::app::menus::Menu;
+
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.startup = false;
+    app.open_menu(Menu::SearchProvider);
+    let hints = app.list_hints();
+    assert!(
+        hints.iter().any(|(key, what)| *key == "ctrl+t" && what == "test"),
+        "{hints:?}"
+    );
+
+    app.check_search_provider(SearchProvider::Off);
+    assert!(app.search_test_rx.is_none(), "off starts no probe");
+    app.check_search_provider(SearchProvider::Hosted);
+    assert!(app.search_test_rx.is_none(), "hosted has nothing to call");
+}

@@ -824,6 +824,22 @@ impl App {
         }
     }
 
+    pub(super) fn poll_search_test(&mut self) {
+        let Some((provider, rx)) = self.search_test_rx.take() else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(Ok(detail)) => self.status(&detail, StatusKind::Ok),
+            Ok(Err(reason)) => self.status(&reason, StatusKind::Err),
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                self.search_test_rx = Some((provider, rx));
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.status("search test task ended", StatusKind::Err);
+            }
+        }
+    }
+
     pub(super) fn start_builtin_update(&mut self, manual: bool) {
         if self.builtin_update_rx.is_some() {
             if manual {

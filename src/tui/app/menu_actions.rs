@@ -374,6 +374,69 @@ impl App {
         self.build_menu_rows();
     }
 
+    /// ctrl+t on the search provider surface: run one short query through the
+    /// selected backend and report what came back (or why nothing did).
+    pub(super) fn check_search_provider(&mut self, provider: crate::config::SearchProvider) {
+        use crate::config::SearchProvider;
+        if self.search_test_rx.is_some() {
+            self.status("a search test is already running", StatusKind::Info);
+            return;
+        }
+        match provider {
+            SearchProvider::Off => {
+                self.status("search is off — nothing to test", StatusKind::Warn);
+                return;
+            }
+            SearchProvider::Hosted => {
+                self.status(
+                    "hosted search runs inside the model request; nothing to test",
+                    StatusKind::Info,
+                );
+                return;
+            }
+            _ => {}
+        }
+        let mut cfg = self.cfg.clone();
+        cfg.web.search_provider = provider;
+        let search = cfg.search_config();
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.search_test_rx = Some((provider, rx));
+        self.status(
+            &format!("testing search provider {}…", provider.as_str()),
+            StatusKind::Info,
+        );
+        std::thread::spawn(move || {
+            let started = std::time::Instant::now();
+            let outcome = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime.block_on(async {
+                    let result = crate::agent::tools::web::search_api::search(
+                        &search,
+                        "rust tokio",
+                        3,
+                        std::time::Duration::from_secs(20),
+                    )
+                    .await;
+                    match result {
+                        Ok(hits) => Ok(format!(
+                            "{}: {} result(s), {} ms",
+                            provider.as_str(),
+                            hits.len(),
+                            started.elapsed().as_millis()
+                        )),
+                        Err(reason) => {
+                            Err(format!("{}: {reason}", provider.as_str()))
+                        }
+                    }
+                }),
+                Err(e) => Err(format!("{}: runtime: {e}", provider.as_str())),
+            };
+            let _ = tx.send(outcome);
+        });
+    }
+
     fn check_provider_connection(&mut self, name: String) {
         let Some(pc) = self.cfg.providers.get(&name).cloned() else {
             self.status(&format!("unknown provider '{name}'"), StatusKind::Err);

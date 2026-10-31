@@ -612,6 +612,11 @@ pub struct App {
     /// In-flight check and the channel its worker thread reports back on,
     /// polled on the UI tick so the check never blocks rendering.
     provider_check_rx: Option<(String, std::sync::mpsc::Receiver<Result<String, String>>)>,
+    /// In-flight `/providers-search` ctrl+t probe: provider and its result.
+    search_test_rx: Option<(
+        crate::config::SearchProvider,
+        std::sync::mpsc::Receiver<Result<String, String>>,
+    )>,
     /// Background check/download of builtin providers: (manual, rx)
     builtin_update_rx: Option<BuiltinUpdateRx>,
     /// Last time a background catalog check was started, so a long-running TUI
@@ -894,6 +899,7 @@ impl App {
             md_click: None,
             provider_checks: std::collections::HashMap::new(),
             provider_check_rx: None,
+            search_test_rx: None,
             builtin_update_rx: None,
             last_builtin_check: Instant::now(),
             maintain_rx: None,
@@ -1053,6 +1059,7 @@ impl App {
         if !self.pending_events.is_empty() {
             consider(now + Duration::from_millis(8));
         } else if self.provider_check_rx.is_some()
+            || self.search_test_rx.is_some()
             || self.builtin_update_rx.is_some()
             || self.maintain_rx.is_some()
             || self.session_env_rx.is_some()
@@ -1146,6 +1153,7 @@ impl App {
                 self.poll_agent();
             }
             self.poll_provider_check();
+            self.poll_search_test();
             self.poll_builtin_update();
             self.poll_maintain();
             self.poll_session_env();
