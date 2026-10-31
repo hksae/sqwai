@@ -944,3 +944,54 @@ fn continuation_is_a_declaration_not_a_url_guess() {
         "a declared host gets its reference honoured"
     );
 }
+
+/// A hosted `web_search_call` becomes a display-only provider-tool event:
+/// the model searched, and the transcript must say what it looked for.
+#[tokio::test]
+async fn a_hosted_web_search_call_surfaces_as_a_provider_tool() {
+    use futures::StreamExt;
+    let body = concat!(
+        "event: response.output_item.done\n",
+        "data: {\"item\":{\"type\":\"web_search_call\",\"id\":\"ws_1\",\"action\":{\"type\":\"search\",\"query\":\"эль дрифто автобус\"}}}\n\n",
+    )
+    .to_string();
+    let (url, h) = sse_server(body);
+    let p = ResponsesProvider::new(&ResolvedProvider {
+        name: "p".into(),
+        format: crate::config::WireFormat::Responses,
+        base_url: url,
+        api_key: Some("k".into()),
+        continuation: false,
+    })
+    .unwrap();
+    let req = request_at(EffortLevel::Off, crate::config::EffortControl::None);
+    let events: Vec<crate::providers::StreamEvent> = p
+        .stream_chat(req)
+        .filter_map(|event| async move { event.ok() })
+        .collect()
+        .await;
+    h.join().unwrap();
+    let hit = events
+        .iter()
+        .find_map(|event| match event {
+            crate::providers::StreamEvent::ProviderTool { name, summary } => {
+                Some((name.as_str(), summary.as_str()))
+            }
+            _ => None,
+        })
+        .expect("web_search_call must surface");
+    assert_eq!(hit.0, "web_search");
+    assert!(hit.1.contains("дрифто"), "{hit:?}");
+}
+
+#[test]
+fn a_web_search_without_a_query_still_names_the_provider_tool() {
+    assert_eq!(
+        web_search_summary(&json!({"type": "web_search_call", "queries": ["rust tokio"]})),
+        "rust tokio"
+    );
+    assert_eq!(
+        web_search_summary(&json!({"type": "web_search_call"})),
+        "search"
+    );
+}

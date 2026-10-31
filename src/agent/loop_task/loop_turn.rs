@@ -143,6 +143,7 @@ pub(crate) async fn run_turn_with_prefetch(
         let mut reasoning_open: Option<Instant> = None;
         let mut reasoning_ms = 0u64;
         let mut calls: Vec<ToolCallReq> = Vec::new();
+        let mut provider_tools = 0u32;
         let mut provider_state: Option<serde_json::Value> = None;
         let mut prefetched: std::collections::HashMap<usize, PrefetchedToolHandle> =
             std::collections::HashMap::new();
@@ -246,6 +247,28 @@ pub(crate) async fn run_turn_with_prefetch(
                             }
                         }
                     }
+                }
+                Ok(StreamEvent::ProviderTool { name, summary }) => {
+                    // display only: the provider already ran it, so the row
+                    // opens and closes at once and never enters `calls`
+                    provider_tools += 1;
+                    let call_id = format!("provider-tool-{provider_tools}");
+                    let _ = tx
+                        .send(AgentEvent::ToolStart {
+                            name: name.clone(),
+                            summary: summary.clone(),
+                            call_id: call_id.clone(),
+                        })
+                        .await;
+                    let _ = tx
+                        .send(AgentEvent::ToolNotice {
+                            name,
+                            summary,
+                            ok: true,
+                            diff: None,
+                            call_id,
+                        })
+                        .await;
                 }
                 Ok(StreamEvent::ProviderState(s)) => {
                     provider_state = Some(s);

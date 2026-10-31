@@ -170,6 +170,24 @@ fn input_items(req: &ChatRequest) -> Vec<Value> {
     input
 }
 
+/// What a hosted `web_search_call` looked for, for the transcript row.
+fn web_search_summary(item: &Value) -> String {
+    let query = item
+        .pointer("/action/query")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            item.get("queries")
+                .and_then(Value::as_array)
+                .and_then(|queries| queries.first())
+                .and_then(Value::as_str)
+        })
+        .or_else(|| item.pointer("/action/queries/0").and_then(Value::as_str));
+    match query.map(str::trim).filter(|q| !q.is_empty()) {
+        Some(query) => query.to_string(),
+        None => "search".to_string(),
+    }
+}
+
 pub fn build_body(req: &ChatRequest) -> Value {
     let mut body = json!({
         "model": req.model_id,
@@ -421,6 +439,14 @@ impl Provider for ResponsesProvider {
                                             if let Some(call) = slot.finish() {
                                                 yield Ok(StreamEvent::ToolCall(call));
                                             }
+                                        }
+                                    }
+                                    Some("web_search_call") => {
+                                        if let Some(item) = v.get("item") {
+                                            yield Ok(StreamEvent::ProviderTool {
+                                                name: "web_search".to_string(),
+                                                summary: web_search_summary(item),
+                                            });
                                         }
                                     }
                                     Some("reasoning") => {

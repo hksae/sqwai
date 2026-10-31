@@ -754,6 +754,10 @@ pub enum StreamEvent {
     ResponseId(String),
     /// the model finished a request to run a tool (arguments are complete)
     ToolCall(ToolCallReq),
+    /// A tool the provider ran itself (hosted web search): display only —
+    /// the host neither dispatches it nor answers it, and the results are
+    /// already inside the model's response.
+    ProviderTool { name: String, summary: String },
     /// Opaque provider-owned state attached to this turn (reasoning items, phase).
     ProviderState(serde_json::Value),
 }
