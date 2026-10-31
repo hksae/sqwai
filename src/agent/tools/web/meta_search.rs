@@ -17,6 +17,59 @@ const BROWSER_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/
 /// Epoch timestamp (seconds) until which unauthenticated GitHub Search API is known to be rate-limited.
 static GITHUB_SEARCH_COOLDOWN_UNTIL: AtomicU64 = AtomicU64::new(0);
 
+/// Brave wants a slow, well-behaved client: a batch of five parallel searches
+/// tripped its per-IP rate limit, and once it answers 429 every further query
+/// is refused too. The gate serializes calls, spaces them, and turns a 429
+/// into a named cooldown the model can read and respect.
+const BRAVE_SPACING: Duration = Duration::from_millis(2_000);
+const BRAVE_COOLDOWN: Duration = Duration::from_secs(60);
+
+struct BraveGate {
+    next_at: tokio::time::Instant,
+    cooldown_until: Option<tokio::time::Instant>,
+}
+
+static BRAVE_GATE: std::sync::LazyLock<tokio::sync::Mutex<BraveGate>> =
+    std::sync::LazyLock::new(|| {
+        tokio::sync::Mutex::new(BraveGate {
+            next_at: tokio::time::Instant::now(),
+            cooldown_until: None,
+        })
+    });
+
+/// What the last general-engine attempt said, when it was not an answer:
+/// "rate-limited" and "no such page" must not read the same to the model.
+static BRAVE_NOTE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+static STARTPAGE_NOTE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+fn set_note(slot: &std::sync::Mutex<Option<String>>, note: Option<String>) {
+    if let Ok(mut guard) = slot.lock() {
+        *guard = note;
+    }
+}
+
+fn read_note(slot: &std::sync::Mutex<Option<String>>) -> Option<String> {
+    slot.lock().ok().and_then(|guard| guard.clone())
+}
+
+/// A search that returned nothing because the engines refused it — not
+/// because the thing does not exist. Names what happened and what to do.
+fn unavailable_note(brave: Option<&str>, startpage: Option<&str>) -> Option<String> {
+    let parts: Vec<String> = [brave, startpage]
+        .into_iter()
+        .flatten()
+        .map(str::to_string)
+        .collect();
+    if parts.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "Search unavailable: {}. This is the engines refusing this client, not an empty answer — \
+rephrasing the same question now will not help. Wait and retry, or use `webfetch` on a known URL.",
+        parts.join("; ")
+    ))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SearchCategory {
     Auto,
@@ -110,8 +163,11 @@ pub async fn run_meta_search(
     );
     // Quotes turn a search into an exact-phrase match; when the phrase is too
     // specific the whole set comes back empty, and the model reads that as
-    // "this does not exist". One retry without the quotes costs nothing.
+    // "this does not exist". One retry without the quotes costs nothing —
+    // unless the engine itself refused us, where a retry buys another refusal.
+    let brave_down = read_note(&BRAVE_NOTE).is_some();
     if merged.is_empty()
+        && !brave_down
         && let Some(relaxed) = without_quotes(query)
     {
         merged = fuse_and_rank(
@@ -122,6 +178,12 @@ pub async fn run_meta_search(
         );
     }
     if merged.is_empty() {
+        if let Some(note) = unavailable_note(
+            read_note(&BRAVE_NOTE).as_deref(),
+            read_note(&STARTPAGE_NOTE).as_deref(),
+        ) {
+            return Ok(note);
+        }
         return Ok(no_results_note(query, category));
     }
 
@@ -452,25 +514,55 @@ fn startpage_form(query: &str) -> Vec<(&'static str, &str)> {
 }
 
 async fn search_startpage(client: &Client, query: &str) -> Vec<RawSearchHit> {
-    let Ok(resp) = client
+    let resp = client
         .post("https://www.startpage.com/sp/search")
         .header(reqwest::header::REFERER, "https://www.startpage.com/")
         .form(&startpage_form(query))
         .send()
-        .await
-    else {
-        return Vec::new();
+        .await;
+    let resp = match resp {
+        Ok(resp) => resp,
+        Err(e) => {
+            set_note(&STARTPAGE_NOTE, Some(format!("startpage request failed ({e})")));
+            return Vec::new();
+        }
     };
-    if !resp.status().is_success() {
+    let status = resp.status();
+    if !status.is_success() {
+        set_note(&STARTPAGE_NOTE, Some(format!("startpage answered HTTP {status}")));
         return Vec::new();
     }
     let Ok(bytes) = resp.bytes().await else {
+        set_note(&STARTPAGE_NOTE, Some("startpage response was unreadable".into()));
         return Vec::new();
     };
     if bytes.len() > router::max_body_bytes() {
+        set_note(&STARTPAGE_NOTE, Some("startpage response exceeded the size cap".into()));
         return Vec::new();
     }
-    parse_startpage_results(&String::from_utf8_lossy(&bytes), 10)
+    let html = String::from_utf8_lossy(&bytes);
+    let hits = parse_startpage_results(&html, 10);
+    if !hits.is_empty() {
+        set_note(&STARTPAGE_NOTE, None);
+        return hits;
+    }
+    // A 200 can still be a bot wall: Startpage serves an Anubis proof-of-work
+    // page (or a captcha) to scripted clients, and parsing it as "no results"
+    // is what makes the model believe the fact does not exist. Only a page
+    // with no result nodes at all is inspected, so a query *about* captchas
+    // cannot be mistaken for one.
+    let lower = html.to_ascii_lowercase();
+    if lower.contains("anubis_challenge")
+        || lower.contains("anubis_version")
+        || lower.contains("challenge-form")
+        || lower.contains("captcha")
+    {
+        set_note(
+            &STARTPAGE_NOTE,
+            Some("startpage served a bot challenge".into()),
+        );
+    }
+    hits
 }
 
 pub fn parse_startpage_results(html: &str, max_count: usize) -> Vec<RawSearchHit> {
@@ -540,24 +632,66 @@ async fn search_brave(client: &Client, query: &str) -> Vec<RawSearchHit> {
     // browser (the search returned 429 for every Chrome-UA request while the
     // same host served the app's own UA: the mismatch is the signal it acts
     // on). The honest UA also keeps the proxy path identical to `webfetch`.
-    let Ok(resp) = client
+    //
+    // The gate below is the second half of that story: a burst of parallel
+    // searches trips a per-IP rate limit that outlives the burst, and a 429
+    // must never be reported as "no such thing".
+    let mut gate = BRAVE_GATE.lock().await;
+    let now = tokio::time::Instant::now();
+    if let Some(until) = gate.cooldown_until {
+        if now < until {
+            let left = (until - now).as_secs().max(1);
+            set_note(
+                &BRAVE_NOTE,
+                Some(format!("brave is rate-limited (HTTP 429) for another {left}s")),
+            );
+            return Vec::new();
+        }
+        gate.cooldown_until = None;
+    }
+    if gate.next_at > now {
+        tokio::time::sleep_until(gate.next_at).await;
+    }
+    let resp = client
         .get("https://search.brave.com/search")
         .header(reqwest::header::USER_AGENT, crate::providers::USER_AGENT)
         .query(&[("q", query), ("source", "web")])
         .send()
-        .await
-    else {
-        return Vec::new();
+        .await;
+    let now = tokio::time::Instant::now();
+    gate.next_at = now + BRAVE_SPACING;
+    let resp = match resp {
+        Ok(resp) => resp,
+        Err(e) => {
+            set_note(&BRAVE_NOTE, Some(format!("brave request failed ({e})")));
+            return Vec::new();
+        }
     };
-    if !resp.status().is_success() {
+    let status = resp.status();
+    if status.as_u16() == 429 {
+        gate.cooldown_until = Some(now + BRAVE_COOLDOWN);
+        set_note(
+            &BRAVE_NOTE,
+            Some(format!(
+                "brave answered HTTP 429 (rate limit); cooling down for {}s",
+                BRAVE_COOLDOWN.as_secs()
+            )),
+        );
+        return Vec::new();
+    }
+    if !status.is_success() {
+        set_note(&BRAVE_NOTE, Some(format!("brave answered HTTP {status}")));
         return Vec::new();
     }
     let Ok(bytes) = resp.bytes().await else {
+        set_note(&BRAVE_NOTE, Some("brave response was unreadable".into()));
         return Vec::new();
     };
     if bytes.len() > router::max_body_bytes() {
+        set_note(&BRAVE_NOTE, Some("brave response exceeded the size cap".into()));
         return Vec::new();
     }
+    set_note(&BRAVE_NOTE, None);
     parse_brave_results(&String::from_utf8_lossy(&bytes), 10)
 }
 
@@ -1325,6 +1459,22 @@ mod tests {
         assert!(hits[0].title.contains("котость"), "{:?}", hits[0].title);
         assert!(hits[0].snippet.contains("Куки"), "{:?}", hits[0].snippet);
         assert_eq!(hits[0].source, "brave");
+    }
+
+    /// An engine refusing the client must not read as "the fact does not
+    /// exist": a live run turned a Brave 429 into forty rephrased searches.
+    #[test]
+    fn an_engine_refusal_is_not_an_empty_answer() {
+        let note = unavailable_note(
+            Some("brave answered HTTP 429 (rate limit); cooling down for 60s"),
+            Some("startpage served a bot challenge"),
+        )
+        .unwrap();
+        assert!(note.contains("brave answered HTTP 429"), "{note}");
+        assert!(note.contains("startpage served a bot challenge"), "{note}");
+        assert!(note.contains("rephrasing"), "{note}");
+        assert!(note.contains("webfetch"), "{note}");
+        assert!(unavailable_note(None, None).is_none());
     }
 
     /// A captcha/consent page has no result nodes: the parser must answer
