@@ -22,8 +22,6 @@ pub struct FileDiff {
     /// that could not be written — the edit still happens, uninsured, which
     /// is the same trade the git snapshot already made.
     pub blob_before: Option<String>,
-    /// blake3 name of the content that was written
-    pub blob_after: Option<String>,
 }
 
 pub struct Outcome {
@@ -303,24 +301,42 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
         );
     }
     // A subagent mutating after its step was reopened (or its plan retired)
-    // would attach stale work to a fresh epoch. Refuse instead.
-    if let Some(inherited) = ctx.subagent_step.clone()
-        && matches!(name, "write" | "edit" | "bash")
-        && !step_epoch_current(&ctx.root, &inherited)
-    {
-        return Outcome::err(
-            serde_json::json!({
-                "ok": false,
-                "code": "stale_epoch",
-                "reason": format!(
-                    "step {} was reopened or retired after this task was spawned (inherited epoch {})",
-                    inherited.step_id, inherited.step_epoch,
-                ),
-                "hint": "stop working on this step; report what was done before the reopen",
-            })
-            .to_string(),
-        );
-    }
+    // would attach stale work to a fresh epoch. The check runs under the plan
+    // lock (audit L17) so a reopen cannot commit between the check and the
+    // act. write/edit keep the guard until this call returns, covering the
+    // file write itself. A shell command is not held under it — an arbitrary
+    // command could block plan commits for its whole duration — so bash
+    // re-checks under the lock and starts the process after releasing it;
+    // what the command writes later is caught by the evidence gate, which
+    // runs under the same lock.
+    let _epoch_guard = match (&ctx.subagent_step, name) {
+        (Some(inherited), "write" | "edit" | "bash") => {
+            let guard = match crate::plan::store::PlanLock::acquire(&ctx.root, &inherited.plan_id) {
+                Ok(guard) => guard,
+                Err(e) => {
+                    return Outcome::err(format!(
+                        "cannot verify the plan step right now (plan lock busy): {e:#}"
+                    ));
+                }
+            };
+            if !step_epoch_current(&ctx.root, inherited) {
+                return Outcome::err(
+                    serde_json::json!({
+                        "ok": false,
+                        "code": "stale_epoch",
+                        "reason": format!(
+                            "step {} was reopened or retired after this task was spawned (inherited epoch {})",
+                            inherited.step_id, inherited.step_epoch,
+                        ),
+                        "hint": "stop working on this step; report what was done before the reopen",
+                    })
+                    .to_string(),
+                );
+            }
+            matches!(name, "write" | "edit").then_some(guard)
+        }
+        _ => None,
+    };
     // Writer-subagent scope: a child declared its roots at spawn, and every
     // file mutation must sit inside them. Read-only children never reach
     // here (refused above); the main agent carries no scope.

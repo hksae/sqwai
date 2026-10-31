@@ -100,6 +100,10 @@ pub fn token_ratio(wire: &Wire) -> u64 {
 /// the same ratio the caller converts with. Everything the token window is
 /// spent on except the instruction prefix, which is the same on every request.
 ///
+/// Text is priced with [`crate::providers::effective_text_bytes`]: real bytes
+/// for ASCII, display cells at two bytes for wide glyphs, so a CJK transcript
+/// is not billed at a quarter of what its tokenizer charges.
+///
 /// Media arrives as tokens over four ([`media_wire_bytes`]) and is re-priced at
 /// `bytes_per_token`, so a screenshot is worth the same tokens whichever way the
 /// window is measured.
@@ -112,7 +116,7 @@ pub fn wire_message_bytes(messages: &[Message], bytes_per_token: u64) -> u64 {
     messages
         .iter()
         .map(|message| {
-            message.content.len() as u64
+            crate::providers::effective_text_bytes(&message.content)
                 + message.tool_call_id.as_deref().map_or(0, str::len) as u64
                 + message
                     .tool_calls

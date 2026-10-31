@@ -1943,7 +1943,6 @@ fn undo_and_redo_round_trip_restores_files_and_recompletes_plan_step() {
     let before = b"fn a() -> i32 { 1 }\n";
     let after = b"fn a() -> i32 { 2 }\n";
     let blob_before = crate::agent::blobs::put(root, before).unwrap();
-    let blob_after = crate::agent::blobs::put(root, after).unwrap();
     std::fs::write(&target, after).unwrap();
 
     let sid = app.session.id.to_string();
@@ -1981,7 +1980,6 @@ fn undo_and_redo_round_trip_restores_files_and_recompletes_plan_step() {
                 "hash_before": "sha256:before",
                 "hash_after": hash_after,
                 "blob_before": blob_before,
-                "blob_after": blob_after,
                 "checkpoint": ckpt,
             }),
         )

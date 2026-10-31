@@ -881,7 +881,6 @@ fn edit_tool_stores_original_content_not_path_in_layer1_blob_and_works_with_shad
                 "hash_before": diff.hash_before,
                 "hash_after": diff.hash_after,
                 "blob_before": diff.blob_before,
-                "blob_after": diff.blob_after,
                 "checkpoint": ckpt,
             }),
         )
@@ -928,7 +927,6 @@ fn bash_file_diffs_records_layer1_blobs_and_hashes_for_scoped_undo() {
                     "hash_before": d.hash_before,
                     "hash_after": d.hash_after,
                     "blob_before": d.blob_before,
-                    "blob_after": d.blob_after,
                     "checkpoint": d.checkpoint,
                 }),
             )

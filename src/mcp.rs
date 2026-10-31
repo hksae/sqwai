@@ -102,19 +102,34 @@ impl Registry {
         split_namespaced(name).is_some_and(|(server, _)| self.connections.contains_key(server))
     }
 
+    /// A failed call. `dropped` names the tool specs the registry removed
+    /// because the connection is gone: the request schema holds its own copy,
+    /// and the caller must drop those there too, or the model keeps being
+    /// offered a tool nothing can answer (audit M13).
     pub async fn call(
-        &self,
+        &mut self,
         namespaced: &str,
         arguments: serde_json::Value,
-    ) -> Result<(String, bool)> {
+    ) -> Result<(String, bool), CallError> {
         let Some((server, tool)) = split_namespaced(namespaced) else {
-            bail!("invalid MCP tool name '{namespaced}'")
+            return Err(CallError::new(format!(
+                "invalid MCP tool name '{namespaced}'"
+            )));
         };
         let Some(connection) = self.connections.get(server) else {
-            bail!("MCP server '{server}' is not connected")
+            return Err(CallError::new(format!(
+                "MCP server '{server}' is not connected"
+            )));
         };
+        if connection_closed(connection).await {
+            let dropped = self.drop_server(server);
+            return Err(CallError {
+                message: format!("MCP server '{server}' is gone; its tools were removed"),
+                dropped,
+            });
+        }
         let args = arguments.as_object().cloned().unwrap_or_default();
-        let response = bounded(&format!("MCP tool '{namespaced}'"), CALL_TIMEOUT, async {
+        let result = bounded(&format!("MCP tool '{namespaced}'"), CALL_TIMEOUT, async {
             match connection {
                 Connection::Stdio(client) | Connection::Http(client) => Ok(client
                     .lock()
@@ -125,21 +140,75 @@ impl Registry {
                     .await?),
             }
         })
-        .await?;
+        .await;
+        let response = match result {
+            Ok(response) => response,
+            Err(e) => {
+                let closed = connection_closed(connection).await;
+                let dropped = if closed {
+                    self.drop_server(server)
+                } else {
+                    Vec::new()
+                };
+                return Err(CallError {
+                    message: format!("{e:#}"),
+                    dropped,
+                });
+            }
+        };
         match response {
             CallToolResponse::Complete(result) => {
                 let output = if let Some(structured) = result.structured_content {
-                    serde_json::to_string_pretty(&structured)?
+                    serde_json::to_string_pretty(&structured).map_err(|e| CallError::new(e.to_string()))?
                 } else {
-                    serde_json::to_string(&result.content)?
+                    serde_json::to_string(&result.content).map_err(|e| CallError::new(e.to_string()))?
                 };
                 // server-authored bytes get the same secret screening as
                 // memory before they enter context (audit M12)
                 let output = crate::agent::secrets::screen(&output).text;
                 Ok((output, result.is_error.unwrap_or(false)))
             }
-            _ => bail!("MCP tool '{namespaced}' requires an unsupported follow-up interaction"),
+            _ => Err(CallError::new(format!(
+                "MCP tool '{namespaced}' requires an unsupported follow-up interaction"
+            ))),
         }
+    }
+
+    /// Forget a server and its tools. Returns the spec names the caller's
+    /// request schema must drop with it.
+    pub fn drop_server(&mut self, server: &str) -> Vec<String> {
+        self.connections.remove(server);
+        let prefix = format!("mcp__{server}__");
+        let mut dropped = Vec::new();
+        self.tools.retain(|spec| {
+            if spec.name.starts_with(&prefix) {
+                dropped.push(spec.name.clone());
+                false
+            } else {
+                true
+            }
+        });
+        dropped
+    }
+}
+
+pub struct CallError {
+    pub message: String,
+    pub dropped: Vec<String>,
+}
+
+impl CallError {
+    fn new(message: String) -> Self {
+        Self {
+            message,
+            dropped: Vec::new(),
+        }
+    }
+}
+
+async fn connection_closed(connection: &Connection) -> bool {
+    match connection {
+        Connection::Stdio(client) | Connection::Http(client) => client.lock().await.is_closed(),
     }
 }
 
@@ -151,7 +220,16 @@ fn split_namespaced(name: &str) -> Option<(&str, &str)> {
 
 #[cfg(test)]
 mod split_tests {
-    use super::split_namespaced;
+    use super::{Registry, split_namespaced};
+    use std::collections::HashMap;
+
+    fn spec(name: &str) -> crate::providers::ToolSpec {
+        crate::providers::ToolSpec {
+            name: name.into(),
+            description: String::new(),
+            parameters: serde_json::json!({"type": "object"}),
+        }
+    }
 
     #[test]
     fn a_tool_name_may_contain_the_separator() {
@@ -161,6 +239,25 @@ mod split_tests {
             Some(("server", "tool__with__parts"))
         );
         assert_eq!(split_namespaced("mcp__server"), None);
+    }
+
+    /// A dead server's specs leave the schema, and only that server's: the
+    /// prefix is exact, a neighbouring name sharing the stem stays.
+    #[test]
+    fn dropping_a_server_removes_only_its_tools() {
+        let mut registry = Registry {
+            tools: vec![
+                spec("mcp__srv__a"),
+                spec("mcp__srv__b"),
+                spec("mcp__srv2__c"),
+                spec("read"),
+            ],
+            connections: HashMap::new(),
+        };
+        let dropped = registry.drop_server("srv");
+        assert_eq!(dropped, vec!["mcp__srv__a", "mcp__srv__b"]);
+        let left: Vec<&str> = registry.specs().iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(left, vec!["mcp__srv2__c", "read"]);
     }
 }
 

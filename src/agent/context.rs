@@ -523,7 +523,7 @@ pub fn estimated_tokens(messages: &[Message]) -> u64 {
     messages
         .iter()
         .map(|m| {
-            (m.content.len() as u64
+            (crate::providers::effective_text_bytes(&m.content)
                 + m.tool_calls
                     .iter()
                     .map(|c| c.name.len() as u64 + c.args.to_string().len() as u64)

@@ -197,7 +197,6 @@ pub(crate) fn file_diff(
     // decision the git snapshot already makes a few lines up.
     let blobs = crate::agent::blobs::dir(root);
     let blob_before = before.and_then(|bytes| crate::agent::blobs::put(root, bytes).ok());
-    let blob_after = crate::agent::blobs::put(root, after).ok();
     if blob_before.is_none() && before.is_some() {
         crate::providers::log_http(&format!(
             "blob store unavailable at {}: this edit is not revertible on its own",
@@ -213,7 +212,6 @@ pub(crate) fn file_diff(
         mode: mode.to_string(),
         checkpoint,
         blob_before,
-        blob_after,
     }
 }
 

@@ -381,7 +381,7 @@ impl Session {
         if self.messages.is_empty() && role == Role::User {
             self.title = title_from(&content);
         }
-        self.estimated_tokens += (content.len() as u64).div_ceil(4)
+        self.estimated_tokens += crate::providers::effective_text_bytes(&content).div_ceil(4)
             + images
                 .iter()
                 .map(|image| crate::media::pressure_tokens(image.width, image.height))
@@ -548,7 +548,7 @@ impl Session {
             .messages
             .iter()
             .map(|m| {
-                let mut bytes = m.content.len() as u64;
+                let mut bytes = crate::providers::effective_text_bytes(&m.content);
                 for call in &m.tool_calls {
                     bytes += (call.name.len() + call.args.to_string().len()) as u64;
                 }

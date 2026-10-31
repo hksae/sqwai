@@ -15,11 +15,9 @@
 //!
 //! The event log's `file_diff` keeps recording `hash_before` / `hash_after` as
 //! sha256 — his scoped-undo matching reads that format — and gains
-//! `blob_before` / `blob_after`, which are the blake3 names *in this store*.
-//! Two algorithms sound like an accident; it is the alternative that is worse.
-//! Renaming the event log's hashes would silently invalidate every record
-//! written before the change, and dropping blake3 would contradict . So
-//! the record carries both, and the link is explicit rather than implied.
+//! `blob_before`, the blake3 name of the pre-image *in this store*. (The
+//! post-image link was dropped: no restore path ever read it, and the file on
+//! disk already is the after image.)
 
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};

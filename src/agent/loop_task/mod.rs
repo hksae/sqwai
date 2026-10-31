@@ -230,6 +230,11 @@ pub enum AgentEvent {
     FallbackSwitched {
         from: String,
         to: String,
+        /// The failed provider's reasoning is its own; another wire cannot
+        /// validate the signatures, so the fallback continues without any
+        /// prior thoughts. Surfaced because the loss is otherwise invisible
+        /// (audit L13).
+        reasoning_dropped: bool,
     },
     Completed(Result<AgentOutcome, String>),
     /// live transcript sync: the full conversation so far, sent at the top
@@ -919,7 +924,7 @@ async fn run_agent(
         }
     }
 
-    let mcp_registry = if enable_tools {
+    let mut mcp_registry = if enable_tools {
         match crate::mcp::Registry::from_config(&mcp).await {
             Ok(registry) => Some(registry),
             Err(e) => {
@@ -944,7 +949,7 @@ async fn run_agent(
     );
     // Tools are part of the request prefix: sorted for stability, one set,
     // and omitted entirely for requests that cannot call them.
-    let tools: Vec<crate::providers::ToolSpec> = if enable_tools {
+    let mut tools: Vec<crate::providers::ToolSpec> = if enable_tools {
         let base = tools::tool_specs();
         if let Some(registry) = &mcp_registry {
             tools::merge_specs(base, registry.specs())
@@ -1546,6 +1551,15 @@ async fn run_agent(
                     ) || failure.retries > 0);
                 if can_fallback && !fallback_chain.is_empty() {
                     let next = fallback_chain.remove(0);
+                    // Replayed reasoning is provider-signed; the fallback's
+                    // wire cannot accept it, so this turn and its later
+                    // context continue thoughtless. Stated, not silent.
+                    let reasoning_dropped = messages.iter().any(|m| {
+                        m.provider_state.as_ref().is_some_and(|state| {
+                            state.get("thinking_blocks").is_some()
+                                || state.get("reasoning_items").is_some()
+                        })
+                    });
                     if let Some(writer) = events.as_mut() {
                         let _ = writer.append(
                             "provider_error",
@@ -1554,6 +1568,7 @@ async fn run_agent(
                                 "retries": failure.retries,
                                 "recovered": true,
                                 "switched_to": next.key,
+                                "reasoning_dropped": reasoning_dropped,
                                 "by": "host",
                             }),
                         );
@@ -1562,6 +1577,7 @@ async fn run_agent(
                         .send(AgentEvent::FallbackSwitched {
                             from: current_model_key.clone(),
                             to: next.key.clone(),
+                            reasoning_dropped,
                         })
                         .await;
                     current_model_key = next.key;
@@ -2196,7 +2212,7 @@ async fn run_agent(
                                 .is_some_and(|registry| registry.contains(other)) =>
                         {
                             match mcp_registry
-                                .as_ref()
+                                .as_mut()
                                 .unwrap()
                                 .call(other, call.args.clone())
                                 .await
@@ -2210,7 +2226,24 @@ async fn run_agent(
                                 Ok((output, is_error)) => {
                                     crate::mcp::result_outcome(output, is_error)
                                 }
-                                Err(e) => tools::Outcome::err(format!("MCP call failed: {e:#}")),
+                                Err(e) => {
+                                    // A dead server's tools are gone from the
+                                    // registry (audit M13); the request schema
+                                    // holds its own copy, so drop them there
+                                    // too or the model keeps calling a tool
+                                    // nothing can answer.
+                                    if !e.dropped.is_empty() {
+                                        tools.retain(|spec| !e.dropped.contains(&spec.name));
+                                        crate::providers::log_http(&format!(
+                                            "MCP: dropped {} after its server went away",
+                                            e.dropped.join(", ")
+                                        ));
+                                    }
+                                    tools::Outcome::err(format!(
+                                        "MCP call failed: {}",
+                                        e.message
+                                    ))
+                                }
                             }
                         }
                         other => {
@@ -2350,7 +2383,6 @@ async fn run_agent(
                                 // single step can be reverted from the event log
                                 // alone; absent when nothing was stored
                                 "blob_before": metadata.blob_before,
-                                "blob_after": metadata.blob_after,
                             }),
                         );
                     }

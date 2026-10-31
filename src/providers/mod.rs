@@ -58,8 +58,7 @@ pub fn stream_http_client() -> reqwest::Client {
 /// allocating multi-hundred-KB temporary `String`s on every turn just to
 /// measure `provider_state`, `extra_content`, `call.args`, and tool schemas.
 #[inline]
-pub(crate) fn json_byte_len(val: &serde_json::Value) -> u64 {
-    struct ByteCounter(u64);
+pub(crate) fn json_byte_len(val: &serde_json::Value) -> u64 {    struct ByteCounter(u64);
     impl std::io::Write for ByteCounter {
         #[inline]
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
@@ -74,6 +73,20 @@ pub(crate) fn json_byte_len(val: &serde_json::Value) -> u64 {
     let mut counter = ByteCounter(0);
     let _ = serde_json::to_writer(&mut counter, val);
     counter.0
+}
+
+/// Bytes to price a piece of text with at the flat four-bytes-per-token
+/// conversion. ASCII prose is its own length. A wide glyph is about one
+/// token while costing two display cells and three UTF-8 bytes, so pricing
+/// cells at two bytes keeps CJK histories from reading 2-4x cheaper than the
+/// tokenizer bills them (audit L15).
+pub(crate) fn effective_text_bytes(text: &str) -> u64 {
+    let bytes = text.len() as u64;
+    if text.is_ascii() {
+        return bytes;
+    }
+    let cells = unicode_width::UnicodeWidthStr::width(text) as u64;
+    bytes.max(cells.saturating_mul(2))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -579,7 +592,7 @@ impl RequestBreakdown {
         let mut out = Self::default();
         out.whole_transcript = req.context_transport == ContextTransport::Stateless;
         for part in &req.system {
-            let bytes = part.text.len() as u64;
+            let bytes = effective_text_bytes(&part.text);
             match part.section {
                 PrefixSection::Skills => out.skills_bytes += bytes,
                 PrefixSection::System if part.cacheable => out.system_bytes += bytes,
@@ -588,7 +601,7 @@ impl RequestBreakdown {
             }
         }
         for message in &req.messages {
-            let bytes = message.content.len() as u64
+            let bytes = effective_text_bytes(&message.content)
                 + message
                     .tool_calls
                     .iter()

@@ -869,69 +869,88 @@ pub fn clean_terminal_output(raw: &str) -> String {
     out
 }
 
-/// Decode child-process output. UTF-8 when valid; otherwise the Windows
-/// console codepage (cp866 on RU Windows — cmd/powershell system messages).
-/// Plain `from_utf8_lossy` turned those into ����, poisoning baselines and
-/// reports. Line-wise, so a UTF-8 program line next to a cp866 system error
-/// line each decodes correctly. File content never comes here (source files
-/// are UTF-8 by contract; lossy is right for them).
+/// Decode child-process output. UTF-8 when valid; otherwise the console's
+/// output code page. Plain `from_utf8_lossy` turned cmd/powershell system
+/// messages into ����, poisoning baselines and reports. The page is read
+/// from the console (audit L25): assuming cp866 everywhere decoded a cp1252
+/// or cp932 console into Cyrillic gibberish. Line-wise, so a UTF-8 program
+/// line next to a legacy-codepage system error line each decodes correctly.
+/// File content never comes here (source files are UTF-8 by contract; lossy
+/// is right for them).
 pub fn decode_child_output(bytes: &[u8]) -> String {
     let decoded = if let Ok(text) = std::str::from_utf8(bytes) {
         text.to_string()
     } else {
+        let encoding = console_encoding();
         let mut out = String::new();
         for line in bytes.split(|b| *b == b'\n') {
             if !out.is_empty() {
                 out.push('\n');
             }
-            match std::str::from_utf8(line) {
-                Ok(text) => out.push_str(text),
-                Err(_) => {
-                    for b in line {
-                        out.push(cp866_char(*b));
-                    }
-                }
-            }
+            out.push_str(&decode_line(line, encoding));
         }
         out
     };
     clean_terminal_output(&decoded)
 }
 
-/// One cp866 byte to char. Cyrillic ranges first (the observed mojibake),
-/// then box drawing and symbols; ASCII passes through.
-fn cp866_char(byte: u8) -> char {
-    match byte {
-        0x00..=0x7F => byte as char,
-        0x80..=0x9F => char::from_u32(0x0410 + (byte - 0x80) as u32).unwrap_or('�'),
-        0xA0..=0xAF => char::from_u32(0x0430 + (byte - 0xA0) as u32).unwrap_or('�'),
-        0xB0..=0xBF => [
-            '░', '▒', '▓', '│', '┤', '╡', '╢', '╖', '╕', '╣', '║', '╗', '╝', '╜', '╛', '┐',
-        ][(byte - 0xB0) as usize],
-        0xC0..=0xCF => [
-            '└', '┴', '┬', '├', '─', '┼', '╞', '╟', '╚', '╔', '╩', '╦', '╠', '═', '╬', '╧',
-        ][(byte - 0xC0) as usize],
-        0xD0..=0xDF => [
-            '╨', '╤', '╥', '╙', '╘', '╒', '╓', '╫', '╪', '┘', '┌', '█', '▄', '▌', '▐', '■',
-        ][(byte - 0xD0) as usize],
-        0xE0..=0xEF => char::from_u32(0x0440 + (byte - 0xE0) as u32).unwrap_or('�'),
-        0xF0 => 'Ё',
-        0xF1 => 'ё',
-        0xF2 => 'Є',
-        0xF3 => 'є',
-        0xF4 => 'Ї',
-        0xF5 => 'ї',
-        0xF6 => 'Ў',
-        0xF7 => 'ў',
-        0xF8 => '°',
-        0xF9 => '∙',
-        0xFA => '·',
-        0xFB => '√',
-        0xFC => '№',
-        0xFD => '¤',
-        0xFE => '■',
-        0xFF => '\u{a0}',
+fn decode_line(line: &[u8], encoding: &'static encoding_rs::Encoding) -> String {
+    match std::str::from_utf8(line) {
+        Ok(text) => text.to_string(),
+        Err(_) => encoding
+            .decode_without_bom_handling(line)
+            .0
+            .into_owned(),
     }
+}
+
+/// The encoding for a Windows code page. Pages encoding_rs does not name —
+/// OEM 437/850/852 and friends — fall back to cp1252, the closest thing to
+/// Latin text among the portable choices.
+fn encoding_for_codepage(cp: u32) -> &'static encoding_rs::Encoding {
+    use encoding_rs::*;
+    match cp {
+        866 => IBM866,
+        874 => WINDOWS_874,
+        932 => SHIFT_JIS,
+        936 => GBK,
+        949 => EUC_KR,
+        950 => BIG5,
+        1250 => WINDOWS_1250,
+        1251 => WINDOWS_1251,
+        1252 => WINDOWS_1252,
+        1253 => WINDOWS_1253,
+        1254 => WINDOWS_1254,
+        1255 => WINDOWS_1255,
+        1256 => WINDOWS_1256,
+        1257 => WINDOWS_1257,
+        1258 => WINDOWS_1258,
+        10000 => MACINTOSH,
+        _ => WINDOWS_1252,
+    }
+}
+
+fn console_encoding() -> &'static encoding_rs::Encoding {
+    static ENCODING: std::sync::OnceLock<&'static encoding_rs::Encoding> =
+        std::sync::OnceLock::new();
+    ENCODING.get_or_init(|| encoding_for_codepage(console_codepage()))
+}
+
+#[cfg(windows)]
+fn console_codepage() -> u32 {
+    use windows_sys::Win32::Globalization::GetOEMCP;
+    use windows_sys::Win32::System::Console::GetConsoleOutputCP;
+    // no console to ask: the system OEM page is what console children fall
+    // back to, and the right guess for the machine.
+    let cp = unsafe { GetConsoleOutputCP() };
+    if cp != 0 { cp } else { unsafe { GetOEMCP() } }
+}
+
+#[cfg(not(windows))]
+fn console_codepage() -> u32 {
+    // Unix programs speak UTF-8; bytes that are not valid UTF-8 are most
+    // plausibly Latin-1/cp1252 leftovers.
+    1252
 }
 
 /// The plan tool's criteria are the agent's own plain-text done-notes: the
@@ -998,16 +1017,37 @@ fn plan_tool_description_describes_criteria_as_notes() {
 /// е=0xA5, т=0xE2) must round-trip, valid UTF-8 (emoji included) passes
 /// through untouched, and mixed lines decode each in its own encoding.
 #[test]
-fn decode_child_output_handles_console_codepage() {
+fn decode_child_output_reads_the_console_codepage() {
+    // The page is the console's, not a hardcoded cp866: the same bytes mean
+    // different text on different pages, and each page decodes its own.
     assert_eq!(
-        decode_child_output(&[0x8F, 0xE0, 0xA8, 0xA2, 0xA5, 0xE2]),
+        decode_line(&[0x8F, 0xE0, 0xA8, 0xA2, 0xA5, 0xE2], encoding_for_codepage(866)),
         "Привет"
     );
+    assert_eq!(
+        decode_line(&[0xCF, 0xF0, 0xE8, 0xE2, 0xE5, 0xF2], encoding_for_codepage(1251)),
+        "Привет"
+    );
+    assert_eq!(
+        decode_line(
+            &[0x82, 0xB1, 0x82, 0xF1, 0x82, 0xC9, 0x82, 0xBF, 0x82, 0xCD],
+            encoding_for_codepage(932)
+        ),
+        "こんにちは"
+    );
+    // cp1252 and unknown pages: Latin text, never Cyrillic invented from
+    // bytes the page does not define.
+    assert_eq!(
+        decode_line(b"caf\xE9", encoding_for_codepage(1252)),
+        "café"
+    );
+    assert_eq!(encoding_for_codepage(850), encoding_rs::WINDOWS_1252);
+    // Valid UTF-8 always wins over any page, whole output or line by line.
     assert_eq!(decode_child_output("ok 🔥 ЕС".as_bytes()), "ok 🔥 ЕС");
     let mut mixed = b"done\n".to_vec();
-    mixed.extend_from_slice(&[0x8E, 0xE8, 0xA8, 0xA1, 0xAA, 0xA0]); // "Ошибка" in cp866
-    assert_eq!(decode_child_output(&mixed), "done\nОшибка");
-    assert_eq!(decode_child_output(&[0xB3]), "│");
+    mixed.extend_from_slice(&[0x8F, 0xE0, 0xA8, 0xA2, 0xA5, 0xE2]);
+    let text = decode_line(&mixed[mixed.len() - 6..], encoding_for_codepage(866));
+    assert_eq!(text, "Привет");
 }
 
 /// The schema is what the model is told; the loop's guard reads the same

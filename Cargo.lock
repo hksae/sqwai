@@ -2617,6 +2617,7 @@ dependencies = [
  "chrono",
  "crossterm",
  "directories",
+ "encoding_rs",
  "eventsource-stream",
  "futures",
  "globset",

@@ -690,10 +690,8 @@ impl EventLog {
         let mut ids = std::collections::HashSet::new();
         for record in Self::records(root)? {
             if record.kind == "file_diff" {
-                for field in ["blob_before", "blob_after"] {
-                    if let Some(id) = record.fields.get(field).and_then(Value::as_str) {
-                        ids.insert(id.to_string());
-                    }
+                if let Some(id) = record.fields.get("blob_before").and_then(Value::as_str) {
+                    ids.insert(id.to_string());
                 }
             } else if record.kind == "undo"
                 && let Some(arr) = record.fields.get("redo_blobs").and_then(Value::as_array)

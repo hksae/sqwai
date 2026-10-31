@@ -409,6 +409,20 @@ fn form_label_column_measures_display_cells_not_bytes() {
 }
 
 #[test]
+fn going_back_puts_the_parent_list_at_its_top() {
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.open_menu(Menu::Providers);
+    app.menu_scroll = 7;
+    app.open_menu(Menu::EditProvider { name: None });
+    app.menu_scroll = 3;
+    app.menu_back();
+    assert_eq!(app.menu_scroll, 0, "back must not reopen the old window");
+    app.menu_scroll = 4;
+    app.menu_home();
+    assert_eq!(app.menu_scroll, 0, "home starts from the top");
+}
+
+#[test]
 fn plan_subcommand_popup_filters_and_inserts() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     // level 2 visible after `/plan `, lists only `/plan delete`

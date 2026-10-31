@@ -18,7 +18,6 @@ fn changed_any_file_requires_actual_lines() {
         mode: "bash".into(),
         checkpoint: None,
         blob_before: None,
-        blob_after: None,
     };
     assert!(!Outcome::ok("ok").changed_any_file());
     assert!(

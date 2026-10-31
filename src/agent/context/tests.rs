@@ -48,6 +48,24 @@ fn provider_owned_state_counts_toward_estimated_and_wire_pressure() {
     assert_eq!(wire, bytes.div_ceil(4));
 }
 
+/// Four bytes per token is an ASCII fact. A CJK glyph is one token but only
+/// three UTF-8 bytes, so the flat counter read it a quarter cheap; display
+/// cells at two bytes put it back at about one token per glyph.
+#[test]
+fn wide_text_is_priced_by_cells_not_utf8_bytes() {
+    let cjk = Message::new(Role::User, "键".repeat(100));
+    let ascii = Message::new(Role::User, "a".repeat(400));
+    let cjk_tokens = estimated_tokens(std::slice::from_ref(&cjk));
+    assert_eq!(cjk_tokens, 100, "100 wide glyphs must read as ~100 tokens");
+    assert_eq!(
+        cjk_tokens,
+        estimated_tokens(std::slice::from_ref(&ascii)),
+        "the same visual volume prices the same"
+    );
+    let wire = wire_estimated_tokens(&[cjk], &crate::agent::tool_output::Wire::default());
+    assert_eq!(wire, 100);
+}
+
 #[test]
 fn anchor_keeps_event_facts_not_plan_state() {
     let root = temp_root("anchor");

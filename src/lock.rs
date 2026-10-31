@@ -29,6 +29,10 @@ impl ProjectLock {
             .with_context(|| format!("cannot create project lock {}", path.display()))?;
         writeln!(file, "pid={}", std::process::id())?;
         writeln!(file, "session={session}")?;
+        // The PID alone cannot outlive recycling; its start identity can.
+        if let Some(started) = process_start(std::process::id()) {
+            writeln!(file, "started={started}")?;
+        }
 
         // Determine writability after creating our lock file to prevent TOCTOU race
         let my_meta = fs::metadata(&path).ok();
@@ -37,10 +41,9 @@ impl ProjectLock {
         let mut read_only = false;
         let mut forced_over_live = false;
         if force {
-            forced_over_live = lock_files(&lock_dir)?.iter().any(|other| {
-                other != &path
-                    && read_pid(other).is_some_and(|pid| pid != std::process::id() && is_pid_alive(pid))
-            });
+            forced_over_live = lock_files(&lock_dir)?
+                .iter()
+                .any(|other| other != &path && !lock_is_stale(other));
         }
         if !force {
             for other_path in lock_files(&lock_dir)? {
@@ -138,6 +141,74 @@ fn read_pid(path: &Path) -> Option<u32> {
     None
 }
 
+fn read_started(path: &Path) -> Option<u64> {
+    let content = fs::read_to_string(path).ok()?;
+    for line in content.lines() {
+        if let Some(started) = line.strip_prefix("started=") {
+            return started.trim().parse().ok();
+        }
+    }
+    None
+}
+
+/// A lock is stale when its writer is gone: no pid, a dead pid, or — when
+/// both sides can report it — a different start identity for that pid, which
+/// is a recycled PID wearing a dead instance's number (audit L9). A lock
+/// written before start identities existed is trusted while its pid lives.
+fn lock_is_stale(path: &Path) -> bool {
+    let Some(pid) = read_pid(path) else {
+        return true;
+    };
+    if !is_pid_alive(pid) {
+        return true;
+    }
+    match (read_started(path), process_start(pid)) {
+        (Some(recorded), Some(current)) => recorded != current,
+        _ => false,
+    }
+}
+
+/// Start identity of a process: a PID can be reused, its creation time
+/// cannot be reused by a different process. `None` when the platform cannot
+/// say — the caller then trusts a live pid.
+#[cfg(windows)]
+pub(crate) fn process_start(pid: u32) -> Option<u64> {
+    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME};
+    use windows_sys::Win32::System::Threading::{
+        GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return None;
+        }
+        let zero = FILETIME {
+            dwLowDateTime: 0,
+            dwHighDateTime: 0,
+        };
+        let (mut created, mut exited, mut kernel, mut user) = (zero, zero, zero, zero);
+        let ok = GetProcessTimes(handle, &mut created, &mut exited, &mut kernel, &mut user);
+        CloseHandle(handle);
+        (ok != 0).then_some(((created.dwHighDateTime as u64) << 32) | created.dwLowDateTime as u64)
+    }
+}
+
+/// `/proc/<pid>/stat` field 22 (starttime, in clock ticks since boot). Field
+/// 2 may contain spaces and parentheses, so parsing starts after the last
+/// `)` — the field this reads is index 19 in what follows.
+#[cfg(unix)]
+pub(crate) fn process_start(pid: u32) -> Option<u64> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    stat.rsplit_once(')')
+        .and_then(|(_, rest)| rest.split_whitespace().nth(19))
+        .and_then(|ticks| ticks.parse().ok())
+}
+
+#[cfg(not(any(windows, unix)))]
+pub(crate) fn process_start(_pid: u32) -> Option<u64> {
+    None
+}
+
 /// Prune lock files whose recorded PID is no longer alive.
 fn prune_stale_locks(dir: &Path) -> Result<()> {
     if !dir.exists() {
@@ -146,14 +217,8 @@ fn prune_stale_locks(dir: &Path) -> Result<()> {
     for entry in fs::read_dir(dir).with_context(|| format!("cannot read {}", dir.display()))? {
         let entry = entry?;
         let path = entry.path();
-        if path.extension().is_some_and(|ext| ext == "lock") {
-            let is_stale = match read_pid(&path) {
-                Some(pid) => pid != std::process::id() && !is_pid_alive(pid),
-                None => true,
-            };
-            if is_stale {
-                let _ = fs::remove_file(&path);
-            }
+        if path.extension().is_some_and(|ext| ext == "lock") && lock_is_stale(&path) {
+            let _ = fs::remove_file(&path);
         }
     }
     Ok(())
@@ -219,6 +284,50 @@ mod tests {
         let lock = ProjectLock::acquire(root.path(), false).unwrap();
         assert!(!lock.read_only);
         assert!(!stale_path.exists());
+    }
+
+    /// A recycled PID once kept a dead instance's project locked forever.
+    /// The start identity distinguishes the process that wrote the file from
+    /// whatever now wears its number.
+    #[test]
+    fn a_reused_pid_with_a_different_start_is_pruned() {
+        let started = process_start(std::process::id()).expect("this process has a start identity");
+        let root = tempdir().unwrap();
+        let lock_dir = crate::agent::state::lock_dir(root.path());
+        fs::create_dir_all(&lock_dir).unwrap();
+        let stale_path = lock_dir.join("reused.lock");
+        fs::write(
+            &stale_path,
+            format!(
+                "pid={}\nsession=reused\nstarted={}\nread_only=false\n",
+                std::process::id(),
+                started.wrapping_add(1)
+            ),
+        )
+        .unwrap();
+
+        let lock = ProjectLock::acquire(root.path(), false).unwrap();
+        assert!(!lock.read_only, "a reused pid must not lock the project");
+        assert!(!stale_path.exists());
+    }
+
+    /// Locks written before start identities existed cannot prove a reuse;
+    /// a live pid is the only evidence there is, and it is trusted.
+    #[test]
+    fn a_legacy_lock_with_a_live_pid_survives() {
+        let root = tempdir().unwrap();
+        let lock_dir = crate::agent::state::lock_dir(root.path());
+        fs::create_dir_all(&lock_dir).unwrap();
+        let legacy = lock_dir.join("legacy.lock");
+        fs::write(
+            &legacy,
+            format!("pid={}\nsession=legacy\n", std::process::id()),
+        )
+        .unwrap();
+
+        let lock = ProjectLock::acquire(root.path(), false).unwrap();
+        assert!(lock.read_only, "a live legacy lock still owns the project");
+        assert!(legacy.exists());
     }
 
     #[test]

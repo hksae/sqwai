@@ -61,7 +61,15 @@ async fn test_provider_fallback_chain_switch_on_failure() {
         effort_support: crate::config::EffortSupport::default(),
         max_tokens: None,
         system: vec![],
-        messages: vec![Message::new(Role::User, "hello")],
+        messages: vec![
+            Message::new(Role::User, "hello"),
+            Message::new(Role::Assistant, "first pass").with_provider_state(Some(
+                serde_json::json!({"thinking_blocks": [
+                    {"type": "thinking", "thinking": "check", "signature": "SIG"}
+                ]}),
+            )),
+            Message::new(Role::User, "again"),
+        ],
         root: temp_dir.clone(),
         session_id: "test-fallback-sess".into(),
         blocked_patterns: vec![],
@@ -101,9 +109,17 @@ async fn test_provider_fallback_chain_switch_on_failure() {
 
     while let Some(ev) = handle.rx.recv().await {
         match ev {
-            AgentEvent::FallbackSwitched { from, to } => {
+            AgentEvent::FallbackSwitched {
+                from,
+                to,
+                reasoning_dropped,
+            } => {
                 assert_eq!(from, "primary-model");
                 assert_eq!(to, "fallback-model");
+                assert!(
+                    reasoning_dropped,
+                    "the switch drops the signed reasoning and must say so"
+                );
                 switched = true;
             }
             AgentEvent::TextDelta(text) => {
@@ -123,6 +139,131 @@ async fn test_provider_fallback_chain_switch_on_failure() {
         got_fallback_text,
         "should have received text from fallback provider"
     );
+}
+
+/// A provider that keeps the requests it was handed, for asserting what the
+/// loop planned after a switch.
+pub(crate) struct RecordingTestProvider {
+    pub(crate) events: std::sync::Mutex<Vec<Vec<crate::providers::StreamResult>>>,
+    pub(crate) requests: std::sync::Mutex<Vec<crate::providers::ChatRequest>>,
+}
+
+impl crate::providers::Provider for RecordingTestProvider {
+    fn stream_chat(
+        &self,
+        req: crate::providers::ChatRequest,
+    ) -> futures::stream::BoxStream<'static, crate::providers::StreamResult> {
+        use futures::StreamExt;
+        self.requests.lock().unwrap().push(req);
+        let batch = self
+            .events
+            .lock()
+            .unwrap()
+            .pop()
+            .unwrap_or_default();
+        futures::stream::iter(batch).boxed()
+    }
+}
+
+/// The fallback decides its own effort wire from its own declaration: the
+/// level is the user's, the mapping is the target model's. Nothing may carry
+/// the failed model's budget into a model that takes named levels (audit
+/// L32) — that request is the "wasted request per switch".
+#[tokio::test]
+async fn fallback_replans_effort_for_the_new_model() {
+    let primary_provider = std::sync::Arc::new(MockTestProvider {
+        events: std::sync::Mutex::new(vec![vec![Err(anyhow::anyhow!(
+            "provider returned 500: internal server error"
+        ))]]),
+    });
+    let fallback_provider = std::sync::Arc::new(RecordingTestProvider {
+        events: std::sync::Mutex::new(vec![vec![Ok(crate::providers::StreamEvent::Text(
+            "ok".into(),
+        ))]]),
+        requests: std::sync::Mutex::new(Vec::new()),
+    });
+    let budget_support = crate::config::EffortSupport {
+        control: crate::config::EffortControl::Budget,
+        always_on: false,
+    };
+    let named_support = crate::config::EffortSupport {
+        control: crate::config::EffortControl::Named,
+        always_on: false,
+    };
+    let fallback = FallbackCandidate {
+        key: "fallback-model".into(),
+        model_id: "m-fallback".into(),
+        provider: fallback_provider.clone(),
+        effort_support: named_support,
+        context_limit: 10000,
+    };
+    let temp_dir = std::env::temp_dir().join(format!("sqwai-test-effort-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&temp_dir);
+    let input = AgentInput {
+        provider: primary_provider,
+        model_id: "m-primary".into(),
+        model_key: "primary-model".into(),
+        effort: Some(EffortLevel::High),
+        effort_support: budget_support,
+        max_tokens: None,
+        system: vec![],
+        messages: vec![Message::new(Role::User, "hello")],
+        root: temp_dir.clone(),
+        session_id: "test-effort-fallback".into(),
+        blocked_patterns: vec![],
+        approval_mode: Default::default(),
+        approval_switch: None,
+        approval_grants: Default::default(),
+        web_allow_hosts: vec![],
+        context_limit: 10000,
+        vision: true,
+        pdf: true,
+        tools: Default::default(),
+        search: Default::default(),
+        limits: Default::default(),
+        active_skills: vec![],
+        read_ledger: Default::default(),
+        enable_tools: false,
+        background_baselines: false,
+        read_only: false,
+        previous_response_id: None,
+        summary: None,
+        mcp: Default::default(),
+        skills: Default::default(),
+        compact_only: false,
+        compact_focus: String::new(),
+        compaction: Default::default(),
+        plan_limits: Default::default(),
+        shadow_store: crate::config::ShadowStore::Off,
+        subagent_depth: 0,
+        parent_step: None,
+        parent_session: None,
+        fallback_chain: vec![fallback],
+    };
+    let mut handle = spawn_agent(input);
+    while let Some(ev) = handle.rx.recv().await {
+        match ev {
+            AgentEvent::Completed(Ok(_)) => break,
+            AgentEvent::Completed(Err(e)) => panic!("unexpected error: {e}"),
+            _ => {}
+        }
+    }
+    let requests = fallback_provider.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1, "one request to the fallback");
+    let req = &requests[0];
+    assert_eq!(req.effort, Some(EffortLevel::High), "the user's level travels");
+    assert_eq!(
+        req.effort_support.control,
+        crate::config::EffortControl::Named,
+        "the fallback model's declaration, not the failed model's"
+    );
+    let wired = crate::providers::effort::plan(EffortLevel::High, req.effort_support);
+    assert_eq!(
+        wired.wire,
+        crate::providers::effort::Wire::Level("high"),
+        "the fallback's wire, not the primary's token budget"
+    );
+    let _ = std::fs::remove_dir_all(&temp_dir);
 }
 
 /// Audit H8: a turn whose text was already streamed to the user must

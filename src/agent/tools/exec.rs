@@ -16,6 +16,75 @@ use std::sync::{Mutex, OnceLock};
 const BG_TAIL_DEFAULT: usize = 10_000;
 const BG_TAIL_MAX: usize = 50_000;
 
+/// Hard cap on one background job's log. A runaway job printing gigabytes
+/// must not be able to fill the disk (audit H15): past this the host keeps
+/// draining the pipe — the child must never block on a full buffer — and
+/// discards the bytes, recording how many were lost at the tail.
+const BG_LOG_CAP: u64 = 64 * 1024 * 1024;
+
+struct LogSink {
+    file: Option<std::fs::File>,
+    written: u64,
+    dropped: u64,
+    cap: u64,
+}
+
+impl LogSink {
+    fn push(&mut self, bytes: &[u8]) {
+        use std::io::Write;
+        let room = self.cap.saturating_sub(self.written) as usize;
+        let take = bytes.len().min(room);
+        if take > 0
+            && let Some(file) = self.file.as_mut()
+        {
+            let _ = file.write_all(&bytes[..take]);
+        }
+        self.written += take as u64;
+        self.dropped += (bytes.len() - take) as u64;
+    }
+
+    fn finish(&mut self) {
+        use std::io::Write;
+        if self.dropped > 0
+            && let Some(file) = self.file.as_mut()
+        {
+            let _ = write!(
+                file,
+                "\n[log capped at {} bytes; {} more bytes discarded]\n",
+                self.cap, self.dropped
+            );
+        }
+    }
+}
+
+/// Both child streams feed one sink. `readers` counts the drain threads still
+/// alive so exactly the last one closes the log with the truncation note.
+struct LogState {
+    sink: Mutex<LogSink>,
+    readers: AtomicU64,
+}
+
+fn drain_into_log(mut source: impl std::io::Read, state: std::sync::Arc<LogState>) {
+    let mut buf = vec![0u8; 16 * 1024];
+    loop {
+        match source.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                if let Ok(mut sink) = state.sink.lock() {
+                    sink.push(&buf[..n]);
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        }
+    }
+    if state.readers.fetch_sub(1, Ordering::SeqCst) == 1
+        && let Ok(mut sink) = state.sink.lock()
+    {
+        sink.finish();
+    }
+}
+
 /// A detached process started with `bash background=true`, kept so its output
 /// can be read later (`bash_output`) and it can be killed or reaped
 /// (`bash_kill`) instead of leaking as a zombie until the app exits.
@@ -522,30 +591,46 @@ fn run_background(ctx: &ToolCtx, command: &str, workdir: Option<&str>) -> Outcom
         cmd.creation_flags(DETACHED_PROCESS | BELOW_NORMAL_PRIORITY_CLASS);
     }
     cmd.stdin(Stdio::null());
-    // One handle, duplicated for the child's two streams (#179). The old setup
-    // moved the created file into stdout and then *opened the same path again*
-    // for stderr: a second descriptor with its own position. The child wrote
-    // stderr to the end of the file and stdout from offset 0 on top of it, so
-    // a job printing to both could erase either stream — and a failed second
-    // open silently dropped stderr to null while stdout kept working.
-    if let Ok(f) = std::fs::File::create(&log) {
-        match f.try_clone() {
-            Ok(err) => {
-                cmd.stdout(Stdio::from(f));
-                cmd.stderr(Stdio::from(err));
-            }
-            Err(_) => {
-                cmd.stdout(Stdio::from(f));
-                cmd.stderr(Stdio::null());
-            }
-        }
+    // The child writes into pipes the host drains into the capped log. The
+    // old setup handed it the file descriptor directly, which made the log
+    // unbounded by construction (#179 kept the two streams from erasing each
+    // other; this keeps them from filling the disk). Without a log file the
+    // streams go to null as before.
+    let log_file = std::fs::File::create(&log).ok();
+    let piped = log_file.is_some();
+    if piped {
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::piped());
     } else {
         cmd.stdout(Stdio::null());
         cmd.stderr(Stdio::null());
     }
     let id = NEXT_JOB_ID.fetch_add(1, Ordering::Relaxed);
     match cmd.spawn() {
-        Ok(child) => {
+        Ok(mut child) => {
+            if let Some(file) = log_file {
+                let state = std::sync::Arc::new(LogState {
+                    sink: Mutex::new(LogSink {
+                        file: Some(file),
+                        written: 0,
+                        dropped: 0,
+                        cap: BG_LOG_CAP,
+                    }),
+                    readers: AtomicU64::new(0),
+                });
+                let mut pipes: Vec<Box<dyn std::io::Read + Send>> = Vec::new();
+                if let Some(out) = child.stdout.take() {
+                    pipes.push(Box::new(out));
+                }
+                if let Some(err) = child.stderr.take() {
+                    pipes.push(Box::new(err));
+                }
+                state.readers.store(pipes.len() as u64, Ordering::SeqCst);
+                for pipe in pipes {
+                    let state = state.clone();
+                    std::thread::spawn(move || drain_into_log(pipe, state));
+                }
+            }
             let pid = child.id();
             let command_head: String = command.chars().take(120).collect();
             bg_jobs().lock().unwrap().push(BgJob {

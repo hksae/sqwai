@@ -422,9 +422,18 @@ impl App {
                 self.retry_line = Some(format!("retry #{attempt} in {delay_secs}s — {error}"));
                 self.dirty = true;
             }
-            AgentEvent::FallbackSwitched { from, to } => {
+            AgentEvent::FallbackSwitched {
+                from,
+                to,
+                reasoning_dropped,
+            } => {
+                let mut text =
+                    format!("primary model '{from}' failed; switched to fallback '{to}'");
+                if reasoning_dropped {
+                    text.push_str(" (prior reasoning was not carried over)");
+                }
                 self.push_segment(Segment::Status {
-                    text: format!("primary model '{from}' failed; switched to fallback '{to}'"),
+                    text,
                     kind: StatusKind::Warn,
                     expanded: false,
                     transient: false,

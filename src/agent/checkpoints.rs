@@ -162,9 +162,6 @@ pub fn bash_file_diffs(
         let blob_before = before
             .as_deref()
             .and_then(|b| crate::agent::blobs::put(root, b).ok());
-        let blob_after = after
-            .as_deref()
-            .and_then(|b| crate::agent::blobs::put(root, b).ok());
         let hash_before = before.as_deref().map(bytes_hash);
         let hash_after = after.as_deref().map(bytes_hash).unwrap_or_default();
         diffs.push(crate::agent::tools::FileDiff {
@@ -176,7 +173,6 @@ pub fn bash_file_diffs(
             mode: "bash".to_string(),
             checkpoint: Some(pre_sha.to_string()),
             blob_before,
-            blob_after,
         });
     }
     diffs

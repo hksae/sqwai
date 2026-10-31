@@ -753,3 +753,29 @@ fn bash_workdir_executes_in_subdir_and_strips_ansi_and_progress_bars() {
     let cleaned = crate::agent::tools::decode_child_output(raw);
     assert_eq!(cleaned, "Compiling crate...\nStep 100%\nDone!\n");
 }
+
+/// A running job's log used to grow without bound. The sink keeps at most
+/// `cap` bytes, drops the rest, and says how much was lost when the last
+/// stream closes.
+#[test]
+fn a_background_log_stops_at_its_cap_and_reports_the_loss() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("capped.out");
+    let file = std::fs::File::create(&path).unwrap();
+    let mut sink = LogSink {
+        file: Some(file),
+        written: 0,
+        dropped: 0,
+        cap: 10,
+    };
+    sink.push(b"0123456789abcdef");
+    sink.push(b"XYZ");
+    sink.finish();
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.starts_with("0123456789"), "{text:?}");
+    assert!(
+        text.contains("9 more bytes discarded"),
+        "the loss is stated: {text:?}"
+    );
+    assert!(!text.contains("XYZ"), "past the cap is not kept");
+}

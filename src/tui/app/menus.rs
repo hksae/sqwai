@@ -1004,6 +1004,10 @@ impl App {
         self.form_focus = 0;
         self.prefill_form();
         self.build_menu_rows();
+        // A scrolled parent used to reopen at the old window (audit M1):
+        // going back shows the list from its top again.
+        self.menu_scroll = 0;
+        self.surf_top = 0;
         if matches!(self.cur_menu(), Some(Menu::Settings)) {
             let pos = match popped {
                 Some(Menu::EditScalar(s)) => self.menu_rows.iter().position(|(_, a)| {
@@ -1036,6 +1040,8 @@ impl App {
     pub(super) fn menu_home(&mut self) {
         self.menu_stack.clear();
         self.menu_sel = 0;
+        self.menu_scroll = 0;
+        self.surf_top = 0;
         self.form_hover_row = None;
         self.form_fields.clear();
         self.form_focus = 0;
