@@ -184,21 +184,28 @@ pub fn build_body(req: &ChatRequest) -> Value {
         // no summary deltas to render.
         body["reasoning"] = json!({"effort": e, "summary": "auto"});
     }
-    if !req.tools.is_empty() {
-        body["tools"] = json!(
-            req.tools
-                .iter()
-                .map(|t| json!({
-                    "type": "function",
-                    "name": t.name,
-                    "description": t.description,
-                    "parameters": t.parameters,
-                    // the field is required by the schema and nullable; we do
-                    // not generate strict schemas, so it is explicitly false
-                    "strict": false,
-                }))
-                .collect::<Vec<_>>()
-        );
+    let mut tools = req
+        .tools
+        .iter()
+        .map(|t| {
+            json!({
+                "type": "function",
+                "name": t.name,
+                "description": t.description,
+                "parameters": t.parameters,
+                // the field is required by the schema and nullable; we do
+                // not generate strict schemas, so it is explicitly false
+                "strict": false,
+            })
+        })
+        .collect::<Vec<_>>();
+    if req.hosted_web_search {
+        // provider-executed: the model calls it, the provider searches and
+        // returns the results inside this same response
+        tools.push(json!({"type": "web_search"}));
+    }
+    if !tools.is_empty() {
+        body["tools"] = json!(tools);
     }
     // The continuation reference travels only under the transport that
     // means "the provider holds the chain". A stateless request resends

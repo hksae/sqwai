@@ -228,6 +228,7 @@ pub(crate) fn compaction_request(
                 tools: Vec::new(),
                 previous_response_id: None,
                 context_transport: ContextTransport::Stateless,
+                hosted_web_search: false,
             },
             false,
         )
@@ -254,6 +255,7 @@ pub(crate) fn compaction_request(
             tools: prefix.tools.to_vec(),
             previous_response_id: None,
             context_transport: ContextTransport::Stateless,
+            hosted_web_search: false,
         },
         true,
     )

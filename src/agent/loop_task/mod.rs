@@ -1077,7 +1077,7 @@ async fn run_agent(
     ctx.outside_roots = approval_grants.dirs.clone();
     ctx.outside_granted = approval_grants.dirs.clone();
     ctx.tools = tool_caps.clone();
-    ctx.search = search;
+    ctx.search = search.clone();
     ctx.limits = limits.clone();
     ctx.activated_skills.extend(active_skills.iter().cloned());
     ctx.read_ledger = read_ledger;
@@ -1395,6 +1395,7 @@ async fn run_agent(
             tools: tools.clone(),
             previous_response_id: previous_response_id.clone(),
             context_transport: transport,
+            hosted_web_search: search.is_hosted(),
         };
         let breakdown = RequestBreakdown::from_request(&chat_req);
         let _ = tx.send(AgentEvent::RequestBreakdown(breakdown)).await;

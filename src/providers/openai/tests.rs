@@ -117,6 +117,7 @@ fn plain_request() -> ChatRequest {
         tools: vec![],
         previous_response_id: None,
         context_transport: crate::providers::ContextTransport::Stateless,
+        hosted_web_search: false,
     }
 }
 
@@ -233,6 +234,7 @@ fn gemini_models_ask_for_thought_summaries_when_reasoning() {
         tools: vec![],
         previous_response_id: None,
         context_transport: crate::providers::ContextTransport::Stateless,
+        hosted_web_search: false,
     };
     let thinking = |body: &Value| {
         body.pointer("/extra_body/google/thinking_config/include_thoughts")
@@ -446,6 +448,7 @@ fn request_body_includes_tools_and_tool_messages() {
         }],
         previous_response_id: None,
         context_transport: crate::providers::ContextTransport::Stateless,
+        hosted_web_search: false,
     };
     let msgs: Vec<Value> = req
         .messages
@@ -487,6 +490,7 @@ fn sanitize_drops_fields_a_gateway_does_not_support() {
         tools: vec![],
         previous_response_id: Some("resp_1".into()),
         context_transport: crate::providers::ContextTransport::Stateless,
+        hosted_web_search: false,
     };
     p.sanitize(&mut req);
     assert!(
@@ -510,6 +514,7 @@ fn system_block_precedes_history_and_host_state_is_not_a_user_turn() {
         tools: vec![],
         previous_response_id: None,
         context_transport: crate::providers::ContextTransport::Stateless,
+        hosted_web_search: false,
     };
     let system = crate::providers::stable_system_text(&req.system);
     assert_eq!(system, "A");
@@ -561,6 +566,7 @@ fn host_block_follows_tool_results_but_never_wears_user() {
         tools: vec![],
         previous_response_id: None,
         context_transport: crate::providers::ContextTransport::Stateless,
+        hosted_web_search: false,
     });
     let msgs = body["messages"].as_array().unwrap();
     assert_eq!(msgs[0]["role"], "system");
@@ -603,6 +609,7 @@ fn volatile_change_keeps_the_prefix_bytes() {
             tools: vec![],
             previous_response_id: None,
             context_transport: crate::providers::ContextTransport::Stateless,
+            hosted_web_search: false,
         })
     };
     let before = body_for("date: monday");
@@ -697,6 +704,7 @@ fn requested_max_tokens_uses_completion_tokens_for_o_series_or_reasoning() {
         tools: vec![],
         previous_response_id: None,
         context_transport: crate::providers::ContextTransport::Stateless,
+        hosted_web_search: false,
     };
     let body = OpenAiProvider::build_body(&req);
     assert_eq!(body["max_tokens"], 1024);
@@ -795,6 +803,7 @@ mod live_cache {
             tools: vec![],
             previous_response_id: None,
             context_transport: crate::providers::ContextTransport::Stateless,
+            hosted_web_search: false,
         }
     }
 
@@ -1058,6 +1067,7 @@ fn openrouter_injects_cache_control_for_anthropic_gemini_and_qwen() {
         tools: vec![],
         previous_response_id: None,
         context_transport: crate::providers::ContextTransport::Stateless,
+        hosted_web_search: false,
     };
     let mut body = OpenAiProvider::build_body(&req);
     OpenAiProvider::apply_openrouter_cache_control(
@@ -1114,6 +1124,7 @@ fn image_request(image: crate::providers::ImageAttachment) -> ChatRequest {
         tools: vec![],
         previous_response_id: None,
         context_transport: crate::providers::ContextTransport::Stateless,
+        hosted_web_search: false,
     }
 }
 
@@ -1162,6 +1173,7 @@ fn user_images_interleave_at_their_markers() {
         tools: vec![],
         previous_response_id: None,
         context_transport: crate::providers::ContextTransport::Stateless,
+        hosted_web_search: false,
     };
     let body = OpenAiProvider::build_body(&req);
     let messages = body["messages"].as_array().unwrap();
@@ -1249,6 +1261,7 @@ fn tool_documents_ride_in_a_synthetic_user_message() {
         tools: vec![],
         previous_response_id: None,
         context_transport: crate::providers::ContextTransport::Stateless,
+        hosted_web_search: false,
     };
     let body = OpenAiProvider::build_body(&req);
     let messages = body["messages"].as_array().unwrap();

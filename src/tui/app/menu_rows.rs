@@ -125,7 +125,10 @@ impl App {
                 MenuAction::OpenSearchProvider,
             ),
         ];
-        if self.cfg.web.search_provider != crate::config::SearchProvider::Off {
+        if !matches!(
+            self.cfg.web.search_provider,
+            crate::config::SearchProvider::Off | crate::config::SearchProvider::Hosted
+        ) {
             tool_rows.push((
                 "search key",
                 ScalarSetting::SearchKey.current(&self.cfg),

@@ -618,6 +618,7 @@ async fn live_compaction_request_reuses_prefix() {
         tools: tools.clone(),
         previous_response_id: None,
         context_transport: crate::providers::ContextTransport::Stateless,
+        hosted_web_search: false,
     };
     let u = send(&live_provider, prime).await;
     report("prime", &u);

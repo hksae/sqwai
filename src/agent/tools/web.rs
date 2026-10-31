@@ -889,6 +889,24 @@ let y = 2;</pre></td>
     }
 
     #[tokio::test]
+    async fn hosted_search_names_the_provider_tool() {
+        let hosted = crate::config::SearchConfig {
+            provider: crate::config::SearchProvider::Hosted,
+            base_url: None,
+            api_key: None,
+        };
+        let out = search(
+            &json!({"query": "rust tokio spawn", "category": "auto"}),
+            &crate::config::ToolsConfig::default(),
+            &hosted,
+        )
+        .await;
+        assert!(out.ok, "{}", out.output);
+        assert!(out.output.contains("hosted by the model provider"), "{}", out.output);
+        assert!(out.output.contains("web_search"), "{}", out.output);
+    }
+
+    #[tokio::test]
     #[ignore = "hits live internet endpoints; run with --ignored"]
     async fn live_meta_search_and_cached_section_fetch_smoke() {
         let Some(api_key) = std::env::var("DEEPSEEK_API_KEY")

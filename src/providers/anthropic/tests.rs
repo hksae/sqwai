@@ -29,6 +29,7 @@ fn requested_max_tokens_is_honoured() {
         tools: vec![],
         previous_response_id: None,
         context_transport: crate::providers::ContextTransport::Stateless,
+        hosted_web_search: false,
     };
     assert_eq!(build_body(&req, 8192, false)["max_tokens"], 32_000);
 
@@ -74,6 +75,7 @@ fn tool_schemas_carry_the_first_cache_breakpoint() {
         tools: vec![tool("read"), tool("write"), tool("bash")],
         previous_response_id: None,
         context_transport: crate::providers::ContextTransport::Stateless,
+        hosted_web_search: false,
     };
 
     let body = build_body(&req, 8192, true);
@@ -135,6 +137,7 @@ fn cache_breakpoints_stay_within_the_provider_limit() {
         }],
         previous_response_id: None,
         context_transport: crate::providers::ContextTransport::Stateless,
+        hosted_web_search: false,
     };
     let body = build_body(&req, 8192, true);
     let marked = body["system"]
@@ -212,6 +215,7 @@ fn long_histories_carry_a_middle_anchor_marker() {
             }],
             previous_response_id: None,
             context_transport: crate::providers::ContextTransport::Stateless,
+            hosted_web_search: false,
         }
     }
     // short history: tools + system + end, no middle anchor
@@ -250,6 +254,7 @@ fn body_has_cache_control_and_thinking() {
         tools: vec![],
         previous_response_id: None,
         context_transport: crate::providers::ContextTransport::Stateless,
+        hosted_web_search: false,
     };
     let b = build_body(&req, 8192, true);
     assert_eq!(b["model"], "claude-x");
@@ -300,6 +305,7 @@ fn volatile_change_keeps_the_prefix_bytes() {
                 tools: vec![],
                 previous_response_id: None,
                 context_transport: crate::providers::ContextTransport::Stateless,
+                hosted_web_search: false,
             },
             8192,
             true,
@@ -339,6 +345,7 @@ fn body_without_documented_cache_has_no_breakpoints() {
         tools: vec![],
         previous_response_id: None,
         context_transport: crate::providers::ContextTransport::Stateless,
+        hosted_web_search: false,
     };
     let b = build_body(&req, 1024, false);
     assert!(b["system"][0].get("cache_control").is_none());
@@ -357,6 +364,7 @@ fn empty_system_block_is_omitted() {
         tools: vec![],
         previous_response_id: None,
         context_transport: crate::providers::ContextTransport::Stateless,
+        hosted_web_search: false,
     };
     let b = build_body(&req, 1024, true);
     assert!(b.get("system").is_none());
@@ -374,6 +382,7 @@ fn body_without_thinking_omits_field() {
         tools: vec![],
         previous_response_id: None,
         context_transport: crate::providers::ContextTransport::Stateless,
+        hosted_web_search: false,
     };
     let b = build_body(&req, 8192, true);
     assert!(b.get("thinking").is_none());
@@ -403,6 +412,7 @@ fn body_maps_tools_and_results() {
         }],
         previous_response_id: None,
         context_transport: crate::providers::ContextTransport::Stateless,
+        hosted_web_search: false,
     };
     let b = build_body(&req, 8192, true);
 
@@ -442,6 +452,7 @@ fn consecutive_tool_results_merge_into_one_user_turn() {
         tools: vec![],
         previous_response_id: None,
         context_transport: crate::providers::ContextTransport::Stateless,
+        hosted_web_search: false,
     };
     let b = build_body(&req, 1024, true);
     let msgs = b["messages"].as_array().unwrap();
@@ -530,6 +541,7 @@ async fn collect(url: String) -> Vec<StreamEvent> {
         tools: vec![],
         previous_response_id: None,
         context_transport: crate::providers::ContextTransport::Stateless,
+        hosted_web_search: false,
     };
     p.stream_chat(req)
         .filter_map(|e| async move { e.ok() })
@@ -652,6 +664,7 @@ fn thinking_request() -> ChatRequest {
         }],
         previous_response_id: None,
         context_transport: crate::providers::ContextTransport::Stateless,
+        hosted_web_search: false,
     }
 }
 
@@ -721,6 +734,7 @@ fn mid_history_anchor_stays_stationary_on_user_turns_and_precedes_volatile_tail(
             tools: vec![],
             previous_response_id: None,
             context_transport: crate::providers::ContextTransport::Stateless,
+            hosted_web_search: false,
         }
     };
 
@@ -756,6 +770,7 @@ fn mid_history_anchor_stays_stationary_on_user_turns_and_precedes_volatile_tail(
         tools: vec![],
         previous_response_id: None,
         context_transport: crate::providers::ContextTransport::Stateless,
+        hosted_web_search: false,
     };
     let b = build_body(&multi_turn, 8192, true);
     let msgs = b["messages"].as_array().unwrap();
@@ -816,6 +831,7 @@ fn user_images_interleave_at_their_markers() {
         tools: vec![],
         previous_response_id: None,
         context_transport: crate::providers::ContextTransport::Stateless,
+        hosted_web_search: false,
     };
     let body = build_body(&req, 8192, false);
     let messages = body["messages"].as_array().unwrap();
@@ -856,6 +872,7 @@ fn tool_images_use_image_blocks_inside_the_tool_result() {
         tools: vec![],
         previous_response_id: None,
         context_transport: crate::providers::ContextTransport::Stateless,
+        hosted_web_search: false,
     };
     let body = build_body(&req, 8192, false);
     let result = find_kind(&body, "tool_result").expect("tool_result block");
@@ -892,6 +909,7 @@ fn tool_documents_use_document_blocks_inside_the_tool_result() {
         tools: vec![],
         previous_response_id: None,
         context_transport: crate::providers::ContextTransport::Stateless,
+        hosted_web_search: false,
     };
     let body = build_body(&req, 8192, false);
     let result = find_kind(&body, "tool_result").expect("tool_result block");

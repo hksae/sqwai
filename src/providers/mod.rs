@@ -998,6 +998,9 @@ pub struct ChatRequest {
     pub previous_response_id: Option<String>,
     /// Selected transport for this request; defaults to stateless.
     pub context_transport: ContextTransport,
+    /// Attach the provider's built-in `web_search` tool (Responses wire only):
+    /// search then runs inside the response, with no separate search key.
+    pub hosted_web_search: bool,
 }
 
 impl ChatRequest {

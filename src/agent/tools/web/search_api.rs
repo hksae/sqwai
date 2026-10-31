@@ -24,6 +24,9 @@ pub async fn search(
             provider => format!("{} has no API key", provider.as_str()),
         });
     }
+    if cfg.is_hosted() {
+        return Err("hosted search runs inside the model request, not as a tool".to_string());
+    }
     let client = reqwest::Client::builder()
         .timeout(timeout)
         .user_agent(crate::providers::USER_AGENT)
@@ -32,6 +35,9 @@ pub async fn search(
     let key = cfg.api_key.as_deref().unwrap_or_default();
     match cfg.provider {
         SearchProvider::Off => unreachable!("readiness checked above"),
+        SearchProvider::Hosted => {
+            Err("hosted search runs inside the model request, not as a tool".to_string())
+        }
         SearchProvider::Deepseek => {
             let url = endpoint(cfg.base_url.as_deref(), DEEPSEEK_BASE, "/v1/tools/search");
             let body = serde_json::json!({

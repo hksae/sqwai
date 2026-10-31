@@ -71,6 +71,7 @@ async fn collect(url: String) -> Vec<StreamEvent> {
         }],
         previous_response_id: None,
         context_transport: crate::providers::ContextTransport::Stateless,
+        hosted_web_search: false,
     };
     p.stream_chat(req)
         .filter_map(|e| async move { e.ok() })
@@ -92,7 +93,28 @@ fn request_at(level: EffortLevel, control: crate::config::EffortControl) -> Chat
         tools: vec![],
         previous_response_id: None,
         context_transport: crate::providers::ContextTransport::Stateless,
+        hosted_web_search: false,
     }
+}
+
+/// Hosted search is a provider-executed tool: it must appear next to the
+/// function tools only when the config asked for it.
+#[test]
+fn hosted_web_search_rides_the_request_only_when_asked() {
+    let mut req = request_at(EffortLevel::Off, crate::config::EffortControl::None);
+    req.tools = vec![crate::providers::ToolSpec {
+        name: "read".into(),
+        description: "read a file".into(),
+        parameters: json!({"type": "object"}),
+    }];
+    let tools = build_body(&req)["tools"].as_array().cloned().unwrap();
+    assert_eq!(tools.len(), 1, "{tools:?}");
+
+    req.hosted_web_search = true;
+    let tools = build_body(&req)["tools"].as_array().cloned().unwrap();
+    assert_eq!(tools.len(), 2, "{tools:?}");
+    assert!(tools.iter().any(|tool| tool["type"] == "web_search"), "{tools:?}");
+    assert!(tools.iter().any(|tool| tool["name"] == "read"), "{tools:?}");
 }
 
 /// Named levels go on the wire literally (transparent slider).
@@ -126,6 +148,7 @@ fn body_roles_and_reasoning() {
         tools: vec![],
         previous_response_id: None,
         context_transport: crate::providers::ContextTransport::Stateless,
+        hosted_web_search: false,
     };
     let b = build_body(&req);
     assert_eq!(b["model"], "gpt-x");
@@ -163,6 +186,7 @@ fn host_block_trails_the_history_as_system() {
         tools: vec![],
         previous_response_id: None,
         context_transport: crate::providers::ContextTransport::Stateless,
+        hosted_web_search: false,
     };
     let b = build_body(&req);
     let input = b["input"].as_array().unwrap();
@@ -206,6 +230,7 @@ fn host_block_stays_last_behind_tool_results() {
         tools: vec![],
         previous_response_id: None,
         context_transport: crate::providers::ContextTransport::Stateless,
+        hosted_web_search: false,
     };
     let input = build_body(&req)["input"].as_array().unwrap().clone();
     // the host block stays anchored before the turn's user message, and the
@@ -245,6 +270,7 @@ fn a_tool_call_and_its_result_are_joined_by_call_id() {
         }],
         previous_response_id: None,
         context_transport: crate::providers::ContextTransport::Stateless,
+        hosted_web_search: false,
     };
     let b = build_body(&req);
 
@@ -288,6 +314,7 @@ fn a_silent_tool_call_produces_no_empty_message() {
         tools: vec![],
         previous_response_id: None,
         context_transport: crate::providers::ContextTransport::Stateless,
+        hosted_web_search: false,
     };
     let input = build_body(&req)["input"].as_array().unwrap().clone();
     assert_eq!(input.len(), 1, "{input:#?}");
@@ -376,6 +403,7 @@ fn previous_response_id_only_reaches_the_wire_when_documented() {
         tools: vec![],
         previous_response_id: Some("resp_1".into()),
         context_transport: crate::providers::ContextTransport::PreviousResponse,
+        hosted_web_search: false,
     };
     assert_eq!(build_body(&req)["previous_response_id"], "resp_1");
 
@@ -412,6 +440,7 @@ fn opencode_gateway_is_stateless_no_continuation_offered() {
         tools: vec![],
         previous_response_id: Some("resp_old".into()),
         context_transport: crate::providers::ContextTransport::Stateless,
+        hosted_web_search: false,
     };
     p.sanitize(&mut req);
     assert!(req.previous_response_id.is_none());
@@ -430,6 +459,7 @@ fn requested_max_tokens_mapped_to_max_output_tokens() {
         tools: vec![],
         previous_response_id: None,
         context_transport: crate::providers::ContextTransport::Stateless,
+        hosted_web_search: false,
     };
     let body = build_body(&req);
     assert_eq!(body["max_output_tokens"], 4096);
@@ -462,6 +492,7 @@ async fn response_failed_event_yields_err() {
         tools: vec![],
         previous_response_id: None,
         context_transport: crate::providers::ContextTransport::Stateless,
+        hosted_web_search: false,
     };
     let mut stream = p.stream_chat(req);
     let first = stream.next().await;
@@ -499,6 +530,7 @@ async fn response_failed_event_carries_its_class() {
             tools: vec![],
             previous_response_id: None,
             context_transport: crate::providers::ContextTransport::Stateless,
+            hosted_web_search: false,
         };
         let mut stream = p.stream_chat(req);
         let first = stream.next().await;
@@ -607,6 +639,7 @@ fn reasoning_items_and_phase_are_replayed_ahead_of_assistant_message() {
         }],
         previous_response_id: None,
         context_transport: crate::providers::ContextTransport::Stateless,
+        hosted_web_search: false,
     };
     let b = build_body(&req);
     let input = b["input"].as_array().unwrap();
@@ -664,6 +697,7 @@ fn reasoning_items_are_not_replayed_under_previous_response_id_continuation() {
         tools: vec![],
         previous_response_id: Some("resp_999".into()),
         context_transport: crate::providers::ContextTransport::PreviousResponse,
+        hosted_web_search: false,
     };
     let b = build_body(&req);
     let input = b["input"].as_array().unwrap();
@@ -704,6 +738,7 @@ fn stateless_request_sends_no_continuation_id_and_keeps_reasoning() {
         tools: vec![],
         previous_response_id: Some("resp_stale".into()),
         context_transport: crate::providers::ContextTransport::Stateless,
+        hosted_web_search: false,
     };
     let b = build_body(&req);
     assert!(
@@ -783,6 +818,7 @@ fn user_images_interleave_at_their_markers() {
         tools: vec![],
         previous_response_id: None,
         context_transport: crate::providers::ContextTransport::Stateless,
+        hosted_web_search: false,
     };
     let body = build_body(&req);
     let input = body["input"].as_array().unwrap();
@@ -818,6 +854,7 @@ fn tool_images_use_the_function_call_output_array() {
         tools: vec![],
         previous_response_id: None,
         context_transport: crate::providers::ContextTransport::Stateless,
+        hosted_web_search: false,
     };
     let body = build_body(&req);
     let input = body["input"].as_array().unwrap();
@@ -861,6 +898,7 @@ fn tool_documents_use_the_function_call_output_array() {
         tools: vec![],
         previous_response_id: None,
         context_transport: crate::providers::ContextTransport::Stateless,
+        hosted_web_search: false,
     };
     let body = build_body(&req);
     let input = body["input"].as_array().unwrap();

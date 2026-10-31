@@ -1460,3 +1460,15 @@ fn a_search_key_round_trips_through_the_store() {
     assert!(!store.contains("tvly-live"), "{store}");
     assert!(store.contains("sk-chat"), "the chat key must survive: {store}");
 }
+
+/// Hosted search needs no key: the provider runs it inside the request.
+#[test]
+fn hosted_search_is_ready_without_a_key() {
+    let mut cfg = Config::default();
+    cfg.web.search_provider = SearchProvider::Hosted;
+    let search = cfg.search_config();
+    assert!(search.is_hosted());
+    assert!(search.is_ready());
+    assert!(search.api_key.is_none());
+    assert_eq!(SearchProvider::Hosted.key_name(), None);
+}

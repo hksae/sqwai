@@ -65,6 +65,17 @@ impl App {
                 self.cfg.save().ok();
                 let message = if provider == crate::config::SearchProvider::Off {
                     "search provider = off".to_string()
+                } else if provider == crate::config::SearchProvider::Hosted {
+                    let wire = self
+                        .cfg
+                        .providers
+                        .get(&self.model_cfg.provider)
+                        .map(|provider| provider.format);
+                    if wire == Some(crate::config::WireFormat::Responses) {
+                        "search provider = hosted (model's built-in web_search)".to_string()
+                    } else {
+                        "hosted search needs a Responses-wire model".to_string()
+                    }
                 } else if self.cfg.search_config().api_key.is_some() {
                     format!("search provider = {}", provider.as_str())
                 } else {

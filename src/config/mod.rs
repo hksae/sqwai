@@ -1079,16 +1079,21 @@ pub enum SearchProvider {
     Off,
     Deepseek,
     Tavily,
+    /// No separate search API: the model provider's own hosted `web_search`
+    /// tool runs inside the request, so search is billed through the model
+    /// account and needs no key. Only the Responses wire carries it.
+    Hosted,
 }
 
 impl SearchProvider {
-    pub const ALL: [Self; 3] = [Self::Off, Self::Deepseek, Self::Tavily];
+    pub const ALL: [Self; 4] = [Self::Off, Self::Deepseek, Self::Tavily, Self::Hosted];
 
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Off => "off",
             Self::Deepseek => "deepseek",
             Self::Tavily => "tavily",
+            Self::Hosted => "hosted",
         }
     }
 
@@ -1100,6 +1105,7 @@ impl SearchProvider {
             Self::Off => None,
             Self::Deepseek => Some("deepseek-search"),
             Self::Tavily => Some("tavily"),
+            Self::Hosted => None,
         }
     }
 }
@@ -1119,11 +1125,19 @@ impl SearchConfig {
     }
 
     pub fn is_ready(&self) -> bool {
-        self.provider != SearchProvider::Off
-            && self
+        match self.provider {
+            SearchProvider::Off => false,
+            SearchProvider::Hosted => true,
+            _ => self
                 .api_key
                 .as_deref()
-                .is_some_and(|key| !key.trim().is_empty())
+                .is_some_and(|key| !key.trim().is_empty()),
+        }
+    }
+
+    /// True when the search runs inside the model request, not as our tool.
+    pub fn is_hosted(&self) -> bool {
+        self.provider == SearchProvider::Hosted
     }
 }
 
@@ -1948,7 +1962,7 @@ impl Config {
             .map(str::to_string);
         let from_store = provider.key_name().and_then(|name| self.keys.get(name).cloned());
         let api_key = match provider {
-            SearchProvider::Off => None,
+            SearchProvider::Off | SearchProvider::Hosted => None,
             SearchProvider::Deepseek => from_store
                 .or_else(|| {
                     self.providers

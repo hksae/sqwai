@@ -24,6 +24,13 @@ empty answer; rephrasing the same question now will not help. Fix the key or pro
     )
 }
 
+/// Hosted mode: the provider's own `web_search` runs inside the model
+/// request, so this function has nothing to do for the general web.
+fn hosted_note() -> String {
+    "Web search is hosted by the model provider in this mode: its built-in `web_search` tool runs inside the response, so call that instead of this function. Category sources (code, docs, packages, discussions, papers) still work here."
+        .to_string()
+}
+
 /// No provider chosen at all. Developer categories keep working, the general
 /// web does not.
 fn not_configured_note() -> String {
@@ -128,6 +135,9 @@ pub async fn run_meta_search(
     if merged.is_empty() {
         if let Some(reason) = provider_error {
             return Ok(unavailable_note(search.name(), &reason));
+        }
+        if search.is_hosted() && matches!(category, SearchCategory::Auto) {
+            return Ok(hosted_note());
         }
         if search.provider == crate::config::SearchProvider::Off
             && matches!(category, SearchCategory::Auto)
@@ -265,7 +275,7 @@ async fn provider_hits(
     query: &str,
     per_provider: Duration,
 ) -> Result<Vec<RawSearchHit>, String> {
-    if search.provider == crate::config::SearchProvider::Off {
+    if search.provider == crate::config::SearchProvider::Off || search.is_hosted() {
         return Ok(Vec::new());
     }
     match tokio::time::timeout(

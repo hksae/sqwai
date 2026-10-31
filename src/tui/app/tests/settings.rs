@@ -1053,7 +1053,7 @@ fn search_provider_is_chosen_from_a_list() {
             _ => None,
         })
         .collect();
-    assert_eq!(labels, vec!["off", "deepseek", "tavily"]);
+    assert_eq!(labels, vec!["off", "deepseek", "tavily", "hosted"]);
 
     app.run_action(MenuAction::SetSearchProvider(SearchProvider::Tavily));
     assert_eq!(app.cfg.web.search_provider, SearchProvider::Tavily);
@@ -1077,7 +1077,7 @@ fn search_provider_surface_filters_while_typing() {
             .unwrap();
         app.poll_input(&rx).unwrap();
     };
-    send(&mut app, KeyCode::Char('t'));
+    send(&mut app, KeyCode::Char('v'));
 
     let labels: Vec<&str> = app
         .menu_rows
