@@ -350,6 +350,8 @@ pub struct AgentInput {
     pub pdf: bool,
     /// `[tools]` caps for the built-in tools.
     pub tools: crate::config::ToolsConfig,
+    /// Resolved `[web]` search provider and key for `websearch`.
+    pub search: crate::config::SearchConfig,
     /// `[limits]` per-turn and concurrency guardrails.
     pub limits: crate::config::LimitsConfig,
     /// Skill names already active in the session (their bodies are in the
@@ -801,7 +803,7 @@ pub(crate) async fn execute_parallel_read_only_call(
             let mut out = if c.name == "webfetch" {
                 tools::web::fetch(&c.args, &mut child_ctx, &allow_hosts).await
             } else {
-                tools::web::search(&c.args, &child_ctx.tools).await
+                tools::web::search(&c.args, &child_ctx.tools, &child_ctx.search).await
             };
             if out.ok {
                 out.output = crate::agent::trust::banner_wrap(&out.output);
@@ -864,6 +866,7 @@ async fn run_agent(
         vision,
         pdf,
         tools: tool_caps,
+        search,
         limits,
         active_skills,
         read_ledger,
@@ -1074,6 +1077,7 @@ async fn run_agent(
     ctx.outside_roots = approval_grants.dirs.clone();
     ctx.outside_granted = approval_grants.dirs.clone();
     ctx.tools = tool_caps.clone();
+    ctx.search = search;
     ctx.limits = limits.clone();
     ctx.activated_skills.extend(active_skills.iter().cloned());
     ctx.read_ledger = read_ledger;
@@ -1772,6 +1776,7 @@ async fn run_agent(
                     vision,
                     pdf,
                     &tool_caps,
+                    &ctx.search,
                     &limits,
                     &active_skills,
                     effort,
@@ -2098,7 +2103,7 @@ async fn run_agent(
                                 ctx.current_call_id = None;
                                 out
                             } else {
-                                tools::web::search(&call.args, &tool_caps).await
+                                tools::web::search(&call.args, &tool_caps, &ctx.search).await
                             };
                             // R banner: external bytes travel delimited
                             // so the boundary survives into context. Failures
@@ -2124,6 +2129,7 @@ async fn run_agent(
                                 vision,
                                 pdf,
                                 &tool_caps,
+                                &ctx.search,
                                 &limits,
                                 &active_skills,
                                 effort,

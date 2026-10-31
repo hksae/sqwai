@@ -380,6 +380,9 @@ pub(super) enum ScalarSetting {
     WebResults,
     WebTimeoutSecs,
     WebFetchBytes,
+    SearchProvider,
+    SearchKey,
+    SearchBaseUrl,
     LimitMaxToolCalls,
     LimitMaxTokens,
     LimitMaxParallelTools,
@@ -572,6 +575,9 @@ impl ScalarSetting {
             Self::WebResults => "web results",
             Self::WebTimeoutSecs => "web timeout secs",
             Self::WebFetchBytes => "web fetch bytes",
+            Self::SearchProvider => "search provider",
+            Self::SearchKey => "search key",
+            Self::SearchBaseUrl => "search base url",
             Self::LimitMaxToolCalls => "max tool calls per turn",
             Self::LimitMaxTokens => "max tokens per turn",
             Self::LimitMaxParallelTools => "max parallel tools",
@@ -597,6 +603,20 @@ impl ScalarSetting {
             Self::WebResults => cfg.tools.web.results.to_string(),
             Self::WebTimeoutSecs => cfg.tools.web.timeout_secs.to_string(),
             Self::WebFetchBytes => human_bytes(cfg.tools.web.fetch_bytes as u64),
+            Self::SearchProvider => cfg.web.search_provider.as_str().to_string(),
+            // a row, not an editor: the key itself only appears once opened
+            Self::SearchKey => {
+                if cfg.search_config().api_key.is_some() {
+                    "set".to_string()
+                } else {
+                    "missing".to_string()
+                }
+            }
+            Self::SearchBaseUrl => cfg
+                .web
+                .search_base_url
+                .clone()
+                .unwrap_or_else(|| "default".to_string()),
             Self::LimitMaxToolCalls => cfg.limits.max_tool_calls_per_turn.to_string(),
             Self::LimitMaxTokens => human_count(cfg.limits.max_tokens_per_turn),
             Self::LimitMaxParallelTools => cfg.limits.max_parallel_tools.to_string(),
@@ -621,6 +641,8 @@ impl ScalarSetting {
             Self::WebFetchBytes => cfg.tools.web.fetch_bytes.to_string(),
             Self::LimitMaxTokens => cfg.limits.max_tokens_per_turn.to_string(),
             Self::UndoShadowMaxBytes => cfg.undo.shadow_max_bytes.to_string(),
+            Self::SearchKey => cfg.search_config().api_key.unwrap_or_default(),
+            Self::SearchBaseUrl => cfg.web.search_base_url.clone().unwrap_or_default(),
             _ => self.current(cfg),
         }
     }
@@ -743,6 +765,45 @@ impl ScalarSetting {
                 &mut cfg.undo.shadow_max_bytes,
                 def.undo.shadow_max_bytes,
             ),
+            Self::SearchProvider => match crate::config::SearchProvider::from_name(raw) {
+                Some(provider) => {
+                    cfg.web.search_provider = provider;
+                    if provider == crate::config::SearchProvider::Off {
+                        "search provider = off".to_string()
+                    } else if cfg.search_config().api_key.is_some() {
+                        format!("search provider = {}", provider.as_str())
+                    } else {
+                        format!("search provider = {} (key missing)", provider.as_str())
+                    }
+                }
+                None => "unknown provider: use off, deepseek or tavily".to_string(),
+            },
+            Self::SearchKey => {
+                let provider = cfg.web.search_provider;
+                let Some(key_name) = provider.key_name() else {
+                    return "choose a search provider first".to_string();
+                };
+                let raw = raw.trim();
+                if raw.is_empty() {
+                    cfg.keys.remove(key_name);
+                    format!("{} search key cleared", provider.as_str())
+                } else {
+                    cfg.keys.insert(key_name.to_string(), raw.to_string());
+                    format!("{} search key set", provider.as_str())
+                }
+            }
+            Self::SearchBaseUrl => {
+                let raw = raw.trim();
+                if raw.is_empty() {
+                    cfg.web.search_base_url = None;
+                    "search base url = default".to_string()
+                } else if raw.starts_with("http://") || raw.starts_with("https://") {
+                    cfg.web.search_base_url = Some(raw.trim_end_matches('/').to_string());
+                    format!("search base url = {raw}")
+                } else {
+                    "search base url must start with http:// or https://".to_string()
+                }
+            }
         }
     }
 }

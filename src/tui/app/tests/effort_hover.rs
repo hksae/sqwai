@@ -47,6 +47,7 @@ fn jitter_test_app() -> App {
         legacy_default_model: String::new(),
         providers,
         models,
+        keys: Default::default(),
         unfiled_models: Default::default(),
         safety: Default::default(),
         web: Default::default(),

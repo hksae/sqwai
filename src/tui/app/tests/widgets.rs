@@ -1866,6 +1866,7 @@ fn session_recovery_with_deleted_or_broken_plan_id() {
         legacy_default_model: String::new(),
         providers,
         models,
+        keys: Default::default(),
         unfiled_models: Default::default(),
         safety: Default::default(),
         web: Default::default(),

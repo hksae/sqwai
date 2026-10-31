@@ -4,6 +4,7 @@
 
 pub mod markdown;
 pub mod meta_search;
+pub mod search_api;
 pub mod ranker;
 pub mod router;
 
@@ -205,7 +206,11 @@ fn select_fragments(
     markdown::extract_selector_markdown(html, selector, base_url)
 }
 
-pub async fn search(args: &Value, tools: &crate::config::ToolsConfig) -> Outcome {
+pub async fn search(
+    args: &Value,
+    tools: &crate::config::ToolsConfig,
+    search: &crate::config::SearchConfig,
+) -> Outcome {
     let query = args
         .get("query")
         .and_then(Value::as_str)
@@ -245,7 +250,7 @@ discussions or papers"
         None => meta_search::SearchCategory::Auto,
     };
 
-    match meta_search::run_meta_search(query, count, timeout, category).await {
+    match meta_search::run_meta_search(query, count, timeout, category, search).await {
         Ok(output) => Outcome::ok(truncate(&output)),
         Err(err) => Outcome::err(format!("websearch {err}")),
     }
@@ -686,39 +691,35 @@ Configure connection and request timeouts with `Duration::from_secs`.
     }
 
     #[test]
-    fn meta_search_parsers_and_rrf_fusion_merge_duplicates() {
-        let sp_html = r#"
-            <div class="result">
-                <a class="result-title result-link" href="https://tokio.rs/tokio/tutorial/spawning">
-                    <h2 class="wgl-title">Spawning | Tokio</h2>
-                </a>
-                <p class="description">Tasks are created with tokio::spawn.</p>
-            </div>
-        "#;
-        let sp_hits = meta_search::parse_startpage_results(sp_html, 5);
-        assert_eq!(sp_hits.len(), 1);
-        assert_eq!(sp_hits[0].url, "https://tokio.rs/tokio/tutorial/spawning");
-
-        let brave_html = r#"
-            <div class="snippet svelte-1" data-pos="1" data-type="web">
-              <a href="https://tokio.rs/tokio/tutorial/spawning" class="l1">
-                <div class="title">Spawning | Tokio Runtime</div>
-              </a>
-              <div class="generic-snippet"><div class="content">Spawning submits the task to the Tokio scheduler.</div></div>
-            </div>
-        "#;
-        let brave_hits = meta_search::parse_brave_results(brave_html, 5);
-        assert_eq!(brave_hits.len(), 1);
-        assert_eq!(brave_hits[0].url, "https://tokio.rs/tokio/tutorial/spawning");
+    fn provider_and_api_hits_fuse_into_one_row() {
+        let provider = search_api::parse_deepseek(
+            r#"{"results":[{"title":"Spawning | Tokio","url":"https://tokio.rs/tokio/tutorial/spawning","snippet":"tokio::spawn creates a task"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(provider.len(), 1);
+        // the same page from a second source must merge into one row
+        let duplicate = vec![meta_search::RawSearchHit {
+            title: "Tokio tutorial".to_string(),
+            url: "https://tokio.rs/tokio/tutorial/spawning".to_string(),
+            snippet: "Tasks are created with tokio::spawn.".to_string(),
+            source: "wikipedia",
+            badge: None,
+            boost: 0.0,
+            repo_url: None,
+        }];
 
         let merged = meta_search::fuse_and_rank(
-            vec![sp_hits, brave_hits],
+            vec![provider, duplicate],
             "tokio spawn",
             meta_search::SearchCategory::Auto,
             5,
         );
-        assert_eq!(merged.len(), 1);
-        assert_eq!(merged[0].sources, vec!["google", "brave"]);
+        let hit = merged
+            .iter()
+            .find(|hit| hit.url.contains("tokio.rs"))
+            .expect("provider hit survives fusion");
+        assert!(hit.sources.contains(&"deepseek"), "{hit:?}");
+        assert!(hit.sources.contains(&"wikipedia"), "{hit:?}");
     }
 
     #[test]
@@ -879,6 +880,7 @@ let y = 2;</pre></td>
         let out = search(
             &json!({"query": "grey cat meme", "category": "images"}),
             &crate::config::ToolsConfig::default(),
+            &crate::config::SearchConfig::default(),
         )
         .await;
         assert!(!out.ok, "{}", out.output);
@@ -889,12 +891,25 @@ let y = 2;</pre></td>
     #[tokio::test]
     #[ignore = "hits live internet endpoints; run with --ignored"]
     async fn live_meta_search_and_cached_section_fetch_smoke() {
+        let Some(api_key) = std::env::var("DEEPSEEK_API_KEY")
+            .ok()
+            .filter(|key| !key.trim().is_empty())
+        else {
+            eprintln!("skipped: set DEEPSEEK_API_KEY to run the live provider smoke");
+            return;
+        };
+        let provider = crate::config::SearchConfig {
+            provider: crate::config::SearchProvider::Deepseek,
+            base_url: None,
+            api_key: Some(api_key),
+        };
         let search_out = search(
             &json!({
                 "query": "rust tokio spawn",
                 "count": 5
             }),
             &crate::config::ToolsConfig::default(),
+            &provider,
         )
         .await;
         assert!(search_out.ok, "search failed: {}", search_out.output);

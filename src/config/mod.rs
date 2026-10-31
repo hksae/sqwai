@@ -1060,6 +1060,78 @@ pub struct SafetyConfig {
 pub struct WebConfig {
     #[serde(default)]
     pub allow_hosts: Vec<String>,
+    /// Which keyed search API `websearch` calls. There is deliberately no
+    /// HTML scraping path: every free engine now answers a scripted client
+    /// with a captcha or a 429, and both read as "no results" to the model.
+    #[serde(default)]
+    pub search_provider: SearchProvider,
+    /// Optional override for the provider's host (a gateway or proxy).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search_base_url: Option<String>,
+}
+
+/// The search backends `websearch` can call. Selection is manual, one at a
+/// time — the same shape opencode uses, minus the HTML scrapers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SearchProvider {
+    #[default]
+    Off,
+    Deepseek,
+    Tavily,
+}
+
+impl SearchProvider {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Deepseek => "deepseek",
+            Self::Tavily => "tavily",
+        }
+    }
+
+    pub fn from_name(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "off" | "none" | "" => Some(Self::Off),
+            "deepseek" => Some(Self::Deepseek),
+            "tavily" => Some(Self::Tavily),
+            _ => None,
+        }
+    }
+
+    /// Key-store entry this provider reads first. DeepSeek gets its own
+    /// `deepseek-search` entry so editing it can never change the chat
+    /// provider's key; with no entry it falls back to that key, then env.
+    pub fn key_name(self) -> Option<&'static str> {
+        match self {
+            Self::Off => None,
+            Self::Deepseek => Some("deepseek-search"),
+            Self::Tavily => Some("tavily"),
+        }
+    }
+}
+
+/// Everything `websearch` needs to call its provider: resolved once per run
+/// from `[web]` plus the host-only key store or the environment.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SearchConfig {
+    pub provider: SearchProvider,
+    pub base_url: Option<String>,
+    pub api_key: Option<String>,
+}
+
+impl SearchConfig {
+    pub fn name(&self) -> &'static str {
+        self.provider.as_str()
+    }
+
+    pub fn is_ready(&self) -> bool {
+        self.provider != SearchProvider::Off
+            && self
+                .api_key
+                .as_deref()
+                .is_some_and(|key| !key.trim().is_empty())
+    }
 }
 
 /// MCP server transport configuration.
@@ -1542,6 +1614,11 @@ pub struct Config {
     /// ([`Config::for_file`]), so no lookup ever consults two places.
     #[serde(skip)]
     pub models: BTreeMap<String, ModelConfig>,
+    /// Provider keys read from the host-only `keys.toml`, plus any keys that
+    /// belong to a search backend rather than a model provider (`tavily`).
+    /// Memory only: `save_to_dir` writes them back to the key store.
+    #[serde(skip)]
+    pub keys: BTreeMap<String, String>,
     /// The legacy top-level `[models]` table. Read on load; written back only for
     /// entries that cannot be nested — a model whose `provider` matches no
     /// provider. Dropping those would delete a user's text over a typo.
@@ -1621,6 +1698,7 @@ impl Default for Config {
             legacy_default_model: String::new(),
             providers: catalog.providers,
             models: catalog.models,
+            keys: BTreeMap::new(),
             unfiled_models: BTreeMap::new(),
             safety: SafetyConfig::default(),
             web: WebConfig::default(),
@@ -1837,6 +1915,7 @@ impl Config {
         cfg.fold_models();
         cfg.apply_builtins();
         cfg.migrate_last_model();
+        cfg.keys = read_keys(dir);
         cfg.attach_keys(dir);
         Ok(cfg)
     }
@@ -1846,7 +1925,6 @@ impl Config {
     /// `config.toml` is rewritten without them, so the file the agent may
     /// read no longer contains a live credential.
     fn attach_keys(&mut self, dir: &Path) {
-        let stored = read_keys(dir);
         // any inline key found on disk must leave it, even when the store
         // already holds the same provider: config.toml may be read and shared
         let mut rewrite = false;
@@ -1854,12 +1932,45 @@ impl Config {
             if provider.api_key.is_some() {
                 rewrite = true;
             }
-            if let Some(key) = stored.get(name) {
+            if let Some(key) = self.keys.get(name) {
                 provider.api_key = Some(key.clone());
             }
         }
         if rewrite {
             let _ = self.save_to_dir(dir);
+        }
+    }
+
+    /// Everything `websearch` needs: the chosen provider, its endpoint
+    /// override and a resolved key. The search key wins over the chat
+    /// provider's key, which wins over the environment.
+    pub fn search_config(&self) -> SearchConfig {
+        let provider = self.web.search_provider;
+        let base_url = self
+            .web
+            .search_base_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+            .map(str::to_string);
+        let from_store = provider.key_name().and_then(|name| self.keys.get(name).cloned());
+        let api_key = match provider {
+            SearchProvider::Off => None,
+            SearchProvider::Deepseek => from_store
+                .or_else(|| {
+                    self.providers
+                        .get("deepseek")
+                        .and_then(|p| p.effective_api_key("deepseek"))
+                })
+                .or_else(|| env_nonempty("DEEPSEEK_API_KEY")),
+            SearchProvider::Tavily => {
+                from_store.or_else(|| env_nonempty("TAVILY_API_KEY"))
+            }
+        };
+        SearchConfig {
+            provider,
+            base_url,
+            api_key,
         }
     }
 
@@ -1899,15 +2010,17 @@ impl Config {
             &dir.join("config.toml"),
             &toml::to_string_pretty(&save_cfg).context("serializing config")?,
         )?;
-        let mut keys = read_keys(dir);
+        // The store is rebuilt from memory: provider keys first, then every
+        // non-provider entry (search backend keys, anything hand-kept).
+        let mut keys = BTreeMap::new();
         for (name, provider) in self.providers.iter() {
-            match provider.api_key.as_deref().filter(|k| !k.is_empty()) {
-                Some(key) => {
-                    keys.insert(name.clone(), key.to_string());
-                }
-                None => {
-                    keys.remove(name);
-                }
+            if let Some(key) = provider.api_key.as_deref().filter(|k| !k.is_empty()) {
+                keys.insert(name.clone(), key.to_string());
+            }
+        }
+        for (name, key) in self.keys.iter() {
+            if !self.providers.contains_key(name) && !key.trim().is_empty() {
+                keys.insert(name.clone(), key.clone());
             }
         }
         write_keys(dir, &keys)
@@ -2364,6 +2477,13 @@ fn read_keys(dir: &Path) -> BTreeMap<String, String> {
     toml::from_str::<KeysFile>(&raw)
         .map(|file| file.keys)
         .unwrap_or_default()
+}
+
+fn env_nonempty(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 fn write_keys(dir: &Path, keys: &BTreeMap<String, String>) -> Result<()> {

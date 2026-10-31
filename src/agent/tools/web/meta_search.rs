@@ -5,69 +5,32 @@
 use super::ranker::{self, canonicalize_url, score_search_hit};
 use super::router;
 use reqwest::Client;
-use scraper::{Html, Selector};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-const BROWSER_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
-
 /// Epoch timestamp (seconds) until which unauthenticated GitHub Search API is known to be rate-limited.
 static GITHUB_SEARCH_COOLDOWN_UNTIL: AtomicU64 = AtomicU64::new(0);
 
-/// Brave wants a slow, well-behaved client: a batch of five parallel searches
-/// tripped its per-IP rate limit, and once it answers 429 every further query
-/// is refused too. The gate serializes calls, spaces them, and turns a 429
-/// into a named cooldown the model can read and respect.
-const BRAVE_SPACING: Duration = Duration::from_millis(2_000);
-const BRAVE_COOLDOWN: Duration = Duration::from_secs(60);
-
-struct BraveGate {
-    next_at: tokio::time::Instant,
-    cooldown_until: Option<tokio::time::Instant>,
+/// A provider call that failed is not an empty answer: the model must never
+/// read a bad key or a rate limit as "this thing does not exist".
+fn unavailable_note(provider: &str, reason: &str) -> String {
+    format!(
+        "Search unavailable: {provider} — {reason}. This is the search backend failing, not an \
+empty answer; rephrasing the same question now will not help. Fix the key or provider in \
+/config, retry later, or use `webfetch` on a known URL."
+    )
 }
 
-static BRAVE_GATE: std::sync::LazyLock<tokio::sync::Mutex<BraveGate>> =
-    std::sync::LazyLock::new(|| {
-        tokio::sync::Mutex::new(BraveGate {
-            next_at: tokio::time::Instant::now(),
-            cooldown_until: None,
-        })
-    });
-
-/// What the last general-engine attempt said, when it was not an answer:
-/// "rate-limited" and "no such page" must not read the same to the model.
-static BRAVE_NOTE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
-static STARTPAGE_NOTE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
-
-fn set_note(slot: &std::sync::Mutex<Option<String>>, note: Option<String>) {
-    if let Ok(mut guard) = slot.lock() {
-        *guard = note;
-    }
-}
-
-fn read_note(slot: &std::sync::Mutex<Option<String>>) -> Option<String> {
-    slot.lock().ok().and_then(|guard| guard.clone())
-}
-
-/// A search that returned nothing because the engines refused it — not
-/// because the thing does not exist. Names what happened and what to do.
-fn unavailable_note(brave: Option<&str>, startpage: Option<&str>) -> Option<String> {
-    let parts: Vec<String> = [brave, startpage]
-        .into_iter()
-        .flatten()
-        .map(str::to_string)
-        .collect();
-    if parts.is_empty() {
-        return None;
-    }
-    Some(format!(
-        "Search unavailable: {}. This is the engines refusing this client, not an empty answer — \
-rephrasing the same question now will not help. Wait and retry, or use `webfetch` on a known URL.",
-        parts.join("; ")
-    ))
+/// No provider chosen at all. Developer categories keep working, the general
+/// web does not.
+fn not_configured_note() -> String {
+    "Web search is not configured. Pick a provider and its key in /config \
+(tavily has a free tier; deepseek uses the DeepSeek API key), or use `webfetch` on a known URL. \
+The developer categories still work without a provider: code, docs, packages, discussions, papers."
+        .to_string()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -138,53 +101,40 @@ pub async fn run_meta_search(
     count: usize,
     timeout_secs: u64,
     category: SearchCategory,
+    search: &crate::config::SearchConfig,
 ) -> Result<String, String> {
-    // Individual provider budget: 2.5s default (up to 4s if user explicitly requested a long timeout),
-    // preventing a single stalled TLS handshake from blocking the whole meta-search.
+    // Hard per-provider budget: one stalled endpoint must not delay the whole
+    // meta-search, and the provider itself is bounded the same way.
     let per_provider = Duration::from_millis((timeout_secs.clamp(2, 20) * 200).clamp(2_200, 4_000));
-
-    let client = Client::builder()
-        .timeout(per_provider)
-        .user_agent(BROWSER_UA)
-        .build()
-        .map_err(|e| format!("client error: {e}"))?;
-
     let api_client = Client::builder()
         .timeout(per_provider)
         .user_agent(crate::providers::USER_AGENT)
         .build()
         .map_err(|e| format!("client error: {e}"))?;
 
-        let mut merged = fuse_and_rank(
-        gather(&client, &api_client, query, category, per_provider).await,
-        query,
-        category,
-        count,
-    );
-    // Quotes turn a search into an exact-phrase match; when the phrase is too
-    // specific the whole set comes back empty, and the model reads that as
-    // "this does not exist". One retry without the quotes costs nothing —
-    // unless the engine itself refused us, where a retry buys another refusal.
-    let brave_down = read_note(&BRAVE_NOTE).is_some();
+    let (lists, provider_error) = gather(&api_client, search, query, category, per_provider).await;
+    let mut merged = fuse_and_rank(lists, query, category, count);
+    // Quotes turn a search into an exact-phrase match; one retry without them
+    // is cheap — unless the provider itself failed, where it buys the same
+    // failure twice.
     if merged.is_empty()
-        && !brave_down
+        && provider_error.is_none()
+        && search.provider != crate::config::SearchProvider::Off
         && let Some(relaxed) = without_quotes(query)
     {
-        merged = fuse_and_rank(
-            gather(&client, &api_client, &relaxed, category, per_provider).await,
-            &relaxed,
-            category,
-            count,
-        );
+        let (lists, _) = gather(&api_client, search, &relaxed, category, per_provider).await;
+        merged = fuse_and_rank(lists, &relaxed, category, count);
     }
     if merged.is_empty() {
-        if let Some(note) = unavailable_note(
-            read_note(&BRAVE_NOTE).as_deref(),
-            read_note(&STARTPAGE_NOTE).as_deref(),
-        ) {
-            return Ok(note);
+        if let Some(reason) = provider_error {
+            return Ok(unavailable_note(search.name(), &reason));
         }
-        return Ok(no_results_note(query, category));
+        if search.provider == crate::config::SearchProvider::Off
+            && matches!(category, SearchCategory::Auto)
+        {
+            return Ok(not_configured_note());
+        }
+        return Ok(no_results_note(query, category, search));
     }
 
     let mut out = String::new();
@@ -205,29 +155,36 @@ pub async fn run_meta_search(
     Ok(out.trim().to_string())
 }
 
-/// Which engines answer a query of this kind.
+/// Which sources answer a query of this kind: the configured provider plus
+/// the free developer APIs the category asks for. The provider's failure is
+/// returned separately so it can be named instead of hidden.
 async fn gather(
-    client: &Client,
     api_client: &Client,
+    search: &crate::config::SearchConfig,
     query: &str,
     category: SearchCategory,
     per_provider: Duration,
-) -> Vec<Vec<RawSearchHit>> {
-    let mut provider_lists: Vec<Vec<RawSearchHit>> = Vec::new();
+) -> (Vec<Vec<RawSearchHit>>, Option<String>) {
+    let mut lists: Vec<Vec<RawSearchHit>> = Vec::new();
+    let mut failure: Option<String> = None;
+    macro_rules! take {
+        ($result:expr) => {
+            match $result {
+                Ok(items) => lists.push(items),
+                Err(error) => {
+                    failure.get_or_insert(error);
+                }
+            }
+        };
+    }
 
     match category {
         SearchCategory::Auto => {
-            // General web only. The engines infer the query's language on
-            // their own; code sources are a deliberate choice (`code`,
-            // `docs`, `packages`, `discussions`), not something to guess at
-            // from the query text — a Russian question about a Rust error is
-            // both, and "looks like code" is a heuristic that silently
-            // drops half the sources.
-            let (sp, brave) = tokio::join!(
-                cap_provider(search_startpage(client, query), per_provider),
-                cap_provider(search_brave(client, query), per_provider),
-            );
-            provider_lists.extend([sp, brave]);
+            // General web only. The provider infers the query's language on
+            // its own; code sources are a deliberate choice (`code`, `docs`,
+            // `packages`, `discussions`), not something to guess at from the
+            // query text.
+            take!(provider_hits(search, query, per_provider).await);
         }
         SearchCategory::Docs => {
             let docs_q = if query.to_ascii_lowercase().contains("doc") {
@@ -235,64 +192,91 @@ async fn gather(
             } else {
                 format!("{query} documentation")
             };
-            let (sp, brave, crates, wiki) = tokio::join!(
-                cap_provider(search_startpage(client, &docs_q), per_provider),
-                cap_provider(search_brave(client, &docs_q), per_provider),
+            let (web, crates, wiki) = tokio::join!(
+                provider_hits(search, &docs_q, per_provider),
                 cap_provider(search_crates_io(api_client, query, 4), per_provider),
                 cap_provider(search_wikipedia(api_client, query, 3), per_provider),
             );
-            provider_lists.extend([sp, brave, crates, wiki]);
+            take!(web);
+            lists.extend([crates, wiki]);
         }
         SearchCategory::Code => {
-            let (gh, so, sp, brave, crates) = tokio::join!(
+            let (web, gh, so, crates) = tokio::join!(
+                provider_hits(search, query, per_provider),
                 cap_provider(
-                    search_github_with_fallback(api_client, client, query, 8),
+                    search_github_with_fallback(api_client, search, query, 8, per_provider),
                     per_provider
                 ),
                 cap_provider(search_stackoverflow(api_client, query, 8), per_provider),
-                cap_provider(search_startpage(client, query), per_provider),
-                cap_provider(search_brave(client, query), per_provider),
                 cap_provider(search_crates_io(api_client, query, 4), per_provider),
             );
-            provider_lists.extend([gh, so, sp, brave, crates]);
+            take!(web);
+            lists.extend([gh, so, crates]);
         }
         SearchCategory::Packages => {
-            let (pkgs, gh, sp, brave) = tokio::join!(
+            let (web, pkgs, gh) = tokio::join!(
+                provider_hits(search, query, per_provider),
                 cap_provider(search_packages(api_client, query, 6), per_provider),
                 cap_provider(
-                    search_github_with_fallback(api_client, client, query, 5),
+                    search_github_with_fallback(api_client, search, query, 5, per_provider),
                     per_provider
                 ),
-                cap_provider(search_startpage(client, query), per_provider),
-                cap_provider(search_brave(client, query), per_provider),
             );
-            provider_lists.extend([pkgs, gh, sp, brave]);
+            take!(web);
+            lists.extend([pkgs, gh]);
         }
         SearchCategory::Discussions => {
-            let (hn, so, gh, sp, brave) = tokio::join!(
+            let (web, hn, so, gh) = tokio::join!(
+                provider_hits(search, query, per_provider),
                 cap_provider(search_hackernews(api_client, query, 6), per_provider),
                 cap_provider(search_stackoverflow(api_client, query, 6), per_provider),
                 cap_provider(
-                    search_github_issues_with_fallback(api_client, client, query, 5),
+                    search_github_issues_with_fallback(
+                        api_client,
+                        search,
+                        query,
+                        5,
+                        per_provider
+                    ),
                     per_provider
                 ),
-                cap_provider(search_startpage(client, query), per_provider),
-                cap_provider(search_brave(client, query), per_provider),
             );
-            provider_lists.extend([hn, so, gh, sp, brave]);
+            take!(web);
+            lists.extend([hn, so, gh]);
         }
         SearchCategory::Papers => {
-            let (arxiv, wiki, sp, brave) = tokio::join!(
+            let (web, arxiv, wiki) = tokio::join!(
+                provider_hits(search, query, per_provider),
                 cap_provider(search_arxiv(api_client, query, 6), per_provider),
                 cap_provider(search_wikipedia(api_client, query, 4), per_provider),
-                cap_provider(search_startpage(client, query), per_provider),
-                cap_provider(search_brave(client, query), per_provider),
             );
-            provider_lists.extend([arxiv, wiki, sp, brave]);
+            take!(web);
+            lists.extend([arxiv, wiki]);
         }
     }
 
-    provider_lists
+    (lists, failure)
+}
+
+/// The configured provider's hits, or the reason it could not answer. `Off`
+/// is not an error: general search was deliberately disabled.
+async fn provider_hits(
+    search: &crate::config::SearchConfig,
+    query: &str,
+    per_provider: Duration,
+) -> Result<Vec<RawSearchHit>, String> {
+    if search.provider == crate::config::SearchProvider::Off {
+        return Ok(Vec::new());
+    }
+    match tokio::time::timeout(
+        per_provider,
+        super::search_api::search(search, query, 10, per_provider),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => Err("the request timed out".to_string()),
+    }
 }
 
 /// Drop quote characters from a query, or `None` when the query has none.
@@ -309,14 +293,25 @@ fn without_quotes(query: &str) -> Option<String> {
 /// An empty set with the reason it may be empty: the model used to read "No
 /// search results found." as "the fact does not exist" and spent the next call
 /// rephrasing the same query.
-fn no_results_note(query: &str, category: SearchCategory) -> String {
+fn no_results_note(
+    query: &str,
+    category: SearchCategory,
+    search: &crate::config::SearchConfig,
+) -> String {
+    let with_provider = |base: &str| {
+        if search.provider == crate::config::SearchProvider::Off {
+            base.to_string()
+        } else {
+            format!("{base}, {}", search.name())
+        }
+    };
     let engines = match category {
-        SearchCategory::Auto => "startpage, brave",
-        SearchCategory::Docs => "startpage, brave, crates.io, wikipedia",
-        SearchCategory::Code => "github, stackoverflow, startpage, brave, crates.io",
-        SearchCategory::Packages => "crates.io, npm, pypi, github, startpage, brave",
-        SearchCategory::Discussions => "hacker news, stackoverflow, github issues, startpage, brave",
-        SearchCategory::Papers => "arxiv, wikipedia, startpage, brave",
+        SearchCategory::Auto => search.name().to_string(),
+        SearchCategory::Docs => with_provider("crates.io, wikipedia"),
+        SearchCategory::Code => with_provider("github, stackoverflow, crates.io"),
+        SearchCategory::Packages => with_provider("crates.io, npm, pypi, github"),
+        SearchCategory::Discussions => with_provider("hacker news, stackoverflow, github issues"),
+        SearchCategory::Papers => with_provider("arxiv, wikipedia"),
     };
     let quoted = query.contains(['"', '«', '»', '\'']);
     format!(
@@ -504,260 +499,6 @@ fn domain_quality_boost(url: &str, category: SearchCategory) -> f64 {
     boost
 }
 
-// ── Web Search Providers (Startpage, Brave) ──────────────────────────────────
-
-/// Startpage form for a query. No language pin: `language=english` +
-/// `lui=english` restricted every search to English by construction, which is
-/// wrong for any query typed in another language. The engine reads the query.
-fn startpage_form(query: &str) -> Vec<(&'static str, &str)> {
-    vec![("query", query), ("cat", "web")]
-}
-
-async fn search_startpage(client: &Client, query: &str) -> Vec<RawSearchHit> {
-    let resp = client
-        .post("https://www.startpage.com/sp/search")
-        .header(reqwest::header::REFERER, "https://www.startpage.com/")
-        .form(&startpage_form(query))
-        .send()
-        .await;
-    let resp = match resp {
-        Ok(resp) => resp,
-        Err(e) => {
-            set_note(&STARTPAGE_NOTE, Some(format!("startpage request failed ({e})")));
-            return Vec::new();
-        }
-    };
-    let status = resp.status();
-    if !status.is_success() {
-        set_note(&STARTPAGE_NOTE, Some(format!("startpage answered HTTP {status}")));
-        return Vec::new();
-    }
-    let Ok(bytes) = resp.bytes().await else {
-        set_note(&STARTPAGE_NOTE, Some("startpage response was unreadable".into()));
-        return Vec::new();
-    };
-    if bytes.len() > router::max_body_bytes() {
-        set_note(&STARTPAGE_NOTE, Some("startpage response exceeded the size cap".into()));
-        return Vec::new();
-    }
-    let html = String::from_utf8_lossy(&bytes);
-    let hits = parse_startpage_results(&html, 10);
-    if !hits.is_empty() {
-        set_note(&STARTPAGE_NOTE, None);
-        return hits;
-    }
-    // A 200 can still be a bot wall: Startpage serves an Anubis proof-of-work
-    // page (or a captcha) to scripted clients, and parsing it as "no results"
-    // is what makes the model believe the fact does not exist. Only a page
-    // with no result nodes at all is inspected, so a query *about* captchas
-    // cannot be mistaken for one.
-    let lower = html.to_ascii_lowercase();
-    if lower.contains("anubis_challenge")
-        || lower.contains("anubis_version")
-        || lower.contains("challenge-form")
-        || lower.contains("captcha")
-    {
-        set_note(
-            &STARTPAGE_NOTE,
-            Some("startpage served a bot challenge".into()),
-        );
-    }
-    hits
-}
-
-pub fn parse_startpage_results(html: &str, max_count: usize) -> Vec<RawSearchHit> {
-    let doc = Html::parse_document(html);
-    let Ok(item_sel) = Selector::parse("div.result, div.w-gl__result") else {
-        return Vec::new();
-    };
-    let Ok(link_sel) = Selector::parse(
-        "a.result-title, a.result-link, a[data-testid='gl-title-link'], a.w-gl__result-title",
-    ) else {
-        return Vec::new();
-    };
-    let Ok(h2_sel) = Selector::parse("h2, h3") else {
-        return Vec::new();
-    };
-    let Ok(desc_sel) = Selector::parse("p.description, p.w-gl__description, p") else {
-        return Vec::new();
-    };
-
-    let mut hits = Vec::new();
-    for item in doc.select(&item_sel) {
-        let Some(link) = item.select(&link_sel).next() else {
-            continue;
-        };
-        let Some(href) = link.value().attr("href").map(str::trim) else {
-            continue;
-        };
-        if !href.starts_with("http") || href.contains("startpage.com") {
-            continue;
-        }
-        let title_raw: String = if let Some(h) = link.select(&h2_sel).next() {
-            h.text().collect()
-        } else {
-            link.text().collect()
-        };
-        let title = collapse_ws(&title_raw);
-        if title.is_empty() {
-            continue;
-        }
-        let snippet = item
-            .select(&desc_sel)
-            .next()
-            .map(|p| collapse_ws(&p.text().collect::<String>()))
-            .unwrap_or_default();
-
-        hits.push(RawSearchHit {
-            title,
-            url: href.to_string(),
-            snippet,
-            source: "google",
-            badge: None,
-            boost: 0.0,
-            repo_url: None,
-        });
-        if hits.len() >= max_count {
-            break;
-        }
-    }
-    hits
-}
-
-/// Brave Search. Plain server-rendered HTML, and the one general engine that
-/// kept answering when Startpage served its captcha. Brave infers the
-/// query's language on its own; no market or language pin is sent.
-async fn search_brave(client: &Client, query: &str) -> Vec<RawSearchHit> {
-    // Brave challenges a browser UA whose TLS/HTTP fingerprint is not a real
-    // browser (the search returned 429 for every Chrome-UA request while the
-    // same host served the app's own UA: the mismatch is the signal it acts
-    // on). The honest UA also keeps the proxy path identical to `webfetch`.
-    //
-    // The gate below is the second half of that story: a burst of parallel
-    // searches trips a per-IP rate limit that outlives the burst, and a 429
-    // must never be reported as "no such thing".
-    let mut gate = BRAVE_GATE.lock().await;
-    let now = tokio::time::Instant::now();
-    if let Some(until) = gate.cooldown_until {
-        if now < until {
-            let left = (until - now).as_secs().max(1);
-            set_note(
-                &BRAVE_NOTE,
-                Some(format!("brave is rate-limited (HTTP 429) for another {left}s")),
-            );
-            return Vec::new();
-        }
-        gate.cooldown_until = None;
-    }
-    if gate.next_at > now {
-        tokio::time::sleep_until(gate.next_at).await;
-    }
-    let resp = client
-        .get("https://search.brave.com/search")
-        .header(reqwest::header::USER_AGENT, crate::providers::USER_AGENT)
-        .query(&[("q", query), ("source", "web")])
-        .send()
-        .await;
-    let now = tokio::time::Instant::now();
-    gate.next_at = now + BRAVE_SPACING;
-    let resp = match resp {
-        Ok(resp) => resp,
-        Err(e) => {
-            set_note(&BRAVE_NOTE, Some(format!("brave request failed ({e})")));
-            return Vec::new();
-        }
-    };
-    let status = resp.status();
-    if status.as_u16() == 429 {
-        gate.cooldown_until = Some(now + BRAVE_COOLDOWN);
-        set_note(
-            &BRAVE_NOTE,
-            Some(format!(
-                "brave answered HTTP 429 (rate limit); cooling down for {}s",
-                BRAVE_COOLDOWN.as_secs()
-            )),
-        );
-        return Vec::new();
-    }
-    if !status.is_success() {
-        set_note(&BRAVE_NOTE, Some(format!("brave answered HTTP {status}")));
-        return Vec::new();
-    }
-    let Ok(bytes) = resp.bytes().await else {
-        set_note(&BRAVE_NOTE, Some("brave response was unreadable".into()));
-        return Vec::new();
-    };
-    if bytes.len() > router::max_body_bytes() {
-        set_note(&BRAVE_NOTE, Some("brave response exceeded the size cap".into()));
-        return Vec::new();
-    }
-    set_note(&BRAVE_NOTE, None);
-    parse_brave_results(&String::from_utf8_lossy(&bytes), 10)
-}
-
-/// Every organic result is `div.snippet[data-type="web"]` holding the link,
-/// the title and the description. A captcha or consent page has none of
-/// those nodes, so an empty parse is also the "blocked" answer.
-pub fn parse_brave_results(html: &str, max_count: usize) -> Vec<RawSearchHit> {
-    let doc = Html::parse_document(html);
-    let Ok(item_sel) = Selector::parse("div.snippet[data-type='web']") else {
-        return Vec::new();
-    };
-    let Ok(link_sel) = Selector::parse("a[href]") else {
-        return Vec::new();
-    };
-    let Ok(title_sel) = Selector::parse("div.title") else {
-        return Vec::new();
-    };
-    let Ok(desc_sel) = Selector::parse("div.generic-snippet") else {
-        return Vec::new();
-    };
-
-    let mut hits = Vec::new();
-    for item in doc.select(&item_sel) {
-        let Some(link) = item
-            .select(&link_sel)
-            .find(|a| a.value().attr("href").is_some_and(|h| h.starts_with("http")))
-        else {
-            continue;
-        };
-        let href = link.value().attr("href").unwrap_or_default().trim();
-        if href.contains("search.brave.com") {
-            continue;
-        }
-        let mut title = item
-            .select(&title_sel)
-            .next()
-            .map(|t| collapse_ws(&t.text().collect::<String>()))
-            .unwrap_or_default();
-        if title.is_empty() {
-            title = collapse_ws(&link.text().collect::<String>());
-        }
-        if title.is_empty() {
-            continue;
-        }
-        let snippet = item
-            .select(&desc_sel)
-            .next()
-            .map(|s| collapse_ws(&s.text().collect::<String>()))
-            .unwrap_or_default();
-
-        hits.push(RawSearchHit {
-            title,
-            url: href.to_string(),
-            snippet,
-            source: "brave",
-            badge: None,
-            boost: 0.0,
-            repo_url: None,
-        });
-        if hits.len() >= max_count {
-            break;
-        }
-    }
-    hits
-}
-
 // ── Developer & Knowledge APIs (Zero-Key JSON/Atom + Rate-Limit Fallbacks) ───
 
 async fn search_stackoverflow(client: &Client, query: &str, limit: usize) -> Vec<RawSearchHit> {
@@ -842,13 +583,14 @@ fn mark_github_rate_limited() {
 }
 
 /// Query GitHub Search API (using `GITHUB_TOKEN`/`GH_TOKEN` if present); if GitHub
-/// returns 403/429 (10 req/min unauthenticated limit), transparently fall back to
-/// `site:github.com <query>` via Brave/Startpage.
+/// returns 403/429 (10 req/min unauthenticated limit), fall back to
+/// `site:github.com <query>` through the configured search provider.
 async fn search_github_with_fallback(
     api_client: &Client,
-    web_client: &Client,
+    search: &crate::config::SearchConfig,
     query: &str,
     limit: usize,
+    per_provider: Duration,
 ) -> Vec<RawSearchHit> {
     if !github_in_cooldown() {
         let (repos, issues) = tokio::join!(
@@ -861,14 +603,15 @@ async fn search_github_with_fallback(
             return out;
         }
     }
-    search_site_github_fallback(web_client, query, limit).await
+    search_site_github_fallback(search, query, limit, per_provider).await
 }
 
 async fn search_github_issues_with_fallback(
     api_client: &Client,
-    web_client: &Client,
+    search: &crate::config::SearchConfig,
     query: &str,
     limit: usize,
+    per_provider: Duration,
 ) -> Vec<RawSearchHit> {
     if !github_in_cooldown() {
         let issues = search_github_issues(api_client, query, limit).await;
@@ -876,19 +619,20 @@ async fn search_github_issues_with_fallback(
             return issues;
         }
     }
-    search_site_github_fallback(web_client, &format!("{query} issues"), limit).await
+    let query = format!("{query} issues");
+    search_site_github_fallback(search, &query, limit, per_provider).await
 }
 
 async fn search_site_github_fallback(
-    web_client: &Client,
+    search: &crate::config::SearchConfig,
     query: &str,
     limit: usize,
+    per_provider: Duration,
 ) -> Vec<RawSearchHit> {
     let site_q = format!("site:github.com {query}");
-    let mut hits = search_brave(web_client, &site_q).await;
-    if hits.is_empty() {
-        hits = search_startpage(web_client, &site_q).await;
-    }
+    let Ok(hits) = provider_hits(search, &site_q, per_provider).await else {
+        return Vec::new();
+    };
     hits.into_iter()
         .filter(|h| h.url.contains("github.com/"))
         .take(limit)
@@ -1338,22 +1082,6 @@ fn truncate_str(s: &str, max_chars: usize) -> String {
 mod tests {
     use super::*;
 
-    /// Forcing `language=english`/`lui=english` emptied Startpage for every
-    /// non-English query: ten "no results" in one live session, each answered
-    /// by rephrasing. The engine reads the query's own language.
-    #[test]
-    fn startpage_form_does_not_pin_a_language() {
-        let form = startpage_form("мем серость кот");
-        assert!(
-            form.iter().all(|(k, _)| *k != "language" && *k != "lui"),
-            "{form:?}"
-        );
-        assert!(
-            form.iter().any(|(k, v)| *k == "query" && *v == "мем серость кот"),
-            "{form:?}"
-        );
-    }
-
     /// One engine hit, for the ranking tests.
     fn hit(title: &str, url: &str, snippet: &str, source: &'static str) -> RawSearchHit {
         RawSearchHit {
@@ -1377,20 +1105,20 @@ mod tests {
             "Мем «Серость» — кот из TikTok",
             "https://example.org/serost",
             "Серость — серый кот из тиктока, мем 2026 года",
-            "brave",
+            "deepseek",
         )];
         let junk = vec![
             hit(
                 "Summer Place Apartment Homes",
                 "https://summerplace.example/",
                 "Apartments for rent in the United States",
-                "brave",
+                "deepseek",
             ),
             hit(
                 "15 of the Best Self-Employed Jobs",
                 "https://jobs.example/",
                 "Careers and hiring advice",
-                "brave",
+                "deepseek",
             ),
         ];
         let merged = fuse_and_rank(vec![relevant, junk], "серость кот мем", SearchCategory::Auto, 10);
@@ -1414,11 +1142,16 @@ mod tests {
     /// "No results" must carry the reason: which engines ran, and that quotes
     /// were already retried without.
     #[test]
-    fn an_empty_set_names_the_engines_and_the_quote_retry() {
-        let note = no_results_note("\"серость\" кот", SearchCategory::Auto);
-        assert!(note.contains("startpage"), "{note}");
+    fn an_empty_set_names_the_provider_and_the_quote_retry() {
+        let search = crate::config::SearchConfig {
+            provider: crate::config::SearchProvider::Deepseek,
+            base_url: None,
+            api_key: Some("key".into()),
+        };
+        let note = no_results_note("\"серость\" кот", SearchCategory::Auto, &search);
+        assert!(note.contains("deepseek"), "{note}");
         assert!(note.contains("without quotes"), "{note}");
-        let plain = no_results_note("серость кот", SearchCategory::Code);
+        let plain = no_results_note("серость кот", SearchCategory::Code, &search);
         assert!(plain.contains("github"), "{plain}");
         assert!(!plain.contains("without quotes"), "{plain}");
     }
@@ -1431,57 +1164,23 @@ mod tests {
             "Summer Place Apartment Homes",
             "https://summerplace.example/",
             "Apartments for rent",
-            "brave",
+            "deepseek",
         )];
         let merged = fuse_and_rank(vec![junk], "серость кот мем", SearchCategory::Auto, 10);
         assert_eq!(merged.len(), 1, "an empty answer is worse than a weak one");
     }
 
-    /// Brave's organic results, and nothing from its news/video rails.
+    /// A provider failing must not read as "the fact does not exist": a live
+    /// run turned a rate limit into forty rephrased searches.
     #[test]
-    fn brave_results_parse_link_title_and_snippet() {
-        let html = r#"
-            <div class="snippet svelte-x" data-pos="1" data-type="web">
-              <div class="result-body"><div class="result-content">
-                <a href="https://vc.ru/ai/2856648-mem-kotost" class="l1">
-                  <div class="title search-snippet-title">Мем котость: что это такое</div>
-                </a>
-                <div class="generic-snippet"><div class="content"><span class="t-secondary">April 7, 2026 -</span> Мем котость, кот Куки и Меллстрой</div></div>
-              </div></div>
-            </div>
-            <div class="snippet" data-type="news">
-              <a href="https://news.example/story">News rail item</a>
-            </div>
-        "#;
-        let hits = parse_brave_results(html, 5);
-        assert_eq!(hits.len(), 1, "{hits:?}");
-        assert_eq!(hits[0].url, "https://vc.ru/ai/2856648-mem-kotost");
-        assert!(hits[0].title.contains("котость"), "{:?}", hits[0].title);
-        assert!(hits[0].snippet.contains("Куки"), "{:?}", hits[0].snippet);
-        assert_eq!(hits[0].source, "brave");
-    }
-
-    /// An engine refusing the client must not read as "the fact does not
-    /// exist": a live run turned a Brave 429 into forty rephrased searches.
-    #[test]
-    fn an_engine_refusal_is_not_an_empty_answer() {
-        let note = unavailable_note(
-            Some("brave answered HTTP 429 (rate limit); cooling down for 60s"),
-            Some("startpage served a bot challenge"),
-        )
-        .unwrap();
-        assert!(note.contains("brave answered HTTP 429"), "{note}");
-        assert!(note.contains("startpage served a bot challenge"), "{note}");
+    fn a_provider_failure_is_not_an_empty_answer() {
+        let note = unavailable_note("tavily", "HTTP 429 (rate-limited)");
+        assert!(note.contains("tavily"), "{note}");
+        assert!(note.contains("429"), "{note}");
         assert!(note.contains("rephrasing"), "{note}");
         assert!(note.contains("webfetch"), "{note}");
-        assert!(unavailable_note(None, None).is_none());
-    }
-
-    /// A captcha/consent page has no result nodes: the parser must answer
-    /// with nothing rather than with chrome.
-    #[test]
-    fn a_brave_challenge_page_yields_no_hits() {
-        let html = "<html><body><div class='challenge'>Verify you are human</div></body></html>";
-        assert!(parse_brave_results(html, 5).is_empty());
+        let off = not_configured_note();
+        assert!(off.contains("/config"), "{off}");
+        assert!(off.contains("webfetch"), "{off}");
     }
 }

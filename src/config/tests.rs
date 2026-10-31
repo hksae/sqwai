@@ -1404,3 +1404,59 @@ fn only_the_key_store_is_host_only() {
     assert!(is_host_secret_path(&keys_path().unwrap()));
     assert!(!is_host_secret_path(&config_path().unwrap()));
 }
+
+/// The search key is resolved from the key store first, then the chat
+/// provider's key (DeepSeek), then the environment; `off` is never ready.
+#[test]
+fn search_config_picks_the_provider_key_in_order() {
+    let mut cfg = Config::default();
+    cfg.web.search_provider = SearchProvider::Tavily;
+    cfg.keys.insert("tavily".into(), "tvly-store".into());
+    let search = cfg.search_config();
+    assert_eq!(search.provider, SearchProvider::Tavily);
+    assert_eq!(search.api_key.as_deref(), Some("tvly-store"));
+    assert!(search.is_ready());
+
+    cfg.web.search_provider = SearchProvider::Deepseek;
+    cfg.providers
+        .insert("deepseek".to_string(), keyed_provider(Some("sk-chat")));
+    assert_eq!(cfg.search_config().api_key.as_deref(), Some("sk-chat"));
+    // a search-specific key shadows the chat key without changing it
+    cfg.keys.insert("deepseek-search".into(), "sk-search".into());
+    assert_eq!(cfg.search_config().api_key.as_deref(), Some("sk-search"));
+    assert_eq!(
+        cfg.providers["deepseek"].api_key.as_deref(),
+        Some("sk-chat")
+    );
+
+    cfg.web.search_provider = SearchProvider::Off;
+    assert!(!cfg.search_config().is_ready());
+}
+
+/// A search key lives in the host-only store next to provider keys and is
+/// removed without touching them.
+#[test]
+fn a_search_key_round_trips_through_the_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = Config::default();
+    cfg.providers
+        .insert("pateway".to_string(), keyed_provider(Some("sk-chat")));
+    cfg.web.search_provider = SearchProvider::Tavily;
+    cfg.keys.insert("tavily".into(), "tvly-live".into());
+    cfg.save_to_dir(dir.path()).unwrap();
+
+    let store = std::fs::read_to_string(dir.path().join("keys.toml")).unwrap();
+    assert!(store.contains("tvly-live"), "{store}");
+    assert!(store.contains("sk-chat"), "{store}");
+
+    let mut loaded = load_dir(dir.path());
+    assert_eq!(
+        loaded.search_config().api_key.as_deref(),
+        Some("tvly-live")
+    );
+    loaded.keys.remove("tavily");
+    loaded.save_to_dir(dir.path()).unwrap();
+    let store = std::fs::read_to_string(dir.path().join("keys.toml")).unwrap();
+    assert!(!store.contains("tvly-live"), "{store}");
+    assert!(store.contains("sk-chat"), "the chat key must survive: {store}");
+}

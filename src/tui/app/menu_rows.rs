@@ -82,6 +82,77 @@ impl App {
             MenuAction::FocusSearch,
         ));
         let q = self.config_search.lines().join("").to_lowercase();
+        let mut tool_rows: Vec<SettingsEntry> = vec![
+            (
+                "skills auto-load",
+                on_off(self.cfg.skills.auto_load),
+                MenuAction::ToggleSkillsAutoLoad,
+            ),
+            (
+                "bash timeout secs",
+                ScalarSetting::BashTimeoutSecs.current(&self.cfg),
+                MenuAction::EditScalar(ScalarSetting::BashTimeoutSecs),
+            ),
+            (
+                "bash output bytes",
+                ScalarSetting::BashOutputBytes.current(&self.cfg),
+                MenuAction::EditScalar(ScalarSetting::BashOutputBytes),
+            ),
+            (
+                "bash background jobs",
+                ScalarSetting::BashBackgroundJobs.current(&self.cfg),
+                MenuAction::EditScalar(ScalarSetting::BashBackgroundJobs),
+            ),
+            (
+                "read window lines",
+                ScalarSetting::ReadWindow.current(&self.cfg),
+                MenuAction::EditScalar(ScalarSetting::ReadWindow),
+            ),
+            (
+                "read max file bytes",
+                ScalarSetting::ReadMaxFileBytes.current(&self.cfg),
+                MenuAction::EditScalar(ScalarSetting::ReadMaxFileBytes),
+            ),
+            (
+                "outline max file bytes",
+                ScalarSetting::OutlineMaxFileBytes.current(&self.cfg),
+                MenuAction::EditScalar(ScalarSetting::OutlineMaxFileBytes),
+            ),
+            (
+                "search provider",
+                ScalarSetting::SearchProvider.current(&self.cfg),
+                MenuAction::EditScalar(ScalarSetting::SearchProvider),
+            ),
+        ];
+        if self.cfg.web.search_provider != crate::config::SearchProvider::Off {
+            tool_rows.push((
+                "search key",
+                ScalarSetting::SearchKey.current(&self.cfg),
+                MenuAction::EditScalar(ScalarSetting::SearchKey),
+            ));
+            tool_rows.push((
+                "search base url",
+                ScalarSetting::SearchBaseUrl.current(&self.cfg),
+                MenuAction::EditScalar(ScalarSetting::SearchBaseUrl),
+            ));
+        }
+        tool_rows.extend([
+            (
+                "web results",
+                ScalarSetting::WebResults.current(&self.cfg),
+                MenuAction::EditScalar(ScalarSetting::WebResults),
+            ),
+            (
+                "web timeout secs",
+                ScalarSetting::WebTimeoutSecs.current(&self.cfg),
+                MenuAction::EditScalar(ScalarSetting::WebTimeoutSecs),
+            ),
+            (
+                "web fetch bytes",
+                ScalarSetting::WebFetchBytes.current(&self.cfg),
+                MenuAction::EditScalar(ScalarSetting::WebFetchBytes),
+            ),
+        ]);
         let groups: Vec<SettingsGroup> = vec![
             (
                 "UI",
@@ -118,61 +189,7 @@ impl App {
                     ),
                 ],
             ),
-            (
-                "Tools",
-                vec![
-                    (
-                        "skills auto-load",
-                        on_off(self.cfg.skills.auto_load),
-                        MenuAction::ToggleSkillsAutoLoad,
-                    ),
-                    (
-                        "bash timeout secs",
-                        ScalarSetting::BashTimeoutSecs.current(&self.cfg),
-                        MenuAction::EditScalar(ScalarSetting::BashTimeoutSecs),
-                    ),
-                    (
-                        "bash output bytes",
-                        ScalarSetting::BashOutputBytes.current(&self.cfg),
-                        MenuAction::EditScalar(ScalarSetting::BashOutputBytes),
-                    ),
-                    (
-                        "bash background jobs",
-                        ScalarSetting::BashBackgroundJobs.current(&self.cfg),
-                        MenuAction::EditScalar(ScalarSetting::BashBackgroundJobs),
-                    ),
-                    (
-                        "read window lines",
-                        ScalarSetting::ReadWindow.current(&self.cfg),
-                        MenuAction::EditScalar(ScalarSetting::ReadWindow),
-                    ),
-                    (
-                        "read max file bytes",
-                        ScalarSetting::ReadMaxFileBytes.current(&self.cfg),
-                        MenuAction::EditScalar(ScalarSetting::ReadMaxFileBytes),
-                    ),
-                    (
-                        "outline max file bytes",
-                        ScalarSetting::OutlineMaxFileBytes.current(&self.cfg),
-                        MenuAction::EditScalar(ScalarSetting::OutlineMaxFileBytes),
-                    ),
-                    (
-                        "web results",
-                        ScalarSetting::WebResults.current(&self.cfg),
-                        MenuAction::EditScalar(ScalarSetting::WebResults),
-                    ),
-                    (
-                        "web timeout secs",
-                        ScalarSetting::WebTimeoutSecs.current(&self.cfg),
-                        MenuAction::EditScalar(ScalarSetting::WebTimeoutSecs),
-                    ),
-                    (
-                        "web fetch bytes",
-                        ScalarSetting::WebFetchBytes.current(&self.cfg),
-                        MenuAction::EditScalar(ScalarSetting::WebFetchBytes),
-                    ),
-                ],
-            ),
+            ("Tools", tool_rows),
             (
                 "Limits",
                 vec![

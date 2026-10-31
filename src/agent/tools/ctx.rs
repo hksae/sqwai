@@ -142,6 +142,8 @@ pub struct ToolCtx {
     pub pdf: bool,
     /// `[tools]` caps for the built-in tools.
     pub tools: crate::config::ToolsConfig,
+    /// Resolved search provider, endpoint and key for `websearch`.
+    pub search: crate::config::SearchConfig,
     /// `[limits]` concurrency caps shared with the loop.
     pub limits: crate::config::LimitsConfig,
     /// Media ids that are still visible on the wire. `view_image` answers a
@@ -195,6 +197,7 @@ impl ToolCtx {
             vision: true,
             pdf: false,
             tools: Default::default(),
+            search: Default::default(),
             limits: Default::default(),
             visible_images: std::sync::Arc::new(std::collections::HashSet::new()),
             visible_documents: std::sync::Arc::new(std::collections::HashSet::new()),
