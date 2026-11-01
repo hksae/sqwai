@@ -100,6 +100,19 @@ fn subagent_writer_scope_rules() {
 }
 
 #[test]
+fn a_task_timeout_is_parsed() {
+    let tasks = subagent_tasks_from_args(&serde_json::json!({
+        "tasks": [
+            {"task": "bounded", "timeout_secs": 5},
+            {"task": "default"}
+        ]
+    }))
+    .unwrap();
+    assert_eq!(tasks[0].timeout_secs, Some(5));
+    assert_eq!(tasks[1].timeout_secs, None);
+}
+
+#[test]
 fn rejects_more_than_eight_subagents() {
     let tasks: Vec<String> = (0..9).map(|n| format!("task {n}")).collect();
     let error = subagent_tasks_from_args(&serde_json::json!({"tasks":tasks})).unwrap_err();
@@ -203,14 +216,24 @@ fn subagent_contract_parent_context_and_receipt_salvage() {
     trail.record_done("read", true);
     trail.modified_files.push("src/lexer.rs".into());
 
-    let attached = trail.attach_receipt("All callers updated.", true);
-    assert!(attached.contains("[Subagent receipt: ok | 2 tool call(s): grep(parse_expr), read(src/parser.rs) | modified: src/lexer.rs]"));
+    let envelope = trail.envelope(
+        3,
+        "completed",
+        std::time::Duration::from_secs(84),
+        true,
+        "All callers updated.",
+    );
+    assert!(
+        envelope.starts_with("[subagent 3 | completed | 1m24s | 2 tool(s) | files: src/lexer.rs | plan: abandoned]"),
+        "{envelope}"
+    );
+    assert!(envelope.ends_with("All callers updated."), "{envelope}");
 
     let salvaged = trail.salvage_on_error(
         "subagent timed out after 600s",
         "Found 3 callers in src/ast.rs:42",
     );
     assert!(salvaged.contains("subagent timed out after 600s"));
-    assert!(salvaged.contains("[Subagent receipt: stopped | 2 tool call(s)"));
+    assert!(!salvaged.contains("receipt"), "{salvaged}");
     assert!(salvaged.contains("Partial findings before stop:\nFound 3 callers in src/ast.rs:42"));
 }

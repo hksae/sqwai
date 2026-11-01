@@ -363,7 +363,8 @@ modified files.",
                                         "write": {"type": "boolean", "description": "allow file writes, scoped to paths"},
                                         "paths": {"type": "array", "items": {"type": "string"}, "description": "write scope roots (required with write:true; or focus paths when write:false)"},
                                         "skills": {"type": "array", "items": {"type": "string"}, "description": "optional skill names from <available_skills> to preload into this subagent"},
-                                        "clean": {"type": "boolean", "description": "when true, omit <parent_context> for this task so it runs with a clean slate"}
+                                        "clean": {"type": "boolean", "description": "when true, omit <parent_context> for this task so it runs with a clean slate"},
+                                        "timeout_secs": {"type": "integer", "minimum": 1, "maximum": 86400, "description": "optional wall-clock budget for this task; the child stops with partial output at the limit"}
                                     },
                                     "additionalProperties": true
                                 }

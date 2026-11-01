@@ -1671,6 +1671,13 @@ async fn subagent_lifecycle_lands_in_the_parent_event_log() {
     )
     .await;
     assert!(outcome.ok, "{}", outcome.output);
+    assert!(
+        outcome.output.starts_with("[subagent ")
+            && outcome.output.contains("| completed |")
+            && outcome.output.contains("plan: none"),
+        "host envelope is not the receipt: {}",
+        outcome.output
+    );
 
     let records = crate::agent::events::EventLog::records_for(&root, "parent-events").unwrap();
     let starts: Vec<_> = records

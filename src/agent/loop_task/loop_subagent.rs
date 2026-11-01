@@ -51,6 +51,8 @@ pub(crate) struct SubagentTask {
     pub(crate) files: Vec<String>,
     pub(crate) skills: Vec<String>,
     pub(crate) clean: bool,
+    /// per-task wall-clock override; None keeps the caller's default
+    pub(crate) timeout_secs: Option<u64>,
 }
 
 fn normalize_rel_path_list(arr: &[serde_json::Value]) -> Vec<String> {
@@ -68,7 +70,7 @@ fn normalize_rel_path_list(arr: &[serde_json::Value]) -> Vec<String> {
 
 fn subagent_task_spec(item: &serde_json::Value, default_clean: bool) -> Option<SubagentTask> {
     let label = subagent_task_text(item)?;
-    let (write, paths, context, files, skills, clean) = match item {
+    let (write, paths, context, files, skills, clean, timeout_secs) = match item {
         serde_json::Value::Object(map) => {
             let write = map.get("write").and_then(|v| v.as_bool()).unwrap_or(false);
             let paths = map
@@ -103,7 +105,11 @@ fn subagent_task_spec(item: &serde_json::Value, default_clean: bool) -> Option<S
                 .get("clean")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(default_clean);
-            (write, paths, context, files, skills, clean)
+            let timeout_secs = map
+                .get("timeout_secs")
+                .and_then(|v| v.as_u64())
+                .filter(|secs| *secs > 0);
+            (write, paths, context, files, skills, clean, timeout_secs)
         }
         _ => (
             false,
@@ -112,6 +118,7 @@ fn subagent_task_spec(item: &serde_json::Value, default_clean: bool) -> Option<S
             Vec::new(),
             Vec::new(),
             default_clean,
+            None,
         ),
     };
     Some(SubagentTask {
@@ -122,6 +129,7 @@ fn subagent_task_spec(item: &serde_json::Value, default_clean: bool) -> Option<S
         files,
         skills,
         clean,
+        timeout_secs,
     })
 }
 
@@ -489,6 +497,7 @@ pub(crate) async fn run_subagent(
                         "files": task.files,
                         "skills": task.skills,
                         "clean": task.clean,
+                        "timeout_secs": task.timeout_secs,
                     }],
                 });
                 let system = system.clone();
@@ -552,8 +561,13 @@ pub(crate) async fn run_subagent(
         };
     }
     let task = tasks.into_iter().next().unwrap();
+    let timeout = task
+        .timeout_secs
+        .map(|secs| std::time::Duration::from_secs(secs.clamp(1, 24 * 3600)))
+        .unwrap_or(timeout);
     let id = next_subagent_id();
     let child_session = next_subagent_session();
+    let started = std::time::Instant::now();
     // Read-only by default: a writer child needs the explicit flag (with
     // paths, validated above) on top of the session lock.
     let child_read_only = read_only || !task.write;
@@ -739,7 +753,15 @@ pub(crate) async fn run_subagent(
                 &task.label,
                 "killed",
             );
-            abandon_child_plan(root, parent_session, &child_session);
+            let plan_abandoned = abandon_child_plan(root, parent_session, &child_session);
+            let mut result = result;
+            result.output = trail.envelope(
+                id,
+                "killed",
+                started.elapsed(),
+                plan_abandoned,
+                &result.output,
+            );
             return result;
         }
         let event = tokio::select! {
@@ -758,7 +780,15 @@ pub(crate) async fn run_subagent(
                     &task.label,
                     "failed",
                 );
-                abandon_child_plan(root, parent_session, &child_session);
+                let plan_abandoned = abandon_child_plan(root, parent_session, &child_session);
+                let mut result = result;
+                result.output = trail.envelope(
+                    id,
+                    "failed",
+                    started.elapsed(),
+                    plan_abandoned,
+                    &result.output,
+                );
                 let _ = parent_tx
                     .send(AgentEvent::SubagentDone {
                         id,
@@ -791,7 +821,15 @@ pub(crate) async fn run_subagent(
                     &task.label,
                     "timeout",
                 );
-                abandon_child_plan(root, parent_session, &child_session);
+                let plan_abandoned = abandon_child_plan(root, parent_session, &child_session);
+                let mut result = result;
+                result.output = trail.envelope(
+                    id,
+                    "timeout",
+                    started.elapsed(),
+                    plan_abandoned,
+                    &result.output,
+                );
                 return result;
             }
             },
@@ -848,8 +886,7 @@ pub(crate) async fn run_subagent(
             }
             AgentEvent::Completed(result) => {
                 trail.collect_event_writes(root, parent_session, &child_session);
-                let completed = result.is_ok();
-                let result = match result {
+                let (body, ok) = match result {
                     Ok(outcome) => {
                         if output.is_empty() {
                             output = outcome
@@ -865,14 +902,12 @@ pub(crate) async fn run_subagent(
                         child_doc.last_message_at = Some(chrono::Utc::now());
                         child_doc.refresh_estimate();
                         let _ = child_doc.save_hidden(&child_session);
-                        let final_text = trail.attach_receipt(&output, true);
-                        tools::Outcome::ok(final_text)
+                        (output.clone(), true)
                     }
-                    Err(error) => {
-                        let final_err = trail.salvage_on_error(&error, &output);
-                        tools::Outcome::err(final_err)
-                    }
+                    Err(error) => (trail.salvage_on_error(&error, &output), false),
                 };
+                let status = if ok { "completed" } else { "failed" };
+                let plan_abandoned = abandon_child_plan(root, parent_session, &child_session);
                 log_subagent_event(
                     root,
                     parent_session,
@@ -881,9 +916,14 @@ pub(crate) async fn run_subagent(
                     id,
                     &child_session,
                     &task.label,
-                    if completed { "completed" } else { "failed" },
+                    status,
                 );
-                abandon_child_plan(root, parent_session, &child_session);
+                let text = trail.envelope(id, status, started.elapsed(), plan_abandoned, &body);
+                let result = if ok {
+                    tools::Outcome::ok(text)
+                } else {
+                    tools::Outcome::err(text)
+                };
                 let _ = parent_tx
                     .send(AgentEvent::SubagentDone {
                         id,
@@ -1020,61 +1060,69 @@ impl SubagentTrail {
         }
     }
 
-    pub(crate) fn receipt_line(&self, ok: bool) -> Option<String> {
-        if self.calls.is_empty() && self.modified_files.is_empty() {
-            return None;
+    /// Host-written header the parent reads before the child's prose. Facts
+    /// (status, duration, tool count, files, plan) come from the host, never
+    /// from the child's self-report.
+    pub(crate) fn envelope(
+        &self,
+        id: u64,
+        status: &str,
+        elapsed: std::time::Duration,
+        plan_abandoned: bool,
+        body: &str,
+    ) -> String {
+        let mut tools = format!("{} tool(s)", self.calls.len());
+        if self.failed_calls > 0 {
+            tools.push_str(&format!(" ({} failed)", self.failed_calls));
         }
-        let status = if ok { "ok" } else { "stopped" };
-        let calls_part = if self.calls.is_empty() {
-            "0 tool calls".to_string()
+        let files = if self.modified_files.is_empty() {
+            "none".to_string()
         } else {
-            let shown: Vec<&str> = self.calls.iter().take(12).map(String::as_str).collect();
-            let extra = if self.calls.len() > 12 {
-                format!(" +{} more", self.calls.len() - 12)
+            let shown: Vec<&str> = self
+                .modified_files
+                .iter()
+                .take(6)
+                .map(String::as_str)
+                .collect();
+            let extra = if self.modified_files.len() > 6 {
+                format!(" +{} more", self.modified_files.len() - 6)
             } else {
                 String::new()
             };
-            let fail_note = if self.failed_calls > 0 {
-                format!(" ({} failed)", self.failed_calls)
-            } else {
-                String::new()
-            };
-            format!(
-                "{} tool call(s){fail_note}: {}{extra}",
-                self.calls.len(),
-                shown.join(", ")
-            )
+            format!("{}{extra}", shown.join(", "))
         };
-        let mod_part = if self.modified_files.is_empty() {
-            String::new()
+        let plan = if plan_abandoned { "abandoned" } else { "none" };
+        let meta = format!(
+            "subagent {id} | {status} | {} | {tools} | files: {files} | plan: {plan}",
+            elapsed_label(elapsed)
+        );
+        let body = body.trim();
+        if body.is_empty() {
+            format!("[{meta}]")
         } else {
-            format!(" | modified: {}", self.modified_files.join(", "))
-        };
-        Some(format!(
-            "[Subagent receipt: {status} | {calls_part}{mod_part}]"
-        ))
-    }
-
-    pub(crate) fn attach_receipt(&self, output: &str, ok: bool) -> String {
-        let trimmed = output.trim();
-        match self.receipt_line(ok) {
-            Some(receipt) if trimmed.is_empty() => receipt,
-            Some(receipt) => format!("{trimmed}\n\n{receipt}"),
-            None => trimmed.to_string(),
+            format!("[{meta}]\n{body}")
         }
     }
 
     pub(crate) fn salvage_on_error(&self, err_msg: &str, partial_output: &str) -> String {
         let mut parts = vec![err_msg.to_string()];
-        if let Some(receipt) = self.receipt_line(false) {
-            parts.push(receipt);
-        }
         let partial = partial_output.trim();
         if !partial.is_empty() {
             let capped: String = partial.chars().take(4_000).collect();
             parts.push(format!("Partial findings before stop:\n{capped}"));
         }
         parts.join("\n\n")
+    }
+}
+
+fn elapsed_label(elapsed: std::time::Duration) -> String {
+    let secs = elapsed.as_secs();
+    if secs >= 3600 {
+        format!("{}h{:02}m", secs / 3600, (secs % 3600) / 60)
+    } else if secs >= 60 {
+        format!("{}m{:02}s", secs / 60, secs % 60)
+    } else {
+        format!("{secs}s")
     }
 }
 
@@ -1324,12 +1372,12 @@ pub(crate) fn bump_subagent_id_at_least(min: u64) {
 
 /// A child that leaves an active plan behind gets it archived by the host;
 /// the parent's plan is never touched (children do not join it).
-pub(crate) fn abandon_child_plan(root: &Path, parent_session: &str, child_session: &str) {
+pub(crate) fn abandon_child_plan(root: &Path, parent_session: &str, child_session: &str) -> bool {
     let Ok(Some(mut plan)) = plan::open_active_for_session(root, Some(child_session)) else {
-        return;
+        return false;
     };
     if plan.status != plan::PlanStatus::Active {
-        return;
+        return false;
     }
     plan::abandon(&mut plan);
     let _ = plan::commit(
@@ -1341,6 +1389,7 @@ pub(crate) fn abandon_child_plan(root: &Path, parent_session: &str, child_sessio
         true,
         serde_json::json!({"reason": "subagent finished"}),
     );
+    true
 }
 
 /// EventLog/shadow identity for a child agent. Unique across process
