@@ -35,6 +35,9 @@ use loop_turn::{request_messages, run_turn_with_prefetch, turn_transport};
 pub(crate) struct BackgroundChild {
     label: String,
     status: &'static str,
+    /// User turn that spawned this child. Undo suppresses and stops only the
+    /// writers of the turn it reverts, never a later turn's running children.
+    turn: u64,
     started: Instant,
     output: Option<String>,
     delivered: bool,
@@ -113,10 +116,10 @@ pub(crate) fn abort_background_children(registry: &BackgroundRegistry) {
 /// stopped child's salvage describes work the user just reverted; it must not
 /// come back as a completion note on a later turn. `subagents output` can
 /// still retrieve it explicitly.
-pub(crate) fn suppress_running_reports(registry: &BackgroundRegistry) {
+pub(crate) fn suppress_running_reports(registry: &BackgroundRegistry, turn: u64) {
     if let Ok(mut entries) = registry.try_lock() {
         for entry in entries.values_mut() {
-            if entry.status == "running" {
+            if entry.status == "running" && entry.turn == turn {
                 entry.delivered = true;
             }
         }
@@ -2609,6 +2612,7 @@ async fn run_agent(
                                     BackgroundChild {
                                         label: label.clone(),
                                         status: "running",
+                                        turn: user_turn,
                                         started: Instant::now(),
                                         output: None,
                                         delivered: false,

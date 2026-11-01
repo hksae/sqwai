@@ -206,7 +206,7 @@ impl App {
         let cancelled = match cancel_turn {
             Some(turn) => {
                 if let Some(bg) = self.background.get(&self.session.id.to_string()) {
-                    crate::agent::loop_task::suppress_running_reports(&bg.registry);
+                    crate::agent::loop_task::suppress_running_reports(&bg.registry, turn);
                 }
                 crate::agent::undo_guard::cancel_running_children_of(
                     &self.session.id.to_string(),
