@@ -203,6 +203,7 @@ pub(crate) async fn run_subagent_batch(
     plan_limits: crate::config::PlanConfig,
     fallback_chain: Vec<FallbackCandidate>,
     timeout: std::time::Duration,
+    steer_controls: Option<super::SteerControls>,
 ) -> bool {
     use futures::{StreamExt, stream};
     // pre-phase in order; stops at the first pre-cancelled call exactly
@@ -259,6 +260,7 @@ pub(crate) async fn run_subagent_batch(
                 let tools = tools.clone();
                 let limits = limits.clone();
                 let parent_cancel = cancel.clone();
+                let steer_controls = steer_controls.clone();
                 async move {
                     let outcome = run_subagent(
                         &call,
@@ -290,6 +292,7 @@ pub(crate) async fn run_subagent_batch(
                         plan_limits,
                         fallback_chain,
                         timeout,
+                        steer_controls.clone(),
                     )
                     .await;
                     (index, call, started, outcome)
@@ -438,6 +441,7 @@ pub(crate) async fn run_subagent(
     plan_limits: crate::config::PlanConfig,
     fallback_chain: Vec<FallbackCandidate>,
     timeout: std::time::Duration,
+    steer_controls: Option<super::SteerControls>,
 ) -> tools::Outcome {
     let tasks = match subagent_tasks_from_args(&call.args) {
         Ok(tasks) => tasks,
@@ -469,6 +473,7 @@ pub(crate) async fn run_subagent(
                 let fallback_chain = fallback_chain.clone();
                 let tools = tools.clone();
                 let limits = limits.clone();
+                let steer_controls = steer_controls.clone();
                 async move {
                     let outcome = run_subagent(
                         &one,
@@ -500,6 +505,7 @@ pub(crate) async fn run_subagent(
                         plan_limits,
                         fallback_chain,
                         timeout,
+                        steer_controls,
                     )
                     .await;
                     (index, task_label, outcome)
@@ -667,6 +673,15 @@ pub(crate) async fn run_subagent(
     // leaves the map on every exit path below, including early returns.
     let _child_slot = crate::agent::undo_guard::track_child(id, child.child_control());
     let _control_slot = ControlSlot::register(id, child.control.clone());
+    if let Some(controls) = &steer_controls {
+        let mut mailbox = controls.lock().await;
+        mailbox.controls.push(child.control.clone());
+        let pending = std::mem::take(&mut mailbox.pending);
+        drop(mailbox);
+        for text in pending {
+            let _ = child.control.try_send(ControlMsg::Steer { text });
+        }
+    }
     // Hidden session for the parent's history screen. The child's transcript
     // is written under its event-session name so the row restored from the
     // event log can open it later; `hidden` keeps it out of the sessions menu.

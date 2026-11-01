@@ -152,6 +152,7 @@ pub(crate) struct RecordingTestProvider {
 /// (without `subagent` in its tools) gets a plain report.
 pub(crate) struct BackgroundRoutingProvider {
     pub(crate) parent_calls: std::sync::atomic::AtomicUsize,
+    pub(crate) child_saw_steer: std::sync::atomic::AtomicBool,
 }
 
 impl crate::providers::Provider for BackgroundRoutingProvider {
@@ -173,9 +174,9 @@ impl crate::providers::Provider for BackgroundRoutingProvider {
                 ))],
                 1 => vec![Ok(crate::providers::StreamEvent::ToolCall(
                     crate::providers::ToolCallReq::new(
-                        "call-list",
+                        "call-send",
                         "subagents",
-                        serde_json::json!({"action": "list"}),
+                        serde_json::json!({"action": "send", "id": 1, "message": "focus on the lexer"}),
                     ),
                 ))],
                 2 => vec![Ok(crate::providers::StreamEvent::ToolCall(
@@ -190,9 +191,24 @@ impl crate::providers::Provider for BackgroundRoutingProvider {
                 ))],
             }
         } else {
-            vec![Ok(crate::providers::StreamEvent::Text(
-                "child report".into(),
-            ))]
+            let saw = req.messages.iter().any(|m| {
+                m.role == Role::User && m.content.contains("<parent_message>")
+            });
+            if saw {
+                self.child_saw_steer.store(true, Ordering::Relaxed);
+                vec![Ok(crate::providers::StreamEvent::Text(
+                    "child report after steer".into(),
+                ))]
+            } else {
+                // keep the child looping until the parent's message lands
+                vec![Ok(crate::providers::StreamEvent::ToolCall(
+                    crate::providers::ToolCallReq::new(
+                        "child-read",
+                        "read",
+                        serde_json::json!({"file_path": "no-such-file"}),
+                    ),
+                ))]
+            }
         };
         futures::stream::iter(events).boxed()
     }
@@ -1657,6 +1673,7 @@ async fn subagent_does_not_join_its_parent_plan() {
         crate::config::PlanConfig::default(),
         Vec::new(),
         std::time::Duration::from_secs(SUBAGENT_TIMEOUT_SECS),
+        None,
     )
     .await;
     assert!(outcome.ok, "{}", outcome.output);
@@ -1718,6 +1735,7 @@ async fn subagent_lifecycle_lands_in_the_parent_event_log() {
         crate::config::PlanConfig::default(),
         Vec::new(),
         std::time::Duration::from_secs(SUBAGENT_TIMEOUT_SECS),
+        None,
     )
     .await;
     assert!(outcome.ok, "{}", outcome.output);
@@ -1875,6 +1893,7 @@ async fn subagent_ignores_a_foreign_active_plan() {
         crate::config::PlanConfig::default(),
         Vec::new(),
         std::time::Duration::from_secs(SUBAGENT_TIMEOUT_SECS),
+        None,
     )
     .await;
     assert!(outcome.ok, "{}", outcome.output);
@@ -1975,6 +1994,7 @@ async fn a_child_request_omits_subagent_and_ask_user_tools() {
         crate::config::PlanConfig::default(),
         Vec::new(),
         std::time::Duration::from_secs(SUBAGENT_TIMEOUT_SECS),
+        None,
     )
     .await;
     assert!(outcome.ok, "{}", outcome.output);
@@ -1999,9 +2019,11 @@ async fn a_background_subagent_reports_before_the_turn_ends() {
     let root = std::env::temp_dir().join(format!("sqwai-bgsub-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     let _ = std::fs::create_dir_all(&root);
-    let provider: SharedProvider = std::sync::Arc::new(BackgroundRoutingProvider {
+    let recorder = std::sync::Arc::new(BackgroundRoutingProvider {
         parent_calls: std::sync::atomic::AtomicUsize::new(0),
+        child_saw_steer: std::sync::atomic::AtomicBool::new(false),
     });
+    let provider: SharedProvider = recorder.clone();
     let input = AgentInput {
         provider,
         model_id: "m".into(),
@@ -2065,7 +2087,7 @@ async fn a_background_subagent_reports_before_the_turn_ends() {
         outcome.messages.iter().any(|m| {
             m.role == Role::Tool
                 && m.tool_call_id.as_deref() == Some("call-out")
-                && m.content.contains("child report")
+                && m.content.contains("child report after steer")
         }),
         "subagents output returns the report: {:#?}",
         outcome.messages
@@ -2077,6 +2099,10 @@ async fn a_background_subagent_reports_before_the_turn_ends() {
         "a report read through output is not repeated as a host note"
     );
     assert!(!note, "a delivered report needs no report note");
+    assert!(
+        recorder.child_saw_steer.load(std::sync::atomic::Ordering::Relaxed),
+        "the child must receive the parent's message at its next request"
+    );
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -2134,6 +2160,7 @@ async fn hung_subagent_times_out_and_aborts() {
         crate::config::PlanConfig::default(),
         Vec::new(),
         std::time::Duration::from_millis(150),
+        None,
     )
     .await;
     assert!(!outcome.ok, "a hung child must fail, not hang");
@@ -2202,6 +2229,7 @@ async fn esc_stops_a_subagent_wait_without_the_timeout() {
         crate::config::PlanConfig::default(),
         Vec::new(),
         std::time::Duration::from_secs(60),
+        None,
     )
     .await;
     assert!(!outcome.ok, "cancelled child must fail");

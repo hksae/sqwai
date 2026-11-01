@@ -41,9 +41,18 @@ struct BackgroundChild {
     abort: Option<tokio::task::AbortHandle>,
     join: Option<tokio::task::JoinHandle<()>>,
     notify: std::sync::Arc<tokio::sync::Notify>,
+    steer: SteerControls,
 }
 
 type BackgroundRegistry = std::sync::Arc<tokio::sync::Mutex<std::collections::HashMap<u64, BackgroundChild>>>;
+/// Child control senders of one background batch, plus messages that arrived
+/// before the child registered its channel.
+#[derive(Default)]
+pub(crate) struct SteerMailbox {
+    pub(crate) controls: Vec<mpsc::Sender<ControlMsg>>,
+    pub(crate) pending: Vec<String>,
+}
+type SteerControls = std::sync::Arc<tokio::sync::Mutex<SteerMailbox>>;
 
 mod loop_ask;
 mod loop_compact;
@@ -296,6 +305,8 @@ pub struct FallbackCandidate {
 pub enum ControlMsg {
     AskAnswer { id: u64, text: String },
     ApprovalAnswer { id: u64, decision: ApprovalDecision },
+    /// a parent message for a running child, delivered at its next request
+    Steer { text: String },
 }
 
 pub struct AgentHandle {
@@ -437,9 +448,55 @@ async fn subagents_control(
         entry.notify.notify_waiters();
         return tools::Outcome::ok(format!("background subagent {id} killed"));
     }
+    if action == "send" {
+        let Some(message) = args["message"].as_str().filter(|m| !m.trim().is_empty()) else {
+            return tools::Outcome::err("subagents: send needs a message");
+        };
+        let controls = {
+            let entries = registry.lock().await;
+            let Some(entry) = entries.get(&id) else {
+                return tools::Outcome::err(format!("no background subagent {id}"));
+            };
+            entry.steer.clone()
+        };
+        let mut mailbox = controls.lock().await;
+        let mut sent = 0usize;
+        for control in mailbox.controls.iter() {
+            if control
+                .try_send(ControlMsg::Steer {
+                    text: message.to_string(),
+                })
+                .is_ok()
+            {
+                sent += 1;
+            }
+        }
+        if sent == 0 {
+            // The child may not have registered its channel yet. Queue until
+            // it does; a finished batch will never read it, so refuse there.
+            let running = {
+                let entries = registry.lock().await;
+                entries
+                    .get(&id)
+                    .is_some_and(|entry| entry.status == "running")
+            };
+            if running {
+                mailbox.pending.push(message.to_string());
+                return tools::Outcome::ok(format!(
+                    "message queued for background subagent {id}; its child will read it at the next request"
+                ));
+            }
+            return tools::Outcome::err(format!(
+                "background subagent {id} has no running child to receive the message"
+            ));
+        }
+        return tools::Outcome::ok(format!(
+            "message queued for {sent} child(ren) of background subagent {id}"
+        ));
+    }
     if action != "output" {
         return tools::Outcome::err(format!(
-            "subagents: unknown action '{action}' (list, output, kill)"
+            "subagents: unknown action '{action}' (list, output, send, kill)"
         ));
     }
 
@@ -1456,6 +1513,16 @@ async fn run_agent(
     let mut next_background_id: u64 = 1;
 
     loop {
+        // Parent messages reach a child at its next request boundary. The
+        // main agent never receives steer: sends are addressed to child ids.
+        if subagent_depth > 0 {
+            while let Ok(ControlMsg::Steer { text }) = ctl.try_recv() {
+                messages.push(Message::new(
+                    Role::User,
+                    format!("<parent_message>\n{}\n</parent_message>", text.trim()),
+                ));
+            }
+        }
         // A finished background child joins the next request, not only the
         // turn's end: the parent can use the report while it still works.
         drain_background_reports(&background_registry, &mut messages, &tx).await;
@@ -2006,6 +2073,7 @@ async fn run_agent(
                     plan_limits,
                     fallback_chain.clone(),
                     std::time::Duration::from_secs(SUBAGENT_TIMEOUT_SECS),
+                    None,
                 )
                 .await;
             }
@@ -2362,6 +2430,9 @@ async fn run_agent(
                                 let registry = background_registry.clone();
                                 let task_registry = registry.clone();
                                 let notify = std::sync::Arc::new(tokio::sync::Notify::new());
+                                let steer: SteerControls = std::sync::Arc::new(
+                                    tokio::sync::Mutex::new(SteerMailbox::default()),
+                                );
                                 registry.lock().await.insert(
                                     batch_id,
                                     BackgroundChild {
@@ -2373,6 +2444,7 @@ async fn run_agent(
                                         abort: None,
                                         join: None,
                                         notify: notify.clone(),
+                                        steer: steer.clone(),
                                     },
                                 );
                                 let task = tokio::spawn(async move {
@@ -2408,6 +2480,7 @@ async fn run_agent(
                                         std::time::Duration::from_secs(
                                             SUBAGENT_TIMEOUT_SECS,
                                         ),
+                                        Some(steer.clone()),
                                     )
                                     .await;
                                     let mut entries = task_registry.lock().await;
@@ -2458,6 +2531,7 @@ async fn run_agent(
                                 plan_limits,
                                 fallback_chain.clone(),
                                 std::time::Duration::from_secs(SUBAGENT_TIMEOUT_SECS),
+                                None,
                             )
                             .await;
                             // The child shares this plan: a `plan finish`

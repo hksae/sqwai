@@ -385,17 +385,18 @@ of executed tools and modified files.",
             kind: Kind::ReadOnly,
             description: "List, wait for, or stop background subagents started with \
 `subagent background=true`. `output(id, wait_secs)` returns that report and marks it read; \
-`list` shows the live batch; `kill` stops one. Reports not read here are added to the \
+`list` shows the live batch; `send` queues a message for the child, `kill` stops one. Reports not read here are added to the \
 transcript before the turn ends.",
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": ["list", "output", "kill"],
+                        "enum": ["list", "output", "send", "kill"],
                         "description": "what to do with a background subagent"
                     },
                     "id": {"type": "integer", "description": "id printed by the background spawn"},
+                    "message": {"type": "string", "description": "send: text delivered to the child at its next request boundary"},
                     "wait_secs": {
                         "type": "integer",
                         "minimum": 0,
