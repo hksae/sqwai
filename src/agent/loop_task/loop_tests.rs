@@ -1624,6 +1624,86 @@ async fn subagent_joins_its_parent_plan() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// The parent event log carries one start/done pair per child, which is what
+/// the reload uses to rebuild every row of a batched call.
+#[tokio::test]
+async fn subagent_lifecycle_lands_in_the_parent_event_log() {
+    let root = std::env::temp_dir().join(format!("sqwai-sublog-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::create_dir_all(&root);
+    let provider: SharedProvider = std::sync::Arc::new(MockTestProvider {
+        events: std::sync::Mutex::new(vec![vec![Ok(crate::providers::StreamEvent::Text(
+            "child done".into(),
+        ))]]),
+    });
+    let (parent_tx, _parent_rx) = mpsc::channel(64);
+    let call = crate::providers::ToolCallReq::new(
+        "call-42",
+        "subagent",
+        serde_json::json!({"tasks": ["look around"]}),
+    );
+    let outcome = run_subagent(
+        &call,
+        "parent-events",
+        &parent_tx,
+        &std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        &provider,
+        "m",
+        &root,
+        &[],
+        &[],
+        crate::config::ApprovalMode::Auto,
+        10_000,
+        true,
+        true,
+        &Default::default(),
+        &Default::default(),
+        &Default::default(),
+        &[],
+        None,
+        crate::config::EffortSupport::default(),
+        None,
+        Vec::new(),
+        crate::config::McpConfig::default(),
+        crate::config::SkillsConfig::default(),
+        false,
+        crate::config::ShadowStore::Off,
+        crate::config::CompactionConfig::default(),
+        crate::config::PlanConfig::default(),
+        Vec::new(),
+        std::time::Duration::from_secs(SUBAGENT_TIMEOUT_SECS),
+    )
+    .await;
+    assert!(outcome.ok, "{}", outcome.output);
+
+    let records = crate::agent::events::EventLog::records_for(&root, "parent-events").unwrap();
+    let starts: Vec<_> = records
+        .iter()
+        .filter(|r| r.kind == "subagent_start")
+        .collect();
+    let dones: Vec<_> = records
+        .iter()
+        .filter(|r| r.kind == "subagent_done")
+        .collect();
+    assert_eq!(starts.len(), 1, "{records:?}");
+    assert_eq!(dones.len(), 1, "{records:?}");
+    assert_eq!(starts[0].fields["call_id"], "call-42");
+    assert_eq!(starts[0].fields["summary"], "look around");
+    assert_eq!(dones[0].fields["status"], "completed");
+    assert_eq!(
+        starts[0].fields["child_id"], dones[0].fields["child_id"],
+        "the pair names the same child"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn live_child_ids_skip_restored_ones() {
+    super::loop_subagent::bump_subagent_id_at_least(1_000_000);
+    let next = super::loop_subagent::next_subagent_id();
+    assert!(next > 1_000_000, "restored ids must not be reused: {next}");
+}
+
 /// Regression: a subagent finishing its parent's step retired the step
 /// globally while the parent session still held it, so the next `plan
 /// start` in the same turn was refused as "one step at a time".

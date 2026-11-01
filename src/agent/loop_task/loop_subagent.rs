@@ -588,6 +588,16 @@ pub(crate) async fn run_subagent(
             task: task.label.clone(),
         })
         .await;
+    log_subagent_event(
+        root,
+        parent_session,
+        "subagent_start",
+        &call.id,
+        id,
+        &child_session,
+        &task.label,
+        "running",
+    );
     // #171: the child works its parent's step, so it joins the parent plan
     // explicitly. Without membership its evidence cannot attach under
     // session-strict resolution — and silent fallback is gone on purpose.
@@ -698,7 +708,7 @@ pub(crate) async fn run_subagent(
     let mut cancel_poll = tokio::time::interval(std::time::Duration::from_millis(100));
     loop {
         if parent_cancel.load(std::sync::atomic::Ordering::Relaxed) {
-            return stop_child(
+            let result = stop_child(
                 &mut child,
                 parent_tx,
                 id,
@@ -710,6 +720,17 @@ pub(crate) async fn run_subagent(
                 &output,
             )
             .await;
+            log_subagent_event(
+                root,
+                parent_session,
+                "subagent_done",
+                &call.id,
+                id,
+                &child_session,
+                &task.label,
+                "killed",
+            );
+            return result;
         }
         let event = tokio::select! {
             biased;
@@ -717,6 +738,16 @@ pub(crate) async fn run_subagent(
             Ok(Some(event)) => event,
             Ok(None) => {
                 let result = tools::Outcome::err("subagent disconnected");
+                log_subagent_event(
+                    root,
+                    parent_session,
+                    "subagent_done",
+                    &call.id,
+                    id,
+                    &child_session,
+                    &task.label,
+                    "failed",
+                );
                 let _ = parent_tx
                     .send(AgentEvent::SubagentDone {
                         id,
@@ -727,7 +758,7 @@ pub(crate) async fn run_subagent(
                 return result;
             }
             Err(_) => {
-                return stop_child(
+                let result = stop_child(
                     &mut child,
                     parent_tx,
                     id,
@@ -739,6 +770,17 @@ pub(crate) async fn run_subagent(
                     &output,
                 )
                 .await;
+                log_subagent_event(
+                    root,
+                    parent_session,
+                    "subagent_done",
+                    &call.id,
+                    id,
+                    &child_session,
+                    &task.label,
+                    "timeout",
+                );
+                return result;
             }
             },
             _ = cancel_poll.tick() => {
@@ -784,6 +826,7 @@ pub(crate) async fn run_subagent(
             }
             AgentEvent::Completed(result) => {
                 trail.collect_event_writes(root, parent_session, &child_session);
+                let completed = result.is_ok();
                 let result = match result {
                     Ok(outcome) => {
                         if output.is_empty() {
@@ -803,6 +846,16 @@ pub(crate) async fn run_subagent(
                         tools::Outcome::err(final_err)
                     }
                 };
+                log_subagent_event(
+                    root,
+                    parent_session,
+                    "subagent_done",
+                    &call.id,
+                    id,
+                    &child_session,
+                    &task.label,
+                    if completed { "completed" } else { "failed" },
+                );
                 let _ = parent_tx
                     .send(AgentEvent::SubagentDone {
                         id,
@@ -1148,9 +1201,48 @@ pub(crate) fn build_parent_context_brief(root: &Path, parent_session: &str) -> O
     }
 }
 
-fn next_subagent_id() -> u64 {
-    static NEXT: AtomicU64 = AtomicU64::new(1);
-    NEXT.fetch_add(1, Ordering::Relaxed)
+/// Durable per-child lifecycle in the parent's event log. The live rows are
+/// rebuilt from these records after a reload: one `subagent_start` per child
+/// (a batched call spawns several) and one `subagent_done` carrying the final
+/// status. No report text is stored here — that lives in the child's session.
+#[allow(clippy::too_many_arguments)]
+fn log_subagent_event(
+    root: &Path,
+    parent_session: &str,
+    kind: &str,
+    call_id: &str,
+    child_id: u64,
+    child_session: &str,
+    task: &str,
+    status: &str,
+) {
+    let Ok(mut log) = crate::agent::events::EventLog::open(root, parent_session) else {
+        return;
+    };
+    let _ = log.append(
+        kind,
+        serde_json::json!({
+            "call_id": call_id,
+            "child_id": child_id,
+            "child_session": child_session,
+            // screened like every other free-text event field
+            "summary": task,
+            "status": status,
+        }),
+    );
+}
+
+pub(crate) fn next_subagent_id() -> u64 {
+    NEXT_SUBAGENT_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+static NEXT_SUBAGENT_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Keep live ids above any id a restored transcript already names: the
+/// static counter restarts with the process, and a fresh child reusing a
+/// restored row's number would paint its text into the old row.
+pub(crate) fn bump_subagent_id_at_least(min: u64) {
+    NEXT_SUBAGENT_ID.fetch_max(min.saturating_add(1), Ordering::Relaxed);
 }
 
 /// Serializes plan-membership joins: concurrent sibling subagents share one

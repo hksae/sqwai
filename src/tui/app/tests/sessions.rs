@@ -526,6 +526,89 @@ fn history_restores_a_delegated_call_as_a_child_row() {
     assert_eq!(app.activity_groups[0].calls, 1);
 }
 
+/// A batched delegation spawns several children behind one tool call. The
+/// live transcript shows one row per child; a reload must keep all of them
+/// (the old restore built exactly one row per call, so 6 spawned / 4 failed
+/// came back as a single row).
+#[test]
+fn history_restores_every_child_of_a_batched_delegation() {
+    use crate::agent::events::Record;
+    use crate::providers::{Message, ToolCallReq};
+    let child_event = |seq: u64, kind: &str, child_id: u64, task: &str, status: &str| Record {
+        seq,
+        ts: seq.to_string(),
+        session: String::new(),
+        step: None,
+        plan: None,
+        agent: "main".into(),
+        epoch: None,
+        kind: kind.into(),
+        fields: serde_json::json!({
+            "call_id": "c1",
+            "child_id": child_id,
+            "child_session": format!("sub-{child_id}"),
+            "summary": task,
+            "status": status,
+        })
+        .as_object()
+        .cloned()
+        .unwrap(),
+    };
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.session.push(Role::User, "delegate three");
+    app.session
+        .messages
+        .push(
+            Message::new(Role::Assistant, "").with_tool_calls(vec![ToolCallReq::new(
+                "c1",
+                "subagent",
+                serde_json::json!({"tasks": ["one", "two", "three"]}),
+            )]),
+        );
+    app.session
+        .messages
+        .push(Message::tool_result("c1", "## one\nok\n\n## two\nfailed", false));
+    app.session
+        .messages
+        .push(Message::new(Role::Assistant, "done"));
+    app.session.events = vec![
+        child_event(1, "subagent_start", 1, "one", "running"),
+        child_event(2, "subagent_start", 2, "two", "running"),
+        child_event(3, "subagent_start", 3, "three", "running"),
+        child_event(4, "subagent_done", 1, "one", "completed"),
+        child_event(5, "subagent_done", 2, "two", "failed"),
+        child_event(6, "subagent_done", 3, "three", "completed"),
+    ];
+    app.clear_segments();
+    app.load_history_segments();
+
+    let rows: Vec<(u64, String, String)> = app
+        .segments
+        .iter()
+        .filter_map(|s| match s {
+            Segment::Subagent {
+                id, task, status, ..
+            } => Some((*id, task.clone(), status.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        vec![
+            (1, "one".into(), "completed".into()),
+            (2, "two".into(), "failed".into()),
+            (3, "three".into(), "completed".into()),
+        ],
+        "{rows:?}"
+    );
+    assert!(
+        !app.segments
+            .iter()
+            .any(|s| matches!(s, Segment::Tool { name, .. } if name == "subagent")),
+        "no generic tool row for a delegation"
+    );
+}
+
 #[test]
 fn apply_session_from_startup_does_not_persist_empty_stub() {
     // the fresh empty session must switch to an existing one without

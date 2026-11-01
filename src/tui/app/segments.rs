@@ -180,6 +180,53 @@ impl App {
         // reloaded session matches what the live path painted.
         let mut pending_children = std::collections::HashMap::<String, usize>::new();
         let mut restored_child_id = 0u64;
+        // A batched `subagent` call spawned several children; the parent
+        // transcript keeps one tool call and one combined result, so the
+        // live rows cannot be rebuilt from the call alone. The host writes a
+        // `subagent_start` / `subagent_done` pair per child into the parent
+        // event log; use them so a reload keeps every row, not one per call.
+        let mut restored_children =
+            std::collections::HashMap::<String, Vec<(u64, String, String)>>::new();
+        let mut max_child_id = 0u64;
+        for record in &self.session.events {
+            let Some(call_id) = record.fields.get("call_id").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let Some(child_id) = record.fields.get("child_id").and_then(|v| v.as_u64()) else {
+                continue;
+            };
+            max_child_id = max_child_id.max(child_id);
+            match record.kind.as_str() {
+                "subagent_start" => {
+                    let task = record
+                        .fields
+                        .get("summary")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("subagent")
+                        .to_string();
+                    let rows = restored_children.entry(call_id.to_string()).or_default();
+                    if !rows.iter().any(|(known, _, _)| *known == child_id) {
+                        rows.push((child_id, task, "interrupted".to_string()));
+                    }
+                }
+                "subagent_done" => {
+                    let status = record
+                        .fields
+                        .get("status")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("failed")
+                        .to_string();
+                    if let Some(row) = restored_children
+                        .get_mut(call_id)
+                        .and_then(|rows| rows.iter_mut().find(|(known, _, _)| *known == child_id))
+                    {
+                        row.2 = status;
+                    }
+                }
+                _ => {}
+            }
+        }
+        crate::agent::loop_task::bump_subagent_id_at_least(max_child_id);
         // Anchored mode: summaries recorded the user message that started
         // their turn, so each can be re-attached to the right group even when
         // turns were stopped/failed. Legacy saves (all anchors None) fall
@@ -259,6 +306,18 @@ impl App {
                     }
                     for call in &m.tool_calls {
                         if call.name == "subagent" {
+                            if let Some(children) = restored_children.get(&call.id).cloned() {
+                                for (child_id, task, status) in children {
+                                    self.push_segment(Segment::Subagent {
+                                        id: child_id,
+                                        task,
+                                        status,
+                                        output: String::new(),
+                                        expanded: false,
+                                    });
+                                }
+                                continue;
+                            }
                             restored_child_id += 1;
                             let idx = self.push_segment(Segment::Subagent {
                                 id: restored_child_id,

@@ -32,6 +32,7 @@ use loop_turn::{request_messages, run_turn_with_prefetch, turn_transport};
 mod loop_ask;
 mod loop_compact;
 mod loop_subagent;
+pub(crate) use loop_subagent::bump_subagent_id_at_least;
 mod loop_turn;
 
 /// How much one `ask_user` call may hold. These are the only numbers for it:
