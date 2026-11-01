@@ -16,7 +16,7 @@ pub(crate) const MAX_PARALLEL_SUBAGENTS: usize = 4;
 /// loops run far longer): cancel cooperatively, wait out a short grace,
 /// then tear the turn down. Without this a hung child stalls the parent
 /// turn forever — Esc only stops what comes *after* running children.
-pub(crate) const SUBAGENT_TIMEOUT_SECS: u64 = 600;
+pub(crate) const SUBAGENT_TIMEOUT_SECS: u64 = 1200;
 const SUBAGENT_CANCEL_GRACE_SECS: u64 = 5;
 
 /// One task's text from any shape the model may send: a bare string, or

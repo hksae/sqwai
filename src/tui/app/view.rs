@@ -1045,6 +1045,19 @@ impl App {
                 let Some(idx) = self.index_of_seg(seg) else {
                     return;
                 };
+                // A subagent row is a doorway, not a fold: the full child
+                // transcript replaces the main history (read-only, no
+                // composer). Tool/thinking rows keep their fold behavior.
+                if let Some(Segment::Subagent { id, .. }) = self.segments.get(idx) {
+                    let id = *id;
+                    // Restored children have no in-memory transcript until
+                    // their hidden session is loaded; opening a blank screen
+                    // is worse than a no-op.
+                    if self.subagent_chats.contains_key(&id) {
+                        self.open_subagent_view(id);
+                    }
+                    return;
+                }
                 // clicking an error line folds/unfolds its full text (it
                 // arrives collapsed); full text stays selectable by drag
                 // like any row. A finished tool row reveals its output; a
@@ -1861,7 +1874,7 @@ impl App {
         self.last_fp = store.fp;
     }
 
-    #[cfg(test)]
+    /// Open a subagent transcript, restoring its saved scroll position.
     pub(super) fn open_subagent_view(&mut self, id: u64) {
         if let Some(cur) = self.active_subagent {
             if cur == id {
@@ -1927,12 +1940,24 @@ impl App {
             height: layout[1].height,
         };
         Block::new().style(Theme::base()).render(area, buf);
-        Paragraph::new(Line::from(Span::styled(
-            format!(" subagent-{id}"),
-            Theme::accent_bold(),
-        )))
-        .style(Theme::base())
-        .render(layout[0], buf);
+        let task = self
+            .segments
+            .iter()
+            .find_map(|segment| match segment {
+                Segment::Subagent { id: sid, task, .. } if *sid == id => Some(task),
+                _ => None,
+            })
+            .map(|task| task.split_whitespace().collect::<Vec<_>>().join(" "))
+            .unwrap_or_default();
+        let title = if task.is_empty() {
+            format!(" subagent-{id}")
+        } else {
+            let room = area.width.saturating_sub(14) as usize;
+            format!(" subagent-{id} · {}", truncate_display_width(&task, room))
+        };
+        Paragraph::new(Line::from(Span::styled(title, Theme::accent_bold())))
+            .style(Theme::base())
+            .render(layout[0], buf);
         // Render the subagent transcript through the SAME id-keyed cache and
         // fingerprint gate as the main view — no transcript cloning, no
         // dataset swap, no cache wipe. Entries for both transcripts coexist

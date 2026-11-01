@@ -239,6 +239,9 @@ impl App {
                     "SUBAGENT",
                     format!("done id={id} ok={ok} output_len={}", output.chars().count()),
                 );
+                if let Some(started) = self.subagent_started.remove(&id) {
+                    self.subagent_elapsed.insert(id, started.elapsed());
+                }
                 if let Some((_, _, status, current, _)) = self
                     .subagents
                     .iter_mut()
@@ -617,6 +620,9 @@ impl App {
             "SUBAGENT",
             format!("start id={id} task_len={}", task.chars().count()),
         );
+        self.subagent_started
+            .insert(id, std::time::Instant::now());
+        self.subagent_elapsed.remove(&id);
         self.subagents
             .push((id, task.clone(), "running".into(), String::new(), false));
         self.subagent_chats.insert(

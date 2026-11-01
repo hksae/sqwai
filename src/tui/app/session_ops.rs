@@ -574,6 +574,8 @@ impl App {
         self.active_subagent = None;
         self.subagents.clear();
         self.subagent_chats.clear();
+        self.subagent_started.clear();
+        self.subagent_elapsed.clear();
         self.subagent_meta.clear();
         self.sub_views.clear();
         self.cache_lines.clear();
@@ -673,6 +675,8 @@ impl App {
         self.active_subagent = None;
         self.subagents.clear();
         self.subagent_chats.clear();
+        self.subagent_started.clear();
+        self.subagent_elapsed.clear();
         self.subagent_meta.clear();
         self.sub_views.clear();
         self.stashed_main_scroll = None;

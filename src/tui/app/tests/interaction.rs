@@ -702,46 +702,6 @@ fn finish_turn_ok_rebases_notes_after_compaction() {
 }
 
 #[test]
-fn transcript_row_toggles_subagent_inline_like_standard_tool() {
-    let mut app = test_app("http://127.0.0.1:9/v1".into());
-    app.startup = false;
-    app.push_segment(Segment::Subagent {
-        id: 7,
-        task: "inspect rendering".into(),
-        status: "completed".into(),
-        output:
-            "found 3 callers in src/view.rs\n[Subagent receipt: ok | 2 tool call(s): grep(render)]"
-                .into(),
-        expanded: false,
-    });
-    let collapsed = render_to_string(&mut app, 100, 30);
-    assert!(
-        !collapsed.contains("found 3 callers"),
-        "collapsed by default:\n{collapsed}"
-    );
-
-    let row = app
-        .cache_rowseg
-        .iter()
-        .position(|t| *t == Some(0))
-        .expect("child row");
-    app.click(row);
-    assert_eq!(
-        app.active_subagent, None,
-        "stays in main chat instead of switching screens"
-    );
-    let unfolded = render_to_string(&mut app, 100, 30);
-    assert!(
-        unfolded.contains("found 3 callers in src/view.rs"),
-        "unfolds inline:\n{unfolded}"
-    );
-    assert!(
-        unfolded.contains("[Subagent receipt: ok"),
-        "receipt visible inline:\n{unfolded}"
-    );
-}
-
-#[test]
 fn subagent_multiline_task_and_blank_deltas_render_without_empty_gaps() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.startup = false;
@@ -942,6 +902,30 @@ fn a_link_wrapped_over_several_rows_stays_clickable() {
         "open failed: no browser in tests",
         "a click anywhere on the wrapped URL fires"
     );
+}
+
+/// A click on a child row is a doorway into the child's history, not a
+/// tool-style fold: the whole transcript opens read-only and has no composer.
+#[test]
+fn clicking_a_subagent_row_opens_its_history() {
+    use ratatui::{buffer::Buffer, layout::Rect};
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.startup = false;
+    app.handle_subagent_start(3, "inspect the renderer".into());
+    let area = Rect::new(0, 0, 60, 16);
+    let mut buf = Buffer::empty(area);
+    app.render_into(&mut buf, area);
+    let (row, _) = app.seg_row_range(0).expect("the child row rendered");
+    app.click(row);
+    assert_eq!(app.active_subagent, Some(3), "click opens the child view");
+    let mut child_buf = Buffer::empty(area);
+    app.render_into(&mut child_buf, area);
+    assert_eq!(
+        app.last_input.height, 0,
+        "the child history has no composer"
+    );
+    app.close_subagent_view();
+    assert!(app.active_subagent.is_none());
 }
 
 #[test]

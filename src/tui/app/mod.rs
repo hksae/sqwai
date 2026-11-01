@@ -282,6 +282,10 @@ pub struct App {
     subagents: Vec<(u64, String, String, String, bool)>,
     /// full read-only transcripts for each child agent
     subagent_chats: std::collections::BTreeMap<u64, Vec<Segment>>,
+    /// when each live child started; drives the row's elapsed label
+    subagent_started: std::collections::BTreeMap<u64, std::time::Instant>,
+    /// frozen elapsed time of finished children (start map drops on done)
+    subagent_elapsed: std::collections::BTreeMap<u64, std::time::Duration>,
     /// child transcript currently replacing the main chat on screen
     active_subagent: Option<u64>,
     /// checked options in the current multi-select ask_user, per question
@@ -777,6 +781,8 @@ impl App {
             todos: Vec::new(),
             subagents: Vec::new(),
             subagent_chats: std::collections::BTreeMap::new(),
+            subagent_started: std::collections::BTreeMap::new(),
+            subagent_elapsed: std::collections::BTreeMap::new(),
             active_subagent: None,
             ask_picked: Vec::new(),
             ask_custom: Vec::new(),

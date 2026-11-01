@@ -465,14 +465,23 @@ impl App {
                 } else {
                     format!(" ({})", truncate_display_width(&clean_task, summary_width))
                 };
-                out.push((
-                    Line::from(vec![
-                        Span::styled(marker.0, marker.1),
-                        Span::styled(name, if failed { Theme::err() } else { Theme::meta() }),
-                        Span::styled(summary, Theme::dim()),
-                    ]),
-                    Some(idx),
-                ));
+                let elapsed = self
+                    .subagent_elapsed
+                    .get(id)
+                    .copied()
+                    .or_else(|| self.subagent_started.get(id).map(|t| t.elapsed()));
+                let mut spans = vec![
+                    Span::styled(marker.0, marker.1),
+                    Span::styled(name, if failed { Theme::err() } else { Theme::meta() }),
+                    Span::styled(summary, Theme::dim()),
+                ];
+                if let Some(elapsed) = elapsed {
+                    spans.push(Span::styled(
+                        format!(" · {}", human_elapsed(elapsed)),
+                        Theme::dim(),
+                    ));
+                }
+                out.push((Line::from(spans), Some(idx)));
                 if *expanded {
                     let non_empty: Vec<&str> = output
                         .lines()
@@ -1095,5 +1104,19 @@ impl App {
                 }
             }
         }
+    }
+}
+
+/// Compact elapsed label for a child row: seconds under a minute, then
+/// minutes, then hours. Rounded down on purpose: the row is a status, not a
+/// stopwatch.
+fn human_elapsed(elapsed: std::time::Duration) -> String {
+    let secs = elapsed.as_secs();
+    if secs >= 3600 {
+        format!("{}h{:02}m", secs / 3600, (secs % 3600) / 60)
+    } else if secs >= 60 {
+        format!("{}m{:02}s", secs / 60, secs % 60)
+    } else {
+        format!("{secs}s")
     }
 }
