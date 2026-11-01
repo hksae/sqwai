@@ -962,9 +962,16 @@ async fn run_agent(
         compaction.threshold,
     );
     // Tools are part of the request prefix: sorted for stability, one set,
-    // and omitted entirely for requests that cannot call them.
+    // and omitted entirely for requests that cannot call them. A child is
+    // not offered the tools its runtime refuses: nested spawning and the
+    // user-facing question tool stay with the main agent.
     let mut tools: Vec<crate::providers::ToolSpec> = if enable_tools {
-        let base = tools::tool_specs();
+        let base: Vec<crate::providers::ToolSpec> = tools::tool_specs()
+            .into_iter()
+            .filter(|spec| {
+                subagent_depth == 0 || !matches!(spec.name.as_str(), "subagent" | "ask_user")
+            })
+            .collect();
         if let Some(registry) = &mcp_registry {
             tools::merge_specs(base, registry.specs())
         } else {
@@ -1111,6 +1118,7 @@ async fn run_agent(
     // Subagents inherit their spawn context: it stamps their
     // event records and gates their mutations against reopen races.
     ctx.subagent_step = parent_step.clone();
+    ctx.subagent_depth = subagent_depth;
     // ...and their parent's trust state: a fresh child events reads
     // clean, and the task text itself may be shaped by what the parent
     // consumed (audit H1).

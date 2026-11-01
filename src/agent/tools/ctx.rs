@@ -18,6 +18,9 @@ pub struct ToolCtx {
     root_canon: PathBuf,
     /// secondary project instances can inspect but not mutate project state
     pub read_only: bool,
+    /// 0 for the main agent, 1 for a child. A child may keep its own plan
+    /// even when its task is read-only; the host plan belongs to the parent.
+    pub subagent_depth: u8,
     /// Full access: every path resolves, inside or out (session-level;
     /// set once per run from the approval mode).
     pub outside_all: bool,
@@ -170,6 +173,7 @@ impl ToolCtx {
             root,
             root_canon,
             read_only,
+            subagent_depth: 0,
             outside_all: false,
             outside_roots: Vec::new(),
             outside_granted: Vec::new(),

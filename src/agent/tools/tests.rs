@@ -105,6 +105,40 @@ fn read_only_context_rejects_mutations_but_allows_reads() {
     assert!(allowed.ok);
 }
 
+/// A read-only child may still own a plan: the host plan belongs to the
+/// parent, but the child's plan is its own state and must not be blocked by
+/// the read-only guard. The main agent under a project lock stays refused.
+#[test]
+fn a_read_only_child_may_still_keep_its_own_plan() {
+    let (_, dir) = proj();
+    let mut child = ToolCtx::with_read_only(&dir, true);
+    child.subagent_depth = 1;
+    child.session_id = "child-plan".into();
+    let created = execute(
+        &mut child,
+        "plan",
+        &json!({
+            "op": "create",
+            "goal": "child work",
+            "steps": [{"title": "step one"}]
+        }),
+    );
+    assert!(created.ok, "{}", created.output);
+
+    let mut main = ToolCtx::with_read_only(&dir, true);
+    let refused = execute(
+        &mut main,
+        "plan",
+        &json!({
+            "op": "create",
+            "goal": "main work",
+            "steps": [{"title": "step one"}]
+        }),
+    );
+    assert!(!refused.ok);
+    assert!(refused.output.contains("read-only"), "{}", refused.output);
+}
+
 /// A writer subagent stays inside its declared scope: same file and
 /// nested paths pass, siblings refuse with a structured code. Reads
 /// are unaffected, and the main agent (no scope) is unaffected too.

@@ -158,16 +158,21 @@ fn subagent_contract_parent_context_and_receipt_salvage() {
     assert!(explorer_prompt.contains("Target files/paths: src/parser.rs"));
     assert!(explorer_prompt.contains("Checking impact before signature change"));
 
-    let explorer_tail = build_subagent_tail(root, "parent-s1", &tasks[0], true);
-    assert!(explorer_tail.contains("Role: READ-ONLY EXPLORER SUBAGENT"));
+    let explorer_tail = build_subagent_tail(root, "parent-s1", &tasks[0]);
+    assert!(explorer_tail.contains("<subagent_role>"));
+    assert!(explorer_tail.contains("Your plan is yours"));
+    assert!(explorer_tail.contains("never modify the parent's plan"));
     assert!(explorer_tail.contains("Plan goal: Refactor parser module"));
     assert!(explorer_tail.contains("Active step [1]: Extract lexer tokens"));
     assert!(explorer_tail.contains("Parent modified files: src/lexer.rs"));
     assert!(explorer_tail.contains("Parent recently read files: src/parser.rs"));
 
-    let writer_tail = build_subagent_tail(root, "parent-s1", &tasks[1], false);
-    assert!(writer_tail.contains("Role: SCOPED WRITER SUBAGENT"));
-    assert!(writer_tail.contains("Allowed write scope: [src/lexer.rs]"));
+    let writer_tail = build_subagent_tail(root, "parent-s1", &tasks[1]);
+    assert!(writer_tail.contains("<subagent_role>"));
+    assert!(
+        !writer_tail.contains("Allowed write scope"),
+        "the child role no longer carries a host write scope"
+    );
 
     // Clean-context reviewer mode (`clean: true`) omits `<parent_context>`
     let clean_tasks = subagent_tasks_from_args(&serde_json::json!({
@@ -176,10 +181,10 @@ fn subagent_contract_parent_context_and_receipt_salvage() {
     }))
     .unwrap();
     assert!(clean_tasks[0].clean);
-    let clean_tail = build_subagent_tail(root, "parent-s1", &clean_tasks[0], true);
-    assert!(clean_tail.contains("Role: READ-ONLY EXPLORER SUBAGENT"));
+    let clean_tail = build_subagent_tail(root, "parent-s1", &clean_tasks[0]);
+    assert!(clean_tail.contains("<subagent_role>"));
     assert!(
-        !clean_tail.contains("<parent_context>"),
+        !clean_tail.contains("Parent context (read-only"),
         "clean:true subagent must not receive parent history: {clean_tail}"
     );
 

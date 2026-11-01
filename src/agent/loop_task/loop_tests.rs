@@ -1545,11 +1545,10 @@ async fn ask_webfetch_prompts_without_always_before_fetching() {
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
 
-/// #171: a child spawned for its parent's step joins the parent plan
-/// explicitly, so its evidence attaches under session-strict
-/// resolution instead of relying on the removed silent fallback.
+/// A child never joins the parent plan: its plan and evidence belong to its
+/// own session, and the host archives whatever plan it leaves active.
 #[tokio::test]
-async fn subagent_joins_its_parent_plan() {
+async fn subagent_does_not_join_its_parent_plan() {
     let root = std::env::temp_dir().join(format!("sqwai-subjoin-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&root);
     let mut plan = plan::create(
@@ -1613,13 +1612,10 @@ async fn subagent_joins_its_parent_plan() {
     assert!(outcome.ok, "{}", outcome.output);
 
     let reloaded = plan::open(&root, &plan_id).unwrap();
-    let members: Vec<&str> = reloaded.sessions.iter().map(String::as_str).collect();
-    assert!(members.contains(&"parent-sess"), "{members:?}");
-    assert!(
-        members
-            .iter()
-            .any(|s| s.starts_with("sub-") && *s != "parent-sess"),
-        "child joined explicitly: {members:?}"
+    assert_eq!(
+        reloaded.sessions,
+        vec!["parent-sess".to_string()],
+        "the child owns its own plan and never joins the parent's"
     );
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -1837,6 +1833,107 @@ async fn subagent_ignores_a_foreign_active_plan() {
 }
 
 /// Same-turn subagent calls overlap: both ToolStarts land before the
+/// A child's active plan is its own; when the child ends the host archives it
+/// instead of leaving an active plan nobody owns.
+#[test]
+fn an_active_child_plan_is_abandoned_when_the_child_finishes() {
+    let root = std::env::temp_dir().join(format!("sqwai-subplan-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::create_dir_all(&root);
+    let mut plan = plan::create(
+        "child goal".into(),
+        Vec::new(),
+        vec!["note".to_string()],
+        vec![plan::NewStep {
+            title: "child step".into(),
+            check: None,
+        }],
+        &plan::Limits::default(),
+    )
+    .unwrap();
+    plan.sessions = vec!["child-sess".into()];
+    plan::store(&root, &plan).unwrap();
+    let id = plan.id.clone();
+
+    super::loop_subagent::abandon_child_plan(&root, "parent-sess", "child-sess");
+
+    let reloaded = plan::open(&root, &id).unwrap();
+    assert_eq!(reloaded.status, plan::PlanStatus::Abandoned);
+    assert!(
+        plan::open_active_for_session(&root, Some("child-sess"))
+            .unwrap()
+            .is_none(),
+        "no active plan is left behind"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The tool schema a child receives never offers the two tools its runtime
+/// refuses; the plan it owns stays available.
+#[tokio::test]
+async fn a_child_request_omits_subagent_and_ask_user_tools() {
+    let root = std::env::temp_dir().join(format!("sqwai-subtools-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::create_dir_all(&root);
+    let recorder = std::sync::Arc::new(RecordingTestProvider {
+        events: std::sync::Mutex::new(vec![vec![Ok(crate::providers::StreamEvent::Text(
+            "done".into(),
+        ))]]),
+        requests: std::sync::Mutex::new(Vec::new()),
+    });
+    let provider: SharedProvider = recorder.clone();
+    let (parent_tx, _parent_rx) = mpsc::channel(64);
+    let call = crate::providers::ToolCallReq::new(
+        "call-tools",
+        "subagent",
+        serde_json::json!({"tasks": ["look around"]}),
+    );
+    let outcome = run_subagent(
+        &call,
+        "parent-tools",
+        &parent_tx,
+        &std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        &provider,
+        "m",
+        &root,
+        &[],
+        &[],
+        crate::config::ApprovalMode::Auto,
+        10_000,
+        true,
+        true,
+        &Default::default(),
+        &Default::default(),
+        &Default::default(),
+        &[],
+        None,
+        crate::config::EffortSupport::default(),
+        None,
+        Vec::new(),
+        crate::config::McpConfig::default(),
+        crate::config::SkillsConfig::default(),
+        false,
+        crate::config::ShadowStore::Off,
+        crate::config::CompactionConfig::default(),
+        crate::config::PlanConfig::default(),
+        Vec::new(),
+        std::time::Duration::from_secs(SUBAGENT_TIMEOUT_SECS),
+    )
+    .await;
+    assert!(outcome.ok, "{}", outcome.output);
+    let requests = recorder.requests.lock().unwrap();
+    let names: Vec<&str> = requests[0]
+        .tools
+        .iter()
+        .map(|tool| tool.name.as_str())
+        .collect();
+    assert!(!names.contains(&"subagent"), "{names:?}");
+    assert!(!names.contains(&"ask_user"), "{names:?}");
+    assert!(names.contains(&"plan"), "the child owns a plan: {names:?}");
+    assert!(names.contains(&"read"), "{names:?}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// A hung child must not stall the parent turn forever: the timeout
 /// cancels cooperatively, waits out the grace, aborts, and reports.
 #[tokio::test]
