@@ -758,6 +758,69 @@ pub(crate) struct OwnEdit {
 }
 
 impl ReadLedger {
+    /// True when `current_hash` is exactly the version this session last
+    /// authored: a full `write` followed only by the model's own edits, with
+    /// every part of that chain still visible on the wire. The read guard may
+    /// then accept a change without a fresh read — the file is the model's own
+    /// bytes and nothing changed outside sqwai. A cleared write/edit result
+    /// means the model may no longer hold the content, so the caller falls
+    /// back to requiring a read.
+    pub(crate) fn own_write_is_current(
+        &self,
+        p: &Path,
+        current_hash: &str,
+        visible: Option<&HashSet<String>>,
+    ) -> bool {
+        if !self.own_write_matches(p, current_hash) {
+            return false;
+        }
+        let entry = self
+            .files
+            .get(&ledger_key(p))
+            .expect("own_write_matches checked the entry");
+        let base = entry.base.as_ref().expect("own_write_matches checked the base");
+        if let Some(visible) = visible {
+            let shown = |id: &Option<String>| {
+                id.as_ref().is_some_and(|id| visible.contains(id))
+            };
+            if !shown(&base.call_id) || !entry.edits.iter().all(|edit| shown(&edit.call_id)) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Whether the current bytes equal the last version this session authored,
+    /// ignoring whether that version is still visible on the wire.
+    pub(crate) fn own_write_matches(&self, p: &Path, current_hash: &str) -> bool {
+        let Some(entry) = self.files.get(&ledger_key(p)) else {
+            return false;
+        };
+        let Some(base) = entry.base.as_ref() else {
+            return false;
+        };
+        if !base.is_write() {
+            return false;
+        }
+        let last = entry
+            .edits
+            .last()
+            .map(|edit| edit.hash_after.as_str())
+            .unwrap_or(base.hash.as_str());
+        last == current_hash
+    }
+
+    /// Whether this session has ever authored `p` in full. Used only to make
+    /// the refusal say "changed since you last wrote it" instead of "was not
+    /// read", which is a lie when the content the model wrote was overwritten
+    /// by someone else.
+    pub(crate) fn has_own_write(&self, p: &Path) -> bool {
+        self.files
+            .get(&ledger_key(p))
+            .and_then(|entry| entry.base.as_ref())
+            .is_some_and(|base| base.is_write())
+    }
+
     /// The record to answer a whole-file read with, when the current bytes
     /// still hash to the end of a chain that started at a full read or write
     /// and contains only the model's own edits. `visible` is the wire's

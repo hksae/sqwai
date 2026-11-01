@@ -1,8 +1,11 @@
 //! File tool handlers. Reads, listings and mutations all pass through
 //! `ToolCtx::resolve` (project-jail); every mutation
-//! snapshots first, and a whole-file overwrite or `replace_all` edit needs a
-//! read taken earlier in the session — a single exact edit is self-validating
-//! and only needs the file to be non-stale.
+//! snapshots first, and a whole-file overwrite or edit of an existing file
+//! needs a read taken earlier in the session — the exception is the model's
+//! own last full write, while its bytes are still current and visible on the
+//! wire. A concurrent child or the user may have changed the file since this
+//! model last saw it, and an exact-match edit against blind content is still a
+//! lost update.
 
 use super::{FileDiff, Kind, Outcome, ToolCtx};
 use serde_json::json;
@@ -127,18 +130,59 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 /// Every write to an existing file needs a read first: a concurrent child (or
 /// the user) may have changed the file since this model last saw it, and an
 /// exact-match edit against blind content is still a lost update.
-fn require_read(ctx: &ToolCtx, p: &Path) -> Result<(), String> {
+///
+/// The exception is the model's own last full write: if the current bytes are
+/// exactly that authored version (plus only its own edits), nothing outside
+/// sqwai changed the file, and the write/edit can proceed without a round
+/// trip. The write and every edit in its chain must still be visible on the
+/// wire — a cleared result means the model may no longer hold the content.
+fn require_read(ctx: &ToolCtx, p: &Path, action: &str) -> Result<(), String> {
     match ctx.read_state(p) {
         super::ReadState::Current => Ok(()),
-        super::ReadState::Unread => err(format!(
-            "edit denied: {} was not read in this turn — call read first",
-            p.display()
-        )),
-        super::ReadState::Stale => err(format!(
-            "edit denied: {} changed since you read it — read it again before editing, \
-             or the edit will be based on content that is gone",
-            p.display()
-        )),
+        super::ReadState::Unread => {
+            if let Ok(bytes) = std::fs::read(p) {
+                let hash = content_hash(&bytes);
+                if ctx
+                    .read_ledger
+                    .own_write_is_current(p, &hash, ctx.visible_calls.as_ref())
+                {
+                    return Ok(());
+                }
+                // Same bytes, but the write/edit result is no longer on the
+                // wire: the model may have lost what it authored. Require the
+                // read rather than let it edit from memory.
+                if ctx.read_ledger.own_write_matches(p, &hash) {
+                    return err(format!(
+                        "{action} denied: {} was not read in this turn — call read first",
+                        p.display()
+                    ));
+                }
+            }
+            if ctx.read_ledger.has_own_write(p) {
+                err(format!(
+                    "{action} denied: {} changed since you last wrote it — read it again \
+                     before changing it",
+                    p.display()
+                ))
+            } else {
+                err(format!(
+                    "{action} denied: {} was not read in this turn — call read first",
+                    p.display()
+                ))
+            }
+        }
+        super::ReadState::Stale => {
+            let what = if ctx.read_ledger.has_own_write(p) {
+                "wrote"
+            } else {
+                "read"
+            };
+            err(format!(
+                "{action} denied: {} changed since you {what} it — read it again before \
+                 changing it",
+                p.display()
+            ))
+        }
     }
 }
 
@@ -701,7 +745,7 @@ pub(super) fn write_file(ctx: &mut ToolCtx, raw: &str, content: &str) -> Outcome
             Ok(p) => p,
             Err(e) => return Outcome::err(e),
         };
-        if let Err(e) = require_read(ctx, &p) {
+        if let Err(e) = require_read(ctx, &p, "write") {
             return Outcome::err(e);
         }
         prev = fs::read_to_string(&p).ok();
@@ -1372,9 +1416,9 @@ pub(super) fn edit(
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     // mass replacement without a fresh read is blind destruction; every edit
-    // now needs the read, because another writer may have moved the file
-    // since this model last saw it.
-    if let Err(e) = require_read(ctx, &p) {
+    // needs the read, except the model's own still-visible full write, because
+    // another writer may have moved the file since this model last saw it.
+    if let Err(e) = require_read(ctx, &p, "edit") {
         return Outcome::err(e);
     }
     let original = match fs::read_to_string(&p) {
@@ -2067,6 +2111,7 @@ fn _touch() -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
     #[test]
     fn consecutive_edits_do_not_require_rereading() {
@@ -3060,4 +3105,96 @@ mod tests {
         let mode = std::fs::metadata(&script).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o755, "the rename lost the mode: {mode:o}");
     }
+
+    /// A full write is the model's own bytes. A later turn may edit or rewrite
+    /// that exact version without first spending a read on it, as long as the
+    /// write and its edit chain are still visible on the wire.
+    #[test]
+    fn own_full_write_skips_the_read_guard_across_turns() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut first = ToolCtx::new(dir.path());
+        first.current_call_id = Some("w1".into());
+        let written = write_file(&mut first, "page.html", "one
+two
+");
+        assert!(written.ok, "{}", written.output);
+
+        let mut next = ToolCtx::new(dir.path());
+        next.read_ledger = first.read_ledger.clone();
+        next.visible_calls = Some(HashSet::from(["w1".to_string()]));
+        next.current_call_id = Some("e1".into());
+        let edited = edit(&mut next, "page.html", "two", "TWO", false);
+        assert!(edited.ok, "{}", edited.output);
+
+        let mut third = ToolCtx::new(dir.path());
+        third.read_ledger = next.read_ledger.clone();
+        third.visible_calls = Some(HashSet::from([
+            "w1".to_string(),
+            "e1".to_string(),
+        ]));
+        third.current_call_id = Some("w2".into());
+        let rewritten = write_file(&mut third, "page.html", "one
+TWO
+three
+");
+        assert!(rewritten.ok, "{}", rewritten.output);
+    }
+
+    /// The exception is bounded: an external change, a cleared write result or
+    /// a base that was only a read still requires a fresh read.
+    #[test]
+    fn own_write_exception_refuses_external_or_hidden_versions() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let mut first = ToolCtx::new(dir.path());
+        first.current_call_id = Some("w1".into());
+        assert!(write_file(&mut first, "changed.txt", "one
+two
+").ok);
+        std::fs::write(dir.path().join("changed.txt"), "one
+TWO
+external
+").unwrap();
+        let mut changed = ToolCtx::new(dir.path());
+        changed.read_ledger = first.read_ledger.clone();
+        changed.visible_calls = Some(HashSet::from(["w1".to_string()]));
+        let denied = edit(&mut changed, "changed.txt", "TWO", "two", false);
+        assert!(!denied.ok);
+        assert!(
+            denied.output.contains("changed since you last wrote it"),
+            "{}",
+            denied.output
+        );
+
+        let mut second = ToolCtx::new(dir.path());
+        second.current_call_id = Some("w1".into());
+        assert!(write_file(&mut second, "cleared.txt", "alpha
+beta
+").ok);
+        let mut hidden = ToolCtx::new(dir.path());
+        hidden.read_ledger = second.read_ledger.clone();
+        hidden.visible_calls = Some(HashSet::new());
+        let denied = edit(&mut hidden, "cleared.txt", "beta", "BETA", false);
+        assert!(!denied.ok);
+        assert!(
+            denied.output.contains("was not read in this turn"),
+            "{}",
+            denied.output
+        );
+
+        let mut reader = ToolCtx::new(dir.path());
+        reader.current_call_id = Some("r1".into());
+        assert!(read(&mut reader, "cleared.txt", &json!({})).ok);
+        let mut fresh = ToolCtx::new(dir.path());
+        fresh.read_ledger = reader.read_ledger.clone();
+        fresh.visible_calls = Some(HashSet::from(["r1".to_string()]));
+        let denied = edit(&mut fresh, "cleared.txt", "alpha", "ALPHA", false);
+        assert!(!denied.ok);
+        assert!(
+            denied.output.contains("was not read in this turn"),
+            "{}",
+            denied.output
+        );
+    }
+
 }
