@@ -234,6 +234,14 @@ impl App {
                 self.sub_touch_all(id);
                 self.dirty = true;
             }
+            AgentEvent::SubagentReportNote { text } => {
+                self.push_segment(Segment::Status {
+                    text,
+                    kind: StatusKind::Info,
+                    expanded: false,
+                    transient: false,
+                });
+            }
             AgentEvent::SubagentDone { id, ok, output } => {
                 crate::tui::event_log::log(
                     "SUBAGENT",

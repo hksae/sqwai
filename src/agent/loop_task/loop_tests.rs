@@ -148,6 +148,43 @@ pub(crate) struct RecordingTestProvider {
     pub(crate) requests: std::sync::Mutex<Vec<crate::providers::ChatRequest>>,
 }
 
+/// Routes by tool schema: a request that can spawn is the parent; the child
+/// (without `subagent` in its tools) gets a plain report.
+pub(crate) struct BackgroundRoutingProvider {
+    pub(crate) parent_calls: std::sync::atomic::AtomicUsize,
+}
+
+impl crate::providers::Provider for BackgroundRoutingProvider {
+    fn stream_chat(
+        &self,
+        req: crate::providers::ChatRequest,
+    ) -> futures::stream::BoxStream<'static, crate::providers::StreamResult> {
+        use futures::StreamExt;
+        use std::sync::atomic::Ordering;
+        let parent = req.tools.iter().any(|tool| tool.name == "subagent");
+        let events = if parent {
+            if self.parent_calls.fetch_add(1, Ordering::Relaxed) == 0 {
+                vec![Ok(crate::providers::StreamEvent::ToolCall(
+                    crate::providers::ToolCallReq::new(
+                        "call-bg",
+                        "subagent",
+                        serde_json::json!({"tasks": ["look around"], "background": true}),
+                    ),
+                ))]
+            } else {
+                vec![Ok(crate::providers::StreamEvent::Text(
+                    "parent done".into(),
+                ))]
+            }
+        } else {
+            vec![Ok(crate::providers::StreamEvent::Text(
+                "child report".into(),
+            ))]
+        };
+        futures::stream::iter(events).boxed()
+    }
+}
+
 impl crate::providers::Provider for RecordingTestProvider {
     fn stream_chat(
         &self,
@@ -1938,6 +1975,88 @@ async fn a_child_request_omits_subagent_and_ask_user_tools() {
     assert!(!names.contains(&"ask_user"), "{names:?}");
     assert!(names.contains(&"plan"), "the child owns a plan: {names:?}");
     assert!(names.contains(&"read"), "{names:?}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A background spawn returns immediately; the parent answers while the
+/// child runs, and the report joins the transcript before the turn ends.
+#[tokio::test]
+async fn a_background_subagent_reports_before_the_turn_ends() {
+    let root = std::env::temp_dir().join(format!("sqwai-bgsub-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::create_dir_all(&root);
+    let provider: SharedProvider = std::sync::Arc::new(BackgroundRoutingProvider {
+        parent_calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let input = AgentInput {
+        provider,
+        model_id: "m".into(),
+        model_key: "p/m".into(),
+        effort: None,
+        effort_support: crate::config::EffortSupport::default(),
+        max_tokens: None,
+        system: vec![],
+        messages: vec![Message::new(Role::User, "do it")],
+        root: root.clone(),
+        session_id: "bg-parent".into(),
+        blocked_patterns: vec![],
+        approval_mode: crate::config::ApprovalMode::Auto,
+        approval_switch: None,
+        approval_grants: Default::default(),
+        web_allow_hosts: vec![],
+        context_limit: 10_000,
+        vision: true,
+        pdf: true,
+        tools: Default::default(),
+        search: Default::default(),
+        limits: Default::default(),
+        active_skills: vec![],
+        read_ledger: Default::default(),
+        enable_tools: true,
+        background_baselines: false,
+        read_only: false,
+        previous_response_id: None,
+        summary: None,
+        mcp: Default::default(),
+        skills: Default::default(),
+        compact_only: false,
+        compact_focus: String::new(),
+        compaction: Default::default(),
+        plan_limits: Default::default(),
+        shadow_store: crate::config::ShadowStore::Off,
+        subagent_depth: 0,
+        parent_step: None,
+        parent_session: None,
+        fallback_chain: vec![],
+    };
+    let mut handle = spawn_agent(input);
+    let mut outcome = None;
+    let mut note = false;
+    while let Some(ev) = handle.rx.recv().await {
+        match ev {
+            AgentEvent::SubagentReportNote { text } => {
+                note = true;
+                assert!(text.contains("background subagent finished"), "{text}");
+            }
+            AgentEvent::Completed(Ok(done)) => {
+                outcome = Some(done);
+                break;
+            }
+            AgentEvent::Completed(Err(e)) => panic!("unexpected error: {e}"),
+            _ => {}
+        }
+    }
+    let outcome = outcome.expect("turn completed");
+    assert!(
+        outcome.messages.iter().any(|m| {
+            m.role == Role::User
+                && m.content.contains("<subagent_completion")
+                && m.content.contains("child report")
+        }),
+        "the report joins the transcript: {:#?}",
+        outcome.messages
+    );
+    assert!(note, "the TUI is told the report landed");
     let _ = std::fs::remove_dir_all(&root);
 }
 

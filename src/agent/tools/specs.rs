@@ -346,6 +346,10 @@ of executed tools and modified files.",
                         "type": "boolean",
                         "description": "when true, omit parent history/notes (<parent_context>) so the subagent reviews or audits with an unbiased clean slate (default: false)"
                     },
+                    "background": {
+                        "type": "boolean",
+                        "description": "start the tasks and return immediately; their reports are added to your context when they finish, joined before this turn ends (default: false)"
+                    },
                     "tasks": {
                         "type": "array",
                         "items": {

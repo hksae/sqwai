@@ -359,6 +359,18 @@ impl App {
         for (message_index, m) in messages.iter().enumerate() {
             match m.role {
                 Role::User => {
+                    // A background child's report is a host note for the
+                    // next request, not a human turn: render it as a status
+                    // row and keep it out of activity grouping.
+                    if m.content.starts_with("<subagent_completion") {
+                        self.push_segment(Segment::Status {
+                            text: "background subagent finished — report kept in context".into(),
+                            kind: StatusKind::Info,
+                            expanded: false,
+                            transient: false,
+                        });
+                        continue;
+                    }
                     // A stopped/failed turn has no Assistant message to give
                     // it a place in the provider transcript. Restore its note
                     // immediately before the next user turn (or after the loop

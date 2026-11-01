@@ -661,6 +661,40 @@ fn a_hidden_child_session_rebuilds_its_transcript() {
     assert!(matches!(&chat[4], Segment::Assistant { text, .. } if text == "done"));
 }
 
+/// A background report is a user-role message for the provider, but a status
+/// row for the human: it must not read as something the user typed.
+#[test]
+fn a_background_report_note_renders_as_status() {
+    use crate::providers::Message;
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.session.messages = vec![
+        Message::new(Role::User, "task"),
+        Message::new(Role::Assistant, "done"),
+        Message::new(
+            Role::User,
+            "<subagent_completion task=\"look\">
+report
+</subagent_completion>",
+        ),
+    ];
+    app.clear_segments();
+    app.load_history_segments();
+    assert!(
+        app.segments.iter().any(|s| matches!(
+            s,
+            Segment::Status { text, .. } if text.contains("background subagent finished")
+        )),
+        "{:?}",
+        app.segments
+    );
+    assert!(
+        !app.segments
+            .iter()
+            .any(|s| matches!(s, Segment::User(t) if t.starts_with("<subagent_completion"))),
+        "a host note must not render as a user turn"
+    );
+}
+
 #[test]
 fn apply_session_from_startup_does_not_persist_empty_stub() {
     // the fresh empty session must switch to an existing one without

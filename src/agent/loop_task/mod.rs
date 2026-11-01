@@ -163,6 +163,10 @@ pub enum AgentEvent {
         ok: bool,
         output: String,
     },
+    /// a background child's report was joined into the transcript
+    SubagentReportNote {
+        text: String,
+    },
     /// a tool just started: name + short arguments, spinner in the TUI.
     /// `call_id` pins the matching notice to this exact row: same-name
     /// calls in one batch (parallel subagents) must not close each other.
@@ -1289,6 +1293,12 @@ async fn run_agent(
     let mut turn_system = build_turn_system(&system, &root, &session_id);
     let mut turn_tokens_used: u64 = 0;
     let mut tool_calls_used: usize = 0;
+    // Background spawns live inside the turn: the parent keeps working, the
+    // host joins them before the final answer, so no write outlives the
+    // checkpoint window undo relies on. Dropping the set (hard abort) cancels
+    // them.
+    let mut background_subagents: tokio::task::JoinSet<(String, tools::Outcome)> =
+        tokio::task::JoinSet::new();
 
     loop {
         // Transcript sync for hard-abort survival: every iteration persists
@@ -1776,7 +1786,17 @@ async fn run_agent(
         // messages stay in call order, only the waits overlap.
         let pure_subagents = subagent_depth == 0
             && !turn.calls.is_empty()
-            && turn.calls.iter().all(|call| call.name == "subagent");
+            && turn
+                .calls
+                .iter()
+                .all(|call| {
+                    call.name == "subagent"
+                        && !call
+                            .args
+                            .get("background")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false)
+                });
         if pure_subagents {
             let remaining = limits
                 .max_tool_calls_per_turn
@@ -2150,6 +2170,73 @@ async fn run_agent(
                             outcome
                         }
                         "subagent" if subagent_depth == 0 => {
+                            let background = call
+                                .args
+                                .get("background")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false);
+                            if background {
+                                let call = call.clone();
+                                let parent_session = ctx.session_id.clone();
+                                let parent_tx = tx.clone();
+                                let parent_cancel = ctx.cancel.clone();
+                                let provider = provider.clone();
+                                let model_id = model_id.clone();
+                                let root = root.clone();
+                                let blocked = blocked_patterns.to_vec();
+                                let hosts = web_allow_hosts.to_vec();
+                                let tool_caps = tool_caps.clone();
+                                let search = ctx.search.clone();
+                                let limits = limits.clone();
+                                let skills_active = active_skills.to_vec();
+                                let system = system.clone();
+                                let mcp = mcp.clone();
+                                let skills = skills.clone();
+                                let compaction = compaction.clone();
+                                let fallback_chain = fallback_chain.clone();
+                                let label =
+                                    crate::agent::tools::call_summary(&call.name, &call.args);
+                                background_subagents.spawn(async move {
+                                    let outcome = run_subagent(
+                                        &call,
+                                        &parent_session,
+                                        &parent_tx,
+                                        &parent_cancel,
+                                        &provider,
+                                        &model_id,
+                                        &root,
+                                        &blocked,
+                                        &hosts,
+                                        approval_mode,
+                                        context_limit,
+                                        vision,
+                                        pdf,
+                                        &tool_caps,
+                                        &search,
+                                        &limits,
+                                        &skills_active,
+                                        effort,
+                                        effort_support,
+                                        max_tokens,
+                                        system,
+                                        mcp,
+                                        skills,
+                                        read_only,
+                                        shadow_store,
+                                        compaction,
+                                        plan_limits,
+                                        fallback_chain,
+                                        std::time::Duration::from_secs(
+                                            SUBAGENT_TIMEOUT_SECS,
+                                        ),
+                                    )
+                                    .await;
+                                    (label, outcome)
+                                });
+                                tools::Outcome::ok(
+                                    "started in the background; its report is added to your context before this turn ends",
+                                )
+                            } else {
                             let outcome = run_subagent(
                                 call,
                                 &ctx.session_id,
@@ -2202,6 +2289,7 @@ async fn run_agent(
                                     .await;
                             }
                             outcome
+                            }
                         }
                         "subagent" => tools::Outcome::err("nested subagents are not allowed"),
                         "plan" => {
@@ -2623,6 +2711,37 @@ async fn run_agent(
             // ends with what was accumulated, the same shape as a normal
             // final answer.
             break;
+        }
+    }
+
+    // Background children finish before the turn does: the parent got to work
+    // meanwhile, and every write still lands inside the checkpoint window undo
+    // knows. Their reports join the transcript as host notes (a user-role
+    // message the next request sees, rendered as a status row by the TUI).
+    while let Some(joined) = background_subagents.join_next().await {
+        match joined {
+            Ok((label, outcome)) => {
+                let label = label.replace('"', "'");
+                messages.push(Message::new(
+                    Role::User,
+                    format!(
+                        "<subagent_completion task=\"{label}\">\n{}\n</subagent_completion>",
+                        outcome.output.trim()
+                    ),
+                ));
+                let _ = tx
+                    .send(AgentEvent::SubagentReportNote {
+                        text: format!("background subagent finished: {label}"),
+                    })
+                    .await;
+            }
+            Err(error) => {
+                let _ = tx
+                    .send(AgentEvent::SubagentReportNote {
+                        text: format!("background subagent failed to join: {error}"),
+                    })
+                    .await;
+            }
         }
     }
 
