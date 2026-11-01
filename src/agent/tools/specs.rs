@@ -348,7 +348,7 @@ of executed tools and modified files.",
                     },
                     "background": {
                         "type": "boolean",
-                        "description": "start the tasks and return immediately; their reports are added to your context when they finish, joined before this turn ends (default: false)"
+                        "description": "run in the background and return an id immediately; the report joins your context when it finishes, before this turn ends. Set false to wait for the report in this same call (default: true)"
                     },
                     "tasks": {
                         "type": "array",

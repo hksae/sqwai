@@ -664,6 +664,7 @@ pub(crate) async fn run_subagent(
         plan_limits,
         shadow_store,
         subagent_depth: 1,
+        background_subagents: false,
         parent_step,
         parent_session: Some(parent_session.to_string()),
         fallback_chain,

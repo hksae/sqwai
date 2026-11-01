@@ -649,6 +649,8 @@ pub struct AgentInput {
     /// nesting guard for delegated subagents; the first generation may create
     /// children, but children cannot recursively create more children.
     pub subagent_depth: u8,
+    /// Treat `subagent` calls as background unless the call says otherwise.
+    pub background_subagents: bool,
     /// Immutable step context inherited from the spawning session.
     /// `None` for main agents. The child stamps it on its event records
     /// and refuses mutations once the step moves to a newer epoch.
@@ -1136,6 +1138,7 @@ async fn run_agent(
         skills,
         shadow_store,
         subagent_depth,
+        background_subagents,
         parent_step,
         parent_session,
         mut fallback_chain,
@@ -2051,6 +2054,7 @@ async fn run_agent(
         // bookkeeping is identical in both shapes: rows, events and
         // messages stay in call order, only the waits overlap.
         let pure_subagents = subagent_depth == 0
+            && !background_subagents
             && !turn.calls.is_empty()
             && turn
                 .calls
@@ -2444,7 +2448,7 @@ async fn run_agent(
                                 .args
                                 .get("background")
                                 .and_then(|v| v.as_bool())
-                                .unwrap_or(false);
+                                .unwrap_or(background_subagents);
                             if background {
                                 let call = call.clone();
                                 let parent_session = ctx.session_id.clone();
