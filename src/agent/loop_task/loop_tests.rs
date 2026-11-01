@@ -3057,3 +3057,409 @@ fn backoff_jitter_stays_inside_twenty_percent_and_varies() {
     let live = backoff(3);
     assert!((base..=base + std::time::Duration::from_millis(1600)).contains(&live));
 }
+
+/// A paused child parks at its next boundary and issues no request until
+/// resumed. Messages sent while parked wait for that next request.
+#[tokio::test]
+async fn a_paused_child_parks_before_its_first_request_and_resumes() {
+    let root = std::env::temp_dir().join(format!("sqwai-pause-first-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::create_dir_all(&root);
+    let provider = std::sync::Arc::new(RecordingTestProvider {
+        events: std::sync::Mutex::new(vec![vec![Ok(crate::providers::StreamEvent::Text(
+            "done".into(),
+        ))]]),
+        requests: std::sync::Mutex::new(Vec::new()),
+    });
+    let input = AgentInput {
+        provider: provider.clone(),
+        model_id: "m".into(),
+        model_key: "p/m".into(),
+        effort: None,
+        effort_support: crate::config::EffortSupport::default(),
+        max_tokens: None,
+        system: vec![],
+        messages: vec![Message::new(Role::User, "work")],
+        root: root.clone(),
+        session_id: "pause-first-child".into(),
+        turn: 1,
+        blocked_patterns: vec![],
+        approval_mode: crate::config::ApprovalMode::Auto,
+        approval_switch: None,
+        approval_grants: Default::default(),
+        web_allow_hosts: vec![],
+        context_limit: 10_000,
+        vision: true,
+        pdf: true,
+        tools: Default::default(),
+        search: Default::default(),
+        limits: Default::default(),
+        active_skills: vec![],
+        read_ledger: Default::default(),
+        enable_tools: true,
+        background_baselines: false,
+        read_only: false,
+        previous_response_id: None,
+        summary: None,
+        mcp: Default::default(),
+        skills: Default::default(),
+        compact_only: false,
+        compact_focus: String::new(),
+        compaction: Default::default(),
+        plan_limits: Default::default(),
+        shadow_store: crate::config::ShadowStore::Off,
+        subagent_depth: 1,
+        background_subagents: false,
+        background_registry: None,
+        background_events: None,
+        parent_step: None,
+        parent_session: Some("pause-parent".into()),
+        fallback_chain: vec![],
+    };
+    let mut handle = spawn_agent(input);
+    handle.control.send(ControlMsg::Pause).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+    assert!(
+        provider.requests.lock().unwrap().is_empty(),
+        "a paused child must not reach the model"
+    );
+    handle
+        .control
+        .send(ControlMsg::Steer {
+            text: "focus after resume".into(),
+            interrupt: false,
+        })
+        .await
+        .unwrap();
+    handle.control.send(ControlMsg::Resume).await.unwrap();
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            match handle.rx.recv().await {
+                Some(AgentEvent::Completed(Ok(done))) => break done,
+                Some(AgentEvent::Completed(Err(e))) => panic!("child failed: {e}"),
+                Some(_) => {}
+                None => panic!("child channel closed"),
+            }
+        }
+    })
+    .await
+    .expect("resumed child completes");
+    let requests = provider.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1, "one request after resume");
+    assert!(
+        requests[0].messages.iter().any(|m| {
+            m.role == Role::User
+                && m.content.contains("<parent_message>")
+                && m.content.contains("focus after resume")
+        }),
+        "the steer sent while parked reaches the resumed request: {:#?}",
+        requests[0].messages
+    );
+    assert!(outcome
+        .messages
+        .iter()
+        .any(|m| m.role == Role::Assistant && m.content == "done"));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Pausing a running tool cancels its process; the child parks with the
+/// cancelled result and only asks the model again after Resume.
+#[tokio::test]
+async fn pause_cancels_a_running_tool_and_resume_continues_with_the_cancelled_result() {
+    let root = std::env::temp_dir().join(format!("sqwai-pause-tool-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::create_dir_all(&root);
+    let provider = std::sync::Arc::new(RecordingTestProvider {
+        // RecordingTestProvider pops from the end: the tool batch must be
+        // last so it is served first.
+        events: std::sync::Mutex::new(vec![
+            vec![Ok(crate::providers::StreamEvent::Text(
+                "after pause".into(),
+            ))],
+            vec![Ok(crate::providers::StreamEvent::ToolCall(
+                crate::providers::ToolCallReq::new(
+                    "slow",
+                    "bash",
+                    serde_json::json!({"command": "sleep 30"}),
+                ),
+            ))],
+        ]),
+        requests: std::sync::Mutex::new(Vec::new()),
+    });
+    let input = AgentInput {
+        provider: provider.clone(),
+        model_id: "m".into(),
+        model_key: "p/m".into(),
+        effort: None,
+        effort_support: crate::config::EffortSupport::default(),
+        max_tokens: None,
+        system: vec![],
+        messages: vec![Message::new(Role::User, "run it")],
+        root: root.clone(),
+        session_id: "pause-tool-child".into(),
+        turn: 1,
+        blocked_patterns: vec![],
+        approval_mode: crate::config::ApprovalMode::Full,
+        approval_switch: None,
+        approval_grants: Default::default(),
+        web_allow_hosts: vec![],
+        context_limit: 10_000,
+        vision: true,
+        pdf: true,
+        tools: Default::default(),
+        search: Default::default(),
+        limits: Default::default(),
+        active_skills: vec![],
+        read_ledger: Default::default(),
+        enable_tools: true,
+        background_baselines: false,
+        read_only: false,
+        previous_response_id: None,
+        summary: None,
+        mcp: Default::default(),
+        skills: Default::default(),
+        compact_only: false,
+        compact_focus: String::new(),
+        compaction: Default::default(),
+        plan_limits: Default::default(),
+        shadow_store: crate::config::ShadowStore::Off,
+        subagent_depth: 1,
+        background_subagents: false,
+        background_registry: None,
+        background_events: None,
+        parent_step: None,
+        parent_session: Some("pause-parent".into()),
+        fallback_chain: vec![],
+    };
+    let mut handle = spawn_agent(input);
+    // Wait until the shell tool is actually running.
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            match handle.rx.recv().await {
+                Some(AgentEvent::ToolStart { name, .. }) if name == "bash" => break,
+                Some(AgentEvent::Completed(Err(e))) => panic!("child failed before the tool: {e}"),
+                Some(AgentEvent::Completed(Ok(_))) => panic!("child completed before the tool"),
+                Some(_) => {}
+                None => panic!("child channel closed before the tool started"),
+            }
+        }
+    })
+    .await
+    .expect("bash tool starts");
+    // What the registry pause does: kill the tool, then park the child.
+    handle.request_tool_cancel();
+    handle
+        .paused_flag()
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    handle.control.send(ControlMsg::Pause).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    assert_eq!(
+        provider.requests.lock().unwrap().len(),
+        1,
+        "a parked child must not ask the model again"
+    );
+    handle.control.send(ControlMsg::Resume).await.unwrap();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            match handle.rx.recv().await {
+                Some(AgentEvent::Completed(Ok(done))) => break done,
+                Some(AgentEvent::Completed(Err(e))) => panic!("child failed: {e}"),
+                Some(_) => {}
+                None => panic!("child channel closed"),
+            }
+        }
+    })
+    .await
+    .expect("the cancelled child does not wait out the 30s sleep");
+    let requests = provider.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2, "one more request after resume");
+    assert!(
+        requests[1].messages.iter().any(|m| {
+            m.role == Role::Tool
+                && m.tool_call_id.as_deref() == Some("slow")
+                && m.content.to_lowercase().contains("cancel")
+        }),
+        "the resumed request carries the cancelled tool result: {:#?}",
+        requests[1].messages
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Pause/resume/kill flip the registry state and reach the child control
+/// channel; pause also sets the shared flags so a running tool stops before
+/// the child reaches its boundary.
+#[tokio::test]
+async fn pause_resume_and_kill_reach_the_child_and_the_registry() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    let registry = super::new_background_registry();
+    let (ctl_tx, mut ctl_rx) = mpsc::channel(8);
+    let cancel = Arc::new(AtomicBool::new(false));
+    let pause = Arc::new(AtomicBool::new(false));
+    let mailbox: SteerControls = Arc::new(tokio::sync::Mutex::new(SteerMailbox {
+        controls: vec![ctl_tx],
+        cancels: vec![cancel.clone()],
+        pauses: vec![pause.clone()],
+        pending: Vec::new(),
+        pending_pause: false,
+    }));
+    registry.lock().await.insert(
+        7,
+        BackgroundChild {
+            label: "task".into(),
+            status: "running",
+            turn: 1,
+            started: Instant::now(),
+            output: None,
+            delivered: false,
+            abort: None,
+            notify: Arc::new(tokio::sync::Notify::new()),
+            steer: mailbox,
+        },
+    );
+    assert_eq!(pause_background(&registry).await, 1);
+    assert_eq!(registry.lock().await[&7].status, "paused");
+    assert!(cancel.load(Ordering::Relaxed));
+    assert!(pause.load(Ordering::Relaxed));
+    assert!(matches!(ctl_rx.recv().await, Some(ControlMsg::Pause)));
+    assert_eq!(background_counts(&registry), (0, 1));
+
+    assert_eq!(resume_background(&registry).await, 1);
+    assert_eq!(registry.lock().await[&7].status, "running");
+    assert!(!cancel.load(Ordering::Relaxed));
+    assert!(!pause.load(Ordering::Relaxed));
+    assert!(matches!(ctl_rx.recv().await, Some(ControlMsg::Resume)));
+    assert_eq!(background_counts(&registry), (1, 0));
+
+    assert_eq!(kill_background(&registry).await, 1);
+    let entries = registry.lock().await;
+    assert_eq!(entries[&7].status, "killed");
+    assert!(entries[&7].delivered);
+}
+
+/// A paused child must not be timed out while it does nothing: the task
+/// clock stops on pause and restarts on resume.
+#[tokio::test]
+async fn a_paused_child_does_not_spend_its_task_timeout() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    struct GatedProvider {
+        calls: AtomicUsize,
+        release: Arc<tokio::sync::Notify>,
+    }
+    impl crate::providers::Provider for GatedProvider {
+        fn stream_chat(
+            &self,
+            _req: crate::providers::ChatRequest,
+        ) -> futures::stream::BoxStream<'static, crate::providers::StreamResult> {
+            use futures::StreamExt;
+            let call = self.calls.fetch_add(1, Ordering::Relaxed);
+            let release = self.release.clone();
+            let step = async move {
+                if call == 0 {
+                    release.notified().await;
+                    Ok(crate::providers::StreamEvent::ToolCall(
+                        crate::providers::ToolCallReq::new(
+                            "post-pause",
+                            "read",
+                            serde_json::json!({"file_path": "nope.txt"}),
+                        ),
+                    ))
+                } else {
+                    Ok(crate::providers::StreamEvent::Text(format!("done {call}")))
+                }
+            };
+            futures::stream::once(step).boxed()
+        }
+    }
+
+    let root = std::env::temp_dir().join(format!("sqwai-pause-timeout-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::create_dir_all(&root);
+    let release = Arc::new(tokio::sync::Notify::new());
+    let provider: SharedProvider = Arc::new(GatedProvider {
+        calls: AtomicUsize::new(0),
+        release: release.clone(),
+    });
+    let (parent_tx, _parent_rx) = mpsc::channel(64);
+    let steer: super::SteerControls = Arc::new(tokio::sync::Mutex::new(SteerMailbox {
+        controls: Vec::new(),
+        cancels: Vec::new(),
+        pauses: Vec::new(),
+        pending: Vec::new(),
+        pending_pause: true,
+    }));
+    let call = crate::providers::ToolCallReq::new(
+        "timeout-call",
+        "subagent",
+        serde_json::json!({"tasks": ["work"]}),
+    );
+    let sink = crate::agent::loop_task::EventSink::bounded(parent_tx.clone());
+    let cancel = Arc::new(AtomicBool::new(false));
+    let tools = Default::default();
+    let search = Default::default();
+    let limits = Default::default();
+    let mcp = Default::default();
+    let skills = Default::default();
+    let compaction = Default::default();
+    let plan_limits = Default::default();
+    let future = super::loop_subagent::run_subagent(
+        &call,
+        "timeout-parent",
+        1,
+        &sink,
+        &cancel,
+        &provider,
+        "m",
+        &root,
+        &[],
+        &[],
+        crate::config::ApprovalMode::Auto,
+        10_000,
+        true,
+        true,
+        &tools,
+        &search,
+        &limits,
+        &[],
+        None,
+        crate::config::EffortSupport::default(),
+        None,
+        Vec::new(),
+        mcp,
+        skills,
+        false,
+        crate::config::ShadowStore::Off,
+        compaction,
+        plan_limits,
+        Vec::new(),
+        std::time::Duration::from_millis(300),
+        Some(steer.clone()),
+    );
+    tokio::pin!(future);
+    // Well past the 300ms budget. The first request is still blocked and the
+    // child is paused, so no active time has elapsed after the pause.
+    tokio::select! {
+        _ = &mut future => panic!("a paused child must not time out while its clock is stopped"),
+        _ = tokio::time::sleep(std::time::Duration::from_millis(800)) => {}
+    }
+    release.notify_one();
+    tokio::select! {
+        _ = &mut future => panic!("the child parks after its request instead of finishing"),
+        _ = tokio::time::sleep(std::time::Duration::from_millis(200)) => {}
+    }
+    // The child registers its own control sender in this mailbox; a
+    // pre-made sender would be a different channel and never reach it.
+    let controls = steer.lock().await.controls.clone();
+    assert!(!controls.is_empty(), "the child registered a control channel");
+    for control in &controls {
+        control.send(ControlMsg::Resume).await.unwrap();
+    }
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), &mut future)
+        .await
+        .expect("resumed child finishes");
+    assert!(outcome.ok, "{}", outcome.output);
+    assert!(outcome.output.contains("done 1"), "{}", outcome.output);
+    let _ = std::fs::remove_dir_all(&root);
+}

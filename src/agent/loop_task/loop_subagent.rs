@@ -690,8 +690,18 @@ pub(crate) async fn run_subagent(
     if let Some(controls) = &steer_controls {
         let mut mailbox = controls.lock().await;
         mailbox.controls.push(child.control.clone());
+        mailbox.cancels.push(child.cancel_flag());
+        mailbox.pauses.push(child.paused_flag());
+        let pending_pause = mailbox.pending_pause;
         let pending = std::mem::take(&mut mailbox.pending);
         drop(mailbox);
+        if pending_pause {
+            // The user paused before this child got a channel: cancel any
+            // running tool and park it at its first boundary.
+            child.paused_flag().store(true, std::sync::atomic::Ordering::Relaxed);
+            child.request_tool_cancel();
+            let _ = child.control.try_send(ControlMsg::Pause);
+        }
         for (text, interrupt) in pending {
             let _ = child.control.try_send(ControlMsg::Steer { text, interrupt });
         }
@@ -712,13 +722,19 @@ pub(crate) async fn run_subagent(
     child_doc.refresh_estimate();
     let mut output = String::new();
     let mut trail = SubagentTrail::default();
-    let deadline = tokio::time::Instant::now() + timeout;
-    // Esc polling: the parent cancel flag is the only stop signal visible
-    // inside this wait — without it a stop request sits unobserved until
-    // the timeout, and the TUI shows "cancelling…" forever.
+    let mut deadline = tokio::time::Instant::now() + timeout;
+    let child_pause = child.paused_flag();
+    // A background child is paused/killed through its registry, not through
+    // the parent's cancel flag: Esc on the parent must park it, not destroy
+    // it. Foreground children block their parent's call and still obey the
+    // parent's stop signal.
+    let background = steer_controls.is_some();
+    // Poll for two things: a parent stop (foreground only) and a paused
+    // child, whose wall-clock budget must not tick while it does nothing.
     let mut cancel_poll = tokio::time::interval(std::time::Duration::from_millis(100));
+    let mut last_poll = std::time::Instant::now();
     loop {
-        if parent_cancel.load(std::sync::atomic::Ordering::Relaxed) {
+        if !background && parent_cancel.load(std::sync::atomic::Ordering::Relaxed) {
             let result = stop_child(
                 &mut child,
                 parent_tx,
@@ -822,6 +838,11 @@ pub(crate) async fn run_subagent(
             }
             },
             _ = cancel_poll.tick() => {
+                let now = std::time::Instant::now();
+                if child_pause.load(std::sync::atomic::Ordering::Relaxed) {
+                    deadline += now.duration_since(last_poll);
+                }
+                last_poll = now;
                 continue;
             }
         };

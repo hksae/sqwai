@@ -385,7 +385,8 @@ of executed tools and modified files.",
             kind: Kind::ReadOnly,
             description: "List, wait for, or stop background subagents started with \
 `subagent background=true`. `output(id, wait_secs)` returns that report and marks it read; \
-`list` shows the live batch; `send` queues a message for the child, `kill` stops one. Reports not read here are added to the \
+`list` shows the live batch (a paused child keeps its place and resumes when the user sends \
+the next message); `send` queues a message for the child, `kill` stops one. Reports not read here are added to the \
 transcript at a turn boundary, including a later turn when a child outlives the answer.",
             parameters: json!({
                 "type": "object",

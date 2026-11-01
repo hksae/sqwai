@@ -787,13 +787,101 @@ impl App {
         self.dirty = true;
     }
 
-    /// Live background writers of this session. The registry is locked only
-    /// momentarily by runners, so `try_lock` answers without blocking the UI.
-    pub(super) fn running_background_writers(&self) -> usize {
+    /// Background writers that may still append to the live events tail.
+    /// A paused child counts: its current request may still be winding down.
+    pub(super) fn active_background_writers(&self) -> usize {
+        let (running, paused) = self.background_writer_counts();
+        running + paused
+    }
+
+    /// `(running, paused)` of this session's background children.
+    pub(super) fn background_writer_counts(&self) -> (usize, usize) {
         self.background
             .get(&self.session.id.to_string())
-            .map(|bg| crate::agent::loop_task::running_background(&bg.registry))
-            .unwrap_or(0)
+            .map(|bg| crate::agent::loop_task::background_counts(&bg.registry))
+            .unwrap_or((0, 0))
+    }
+
+    /// Rewrite child rows whose status is in `from`. Purely presentational:
+    /// the registry is the source for `subagents list`, this keeps the
+    /// overview and history rows honest without waiting for an event.
+    pub(super) fn mark_subagent_rows(&mut self, from: &[&str], to: &str) -> usize {
+        let mut changed = 0usize;
+        for (_, _, status, _, _) in self.subagents.iter_mut() {
+            if from.contains(&status.as_str()) {
+                *status = to.to_string();
+                changed += 1;
+            }
+        }
+        for segment in self.segments.iter_mut() {
+            if let Segment::Subagent { status, .. } = segment
+                && from.contains(&status.as_str())
+            {
+                *status = to.to_string();
+                changed += 1;
+            }
+        }
+        if changed > 0 {
+            self.dirty = true;
+        }
+        changed
+    }
+
+    /// Esc or an explicit stop: park the writers of this session. Tools are
+    /// cancelled through the registry before the children reach a boundary.
+    pub(super) fn request_pause_background(&mut self) -> usize {
+        let Some(bg) = self.background.get(&self.session.id.to_string()) else {
+            return 0;
+        };
+        let registry = bg.registry.clone();
+        tokio::spawn(async move {
+            let _ = crate::agent::loop_task::pause_background(&registry).await;
+        });
+        self.mark_subagent_rows(&["running"], "paused")
+    }
+
+    /// Continue parked writers, called when the user sends the next message.
+    pub(super) fn request_resume_background(&mut self) -> usize {
+        let Some(bg) = self.background.get(&self.session.id.to_string()) else {
+            return 0;
+        };
+        let registry = bg.registry.clone();
+        tokio::spawn(async move {
+            let _ = crate::agent::loop_task::resume_background(&registry).await;
+        });
+        self.mark_subagent_rows(&["paused"], "running")
+    }
+
+    /// Second Esc: destroy paused/running writers instead of parking them.
+    pub(super) fn request_kill_background(&mut self) -> usize {
+        let Some(bg) = self.background.get(&self.session.id.to_string()) else {
+            return 0;
+        };
+        let registry = bg.registry.clone();
+        tokio::spawn(async move {
+            let _ = crate::agent::loop_task::kill_background(&registry).await;
+        });
+        self.mark_subagent_rows(&["running", "paused"], "killed")
+    }
+
+    /// Status-row text for writers left behind by the turn.
+    pub(super) fn background_writer_note(&self) -> Option<String> {
+        let (running, paused) = self.background_writer_counts();
+        match (running, paused) {
+            (0, 0) => None,
+            (r, 0) => Some(format!(
+                "{r} background writer(s) still running — reports arrive on a later turn; \
+                 /undo turn stops and reverts them"
+            )),
+            (0, p) => Some(format!(
+                "{p} background writer(s) paused — they resume on your next message; \
+                 esc again kills them"
+            )),
+            (r, p) => Some(format!(
+                "{r} background writer(s) running and {p} paused — reports arrive on a later \
+                 turn; esc pauses the rest"
+            )),
+        }
     }
 
     /// Merge the live events tail once no background writer of this session
@@ -801,7 +889,7 @@ impl App {
     /// has flipped the registry status, so a still-running rail retries once
     /// on a short deadline instead of merging mid-write.
     pub(super) fn note_background_event(&mut self) {
-        if self.running_background_writers() == 0 {
+        if self.active_background_writers() == 0 {
             self.merge_host_events();
             self.background_merge_at = None;
         } else if self.background_merge_at.is_none() {
@@ -818,7 +906,7 @@ impl App {
             return;
         }
         self.background_merge_at = None;
-        if self.agent.is_none() && self.running_background_writers() == 0 {
+        if self.agent.is_none() && self.active_background_writers() == 0 {
             self.merge_host_events();
         }
     }
@@ -870,11 +958,6 @@ impl App {
         self.finish_turn_inner(Ok(()), advanced);
     }
 
-    pub(super) fn is_subagent_row(segment: &Segment) -> bool {
-        matches!(segment, Segment::Subagent { .. })
-            || matches!(segment, Segment::Tool { name, .. } if name == "subagent")
-    }
-
     pub(super) fn tool_running(&self) -> bool {
         self.segments
             .iter()
@@ -921,38 +1004,6 @@ impl App {
             self.toast = None;
             self.dirty = true;
         }
-    }
-
-    pub(super) fn clear_subagent_ui_on_stop(&mut self) {
-        self.subagents.clear();
-        let removed: Vec<usize> = self
-            .segments
-            .iter()
-            .enumerate()
-            .filter(|(_, s)| Self::is_subagent_row(s))
-            .map(|(i, _)| i)
-            .collect();
-        if !removed.is_empty() {
-            self.retain_segments(|s| !Self::is_subagent_row(s));
-            for g in &mut self.activity_groups {
-                let before = removed.iter().filter(|i| **i < g.seg_start).count();
-                let inside = removed
-                    .iter()
-                    .filter(|i| **i >= g.seg_start && **i < g.seg_end)
-                    .count();
-                g.seg_start -= before;
-                g.seg_end -= before + inside;
-            }
-            for g in &mut self.activity_groups {
-                let run = self
-                    .segments
-                    .get(g.seg_start..g.seg_end)
-                    .unwrap_or_default();
-                (g.calls, g.thinking, g.errors) = Self::tally_activity(run);
-            }
-        }
-        self.turn_started = None;
-        self.dirty = true;
     }
 
     pub(super) fn trailing_work_run(&self) -> Option<(usize, usize)> {
@@ -1119,9 +1170,6 @@ impl App {
         } else if self.active_ask_seg().is_some() {
             self.freeze_active_ask("(no answer)");
         }
-        if res.as_ref().is_err_and(|error| error == "aborted") {
-            self.clear_subagent_ui_on_stop();
-        }
         self.reveal_chars(usize::MAX);
         let text = std::mem::take(&mut self.assistant_buf);
         self.thinking_open = false;
@@ -1200,7 +1248,7 @@ impl App {
             self.context_bootstrap_pending = true;
         }
         let aborted_turn = matches!(&res, Err(e) if e == "aborted");
-        let writing_children = self.running_background_writers();
+        let writing_children = self.active_background_writers();
         if aborted_turn || res.is_ok() {
             self.session.prev_turn_aborted = aborted_turn;
             // A still-running child appends to the same live events tail.
@@ -1235,18 +1283,14 @@ impl App {
         if res.is_ok() {
             self.retract_transient_status();
             self.retry_notified = false;
-            let running = self.running_background_writers();
-            if running > 0 {
-                self.push_segment(Segment::Status {
-                    text: format!(
-                        "{running} background writer(s) still running — reports arrive on a later \
-                         turn; /undo turn stops and reverts them"
-                    ),
-                    kind: StatusKind::Info,
-                    expanded: false,
-                    transient: false,
-                });
-            }
+        }
+        if let Some(note) = self.background_writer_note() {
+            self.push_segment(Segment::Status {
+                text: note,
+                kind: StatusKind::Info,
+                expanded: false,
+                transient: false,
+            });
         }
         self.finalize_activity_group();
         if let Some((text, is_error)) = turn_note

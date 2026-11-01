@@ -319,6 +319,7 @@ pub(super) enum Segment {
 /// (but excluding) the final `Assistant` answer of that turn.
 #[derive(Clone)]
 pub(super) struct ActivityGroup {
+    #[allow(dead_code)] // tests assert the range; rendering anchors on seg_end
     pub seg_start: usize,
     pub seg_end: usize,
     pub calls: usize,

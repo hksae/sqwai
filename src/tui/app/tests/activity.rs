@@ -372,69 +372,6 @@ fn failed_turn_shows_failed_rows_flat() {
 }
 
 #[test]
-fn abort_remaps_activity_group_ranges_past_dropped_rows() {
-    let mut app = test_app("http://127.0.0.1:9/v1".into());
-    app.push_segment(Segment::User("go".into()));
-    app.push_segment(Segment::Tool {
-        call_id: None,
-        name: "subagent".into(),
-        args: "task".into(),
-        ok: Some(true),
-        output: String::new(),
-        diff: None,
-        preview: Vec::new(),
-        preview_total: 0,
-        expanded: false,
-        ask: None,
-    });
-    app.push_segment(Segment::Thinking {
-        text: "hmm".into(),
-        expanded: false,
-        started: None,
-        duration_ms: 0,
-        live: false,
-    });
-    app.push_segment(Segment::Tool {
-        call_id: None,
-        name: "read".into(),
-        args: "a.rs".into(),
-        ok: Some(true),
-        output: String::new(),
-        diff: None,
-        preview: Vec::new(),
-        preview_total: 0,
-        expanded: false,
-        ask: None,
-    });
-    app.push_segment(Segment::Assistant {
-        text: "done".into(),
-        live: false,
-    });
-    app.finalize_activity_group();
-    // The subagent row is itself a tool call, so it belongs to the run.
-    let g = &app.activity_groups[0];
-    assert_eq!((g.seg_start, g.seg_end), (1, 4));
-
-    // Stopping drops the subagent row, pulling only the range end inward.
-    app.clear_subagent_ui_on_stop();
-    assert_eq!(app.segments.len(), 4, "the subagent row is gone");
-    let g = &app.activity_groups[0];
-    assert_eq!((g.seg_start, g.seg_end), (1, 3), "end pulled in by one");
-
-    // flat view: every surviving row visible, no aggregate
-    app.rebuild_cache(80);
-    let text = rendered(&app);
-    assert!(text.contains("read"), "tool row visible: {text}");
-    assert!(!text.contains("subagent"), "subagent row removed: {text}");
-    assert!(text.contains("done"), "answer stays visible: {text}");
-    assert!(!text.contains("calls"), "no aggregate: {text}");
-}
-
-/// A compact `Subagent` row is a tool call like any other: it must join
-/// the turn's activity group instead of breaking the run. Before the fix
-/// the backward scan stopped dead on it, so the group was never built and
-/// every row above the child stayed visible as an orphan.
-#[test]
 fn subagent_row_joins_the_turn_activity_group() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.push_segment(Segment::User("delegate".into()));
@@ -526,74 +463,6 @@ fn delegated_call_paints_one_row_and_folds_with_the_turn() {
     assert!(!text.contains("calls"), "no aggregate: {text}");
 }
 
-/// Stopping mid-turn drops the subagent rows from *inside* a group: the
-/// range must pull in by exactly the rows removed, and the recount must
-/// agree with the builder that produced the footer.
-#[test]
-fn abort_drops_subagent_rows_inside_a_group() {
-    let mut app = test_app("http://127.0.0.1:9/v1".into());
-    app.push_segment(Segment::User("go".into()));
-    app.push_segment(Segment::Thinking {
-        text: "hmm".into(),
-        expanded: false,
-        started: None,
-        duration_ms: 0,
-        live: false,
-    });
-    app.push_segment(Segment::Tool {
-        call_id: None,
-        name: "read".into(),
-        args: "a.rs".into(),
-        ok: Some(true),
-        output: String::new(),
-        diff: None,
-        preview: Vec::new(),
-        preview_total: 0,
-        expanded: false,
-        ask: None,
-    });
-    app.push_segment(Segment::Subagent {
-        id: 1,
-        task: "look".into(),
-        status: "running".into(),
-        output: String::new(),
-        expanded: false,
-    });
-    app.push_segment(Segment::Assistant {
-        text: "done".into(),
-        live: false,
-    });
-    app.finalize_activity_group();
-    let g = &app.activity_groups[0];
-    assert_eq!((g.seg_start, g.seg_end), (1, 4));
-    assert_eq!(g.calls, 2, "read + the delegated call");
-
-    app.clear_subagent_ui_on_stop();
-    assert_eq!(app.segments.len(), 4, "the child row is gone");
-    let g = &app.activity_groups[0];
-    assert_eq!((g.seg_start, g.seg_end), (1, 3), "end pulled in by it");
-    assert_eq!((g.calls, g.thinking), (1, 1), "recount agrees with builder");
-    // the recount must match a freshly built group over the same slice
-    let rebuilt = App::build_activity_group_in(&app.segments, (g.seg_start, g.seg_end), 0, None);
-    assert_eq!(
-        (g.calls, g.thinking, g.errors),
-        (rebuilt.calls, rebuilt.thinking, rebuilt.errors),
-        "abort recount and group builder must never disagree"
-    );
-
-    app.rebuild_cache(80);
-    let text = rendered(&app);
-    assert!(text.contains("read"), "tool row visible: {text}");
-    assert!(
-        !text.contains("subagent"),
-        "no subagent row survives: {text}"
-    );
-    assert!(text.contains("done"), "answer visible: {text}");
-    assert!(!text.contains("calls"), "no aggregate: {text}");
-}
-
-/// A provider dump must not flood the chat: multi-line errors arrive
-/// collapsed to one width-capped row and unfold on click.
 #[test]
 fn error_status_arrives_collapsed_and_unfolds_on_click() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
@@ -838,6 +707,44 @@ fn finish_retires_unfinished_tool_rows_and_keeps_running_writers() {
         app.seg_meta.iter().map(|m| m.rev).collect::<Vec<_>>(),
         "idempotent"
     );
+}
+
+#[test]
+fn pause_marks_live_rows_and_leaves_finished_ones_alone() {
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.subagents.push((
+        1,
+        "running child".into(),
+        "running".into(),
+        String::new(),
+        false,
+    ));
+    app.subagents.push((
+        2,
+        "finished child".into(),
+        "completed".into(),
+        String::new(),
+        false,
+    ));
+    app.push_segment(Segment::Subagent {
+        id: 1,
+        task: "running child".into(),
+        status: "running".into(),
+        output: String::new(),
+        expanded: false,
+    });
+    assert_eq!(app.mark_subagent_rows(&["running"], "paused"), 2);
+    assert_eq!(app.subagents[0].2, "paused");
+    assert_eq!(
+        app.subagents[1].2, "completed",
+        "a finished child keeps its status"
+    );
+    assert!(matches!(
+        &app.segments[0],
+        Segment::Subagent { status, .. } if status == "paused"
+    ));
+    assert_eq!(app.request_kill_background(), 0, "no registry to kill");
+    assert!(app.background_writer_note().is_none());
 }
 
 #[test]

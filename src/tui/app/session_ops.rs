@@ -338,6 +338,11 @@ impl App {
         self.session.turn_seq = self.session.turn_seq.saturating_add(1);
         self.background_merge_at = None;
         let (background_registry, background_events) = self.ensure_background_session();
+        // Paused writers wake up on the next message, per the contract. The
+        // registry status flips immediately; the child itself continues from
+        // the boundary where it parked.
+        self.request_resume_background();
+        self.children_paused = false;
         let input = crate::agent::loop_task::AgentInput {
             provider: self.provider.clone(),
             model_id: self.model_cfg.id.clone(),
@@ -578,6 +583,7 @@ impl App {
         }
         self.context_bootstrap_pending = true;
         self.background_merge_at = None;
+        self.children_paused = false;
         self.session = s;
         // The session's own mode, not this window's: a reopened session picks
         // up where it left off. A save from before the field existed keeps
@@ -679,6 +685,7 @@ impl App {
         self.run_undo_maintenance();
         let ctx = self.session.context_limit;
         self.background_merge_at = None;
+        self.children_paused = false;
         self.session = Session::new(self.cfg.last_model.clone(), ctx);
         // A new session inherits the mode this window is in: the config
         // default set the tone for the launch, not for every new chat.

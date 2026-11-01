@@ -422,6 +422,14 @@ impl App {
                                         self.agent.as_ref().is_some_and(|a| a.cancel_requested())
                                     ),
                                 );
+                                // Esc parks the children first, whichever
+                                // path stops the parent turn: their tools are
+                                // cancelled through the registry, and they
+                                // resume on the next message.
+                                let paused = self.request_pause_background();
+                                if paused > 0 {
+                                    self.children_paused = true;
+                                }
                                 if self.test_churn.is_some() {
                                     // fake turn, fake stop: there is no agent
                                     // handle to cancel through
@@ -444,26 +452,79 @@ impl App {
                                         // not landing (a subagent wait that
                                         // never noticed, a wedged tool) —
                                         // tear the turn down instead of
-                                        // showing "cancelling…" forever.
+                                        // showing "cancelling…" forever, and
+                                        // destroy the writers instead of
+                                        // parking them.
                                         self.clear_busy_statuses();
-                                        self.clear_subagent_ui_on_stop();
+                                        self.children_paused = false;
                                         self.aborted = true;
                                         if let Some(a) = &self.agent {
                                             a.abort();
                                         }
-                                        self.status("stopping…", StatusKind::Info);
+                                        let killed = self.request_kill_background();
+                                        if killed > 0 {
+                                            self.status(
+                                                &format!("killed {killed} subagent(s)"),
+                                                StatusKind::Info,
+                                            );
+                                        } else {
+                                            self.status("stopping…", StatusKind::Info);
+                                        }
                                     } else {
                                         if let Some(a) = &self.agent {
                                             a.request_tool_cancel();
                                         }
-                                        self.status("cancelling…", StatusKind::Info);
+                                        let what = if paused > 0 {
+                                            format!("pausing… ({paused} subagent(s) parked)")
+                                        } else {
+                                            "cancelling…".to_string()
+                                        };
+                                        self.status(&what, StatusKind::Info);
                                     }
                                 } else {
+                                    // model streaming or between calls: the
+                                    // parent stops now; its writers stay
+                                    // parked for the next turn.
                                     self.clear_busy_statuses();
-                                    self.clear_subagent_ui_on_stop();
                                     self.aborted = true;
                                     if let Some(a) = &self.agent {
                                         a.abort();
+                                    }
+                                    if paused > 0 {
+                                        self.status(
+                                            &format!(
+                                                "paused {paused} subagent(s) — they resume on your \
+                                                 next message; esc again kills them"
+                                            ),
+                                            StatusKind::Info,
+                                        );
+                                    }
+                                }
+                            } else {
+                                // Idle Esc with writers still outliving a
+                                // turn: park them. A second Esc (now that all
+                                // are paused) destroys them.
+                                let (running, paused) = self.background_writer_counts();
+                                if running > 0 && !self.children_paused {
+                                    let n = self.request_pause_background();
+                                    self.children_paused = n > 0;
+                                    if n > 0 {
+                                        self.status(
+                                            &format!(
+                                                "paused {n} subagent(s) — they resume on your next \
+                                                 message; esc again kills them"
+                                            ),
+                                            StatusKind::Info,
+                                        );
+                                    }
+                                } else if self.children_paused || paused > 0 {
+                                    let n = self.request_kill_background();
+                                    self.children_paused = false;
+                                    if n > 0 {
+                                        self.status(
+                                            &format!("killed {n} subagent(s)"),
+                                            StatusKind::Warn,
+                                        );
                                     }
                                 }
                             }

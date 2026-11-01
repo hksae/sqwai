@@ -360,7 +360,7 @@ fn toast_replaces_previous_notice() {
 }
 
 #[test]
-fn status_bar_ignores_subagents_and_abort_cancels_running_children() {
+fn status_bar_ignores_subagents_and_stop_keeps_child_rows() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.subagents
         .push((1, "one".into(), "running".into(), String::new(), false));
@@ -392,11 +392,15 @@ fn status_bar_ignores_subagents_and_abort_cancels_running_children() {
         expanded: false,
         ask: None,
     });
-    app.clear_subagent_ui_on_stop();
-    assert!(app.subagents.is_empty());
-    assert!(!app.segments.iter().any(|segment| {
+    // A stop no longer drops child rows: a paused writer keeps its place
+    // for the next message, and its history stays one click away.
+    app.retire_unfinished_rows();
+    assert_eq!(app.subagents.len(), 2);
+    assert!(app.segments.iter().any(|segment| {
         matches!(segment, Segment::Subagent { .. })
-            || matches!(segment, Segment::Tool { name, .. } if name == "subagent")
+    }));
+    assert!(app.segments.iter().any(|segment| {
+        matches!(segment, Segment::Tool { name, .. } if name == "subagent")
     }));
 }
 

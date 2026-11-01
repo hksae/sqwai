@@ -294,6 +294,9 @@ pub struct App {
     /// runner flips the registry status; retrying a few milliseconds later
     /// keeps the completion record from being dropped on the floor.
     pub(super) background_merge_at: Option<Instant>,
+    /// A pause was just issued; a second idle Esc destroys the writers even
+    /// if the registry has not observed the async pause yet.
+    pub(super) children_paused: bool,
     /// derived visible steps from the active structured plan
     todos: Vec<String>,
     /// tracked child agents shown in the overview
@@ -795,6 +798,7 @@ impl App {
             agent: None,
             background: std::collections::HashMap::new(),
             background_merge_at: None,
+            children_paused: false,
             test_churn: None,
             test_approvals: std::collections::VecDeque::new(),
             test_approval_total: 0,

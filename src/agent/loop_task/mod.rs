@@ -126,27 +126,140 @@ pub(crate) fn suppress_running_reports(registry: &BackgroundRegistry, turn: u64)
     }
 }
 
-/// How many background children a session still runs. The registry outlives
-/// a turn, so this is what the end-of-turn notice counts.
-pub(crate) fn running_background(registry: &BackgroundRegistry) -> usize {
-    // `try_lock` because the TUI asks this synchronously while idle; a busy
-    // registry means a spawn is mid-flight, and the answer is still true.
+/// `(running, paused)` for the end-of-turn note and the TUI status row.
+pub(crate) fn background_counts(registry: &BackgroundRegistry) -> (usize, usize) {
     registry
         .try_lock()
         .map(|entries| {
-            entries
+            let running = entries
                 .values()
                 .filter(|entry| entry.status == "running")
-                .count()
+                .count();
+            let paused = entries
+                .values()
+                .filter(|entry| entry.status == "paused")
+                .count();
+            (running, paused)
         })
-        .unwrap_or(0)
+        .unwrap_or((0, 0))
+}
+
+/// Park every running background child: kill its tool first, then let it stop
+/// at its next boundary. The registry status changes immediately so the UI
+/// and `subagents list` say "paused" while the child is winding down.
+pub(crate) async fn pause_background(registry: &BackgroundRegistry) -> usize {
+    use std::sync::atomic::Ordering;
+    let (targets, paused) = {
+        let mut entries = registry.lock().await;
+        let mut paused = 0usize;
+        let mut targets = Vec::new();
+        for entry in entries.values_mut() {
+            if entry.status != "running" {
+                continue;
+            }
+            entry.status = "paused";
+            paused += 1;
+            let mut mailbox = entry.steer.lock().await;
+            if mailbox.controls.is_empty() {
+                mailbox.pending_pause = true;
+            }
+            targets.push((
+                mailbox.controls.clone(),
+                mailbox.cancels.clone(),
+                mailbox.pauses.clone(),
+            ));
+        }
+        (targets, paused)
+    };
+    for (controls, cancels, pauses) in targets {
+        for cancel in cancels {
+            cancel.store(true, Ordering::Relaxed);
+        }
+        for pause in pauses {
+            pause.store(true, Ordering::Relaxed);
+        }
+        for control in controls {
+            let _ = control.send(ControlMsg::Pause).await;
+        }
+    }
+    paused
+}
+
+/// Resume every parked child. The child clears its own pause flag when it
+/// consumes Resume; its runner restarts the task clock at the same moment.
+pub(crate) async fn resume_background(registry: &BackgroundRegistry) -> usize {
+    use std::sync::atomic::Ordering;
+    let (targets, resumed) = {
+        let mut entries = registry.lock().await;
+        let mut resumed = 0usize;
+        let mut targets = Vec::new();
+        for entry in entries.values_mut() {
+            if entry.status != "paused" {
+                continue;
+            }
+            entry.status = "running";
+            resumed += 1;
+            let mut mailbox = entry.steer.lock().await;
+            mailbox.pending_pause = false;
+            targets.push((
+                mailbox.controls.clone(),
+                mailbox.cancels.clone(),
+                mailbox.pauses.clone(),
+            ));
+        }
+        (targets, resumed)
+    };
+    for (controls, cancels, pauses) in targets {
+        for cancel in cancels {
+            cancel.store(false, Ordering::Relaxed);
+        }
+        for pause in pauses {
+            pause.store(false, Ordering::Relaxed);
+        }
+        for control in controls {
+            let _ = control.send(ControlMsg::Resume).await;
+        }
+    }
+    resumed
+}
+
+/// Hard-kill every background child that is not already finished. Used by a
+/// second Esc and by session deletion: a paused child must not survive it.
+pub(crate) async fn kill_background(registry: &BackgroundRegistry) -> usize {
+    let mut entries = registry.lock().await;
+    let mut killed = 0usize;
+    for entry in entries.values_mut() {
+        if matches!(entry.status, "completed" | "failed" | "killed") {
+            continue;
+        }
+        if let Some(abort) = entry.abort.as_ref() {
+            abort.abort();
+        }
+        entry.status = "killed";
+        entry.output = Some("subagent killed by user".into());
+        entry.delivered = true;
+        entry.notify.notify_waiters();
+        killed += 1;
+    }
+    killed
 }
 /// Child control senders of one background batch, plus messages that arrived
 /// before the child registered its channel.
 #[derive(Default)]
 pub(crate) struct SteerMailbox {
     pub(crate) controls: Vec<mpsc::Sender<ControlMsg>>,
+    /// Cooperative-cancel flags of the registered children. Pause sets these
+    /// before the child reaches a control boundary, so a running tool (and
+    /// its process) stops immediately instead of after the next request.
+    pub(crate) cancels: Vec<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// Pause flags of the registered children. Set directly by the host so
+    /// the boundary check sees the request even before the child drains the
+    /// control message.
+    pub(crate) pauses: Vec<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     pub(crate) pending: Vec<(String, bool)>,
+    /// Pause requested before the child registered its control channel.
+    /// Resume clears it; if the child never ran, there is nothing to resume.
+    pub(crate) pending_pause: bool,
 }
 type SteerControls = std::sync::Arc<tokio::sync::Mutex<SteerMailbox>>;
 
@@ -403,6 +516,11 @@ pub enum ControlMsg {
     ApprovalAnswer { id: u64, decision: ApprovalDecision },
     /// a parent message for a running child, delivered at its next request
     Steer { text: String, interrupt: bool },
+    /// stop issuing work at the next boundary and park until resumed; a
+    /// running tool is cancelled first so no process survives the pause
+    Pause,
+    /// continue a parked child from the boundary where it stopped
+    Resume,
 }
 
 pub struct AgentHandle {
@@ -417,6 +535,9 @@ pub struct AgentHandle {
     /// finished on its own. This flag lets the tool notice the request at its
     /// own polling point and stop the process itself.
     cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Set while the child is parked on a pause. The runner reads it to stop
+    /// the per-task timeout while nothing runs.
+    pause: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl AgentHandle {
@@ -439,6 +560,19 @@ impl AgentHandle {
     /// a second Esc to a hard abort instead of requesting twice.
     pub fn cancel_requested(&self) -> bool {
         self.cancel.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Whether the child is parked on a pause (read by its runner to stop
+    /// the task timeout while nothing runs).
+    pub fn paused_flag(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        self.pause.clone()
+    }
+
+    /// The cooperative-cancel flag, shared with a child's tool dispatch. The
+    /// host sets it to stop a running tool the moment a pause starts, before
+    /// the child reaches its next control boundary.
+    pub fn cancel_flag(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        self.cancel.clone()
     }
 
     /// The stop half of this handle for the S1 child registry
@@ -648,16 +782,66 @@ async fn subagents_control(
     }
 }
 
-fn take_steer(ctl: &mut mpsc::Receiver<ControlMsg>) -> (Vec<String>, bool) {
+fn take_steer(
+    ctl: &mut mpsc::Receiver<ControlMsg>,
+    pause: &std::sync::atomic::AtomicBool,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> (Vec<String>, bool) {
+    use std::sync::atomic::Ordering;
     let mut texts = Vec::new();
     let mut interrupt = false;
     while let Ok(msg) = ctl.try_recv() {
-        if let ControlMsg::Steer { text, interrupt: i } = msg {
-            texts.push(text);
-            interrupt |= i;
+        match msg {
+            ControlMsg::Steer { text, interrupt: i } => {
+                texts.push(text);
+                interrupt |= i;
+            }
+            ControlMsg::Pause => {
+                // A pause kills the running tool first: the child might not
+                // reach its next boundary for a while, and no process may
+                // outlive the user's stop.
+                pause.store(true, Ordering::Relaxed);
+                cancel.store(true, Ordering::Relaxed);
+            }
+            ControlMsg::Resume => {
+                pause.store(false, Ordering::Relaxed);
+                cancel.store(false, Ordering::Relaxed);
+            }
+            ControlMsg::AskAnswer { .. } | ControlMsg::ApprovalAnswer { .. } => {}
         }
     }
     (texts, interrupt)
+}
+
+/// Park a paused child at its next request boundary. Everything it already
+/// produced is in `messages`; the next request after Resume sees the
+/// cancelled tool results and decides what to do. Steers that arrive while
+/// parked wait in the transcript for that request. `false` means the control
+/// channel closed — the runner is gone, so the loop must stop.
+async fn park_paused(
+    ctl: &mut mpsc::Receiver<ControlMsg>,
+    pause: &std::sync::atomic::AtomicBool,
+    cancel: &std::sync::atomic::AtomicBool,
+    messages: &mut Vec<Message>,
+) -> bool {
+    use std::sync::atomic::Ordering;
+    while pause.load(Ordering::Relaxed) {
+        match ctl.recv().await {
+            Some(ControlMsg::Resume) => {
+                pause.store(false, Ordering::Relaxed);
+                cancel.store(false, Ordering::Relaxed);
+            }
+            Some(ControlMsg::Steer { text, .. }) => {
+                messages.push(parent_message_message(&text));
+            }
+            Some(ControlMsg::Pause) => {
+                cancel.store(true, Ordering::Relaxed);
+            }
+            Some(ControlMsg::AskAnswer { .. } | ControlMsg::ApprovalAnswer { .. }) => {}
+            None => return false,
+        }
+    }
+    true
 }
 
 fn parent_message_message(text: &str) -> Message {
@@ -786,12 +970,21 @@ pub fn spawn_agent(input: AgentInput) -> AgentHandle {
     let (tx, rx) = mpsc::channel::<AgentEvent>(256);
     let (ctl_tx, ctl_rx) = mpsc::channel::<ControlMsg>(32);
     let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let abort = tokio::spawn(run_agent(input, tx, ctl_rx, cancel.clone())).abort_handle();
+    let pause = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let abort = tokio::spawn(run_agent(
+        input,
+        tx,
+        ctl_rx,
+        cancel.clone(),
+        pause.clone(),
+    ))
+    .abort_handle();
     AgentHandle {
         rx,
         control: ctl_tx,
         abort,
         cancel,
+        pause,
     }
 }
 
@@ -1218,6 +1411,7 @@ async fn run_agent(
     tx: mpsc::Sender<AgentEvent>,
     mut ctl: mpsc::Receiver<ControlMsg>,
     cancel_tool: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pause_signal: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
     let AgentInput {
         mut provider,
@@ -1452,7 +1646,7 @@ async fn run_agent(
         .in_session(&session_id)
         .with_shadow_store(shadow_store)
         .with_plan_limits(plan_limits, context_limit)
-        .with_cancel(cancel_tool)
+        .with_cancel(cancel_tool.clone())
         .with_vision(vision)
         .with_pdf(pdf);
     // session-wide approval state rides the context: full access resolves
@@ -1661,7 +1855,7 @@ async fn run_agent(
         // Parent messages reach a child at its next request boundary. The
         // main agent never receives steer: sends are addressed to child ids.
         if subagent_depth > 0 {
-            let (texts, _) = take_steer(&mut ctl);
+            let (texts, _) = take_steer(&mut ctl, &pause_signal, &cancel_tool);
             for text in texts {
                 messages.push(parent_message_message(&text));
             }
@@ -1679,6 +1873,14 @@ async fn run_agent(
                 summary: summary.clone(),
             })
             .await;
+        // A paused child parks here, before compaction or a model request,
+        // with its transcript already saved. No tool follows a pause.
+        if subagent_depth > 0
+            && pause_signal.load(std::sync::atomic::Ordering::Relaxed)
+            && !park_paused(&mut ctl, &pause_signal, &cancel_tool, &mut messages).await
+        {
+            break;
+        }
         // the plan nudge rides at most one mutating result per model
         // request: every result carrying it waters the next one down
         plan_nudged = false;
@@ -2081,7 +2283,7 @@ async fn run_agent(
         // final answer it is, rather than re-asking in a loop.
         normalize_call_ids(&mut turn.calls, &history_call_ids(&messages));
         if subagent_depth > 0 {
-            let (texts, interrupt) = take_steer(&mut ctl);
+            let (texts, interrupt) = take_steer(&mut ctl, &pause_signal, &cancel_tool);
             if interrupt {
                 // Soft parent interrupt: keep what the model streamed, drop
                 // the calls it had started, and answer the parent message on
@@ -2100,6 +2302,43 @@ async fn run_agent(
             }
             for text in texts {
                 messages.push(parent_message_message(&text));
+            }
+            if pause_signal.load(std::sync::atomic::Ordering::Relaxed)
+                && !turn.calls.is_empty()
+            {
+                // The stream finished while the pause request was in flight.
+                // Do not execute what it asked for: record the assistant
+                // message and a cancelled result per call, then park. On
+                // resume the model decides anew with those results in view.
+                for (_, handle) in turn.prefetched.drain() {
+                    handle.abort();
+                }
+                messages.push(
+                    Message::new(Role::Assistant, turn.text)
+                        .with_tool_calls(turn.calls.clone())
+                        .with_provider_state(turn.provider_state)
+                        .with_thinking(turn.reasoning_text, turn.reasoning_ms)
+                        .with_provider_tools(turn.provider_tools),
+                );
+                for call in &turn.calls {
+                    messages.push(Message::tool_result(
+                        &call.id,
+                        "paused by the user — this tool call was not run".to_string(),
+                        true,
+                    ));
+                }
+                // Persist the cancelled results before parking, so the child
+                // session on disk matches what the pause kept in memory.
+                let _ = tx
+                    .send(AgentEvent::TranscriptSync {
+                        messages: messages.clone(),
+                        summary: summary.clone(),
+                    })
+                    .await;
+                if !park_paused(&mut ctl, &pause_signal, &cancel_tool, &mut messages).await {
+                    break;
+                }
+                continue;
             }
         }
         if turn.calls.is_empty() {
@@ -3149,6 +3388,12 @@ async fn run_agent(
                     break;
                 }
             }
+        }
+        if (interrupted || limit_hit) && pause_signal.load(std::sync::atomic::Ordering::Relaxed) {
+            // A cancelled tool under a pause is not a stopped turn: the park
+            // at the top of the loop waits for Resume, then the model sees
+            // the cancelled results and continues.
+            interrupted = false;
         }
         if interrupted || limit_hit {
             // and no further model turn is requested this round; the turn
