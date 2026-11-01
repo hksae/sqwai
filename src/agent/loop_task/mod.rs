@@ -348,7 +348,45 @@ impl Drop for AgentHandle {
     }
 }
 
-/// `subagents` tool: list background batches, wait for one report, or stop one.
+/// Move completed, unread background reports into the transcript. Called at
+/// request boundaries and once at turn end; `delivered` makes it idempotent
+/// with `subagents output`.
+async fn drain_background_reports(
+    registry: &BackgroundRegistry,
+    messages: &mut Vec<Message>,
+    tx: &mpsc::Sender<AgentEvent>,
+) {
+    let mut notes: Vec<(String, String)> = Vec::new();
+    {
+        let mut entries = registry.lock().await;
+        for entry in entries.values_mut() {
+            if entry.delivered {
+                continue;
+            }
+            if let Some(output) = entry.output.as_deref() {
+                entry.delivered = true;
+                notes.push((entry.label.clone(), output.to_string()));
+            }
+        }
+    }
+    for (label, output) in notes {
+        let label = label.replace('"', "'");
+        messages.push(Message::new(
+            Role::User,
+            format!(
+                "<subagent_completion task=\"{label}\">\n{}\n</subagent_completion>",
+                output.trim()
+            ),
+        ));
+        let _ = tx
+            .send(AgentEvent::SubagentReportNote {
+                text: format!("background subagent finished: {label}"),
+            })
+            .await;
+    }
+}
+
+
 async fn subagents_control(
     registry: &BackgroundRegistry,
     args: &serde_json::Value,
@@ -1418,6 +1456,9 @@ async fn run_agent(
     let mut next_background_id: u64 = 1;
 
     loop {
+        // A finished background child joins the next request, not only the
+        // turn's end: the parent can use the report while it still works.
+        drain_background_reports(&background_registry, &mut messages, &tx).await;
         // Transcript sync for hard-abort survival: every iteration persists
         // the conversation so far, so killing the task loses at most the
         // in-flight request. Children emit it too — their runner writes it to
@@ -2883,34 +2924,7 @@ async fn run_agent(
     for join in joins {
         let _ = join.await;
     }
-    let mut notes: Vec<(String, String)> = Vec::new();
-    {
-        let mut entries = background_registry.lock().await;
-        for entry in entries.values_mut() {
-            if entry.delivered {
-                continue;
-            }
-            if let Some(output) = entry.output.as_deref() {
-                entry.delivered = true;
-                notes.push((entry.label.clone(), output.to_string()));
-            }
-        }
-    }
-    for (label, output) in notes {
-        let label = label.replace('"', "'");
-        messages.push(Message::new(
-            Role::User,
-            format!(
-                "<subagent_completion task=\"{label}\">\n{}\n</subagent_completion>",
-                output.trim()
-            ),
-        ));
-        let _ = tx
-            .send(AgentEvent::SubagentReportNote {
-                text: format!("background subagent finished: {label}"),
-            })
-            .await;
-    }
+    drain_background_reports(&background_registry, &mut messages, &tx).await;
 
     let _ = tx
         .send(AgentEvent::Completed(Ok(AgentOutcome {
