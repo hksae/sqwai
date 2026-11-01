@@ -334,12 +334,11 @@ instructions.",
             name: "subagent",
             kind: Kind::ReadOnly,
             description: "Delegate 1–8 focused tasks to isolated child agents (up to 4 \
-concurrently). Use it for recon whose output is large compared with what you will use — exploring \
-a codebase, gathering docs or web pages, sweeping logs — so the child reads the bytes and you get \
-the report. Read-only explorers gather broadly without polluting parent context; scoped \
-writers get `write: true, paths` with non-overlapping scopes. Pass `files`, `context`, `skills` \
-and `clean` as needed. Returns each report with a host-verified receipt of executed tools and \
-modified files.",
+concurrently). Use it for work whose bytes would cost more context than the report they \
+produce: exploring a codebase, gathering docs or web pages, sweeping logs, or a disjoint \
+task. A child has the same tools and approval mode as you. Pass `files`, `paths`, `context`, \
+`skills`, `clean` and `timeout_secs` as needed. Returns each report with a host-built header \
+of executed tools and modified files.",
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -360,8 +359,7 @@ modified files.",
                                         "description": {"type": "string"},
                                         "context": {"type": "string", "description": "optional background/decisions from parent to guide the child"},
                                         "files": {"type": "array", "items": {"type": "string"}, "description": "optional starting file/dir paths to inspect"},
-                                        "write": {"type": "boolean", "description": "allow file writes, scoped to paths"},
-                                        "paths": {"type": "array", "items": {"type": "string"}, "description": "write scope roots (required with write:true; or focus paths when write:false)"},
+                                        "paths": {"type": "array", "items": {"type": "string"}, "description": "optional focus paths; they guide the child but never bound its writes"},
                                         "skills": {"type": "array", "items": {"type": "string"}, "description": "optional skill names from <available_skills> to preload into this subagent"},
                                         "clean": {"type": "boolean", "description": "when true, omit <parent_context> for this task so it runs with a clean slate"},
                                         "timeout_secs": {"type": "integer", "minimum": 1, "maximum": 86400, "description": "optional wall-clock budget for this task; the child stops with partial output at the limit"}

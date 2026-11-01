@@ -30,10 +30,8 @@ fn accepts_one_or_many_subagent_tasks() {
             .unwrap_err()
             .contains("tasks")
     );
-    // strings are read-only writers of nothing
     for task in subagent_tasks_from_args(&serde_json::json!({"tasks":["one"]})).unwrap() {
-        assert!(!task.write);
-        assert!(task.paths.is_empty());
+        assert!(task.paths.is_empty(), "no focus paths were given");
     }
 }
 
@@ -68,35 +66,20 @@ fn accepts_object_shaped_subagent_tasks() {
 }
 
 #[test]
-fn subagent_writer_scope_rules() {
-    // write without paths refuses: a scope must be declared
-    let error = subagent_tasks_from_args(&serde_json::json!({
-        "tasks": [{"task": "fix it", "write": true}]
-    }))
-    .unwrap_err();
-    assert!(error.contains("needs paths"), "{error}");
-
-    // overlapping writer scopes refuse, naming the conflict
-    let error = subagent_tasks_from_args(&serde_json::json!({
-        "tasks": [
-            {"task": "fix a", "write": true, "paths": ["src/a"]},
-            {"task": "fix b", "write": true, "paths": ["src/a/b.rs"]},
-        ]
-    }))
-    .unwrap_err();
-    assert!(error.contains("overlap"), "{error}");
-
-    // disjoint writers pass with normalized scopes
+fn paths_are_focus_not_a_write_scope() {
+    // `write` is gone: a task with or without it parses the same, and paths
+    // only name where the child should start.
     let tasks = subagent_tasks_from_args(&serde_json::json!({
         "tasks": [
             {"task": "fix a", "write": true, "paths": ["src/a/", "./src/b"]},
             {"task": "read all"},
+            {"task": "no paths", "write": true}
         ]
     }))
     .unwrap();
-    assert!(tasks[0].write);
     assert_eq!(tasks[0].paths, vec!["src/a", "src/b"]);
-    assert!(!tasks[1].write);
+    assert!(tasks[1].paths.is_empty());
+    assert!(tasks[2].paths.is_empty(), "no scope is required anymore");
 }
 
 #[test]

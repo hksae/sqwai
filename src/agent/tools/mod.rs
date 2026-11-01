@@ -25,9 +25,7 @@ pub(crate) use dispatch::{
 };
 pub(crate) use git::porcelain_paths;
 pub(crate) use policy::{
-    bash_scope_hit, first_host_secret_target, first_host_state_target, first_outside_target,
-    register_subagent_scope,
-    take_subagent_scope,
+    first_host_secret_target, first_host_state_target, first_outside_target,
 };
 pub(crate) use specs::{
     Kind, args_fingerprint, call_path, call_summary, decode_child_output, is_mutating_call,

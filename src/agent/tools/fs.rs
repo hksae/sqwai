@@ -124,6 +124,9 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 /// guard shared by destructive writes: overwriting an existing file and
 /// replace_all edits proceed only on a fresh read — blind mass changes
 /// are the one failure exact matching cannot catch.
+/// Every write to an existing file needs a read first: a concurrent child (or
+/// the user) may have changed the file since this model last saw it, and an
+/// exact-match edit against blind content is still a lost update.
 fn require_read(ctx: &ToolCtx, p: &Path) -> Result<(), String> {
     match ctx.read_state(p) {
         super::ReadState::Current => Ok(()),
@@ -136,21 +139,6 @@ fn require_read(ctx: &ToolCtx, p: &Path) -> Result<(), String> {
              or the edit will be based on content that is gone",
             p.display()
         )),
-    }
-}
-
-/// freshness-only gate for self-validating writes: single exact edits and
-/// edits match-or-error before touching disk, so they need no
-/// prior read — but working from a stale read is still refused, stale
-/// knowledge pointing at moved code.
-fn require_fresh(ctx: &ToolCtx, p: &Path) -> Result<(), String> {
-    match ctx.read_state(p) {
-        super::ReadState::Stale => err(format!(
-            "edit denied: {} changed since you read it — read it again before editing, \
-             or the edit will be based on content that is gone",
-            p.display()
-        )),
-        super::ReadState::Current | super::ReadState::Unread => Ok(()),
     }
 }
 
@@ -676,13 +664,32 @@ fn restore_bom(edited: String, had_bom: bool) -> String {
     }
 }
 
+/// One in-process writer at a time per path: two children can read the same
+/// file, then the second must see the first's bytes and refuse its stale
+/// edit instead of overwriting them. Different paths stay parallel.
+fn write_path_lock(path: &Path) -> std::sync::Arc<std::sync::Mutex<()>> {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex, OnceLock};
+    static LOCKS: OnceLock<Mutex<HashMap<std::path::PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
+    let key = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let map = LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = map.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard
+        .entry(key)
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone()
+}
+
 pub(super) fn write_file(ctx: &mut ToolCtx, raw: &str, content: &str) -> Outcome {
-    let exists = {
-        // probe without failing when missing
-        ctx.resolve(raw)
-            .map(|p| p.exists())
-            .unwrap_or(false)
+    let p = match ctx.resolve(raw) {
+        Ok(p) => p,
+        Err(e) => return Outcome::err(e),
     };
+    let exists = p.exists();
+    let write_lock = write_path_lock(&p);
+    let _write_guard = write_lock
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     // previous contents, kept for the post-facto diff
     let mut prev: Option<String> = None;
     // the encoding marker the file carried: a whole-file rewrite must not
@@ -702,10 +709,6 @@ pub(super) fn write_file(ctx: &mut ToolCtx, raw: &str, content: &str) -> Outcome
             had_bom = split_bom(text).1;
         }
     }
-    let p = match ctx.resolve(raw) {
-        Ok(p) => p,
-        Err(e) => return Outcome::err(e),
-    };
     if let Some(parent) = p.parent()
         && let Err(e) = fs::create_dir_all(parent)
     {
@@ -1364,14 +1367,14 @@ pub(super) fn edit(
         Ok(p) => p,
         Err(e) => return Outcome::err(e),
     };
-    // mass replacement without a fresh read is blind destruction; a single
-    // exact edit is self-validating (match-or-error before touching disk)
-    // and only needs the file to be non-stale
-    if replace_all {
-        if let Err(e) = require_read(ctx, &p) {
-            return Outcome::err(e);
-        }
-    } else if let Err(e) = require_fresh(ctx, &p) {
+    let write_lock = write_path_lock(&p);
+    let _write_guard = write_lock
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // mass replacement without a fresh read is blind destruction; every edit
+    // now needs the read, because another writer may have moved the file
+    // since this model last saw it.
+    if let Err(e) = require_read(ctx, &p) {
         return Outcome::err(e);
     }
     let original = match fs::read_to_string(&p) {

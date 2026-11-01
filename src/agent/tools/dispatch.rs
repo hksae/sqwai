@@ -3,7 +3,7 @@ use super::exec;
 use super::fs;
 use super::git;
 use super::outline;
-use super::policy::{bash_scope_hit, in_write_scope, mutation_target_paths, step_epoch_current};
+use super::policy::step_epoch_current;
 use super::verify::{rejection, with_authorship, with_blast_radius};
 use crate::plan;
 use serde_json::Value;
@@ -336,52 +336,6 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
         }
         _ => None,
     };
-    // Writer-subagent scope: a child declared its roots at spawn, and every
-    // file mutation must sit inside them. Read-only children never reach
-    // here (refused above); the main agent carries no scope.
-    if ctx.subagent_step.is_some()
-        && let Some(allowed) = ctx.subagent_write_paths.as_ref()
-    {
-        if matches!(name, "write" | "edit") {
-            let outside = mutation_target_paths(ctx, args)
-                .into_iter()
-                .find(|target| !in_write_scope(target, allowed));
-            if let Some(path) = outside {
-                return Outcome::err(
-                    serde_json::json!({
-                        "ok": false,
-                        "code": "subagent_scope",
-                        "reason": format!(
-                            "'{path}' is outside this subagent's declared write scope ({})",
-                            allowed.join(", ")
-                        ),
-                        "hint": "stay inside the spawned scope, or spawn with wider paths",
-                    })
-                    .to_string(),
-                );
-            }
-        }
-        // Shell writes are analyzed best-effort (see `bash_scope_hit`):
-        // explicit out-of-scope targets refuse, the rest runs.
-        if name == "bash"
-            && let Some(target) =
-                bash_scope_hit(ctx, allowed, args["command"].as_str().unwrap_or_default())
-        {
-            return Outcome::err(
-                serde_json::json!({
-                    "ok": false,
-                    "code": "subagent_scope",
-                    "reason": format!(
-                        "'{target}' is outside this subagent's declared write scope ({})",
-                        allowed.join(", ")
-                    ),
-                    "hint": "stay inside the spawned scope, or spawn with wider paths",
-                })
-                .to_string(),
-            );
-        }
-    }
-
     match name {
         "read" => fs::read(ctx, args["file_path"].as_str().unwrap_or_default(), args),
         "view_image" => super::view_image::view(ctx, args),

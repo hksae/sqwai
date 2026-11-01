@@ -111,7 +111,6 @@ pub struct ToolCtx {
     /// file mutation must sit inside these project-relative roots. Taken
     /// from the spawn registry at construction; read-only children and
     /// the main agent never set it.
-    pub subagent_write_paths: Option<Vec<String>>,
     /// Session id of the spawning agent, if any (audit H1). A child starts
     /// with an empty events, so its own taint reads clean no matter what
     /// the parent consumed; trust gates must see the parent's external
@@ -192,7 +191,6 @@ impl ToolCtx {
             shadow_store: crate::config::ShadowStore::default(),
             current_step: None,
             subagent_step: None,
-            subagent_write_paths: None,
             parent_session: None,
             background_baselines: false,
             current_call_id: None,

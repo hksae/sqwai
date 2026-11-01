@@ -5,10 +5,7 @@
 //!
 use super::ToolCtx;
 use crate::plan;
-use serde_json::Value;
-use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Mutex, OnceLock};
 
 /// True when the step a subagent was spawned for still exists in the named
 /// plan at exactly the inherited epoch. Anything else — reopened,
@@ -21,56 +18,6 @@ pub(crate) fn step_epoch_current(root: &Path, inherited: &plan::StepContext) -> 
         .iter()
         .find(|step| step.id == inherited.step_id)
         .is_some_and(|step| step.step_epoch == inherited.step_epoch)
-}
-
-/// Project-relative, lexically cleaned mutation targets of a file-writing
-/// call: the `file_path` of a write or an edit.
-/// Unresolvable or empty spellings yield nothing — the tool's own
-/// validation reports those, not the scope gates.
-pub(crate) fn mutation_target_paths(ctx: &ToolCtx, args: &Value) -> Vec<String> {
-    let raw = args["file_path"].as_str().unwrap_or_default();
-    if raw.trim().is_empty() {
-        return Vec::new();
-    }
-    let raws: Vec<String> = vec![raw.to_string()];
-    raws.into_iter()
-        .filter_map(|raw| {
-            // scope decisions run in canonical space: the OS resolves
-            // symlinks, the lexical spelling does not (audit H3)
-            let rel = ctx.resolve_scope_rel(&raw).ok()?;
-            Some(lexical_clean(&rel))
-        })
-        .collect()
-}
-
-/// First write target of a shell command outside the subagent scope, if
-/// any. Best-effort: redirect
-/// destinations plus operands of the classic mutating shapes (tee, cp/mv/
-/// install/rsync/ln, dd's `of=`, truncate/mkdir/rmdir/rm/touch, in-place
-/// sed, patch application). Only what a shape *writes* counts: a mover's
-/// sources are reads (its destination is its last operand), a sed script is
-/// not a file, `/dev/null` is a sink. An unresolvable target fails closed (it
-/// is an escape or it never reaches the tree — either way not an in-scope
-/// write). What slips past — implicit writes like a test run rebuilding
-/// `target/`, `cd` games, writers outside the list (python, cargo) — is
-/// documented, not fixed: refusing all bash for scoped children would brick
-/// their legitimate test runs, and the journal plus the shadow copy see those
-/// writes either way.
-pub(crate) fn bash_scope_hit(ctx: &ToolCtx, scope: &[String], command: &str) -> Option<String> {
-    for target in bash_write_targets(command) {
-        // canonical, not lexical: a symlink inside scope can point at a
-        // sibling's directory, and the OS follows it (audit H3)
-        match ctx.resolve_scope_rel(&target) {
-            Ok(rel) => {
-                let rel = lexical_clean(&rel);
-                if !in_write_scope(&rel, scope) {
-                    return Some(rel);
-                }
-            }
-            Err(_) => return Some(target),
-        }
-    }
-    None
 }
 
 /// The first write target of this command that lands outside the project
@@ -394,58 +341,6 @@ fn shell_segments(command: &str) -> Vec<Vec<String>> {
         segments.push(words);
     }
     segments
-}
-
-/// Lexically clean a relative path: drop `.`, resolve `..` against the
-/// stack. No filesystem access — the jail verdict already came from
-/// `resolve`.
-pub(crate) fn lexical_clean(path: &str) -> String {
-    let mut stack: Vec<&str> = Vec::new();
-    for comp in path.split('/') {
-        match comp {
-            "" | "." => {}
-            ".." => {
-                if stack.last().is_some_and(|top| *top != "..") {
-                    stack.pop();
-                } else {
-                    stack.push("..");
-                }
-            }
-            _ => stack.push(comp),
-        }
-    }
-    stack.join("/")
-}
-
-/// Writer scopes of live subagents, keyed by child session. Written at
-/// spawn (after scope validation), taken once at child-context
-/// construction — single take, so a crashed spawn cannot poison anything
-/// later (session ids are unique per spawn).
-fn subagent_scopes() -> &'static Mutex<HashMap<String, Vec<String>>> {
-    static SCOPES: OnceLock<Mutex<HashMap<String, Vec<String>>>> = OnceLock::new();
-    SCOPES.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-/// Register a writer child's path scope. Called at spawn, after the
-/// write flag and the sibling-overlap checks passed.
-pub(crate) fn register_subagent_scope(session: &str, paths: Vec<String>) {
-    subagent_scopes()
-        .lock()
-        .unwrap()
-        .insert(session.to_string(), paths);
-}
-
-/// Take a registered scope for child-context construction.
-pub(crate) fn take_subagent_scope(session: &str) -> Option<Vec<String>> {
-    subagent_scopes().lock().unwrap().remove(session)
-}
-
-/// True when `path` (project-relative, forward slashes) sits inside one
-/// of the scope roots: equal, nested under a root, or the whole tree (`.`).
-pub(crate) fn in_write_scope(path: &str, scope: &[String]) -> bool {
-    scope
-        .iter()
-        .any(|root| path == root || path.starts_with(&format!("{root}/")) || root == ".")
 }
 
 #[cfg(test)]

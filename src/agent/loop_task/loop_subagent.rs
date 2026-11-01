@@ -45,7 +45,7 @@ fn subagent_task_text(item: &serde_json::Value) -> Option<String> {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct SubagentTask {
     pub(crate) label: String,
-    pub(crate) write: bool,
+    /// focus paths the child should start from; never a write boundary
     pub(crate) paths: Vec<String>,
     pub(crate) context: Option<String>,
     pub(crate) files: Vec<String>,
@@ -70,9 +70,8 @@ fn normalize_rel_path_list(arr: &[serde_json::Value]) -> Vec<String> {
 
 fn subagent_task_spec(item: &serde_json::Value, default_clean: bool) -> Option<SubagentTask> {
     let label = subagent_task_text(item)?;
-    let (write, paths, context, files, skills, clean, timeout_secs) = match item {
+    let (paths, context, files, skills, clean, timeout_secs) = match item {
         serde_json::Value::Object(map) => {
-            let write = map.get("write").and_then(|v| v.as_bool()).unwrap_or(false);
             let paths = map
                 .get("paths")
                 .and_then(|v| v.as_array())
@@ -109,10 +108,9 @@ fn subagent_task_spec(item: &serde_json::Value, default_clean: bool) -> Option<S
                 .get("timeout_secs")
                 .and_then(|v| v.as_u64())
                 .filter(|secs| *secs > 0);
-            (write, paths, context, files, skills, clean, timeout_secs)
+            (paths, context, files, skills, clean, timeout_secs)
         }
         _ => (
-            false,
             Vec::new(),
             None,
             Vec::new(),
@@ -123,23 +121,12 @@ fn subagent_task_spec(item: &serde_json::Value, default_clean: bool) -> Option<S
     };
     Some(SubagentTask {
         label,
-        write,
         paths,
         context,
         files,
         skills,
         clean,
         timeout_secs,
-    })
-}
-
-/// Two writer scopes overlap when a path is equal or nested either way.
-/// Sibling writers must not overlap: concurrent writes to one file tangle
-/// attribution and undo beyond what epochs can separate.
-fn scopes_overlap(a: &[String], b: &[String]) -> bool {
-    a.iter().any(|x| {
-        b.iter()
-            .any(|y| x == y || x.starts_with(&format!("{y}/")) || y.starts_with(&format!("{x}/")))
     })
 }
 
@@ -168,30 +155,6 @@ pub(crate) fn subagent_tasks_from_args(
         return Err(format!(
             "too many subagents: maximum is {MAX_SUBAGENTS_PER_CALL}"
         ));
-    }
-    // writers declare their scope up front; overlapping siblings refuse
-    // before anything spawns, naming both sides.
-    for task in &tasks {
-        if task.write && task.paths.is_empty() {
-            return Err(format!(
-                "subagent write needs paths: task '{}' declares write without a scope — name the roots it may touch",
-                task.label.chars().take(80).collect::<String>()
-            ));
-        }
-    }
-    for (i, a) in tasks.iter().enumerate() {
-        if !a.write {
-            continue;
-        }
-        for b in tasks.iter().skip(i + 1) {
-            if b.write && scopes_overlap(&a.paths, &b.paths) {
-                return Err(format!(
-                    "subagent writer scopes overlap: '{}' and '{}' share paths — split the scopes or serialize the work",
-                    a.label.chars().take(60).collect::<String>(),
-                    b.label.chars().take(60).collect::<String>()
-                ));
-            }
-        }
     }
     Ok(tasks)
 }
@@ -491,7 +454,6 @@ pub(crate) async fn run_subagent(
                 one.args = serde_json::json!({
                     "tasks": [{
                         "task": task.label,
-                        "write": task.write,
                         "paths": task.paths,
                         "context": task.context,
                         "files": task.files,
@@ -568,12 +530,9 @@ pub(crate) async fn run_subagent(
     let id = next_subagent_id();
     let child_session = next_subagent_session();
     let started = std::time::Instant::now();
-    // Read-only by default: a writer child needs the explicit flag (with
-    // paths, validated above) on top of the session lock.
-    let child_read_only = read_only || !task.write;
-    if task.write {
-        tools::register_subagent_scope(&child_session, task.paths.clone());
-    }
+    // Only the project writer lock makes a child read-only; a child may
+    // write anywhere its approvals allow.
+    let child_read_only = read_only;
     // NOTE: children always complete inside this tool call — the
     // event loop below is awaited before the outcome returns. There is no
     // fire-and-forget spawn, so `plan finish` can never race still-running
@@ -1129,11 +1088,9 @@ fn elapsed_label(elapsed: std::time::Duration) -> String {
 pub(crate) fn build_subagent_user_prompt(task: &SubagentTask) -> String {
     let mut prompt = task.label.clone();
     let mut focus_files = task.files.clone();
-    if !task.write {
-        for p in &task.paths {
-            if !focus_files.contains(p) {
-                focus_files.push(p.clone());
-            }
+    for p in &task.paths {
+        if !focus_files.contains(p) {
+            focus_files.push(p.clone());
         }
     }
     if !focus_files.is_empty() {

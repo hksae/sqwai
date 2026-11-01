@@ -139,262 +139,6 @@ fn a_read_only_child_may_still_keep_its_own_plan() {
     assert!(refused.output.contains("read-only"), "{}", refused.output);
 }
 
-/// A writer subagent stays inside its declared scope: same file and
-/// nested paths pass, siblings refuse with a structured code. Reads
-/// are unaffected, and the main agent (no scope) is unaffected too.
-#[test]
-fn subagent_write_scope_confines_file_mutations() {
-    let (mut ctx, dir) = proj();
-    let created = plan_op(
-        &mut ctx,
-        &json!({
-            "op": "create",
-            "goal": "scoped child",
-            "acceptance": ["manual: eyeball it"],
-            "steps": [{"title": "work"}]
-        }),
-    );
-    assert!(created.ok, "{}", created.output);
-    let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
-    ctx.subagent_step = Some(plan::StepContext {
-        plan_id: plan_id.clone(),
-        step_id: "1".into(),
-        step_epoch: 0,
-    });
-    ctx.subagent_write_paths = Some(vec!["src".to_string()]);
-
-    let inside = execute(
-        &mut ctx,
-        "write",
-        &json!({"file_path": "src/child.rs", "content": "fresh\n"}),
-    );
-    assert!(inside.ok, "{}", inside.output);
-
-    let outside = execute(
-        &mut ctx,
-        "write",
-        &json!({"file_path": "notes.txt", "content": "elsewhere\n"}),
-    );
-    assert!(!outside.ok, "{}", outside.output);
-    assert!(
-        outside.output.contains("subagent_scope"),
-        "{}",
-        outside.output
-    );
-
-    let read = execute(&mut ctx, "read", &json!({"file_path": "README.md"}));
-    assert!(read.ok, "{}", read.output);
-    assert!(!dir.join("notes.txt").exists());
-    fs::remove_dir_all(&dir).ok();
-}
-
-/// The scope gate is a boundary, not a suggestion: bash redirects obey
-/// it too. Pre-fix only write and edit were confined — a
-/// scoped child wrote anywhere through `echo x > ../outside`.
-#[test]
-fn subagent_write_scope_confines_bash_redirects() {
-    let (mut ctx, dir) = proj();
-    let created = plan_op(
-        &mut ctx,
-        &json!({
-            "op": "create",
-            "goal": "scoped child",
-            "acceptance": ["manual: eyeball it"],
-            "steps": [{"title": "work"}]
-        }),
-    );
-    assert!(created.ok, "{}", created.output);
-    let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
-    ctx.subagent_step = Some(plan::StepContext {
-        plan_id: plan_id.clone(),
-        step_id: "1".into(),
-        step_epoch: 0,
-    });
-    ctx.subagent_write_paths = Some(vec!["src".to_string()]);
-
-    // a bare command with no write targets runs
-    let plain = execute(&mut ctx, "bash", &json!({"command": "echo hi"}));
-    assert!(plain.ok, "{}", plain.output);
-
-    // a redirect outside the scope refuses BEFORE executing
-    let outside = execute(&mut ctx, "bash", &json!({"command": "echo x > notes.txt"}));
-    assert!(!outside.ok, "{}", outside.output);
-    assert!(
-        outside.output.contains("subagent_scope"),
-        "{}",
-        outside.output
-    );
-    assert!(
-        !dir.join("notes.txt").exists(),
-        "refused write must not land"
-    );
-
-    // the same redirect inside the scope runs
-    let inside = execute(
-        &mut ctx,
-        "bash",
-        &json!({"command": "echo x > src/inside.txt"}),
-    );
-    assert!(inside.ok, "{}", inside.output);
-    assert!(dir.join("src/inside.txt").exists());
-
-    // quoted operators are not redirects
-    let narrated = execute(&mut ctx, "bash", &json!({"command": "echo \"a > b\""}));
-    assert!(narrated.ok, "{}", narrated.output);
-
-    fs::remove_dir_all(&dir).ok();
-}
-
-/// Audit H2: `nohup`/`nice`/`timeout` are transparent execution
-/// prefixes. The scope gate's skip list covered only sudo/doas/env, so
-/// the wrapper became "the binary", no write target was extracted, and
-/// an out-of-scope `mv`/`cp` sailed through.
-#[test]
-fn subagent_scope_sees_through_wrapper_prefixes() {
-    let (mut ctx, dir) = proj();
-    let created = plan_op(
-        &mut ctx,
-        &json!({
-            "op": "create",
-            "goal": "scoped child",
-            "acceptance": ["manual: eyeball it"],
-            "steps": [{"title": "work"}]
-        }),
-    );
-    assert!(created.ok, "{}", created.output);
-    let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
-    ctx.subagent_step = Some(plan::StepContext {
-        plan_id,
-        step_id: "1".into(),
-        step_epoch: 0,
-    });
-    ctx.subagent_write_paths = Some(vec!["src".to_string()]);
-    fs::write(dir.join("src/payload.txt"), "x\n").unwrap();
-
-    for cmd in [
-        "nohup mv src/payload.txt notes-escape.txt",
-        "nice -n 10 cp src/payload.txt notes-escape.txt",
-        "timeout 30 mv src/payload.txt notes-escape.txt",
-    ] {
-        let out = execute(&mut ctx, "bash", &json!({"command": cmd}));
-        assert!(!out.ok, "wrapper prefix escaped the scope: {cmd}");
-        assert!(
-            out.output.contains("subagent_scope"),
-            "expected subagent_scope refusal for `{cmd}`: {}",
-            out.output
-        );
-    }
-    assert!(
-        !dir.join("notes-escape.txt").exists(),
-        "refused write must not land"
-    );
-    fs::remove_dir_all(&dir).ok();
-}
-
-/// operand roles: a scoped child may read from anywhere and write
-/// only inside its scope. A mover's sources are reads, `/dev/null` is a
-/// sink, a sed script is not a file — none of them may refuse.
-#[test]
-fn subagent_scope_reads_outside_and_writes_inside() {
-    let (ctx, dir) = proj();
-    let scope = ["src".to_string()];
-    for cmd in [
-        "mv ../old.rs ./src/new.rs",
-        "cp /etc/hosts src/hosts.copy",
-        "rsync -a ../sibling/ src/sibling/",
-        "make test 2>/dev/null",
-        "sed -i s/old/new/ src/main.rs",
-        "echo done > 'src/status.txt'",
-    ] {
-        assert_eq!(
-            bash_scope_hit(&ctx, &scope, cmd),
-            None,
-            "legal in-scope write must not refuse: {cmd}"
-        );
-    }
-    for cmd in [
-        "mv src/x.rs ../x.rs",
-        "cp src/x.rs notes.md",
-        "echo hi > src/../notes.md",
-        "nohup tee notes.md < src/main.rs",
-    ] {
-        assert!(
-            bash_scope_hit(&ctx, &scope, cmd).is_some(),
-            "out-of-scope write must refuse: {cmd}"
-        );
-    }
-    fs::remove_dir_all(&dir).ok();
-}
-
-/// Audit H3: scope was compared lexically while the OS resolves
-/// symlinks — a link inside scope `a/` pointing at sibling `b/` let a
-/// writer confined to `a/` mutate `b/`. Scope decisions must run on
-/// canonical paths.
-#[test]
-fn subagent_scope_follows_symlinks_canonically() {
-    let (mut ctx, dir) = proj();
-    fs::create_dir_all(dir.join("b")).unwrap();
-    // link a/link -> ../b ; skip the test where symlinks need privileges
-    #[cfg(unix)]
-    let made = std::os::unix::fs::symlink(dir.join("b"), dir.join("src/link")).is_ok();
-    #[cfg(windows)]
-    let made = std::os::windows::fs::symlink_dir(dir.join("b"), dir.join("src/link")).is_ok();
-    if !made {
-        eprintln!("symlink creation unsupported here; skipping");
-        return;
-    }
-    let created = plan_op(
-        &mut ctx,
-        &json!({
-            "op": "create",
-            "goal": "scoped child",
-            "acceptance": ["manual: eyeball it"],
-            "steps": [{"title": "work"}]
-        }),
-    );
-    assert!(created.ok, "{}", created.output);
-    let plan_id = plan::open_active(&dir).unwrap().unwrap().id;
-    ctx.subagent_step = Some(plan::StepContext {
-        plan_id,
-        step_id: "1".into(),
-        step_epoch: 0,
-    });
-    ctx.subagent_write_paths = Some(vec!["src".to_string()]);
-
-    // a file-tool write through the link lands in b/ — outside scope
-    let out = execute(
-        &mut ctx,
-        "write",
-        &json!({"file_path": "src/link/escape.txt", "content": "x\n"}),
-    );
-    assert!(!out.ok, "symlink write escaped the scope: {}", out.output);
-    assert!(out.output.contains("subagent_scope"), "{}", out.output);
-    assert!(!dir.join("b/escape.txt").exists(), "write must not land");
-
-    // the same through a bash redirect
-    let out = execute(
-        &mut ctx,
-        "bash",
-        &json!({"command": "echo x > src/link/escape2.txt"}),
-    );
-    assert!(
-        !out.ok,
-        "symlink redirect escaped the scope: {}",
-        out.output
-    );
-    assert!(out.output.contains("subagent_scope"), "{}", out.output);
-    assert!(!dir.join("b/escape2.txt").exists(), "write must not land");
-
-    // a plain in-scope write still works
-    let out = execute(
-        &mut ctx,
-        "write",
-        &json!({"file_path": "src/ok.txt", "content": "x\n"}),
-    );
-    assert!(out.ok, "{}", out.output);
-    fs::remove_dir_all(&dir).ok();
-}
-
 #[test]
 fn read_then_edit_flow_and_guards() {
     let (mut ctx, dir) = proj();
@@ -417,13 +161,23 @@ fn read_then_edit_flow_and_guards() {
     );
     assert!(!o.ok, "replace_all must require a prior read");
 
-    // a single exact edit is self-validating: no prior read needed
+    // a single exact edit also needs the read: another writer may have moved
+    // the file since this model last saw it
     let o = execute(
         &mut ctx,
         "edit",
         &json!({"file_path": "src/main.rs", "old_string": "TODO", "new_string": "DONE"}),
     );
-    assert!(o.ok, "exact edit needs no prior read: {}", o.output);
+    assert!(!o.ok, "exact edit without a read must refuse: {}", o.output);
+    assert!(o.output.contains("was not read"), "{}", o.output);
+    let o = execute(&mut ctx, "read", &json!({"file_path": "src/main.rs"}));
+    assert!(o.ok, "{}", o.output);
+    let o = execute(
+        &mut ctx,
+        "edit",
+        &json!({"file_path": "src/main.rs", "old_string": "TODO", "new_string": "DONE"}),
+    );
+    assert!(o.ok, "exact edit after a read: {}", o.output);
     assert_eq!(
         fs::read_to_string(dir.join("src/main.rs")).unwrap(),
         "fn main() {}\n// DONE\n"
@@ -459,6 +213,35 @@ fn read_then_edit_flow_and_guards() {
     );
     // checkpoint events got entries from the mutation above
     assert!(!ctx.checkpoints.is_empty());
+    fs::remove_dir_all(&dir).ok();
+}
+
+/// Two sessions on one project: the first read, the second wrote, so the
+/// first's edit is based on bytes that are gone. The read ledger is
+/// session-scoped; comparing its hash with the disk catches the race.
+#[test]
+fn a_write_from_another_session_makes_the_edit_stale() {
+    let (mut first, dir) = proj();
+    let mut second = ToolCtx::new(&dir);
+    let r = execute(&mut first, "read", &json!({"file_path": "src/main.rs"}));
+    assert!(r.ok, "{}", r.output);
+    let r = execute(&mut second, "read", &json!({"file_path": "src/main.rs"}));
+    assert!(r.ok, "{}", r.output);
+    let w = execute(
+        &mut second,
+        "write",
+        &json!({"file_path": "src/main.rs", "content": "fn main() {}
+// second
+"}),
+    );
+    assert!(w.ok, "{}", w.output);
+    let e = execute(
+        &mut first,
+        "edit",
+        &json!({"file_path": "src/main.rs", "old_string": "TODO", "new_string": "DONE"}),
+    );
+    assert!(!e.ok, "stale edit must refuse: {}", e.output);
+    assert!(e.output.contains("changed since you read"), "{}", e.output);
     fs::remove_dir_all(&dir).ok();
 }
 
@@ -632,6 +415,8 @@ fn edit_reports_where_the_change_landed() {
     let (mut ctx, dir) = proj();
     let body: String = (1..=9).map(|i| format!("line {i}\n")).collect();
     fs::write(dir.join("t.txt"), &body).unwrap();
+    let r = execute(&mut ctx, "read", &json!({"file_path": "t.txt"}));
+    assert!(r.ok, "{}", r.output);
     let o = execute(
         &mut ctx,
         "edit",
@@ -1054,6 +839,8 @@ fn git_status_and_diff_work_in_project_root() {
         .status()
         .unwrap();
 
+    let r = execute(&mut ctx, "read", &json!({"file_path": "README.md"}));
+    assert!(r.ok, "{}", r.output);
     let edit = execute(
         &mut ctx,
         "edit",
@@ -2555,6 +2342,8 @@ fn a_utf8_bom_is_hidden_from_the_model_and_kept_on_disk() {
 
     // and so does multi_edit
     fs::write(dir.join("three.ps1"), format!("{bom}a\nb\nc\n")).unwrap();
+    let r = execute(&mut ctx, "read", &json!({"file_path": "three.ps1"}));
+    assert!(r.ok, "{}", r.output);
     for (old, new) in [("a", "x"), ("c", "z")] {
         let m = execute(
             &mut ctx,
@@ -2578,6 +2367,8 @@ fn a_utf8_bom_is_hidden_from_the_model_and_kept_on_disk() {
 fn an_edit_to_a_plain_file_does_not_add_a_bom() {
     let (mut ctx, dir) = proj();
     fs::write(dir.join("plain.rs"), "fn a() {}\n").unwrap();
+    let r = execute(&mut ctx, "read", &json!({"file_path": "plain.rs"}));
+    assert!(r.ok, "{}", r.output);
     let e = execute(
         &mut ctx,
         "edit",

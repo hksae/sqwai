@@ -1123,9 +1123,6 @@ async fn run_agent(
     // clean, and the task text itself may be shaped by what the parent
     // consumed (audit H1).
     ctx.parent_session = parent_session.clone();
-    // ...and a writer child's declared scope, if any (read-only children
-    // and the main agent take nothing).
-    ctx.subagent_write_paths = tools::take_subagent_scope(&session_id);
     // The `skill` tool searches the same directories the TUI catalog does —
     // otherwise a skill visible in `/skills` would be invisible to the model.
     ctx.skills_cfg = skills.clone();
