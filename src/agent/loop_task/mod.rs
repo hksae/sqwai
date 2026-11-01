@@ -32,6 +32,7 @@ use loop_turn::{request_messages, run_turn_with_prefetch, turn_transport};
 mod loop_ask;
 mod loop_compact;
 mod loop_subagent;
+pub(crate) use loop_subagent::answer_subagent_approval;
 pub(crate) use loop_subagent::bump_subagent_id_at_least;
 mod loop_turn;
 
@@ -207,6 +208,16 @@ pub enum AgentEvent {
         reason: String,
         grant: String,
         /// false for approvals that must repeat every time (network reads)
+        allow_always: bool,
+    },
+    /// an approval requested by a child agent: the same dialog, tagged with
+    /// the child so the answer reaches that child's control channel
+    SubagentApproval {
+        child: u64,
+        id: u64,
+        subject: String,
+        reason: String,
+        grant: String,
         allow_always: bool,
     },
     /// a shadow git or layer-1 checkpoint was taken before a mutation

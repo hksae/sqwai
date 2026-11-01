@@ -700,6 +700,7 @@ pub(crate) async fn run_subagent(
     // S1: visible to undo's cancellation signal until it joins. The guard
     // leaves the map on every exit path below, including early returns.
     let _child_slot = crate::agent::undo_guard::track_child(id, child.child_control());
+    let _control_slot = ControlSlot::register(id, child.control.clone());
     // Hidden session for the parent's history screen. The child's transcript
     // is written under its event-session name so the row restored from the
     // event log can open it later; `hidden` keeps it out of the sessions menu.
@@ -905,11 +906,26 @@ pub(crate) async fn run_subagent(
                         .to_string(),
                 });
             }
-            AgentEvent::Approval { id, .. } => {
-                let _ = child.control.try_send(ControlMsg::ApprovalAnswer {
-                    id,
-                    decision: ApprovalDecision::Deny,
-                });
+            // A child gets the same approvals as the parent: forward the
+            // request to the main UI tagged with the child, and let the menu
+            // answer reach this runner's control slot.
+            AgentEvent::Approval {
+                id: approval_id,
+                subject,
+                reason,
+                grant,
+                allow_always,
+            } => {
+                let _ = parent_tx
+                    .send(AgentEvent::SubagentApproval {
+                        child: id,
+                        id: approval_id,
+                        subject,
+                        reason,
+                        grant,
+                        allow_always,
+                    })
+                    .await;
             }
             _ => {}
         }
@@ -1260,6 +1276,61 @@ fn log_subagent_event(
             "status": status,
         }),
     );
+}
+
+/// Child control channels by numeric id. The parent UI answers a child's
+/// approval through this table; children are not stored in the App, their
+/// runner owns the handle.
+fn subagent_controls()
+-> &'static std::sync::Mutex<std::collections::HashMap<u64, mpsc::Sender<ControlMsg>>> {
+    static CONTROLS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<u64, mpsc::Sender<ControlMsg>>>,
+    > = std::sync::OnceLock::new();
+    CONTROLS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+struct ControlSlot(u64);
+
+impl ControlSlot {
+    fn register(id: u64, control: mpsc::Sender<ControlMsg>) -> Self {
+        if let Ok(mut controls) = subagent_controls().lock() {
+            controls.insert(id, control);
+        }
+        Self(id)
+    }
+}
+
+impl Drop for ControlSlot {
+    fn drop(&mut self) {
+        if let Ok(mut controls) = subagent_controls().lock() {
+            controls.remove(&self.0);
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn register_subagent_control_for_test(id: u64, control: mpsc::Sender<ControlMsg>) {
+    if let Ok(mut controls) = subagent_controls().lock() {
+        controls.insert(id, control);
+    }
+}
+
+/// Answer an approval raised by a child. Returns false when the child is gone
+/// (its runner dropped the slot), so the UI need not retry.
+pub(crate) fn answer_subagent_approval(
+    child: u64,
+    id: u64,
+    decision: ApprovalDecision,
+) -> bool {
+    let Ok(controls) = subagent_controls().lock() else {
+        return false;
+    };
+    let Some(control) = controls.get(&child) else {
+        return false;
+    };
+    control
+        .try_send(ControlMsg::ApprovalAnswer { id, decision })
+        .is_ok()
 }
 
 pub(crate) fn next_subagent_id() -> u64 {

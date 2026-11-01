@@ -70,6 +70,7 @@ impl App {
                     self.clear_test_ask_mode();
                     self.open_menu(Menu::Approval {
                         id: 0,
+                        child: None,
                         subject: "git reset --hard HEAD~1".into(),
                         reason: "destructive git command".into(),
                         grant: "git reset *".into(),
@@ -594,6 +595,7 @@ impl App {
         let total = self.test_approval_total;
         self.open_menu(Menu::Approval {
             id: 0,
+            child: None,
             subject: next.subject,
             reason: next.reason,
             grant: next.grant,

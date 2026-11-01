@@ -448,6 +448,7 @@ fn session_switch_back_to_empty_session_marks_fresh() {
 fn open_test_approval(app: &mut App) {
     app.open_menu(Menu::Approval {
         id: 7,
+        child: None,
         subject: "rm -rf x".into(),
         reason: "test".into(),
         grant: "rm -rf x".into(),
@@ -575,6 +576,7 @@ fn approval_without_always_hides_the_option() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.open_menu(Menu::Approval {
         id: 8,
+        child: None,
         subject: "webfetch https://example.com".into(),
         reason: "network read in ask mode".into(),
         grant: String::new(),
@@ -610,6 +612,7 @@ fn approval_long_subject_expands_on_request() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.open_menu(Menu::Approval {
         id: 9,
+        child: None,
         subject: "line1\nline2\nline3\nline4\nline5\nline6".into(),
         reason: "test".into(),
         grant: "edit *".into(),

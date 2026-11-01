@@ -275,6 +275,8 @@ pub(super) enum Menu {
     /// a dangerous command or mutating tool call needs explicit approval
     Approval {
         id: u64,
+        /// set when a child agent asked; the answer goes to that child
+        child: Option<u64>,
         subject: String,
         reason: String,
         grant: String,
@@ -1559,11 +1561,13 @@ impl App {
             self.show_next_test_approval();
             return;
         }
-        let id = match self.cur_menu() {
-            Some(Menu::Approval { id, .. }) => *id,
+        let (id, child) = match self.cur_menu() {
+            Some(Menu::Approval { id, child, .. }) => (*id, *child),
             _ => return,
         };
-        if let Some(agent) = &self.agent {
+        if let Some(child) = child {
+            crate::agent::loop_task::answer_subagent_approval(child, id, decision);
+        } else if let Some(agent) = &self.agent {
             let _ = agent
                 .control
                 .try_send(ControlMsg::ApprovalAnswer { id, decision });

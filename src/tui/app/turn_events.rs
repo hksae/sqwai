@@ -391,7 +391,28 @@ impl App {
                 self.clear_test_ask_mode();
                 self.open_menu(Menu::Approval {
                     id,
+                    child: None,
                     subject,
+                    reason,
+                    grant,
+                    allow_always,
+                    expanded: false,
+                });
+                self.dirty = true;
+            }
+            AgentEvent::SubagentApproval {
+                child,
+                id,
+                subject,
+                reason,
+                grant,
+                allow_always,
+            } => {
+                self.clear_test_ask_mode();
+                self.open_menu(Menu::Approval {
+                    id,
+                    child: Some(child),
+                    subject: format!("subagent-{child} · {subject}"),
                     reason,
                     grant,
                     allow_always,

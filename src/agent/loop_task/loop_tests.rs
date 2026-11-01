@@ -1697,6 +1697,28 @@ async fn subagent_lifecycle_lands_in_the_parent_event_log() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+#[tokio::test]
+async fn a_child_approval_answer_reaches_that_childs_control_channel() {
+    let (tx, mut rx) = mpsc::channel(4);
+    super::loop_subagent::register_subagent_control_for_test(9_001, tx);
+    assert!(super::loop_subagent::answer_subagent_approval(
+        9_001,
+        42,
+        ApprovalDecision::RunOnce,
+    ));
+    match rx.recv().await {
+        Some(ControlMsg::ApprovalAnswer { id, decision }) => {
+            assert_eq!(id, 42);
+            assert_eq!(decision, ApprovalDecision::RunOnce);
+        }
+        other => panic!("expected the child approval answer, got {other:?}"),
+    }
+    assert!(
+        !super::loop_subagent::answer_subagent_approval(9_002, 1, ApprovalDecision::Deny),
+        "an unknown child has no channel"
+    );
+}
+
 #[test]
 fn live_child_ids_skip_restored_ones() {
     super::loop_subagent::bump_subagent_id_at_least(1_000_000);
