@@ -163,18 +163,31 @@ impl crate::providers::Provider for BackgroundRoutingProvider {
         use std::sync::atomic::Ordering;
         let parent = req.tools.iter().any(|tool| tool.name == "subagent");
         let events = if parent {
-            if self.parent_calls.fetch_add(1, Ordering::Relaxed) == 0 {
-                vec![Ok(crate::providers::StreamEvent::ToolCall(
+            match self.parent_calls.fetch_add(1, Ordering::Relaxed) {
+                0 => vec![Ok(crate::providers::StreamEvent::ToolCall(
                     crate::providers::ToolCallReq::new(
                         "call-bg",
                         "subagent",
                         serde_json::json!({"tasks": ["look around"], "background": true}),
                     ),
-                ))]
-            } else {
-                vec![Ok(crate::providers::StreamEvent::Text(
+                ))],
+                1 => vec![Ok(crate::providers::StreamEvent::ToolCall(
+                    crate::providers::ToolCallReq::new(
+                        "call-list",
+                        "subagents",
+                        serde_json::json!({"action": "list"}),
+                    ),
+                ))],
+                2 => vec![Ok(crate::providers::StreamEvent::ToolCall(
+                    crate::providers::ToolCallReq::new(
+                        "call-out",
+                        "subagents",
+                        serde_json::json!({"action": "output", "id": 1, "wait_secs": 5}),
+                    ),
+                ))],
+                _ => vec![Ok(crate::providers::StreamEvent::Text(
                     "parent done".into(),
-                ))]
+                ))],
             }
         } else {
             vec![Ok(crate::providers::StreamEvent::Text(
@@ -1972,6 +1985,7 @@ async fn a_child_request_omits_subagent_and_ask_user_tools() {
         .map(|tool| tool.name.as_str())
         .collect();
     assert!(!names.contains(&"subagent"), "{names:?}");
+    assert!(!names.contains(&"subagents"), "{names:?}");
     assert!(!names.contains(&"ask_user"), "{names:?}");
     assert!(names.contains(&"plan"), "the child owns a plan: {names:?}");
     assert!(names.contains(&"read"), "{names:?}");
@@ -2049,14 +2063,20 @@ async fn a_background_subagent_reports_before_the_turn_ends() {
     let outcome = outcome.expect("turn completed");
     assert!(
         outcome.messages.iter().any(|m| {
-            m.role == Role::User
-                && m.content.contains("<subagent_completion")
+            m.role == Role::Tool
+                && m.tool_call_id.as_deref() == Some("call-out")
                 && m.content.contains("child report")
         }),
-        "the report joins the transcript: {:#?}",
+        "subagents output returns the report: {:#?}",
         outcome.messages
     );
-    assert!(note, "the TUI is told the report landed");
+    assert!(
+        !outcome.messages.iter().any(|m| {
+            m.role == Role::User && m.content.contains("<subagent_completion")
+        }),
+        "a report read through output is not repeated as a host note"
+    );
+    assert!(!note, "a delivered report needs no report note");
     let _ = std::fs::remove_dir_all(&root);
 }
 

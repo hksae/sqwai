@@ -29,6 +29,22 @@ use loop_subagent::{
 };
 use loop_turn::{request_messages, run_turn_with_prefetch, turn_transport};
 
+/// One background child batch owned by the current turn. The report is
+/// delivered either through `subagents output` or as a host note at turn end,
+/// never both.
+struct BackgroundChild {
+    label: String,
+    status: &'static str,
+    started: Instant,
+    output: Option<String>,
+    delivered: bool,
+    abort: Option<tokio::task::AbortHandle>,
+    join: Option<tokio::task::JoinHandle<()>>,
+    notify: std::sync::Arc<tokio::sync::Notify>,
+}
+
+type BackgroundRegistry = std::sync::Arc<tokio::sync::Mutex<std::collections::HashMap<u64, BackgroundChild>>>;
+
 mod loop_ask;
 mod loop_compact;
 mod loop_subagent;
@@ -329,6 +345,104 @@ impl AgentHandle {
 impl Drop for AgentHandle {
     fn drop(&mut self) {
         self.abort.abort();
+    }
+}
+
+/// `subagents` tool: list background batches, wait for one report, or stop one.
+async fn subagents_control(
+    registry: &BackgroundRegistry,
+    args: &serde_json::Value,
+) -> tools::Outcome {
+    let action = args["action"].as_str().unwrap_or("list");
+    if action == "list" {
+        let entries = registry.lock().await;
+        if entries.is_empty() {
+            return tools::Outcome::ok("no background subagents");
+        }
+        let mut ids: Vec<&u64> = entries.keys().collect();
+        ids.sort();
+        let mut out = String::new();
+        for id in ids {
+            let entry = &entries[id];
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(&format!(
+                "{id} — {} — {} — {}s",
+                entry.label,
+                entry.status,
+                entry.started.elapsed().as_secs()
+            ));
+            if entry.output.is_some() && !entry.delivered {
+                out.push_str(" — report ready");
+            }
+        }
+        return tools::Outcome::ok(out);
+    }
+
+    let Some(id) = args["id"].as_u64() else {
+        return tools::Outcome::err("subagents: id is required for output and kill");
+    };
+    let wait = args["wait_secs"].as_u64().unwrap_or(0).min(300);
+
+    if action == "kill" {
+        let mut entries = registry.lock().await;
+        let Some(entry) = entries.get_mut(&id) else {
+            return tools::Outcome::err(format!("no background subagent {id}"));
+        };
+        if let Some(abort) = entry.abort.as_ref() {
+            abort.abort();
+        }
+        entry.status = "killed";
+        entry.output = Some("subagent killed by parent".into());
+        entry.delivered = true;
+        entry.notify.notify_waiters();
+        return tools::Outcome::ok(format!("background subagent {id} killed"));
+    }
+    if action != "output" {
+        return tools::Outcome::err(format!(
+            "subagents: unknown action '{action}' (list, output, kill)"
+        ));
+    }
+
+    let notified = {
+        let mut entries = registry.lock().await;
+        let Some(entry) = entries.get_mut(&id) else {
+            return tools::Outcome::err(format!("no background subagent {id}"));
+        };
+        if let Some(output) = entry.output.clone() {
+            entry.delivered = true;
+            return tools::Outcome::ok(output);
+        }
+        if wait == 0 {
+            return tools::Outcome::err(format!(
+                "background subagent {id} is still {status}; call output with wait_secs",
+                status = entry.status
+            ));
+        }
+        // Created under the lock: a completion that lands after this point
+        // wakes the waiter instead of being lost between check and await.
+        Some(entry.notify.clone().notified_owned())
+    };
+    if let Some(notified) = notified {
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(wait),
+            notified,
+        )
+        .await;
+    }
+    let mut entries = registry.lock().await;
+    let Some(entry) = entries.get_mut(&id) else {
+        return tools::Outcome::err(format!("no background subagent {id}"));
+    };
+    if let Some(output) = entry.output.clone() {
+        entry.delivered = true;
+        tools::Outcome::ok(output)
+    } else {
+        tools::Outcome::err(format!(
+            "background subagent {id} is still {status} after {wait}s",
+            status = entry.status
+        ))
     }
 }
 
@@ -973,7 +1087,8 @@ async fn run_agent(
         let base: Vec<crate::providers::ToolSpec> = tools::tool_specs()
             .into_iter()
             .filter(|spec| {
-                subagent_depth == 0 || !matches!(spec.name.as_str(), "subagent" | "ask_user")
+                subagent_depth == 0
+                    || !matches!(spec.name.as_str(), "subagent" | "subagents" | "ask_user")
             })
             .collect();
         if let Some(registry) = &mcp_registry {
@@ -1295,10 +1410,12 @@ async fn run_agent(
     let mut tool_calls_used: usize = 0;
     // Background spawns live inside the turn: the parent keeps working, the
     // host joins them before the final answer, so no write outlives the
-    // checkpoint window undo relies on. Dropping the set (hard abort) cancels
-    // them.
-    let mut background_subagents: tokio::task::JoinSet<(String, tools::Outcome)> =
-        tokio::task::JoinSet::new();
+    // checkpoint window undo relies on. Dropping the task handles (hard abort)
+    // cancels them. The id is local to this turn and starts at 1.
+    let background_registry: BackgroundRegistry = std::sync::Arc::new(
+        tokio::sync::Mutex::new(std::collections::HashMap::new()),
+    );
+    let mut next_background_id: u64 = 1;
 
     loop {
         // Transcript sync for hard-abort survival: every iteration persists
@@ -2169,6 +2286,9 @@ async fn run_agent(
                             }
                             outcome
                         }
+                        "subagents" if subagent_depth == 0 => {
+                            subagents_control(&background_registry, &call.args).await
+                        }
                         "subagent" if subagent_depth == 0 => {
                             let background = call
                                 .args
@@ -2196,7 +2316,25 @@ async fn run_agent(
                                 let fallback_chain = fallback_chain.clone();
                                 let label =
                                     crate::agent::tools::call_summary(&call.name, &call.args);
-                                background_subagents.spawn(async move {
+                                let batch_id = next_background_id;
+                                next_background_id += 1;
+                                let registry = background_registry.clone();
+                                let task_registry = registry.clone();
+                                let notify = std::sync::Arc::new(tokio::sync::Notify::new());
+                                registry.lock().await.insert(
+                                    batch_id,
+                                    BackgroundChild {
+                                        label: label.clone(),
+                                        status: "running",
+                                        started: Instant::now(),
+                                        output: None,
+                                        delivered: false,
+                                        abort: None,
+                                        join: None,
+                                        notify: notify.clone(),
+                                    },
+                                );
+                                let task = tokio::spawn(async move {
                                     let outcome = run_subagent(
                                         &call,
                                         &parent_session,
@@ -2231,11 +2369,23 @@ async fn run_agent(
                                         ),
                                     )
                                     .await;
-                                    (label, outcome)
+                                    let mut entries = task_registry.lock().await;
+                                    if let Some(entry) = entries.get_mut(&batch_id) {
+                                        entry.status =
+                                            if outcome.ok { "completed" } else { "failed" };
+                                        entry.output = Some(outcome.output.clone());
+                                    }
+                                    notify.notify_waiters();
                                 });
-                                tools::Outcome::ok(
-                                    "started in the background; its report is added to your context before this turn ends",
-                                )
+                                let abort = task.abort_handle();
+                                let mut entries = registry.lock().await;
+                                if let Some(entry) = entries.get_mut(&batch_id) {
+                                    entry.abort = Some(abort);
+                                    entry.join = Some(task);
+                                }
+                                tools::Outcome::ok(format!(
+                                    "started background subagent {batch_id} ({label}); use subagents output id={batch_id} to wait, or let the report join before this turn ends"
+                                ))
                             } else {
                             let outcome = run_subagent(
                                 call,
@@ -2718,31 +2868,48 @@ async fn run_agent(
     // meanwhile, and every write still lands inside the checkpoint window undo
     // knows. Their reports join the transcript as host notes (a user-role
     // message the next request sees, rendered as a status row by the TUI).
-    while let Some(joined) = background_subagents.join_next().await {
-        match joined {
-            Ok((label, outcome)) => {
-                let label = label.replace('"', "'");
-                messages.push(Message::new(
-                    Role::User,
-                    format!(
-                        "<subagent_completion task=\"{label}\">\n{}\n</subagent_completion>",
-                        outcome.output.trim()
-                    ),
-                ));
-                let _ = tx
-                    .send(AgentEvent::SubagentReportNote {
-                        text: format!("background subagent finished: {label}"),
-                    })
-                    .await;
+    // Background children finish before the turn does: the parent got to work
+    // meanwhile, and every write still lands inside the checkpoint window undo
+    // knows. Reports already read through `subagents output` are not repeated;
+    // the rest join the transcript as host notes.
+    let joins: Vec<tokio::task::JoinHandle<()>> = {
+        background_registry
+            .lock()
+            .await
+            .values_mut()
+            .filter_map(|entry| entry.join.take())
+            .collect()
+    };
+    for join in joins {
+        let _ = join.await;
+    }
+    let mut notes: Vec<(String, String)> = Vec::new();
+    {
+        let mut entries = background_registry.lock().await;
+        for entry in entries.values_mut() {
+            if entry.delivered {
+                continue;
             }
-            Err(error) => {
-                let _ = tx
-                    .send(AgentEvent::SubagentReportNote {
-                        text: format!("background subagent failed to join: {error}"),
-                    })
-                    .await;
+            if let Some(output) = entry.output.as_deref() {
+                entry.delivered = true;
+                notes.push((entry.label.clone(), output.to_string()));
             }
         }
+    }
+    for (label, output) in notes {
+        let label = label.replace('"', "'");
+        messages.push(Message::new(
+            Role::User,
+            format!(
+                "<subagent_completion task=\"{label}\">\n{}\n</subagent_completion>",
+                output.trim()
+            ),
+        ));
+        let _ = tx
+            .send(AgentEvent::SubagentReportNote {
+                text: format!("background subagent finished: {label}"),
+            })
+            .await;
     }
 
     let _ = tx

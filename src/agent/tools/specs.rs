@@ -381,6 +381,32 @@ of executed tools and modified files.",
             }),
         },
         ToolDef {
+            name: "subagents",
+            kind: Kind::ReadOnly,
+            description: "List, wait for, or stop background subagents started with \
+`subagent background=true`. `output(id, wait_secs)` returns that report and marks it read; \
+`list` shows the live batch; `kill` stops one. Reports not read here are added to the \
+transcript before the turn ends.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["list", "output", "kill"],
+                        "description": "what to do with a background subagent"
+                    },
+                    "id": {"type": "integer", "description": "id printed by the background spawn"},
+                    "wait_secs": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 300,
+                        "description": "output: how long to wait for a running child (default 0)"
+                    }
+                },
+                "required": ["action"]
+            }),
+        },
+        ToolDef {
             name: "skill",
             kind: Kind::ReadOnly,
             description: "Load a skill from `<available_skills>` by `name`, or one bundled file \
