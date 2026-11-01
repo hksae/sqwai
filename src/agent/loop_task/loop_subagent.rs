@@ -173,10 +173,11 @@ pub(crate) fn subagent_tasks_from_args(
 pub(crate) async fn run_subagent_batch(
     calls: &[ToolCallReq],
     session_id: &str,
+    turn: u64,
     root: &Path,
     cancel: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     events: &mut Option<crate::agent::events::EventLog>,
-    tx: &mpsc::Sender<AgentEvent>,
+    tx: &super::EventSink,
     current_step: Option<String>,
     provider: &SharedProvider,
     model_id: &str,
@@ -228,6 +229,7 @@ pub(crate) async fn run_subagent_batch(
                 })
             });
             writer.set_attribution(step, plan_id, "main");
+            writer.set_turn(Some(turn));
         }
         let _ = tx
             .send(AgentEvent::ToolStart {
@@ -265,6 +267,7 @@ pub(crate) async fn run_subagent_batch(
                     let outcome = run_subagent(
                         &call,
                         &session_id,
+                        turn,
                         tx,
                         &parent_cancel,
                         &provider,
@@ -414,7 +417,8 @@ pub(crate) fn adopt_in_progress_step(root: &Path, session_id: &str) -> Option<St
 pub(crate) async fn run_subagent(
     call: &ToolCallReq,
     parent_session: &str,
-    parent_tx: &mpsc::Sender<AgentEvent>,
+    parent_turn: u64,
+    parent_tx: &super::EventSink,
     parent_cancel: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     provider: &SharedProvider,
     model_id: &str,
@@ -478,6 +482,7 @@ pub(crate) async fn run_subagent(
                     let outcome = run_subagent(
                         &one,
                         parent_session,
+                        parent_turn,
                         parent_tx,
                         parent_cancel,
                         provider,
@@ -629,6 +634,9 @@ pub(crate) async fn run_subagent(
         // #190: NOT `sub-{id}` — the numeric counter resets on restart
         // and would append to a previous run's events file
         session_id: child_session.clone(),
+        // the spawner's user turn: this child's writes belong to it even if
+        // the child finishes after the parent's answer
+        turn: parent_turn,
         blocked_patterns: blocked_patterns.to_vec(),
         web_allow_hosts: web_allow_hosts.to_vec(),
         // a child keeps the mode it was spawned under: a live Shift+Tab
@@ -665,6 +673,8 @@ pub(crate) async fn run_subagent(
         shadow_store,
         subagent_depth: 1,
         background_subagents: false,
+        background_registry: None,
+        background_events: None,
         parent_step,
         parent_session: Some(parent_session.to_string()),
         fallback_chain,
@@ -672,7 +682,10 @@ pub(crate) async fn run_subagent(
     let mut child = child;
     // S1: visible to undo's cancellation signal until it joins. The guard
     // leaves the map on every exit path below, including early returns.
-    let _child_slot = crate::agent::undo_guard::track_child(id, child.child_control());
+    let _child_slot = crate::agent::undo_guard::track_child(
+        id,
+        child.child_control(parent_session, parent_turn),
+    );
     let _control_slot = ControlSlot::register(id, child.control.clone());
     if let Some(controls) = &steer_controls {
         let mut mailbox = controls.lock().await;
@@ -953,7 +966,7 @@ pub(crate) async fn run_subagent(
 #[allow(clippy::too_many_arguments)]
 async fn stop_child(
     child: &mut AgentHandle,
-    parent_tx: &mpsc::Sender<AgentEvent>,
+    parent_tx: &super::EventSink,
     id: u64,
     reason: &str,
     root: &Path,

@@ -348,7 +348,7 @@ of executed tools and modified files.",
                     },
                     "background": {
                         "type": "boolean",
-                        "description": "run in the background and return an id immediately; the report joins your context when it finishes, before this turn ends. Set false to wait for the report in this same call (default: true)"
+                        "description": "run in the background and return an id immediately; the report joins your context when it finishes, at this turn's end or the next turn boundary. Set false to wait for the report in this same call (default: true)"
                     },
                     "tasks": {
                         "type": "array",
@@ -386,7 +386,7 @@ of executed tools and modified files.",
             description: "List, wait for, or stop background subagents started with \
 `subagent background=true`. `output(id, wait_secs)` returns that report and marks it read; \
 `list` shows the live batch; `send` queues a message for the child, `kill` stops one. Reports not read here are added to the \
-transcript before the turn ends.",
+transcript at a turn boundary, including a later turn when a child outlives the answer.",
             parameters: json!({
                 "type": "object",
                 "properties": {

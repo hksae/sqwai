@@ -54,6 +54,11 @@ pub struct Record {
     /// (epoch bumped) such records stop counting as evidence.
     #[serde(default)]
     pub epoch: Option<u64>,
+    /// User turn of the spawning session this record belongs to. A child
+    /// outliving its turn still stamps the turn that spawned it, so a late
+    /// write stays attributable to the turn `/undo turn` rolls back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn: Option<u64>,
     pub kind: String,
     #[serde(flatten)]
     pub fields: serde_json::Map<String, Value>,
@@ -67,6 +72,7 @@ pub struct EventLog {
     plan: Option<String>,
     agent: String,
     epoch: Option<u64>,
+    turn: Option<u64>,
 }
 
 /// What a per-step revert can and cannot put back.
@@ -144,6 +150,7 @@ impl EventLog {
             plan: None,
             agent: "main".to_string(),
             epoch: None,
+            turn: None,
         };
         if repaired > 0 {
             events.append(
@@ -169,6 +176,11 @@ impl EventLog {
     ///. Used by subagent sessions; the main session leaves it `None`.
     pub fn set_epoch(&mut self, epoch: Option<u64>) {
         self.epoch = epoch;
+    }
+
+    /// Stamp the user turn every record this writer produces belongs to.
+    pub fn set_turn(&mut self, turn: Option<u64>) {
+        self.turn = turn;
     }
 
     #[allow(dead_code)]
@@ -317,6 +329,41 @@ impl EventLog {
                 && step.is_none_or(|expected| r.step.as_deref() == Some(expected))
                 && matches!(r.kind.as_str(), "observation" | "tool_result" | "file_diff")
         }))
+    }
+
+    /// Checkpoints recorded by file mutations attributed to one user turn,
+    /// in first-seen order. Child writes appear here too: a child logs into
+    /// the parent's event log and stamps the turn that spawned it, so a
+    /// writer finishing after its turn ended is still undoable by that turn.
+    pub fn checkpoints_in_turn(
+        root: &Path,
+        session_id: &str,
+        turn: u64,
+    ) -> Result<Vec<(String, String)>> {
+        let mut out: Vec<(String, String)> = Vec::new();
+        for record in Self::records_for(root, session_id)? {
+            if record.kind != "file_diff" || record.turn != Some(turn) {
+                continue;
+            }
+            let Some(sha) = record.fields.get("checkpoint").and_then(Value::as_str) else {
+                continue;
+            };
+            if out.iter().any(|(known, _)| known == sha) {
+                continue;
+            }
+            let mode = record
+                .fields
+                .get("mode")
+                .and_then(Value::as_str)
+                .unwrap_or("write");
+            let path = record
+                .fields
+                .get("path")
+                .and_then(Value::as_str)
+                .unwrap_or("file");
+            out.push((sha.to_string(), format!("{mode} {path}")));
+        }
+        Ok(out)
     }
 
     /// Paths the host recorded as its own writes for the given checkpoints,
@@ -856,6 +903,7 @@ impl EventLog {
             plan: self.plan.clone(),
             agent: self.agent.clone(),
             epoch: self.epoch,
+            turn: self.turn,
             kind: kind.to_string(),
             fields,
         };

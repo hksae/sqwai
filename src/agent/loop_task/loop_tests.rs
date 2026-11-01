@@ -72,6 +72,7 @@ async fn test_provider_fallback_chain_switch_on_failure() {
         ],
         root: temp_dir.clone(),
         session_id: "test-fallback-sess".into(),
+        turn: 0,
         blocked_patterns: vec![],
         approval_mode: Default::default(),
         approval_switch: None,
@@ -99,6 +100,8 @@ async fn test_provider_fallback_chain_switch_on_failure() {
         shadow_store: crate::config::ShadowStore::Off,
         subagent_depth: 0,
         background_subagents: false,
+        background_registry: None,
+        background_events: None,
         parent_step: None,
         parent_session: None,
         fallback_chain: vec![fallback],
@@ -277,6 +280,7 @@ async fn fallback_replans_effort_for_the_new_model() {
         messages: vec![Message::new(Role::User, "hello")],
         root: temp_dir.clone(),
         session_id: "test-effort-fallback".into(),
+        turn: 0,
         blocked_patterns: vec![],
         approval_mode: Default::default(),
         approval_switch: None,
@@ -304,6 +308,8 @@ async fn fallback_replans_effort_for_the_new_model() {
         shadow_store: crate::config::ShadowStore::Off,
         subagent_depth: 0,
         background_subagents: false,
+        background_registry: None,
+        background_events: None,
         parent_step: None,
         parent_session: None,
         fallback_chain: vec![fallback],
@@ -370,6 +376,7 @@ async fn partial_stream_failure_does_not_fall_back() {
         messages: vec![Message::new(Role::User, "hello")],
         root: temp_dir.clone(),
         session_id: "test-partial-sess".into(),
+        turn: 0,
         blocked_patterns: vec![],
         approval_mode: Default::default(),
         approval_switch: None,
@@ -397,6 +404,8 @@ async fn partial_stream_failure_does_not_fall_back() {
         shadow_store: crate::config::ShadowStore::Off,
         subagent_depth: 0,
         background_subagents: false,
+        background_registry: None,
+        background_events: None,
         parent_step: None,
         parent_session: None,
         fallback_chain: vec![fallback],
@@ -1444,6 +1453,7 @@ async fn esc_between_tool_calls_stops_the_batch() {
         messages: vec![Message::new(Role::User, "go")],
         root: temp_dir.clone(),
         session_id: "test-esc-sess".into(),
+        turn: 0,
         blocked_patterns: vec![],
         approval_mode: Default::default(),
         approval_switch: None,
@@ -1471,6 +1481,8 @@ async fn esc_between_tool_calls_stops_the_batch() {
         shadow_store: crate::config::ShadowStore::Off,
         subagent_depth: 0,
         background_subagents: false,
+        background_registry: None,
+        background_events: None,
         parent_step: None,
         parent_session: None,
         fallback_chain: vec![],
@@ -1546,6 +1558,7 @@ async fn ask_webfetch_prompts_without_always_before_fetching() {
         messages: vec![Message::new(Role::User, "fetch it")],
         root: temp_dir.clone(),
         session_id: "test-netask-sess".into(),
+        turn: 0,
         blocked_patterns: vec![],
         approval_mode: crate::config::ApprovalMode::Ask,
         approval_switch: None,
@@ -1573,6 +1586,8 @@ async fn ask_webfetch_prompts_without_always_before_fetching() {
         shadow_store: crate::config::ShadowStore::Off,
         subagent_depth: 0,
         background_subagents: false,
+        background_registry: None,
+        background_events: None,
         parent_step: None,
         parent_session: None,
         fallback_chain: vec![],
@@ -1651,7 +1666,8 @@ async fn subagent_does_not_join_its_parent_plan() {
     let outcome = run_subagent(
         &call,
         "parent-sess",
-        &parent_tx,
+        0,
+        &crate::agent::loop_task::EventSink::bounded(parent_tx.clone()),
         &std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         &provider,
         "m",
@@ -1713,7 +1729,8 @@ async fn subagent_lifecycle_lands_in_the_parent_event_log() {
     let outcome = run_subagent(
         &call,
         "parent-events",
-        &parent_tx,
+        0,
+        &crate::agent::loop_task::EventSink::bounded(parent_tx.clone()),
         &std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         &provider,
         "m",
@@ -1871,7 +1888,8 @@ async fn subagent_ignores_a_foreign_active_plan() {
     let outcome = run_subagent(
         &call,
         "lonely-sess",
-        &parent_tx,
+        0,
+        &crate::agent::loop_task::EventSink::bounded(parent_tx.clone()),
         &std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         &provider,
         "m",
@@ -1972,7 +1990,8 @@ async fn a_child_request_omits_subagent_and_ask_user_tools() {
     let outcome = run_subagent(
         &call,
         "parent-tools",
-        &parent_tx,
+        0,
+        &crate::agent::loop_task::EventSink::bounded(parent_tx.clone()),
         &std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         &provider,
         "m",
@@ -2040,6 +2059,7 @@ async fn a_background_subagent_reports_before_the_turn_ends() {
         messages: vec![Message::new(Role::User, "do it")],
         root: root.clone(),
         session_id: "bg-parent".into(),
+        turn: 0,
         blocked_patterns: vec![],
         approval_mode: crate::config::ApprovalMode::Auto,
         approval_switch: None,
@@ -2066,7 +2086,9 @@ async fn a_background_subagent_reports_before_the_turn_ends() {
         plan_limits: Default::default(),
         shadow_store: crate::config::ShadowStore::Off,
         subagent_depth: 0,
-            background_subagents: true,
+        background_subagents: true,
+        background_registry: None,
+        background_events: None,
         parent_step: None,
         parent_session: None,
         fallback_chain: vec![],
@@ -2112,6 +2134,232 @@ async fn a_background_subagent_reports_before_the_turn_ends() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// A background writer may outlive the turn that spawned it. The parent
+/// answers without waiting; the child's write still carries the spawner turn
+/// and reaches the event log, and its report is delivered to the next turn.
+#[tokio::test]
+async fn a_background_writer_can_outlive_the_turn_and_report_next_turn() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    struct OutlivingProvider {
+        parent_calls: AtomicUsize,
+        child_calls: AtomicUsize,
+        release: Arc<tokio::sync::Notify>,
+    }
+    impl crate::providers::Provider for OutlivingProvider {
+        fn stream_chat(
+            &self,
+            req: crate::providers::ChatRequest,
+        ) -> futures::stream::BoxStream<'static, crate::providers::StreamResult> {
+            use futures::StreamExt;
+            let parent = req.tools.iter().any(|tool| tool.name == "subagent");
+            if parent {
+                let events: Vec<crate::providers::StreamResult> =
+                    match self.parent_calls.fetch_add(1, Ordering::Relaxed) {
+                        0 => vec![Ok(crate::providers::StreamEvent::ToolCall(
+                            crate::providers::ToolCallReq::new(
+                                "call-bg",
+                                "subagent",
+                                serde_json::json!({"tasks": ["write late.txt"]}),
+                            ),
+                        ))],
+                        _ => vec![Ok(crate::providers::StreamEvent::Text(
+                            "parent answer".into(),
+                        ))],
+                    };
+                return futures::stream::iter(events).boxed();
+            }
+            let turn = self.child_calls.fetch_add(1, Ordering::Relaxed);
+            let release = self.release.clone();
+            // The child does not start until the parent is already done.
+            let step = async move {
+                if turn == 0 {
+                    release.notified().await;
+                }
+                if turn == 0 {
+                    Ok(crate::providers::StreamEvent::ToolCall(
+                        crate::providers::ToolCallReq::new(
+                            "late-write",
+                            "write",
+                            serde_json::json!({"file_path": "late.txt", "content": "late-bytes"}),
+                        ),
+                    ))
+                } else {
+                    Ok(crate::providers::StreamEvent::Text("late report".into()))
+                }
+            };
+            futures::stream::once(step).boxed()
+        }
+    }
+
+    let root = std::env::temp_dir().join(format!("sqwai-bgoutlive-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::create_dir_all(&root);
+    // One Notify shared by the provider and the test.
+    let shared = Arc::new(tokio::sync::Notify::new());
+    let provider: SharedProvider = Arc::new(OutlivingProvider {
+        parent_calls: AtomicUsize::new(0),
+        child_calls: AtomicUsize::new(0),
+        release: shared.clone(),
+    });
+    let registry = super::new_background_registry();
+    let (bg_tx, _bg_rx) = mpsc::unbounded_channel();
+
+    let spawn_input = |messages: Vec<Message>, turn: u64| AgentInput {
+        provider: provider.clone(),
+        model_id: "m".into(),
+        model_key: "p/m".into(),
+        effort: None,
+        effort_support: crate::config::EffortSupport::default(),
+        max_tokens: None,
+        system: vec![],
+        messages,
+        root: root.clone(),
+        session_id: "bg-outlive".into(),
+        turn,
+        blocked_patterns: vec![],
+        approval_mode: crate::config::ApprovalMode::Auto,
+        approval_switch: None,
+        approval_grants: Default::default(),
+        web_allow_hosts: vec![],
+        context_limit: 10_000,
+        vision: true,
+        pdf: true,
+        tools: Default::default(),
+        search: Default::default(),
+        limits: Default::default(),
+        active_skills: vec![],
+        read_ledger: Default::default(),
+        enable_tools: true,
+        background_baselines: false,
+        read_only: false,
+        previous_response_id: None,
+        summary: None,
+        mcp: Default::default(),
+        skills: Default::default(),
+        compact_only: false,
+        compact_focus: String::new(),
+        compaction: Default::default(),
+        plan_limits: Default::default(),
+        shadow_store: crate::config::ShadowStore::Off,
+        subagent_depth: 0,
+        background_subagents: true,
+        background_registry: Some(registry.clone()),
+        background_events: Some(bg_tx.clone()),
+        parent_step: None,
+        parent_session: None,
+        fallback_chain: vec![],
+    };
+
+    let mut handle = spawn_agent(spawn_input(
+        vec![Message::new(Role::User, "delegate it")],
+        1,
+    ));
+    let mut first = None;
+    while let Some(ev) = handle.rx.recv().await {
+        match ev {
+            AgentEvent::Completed(Ok(done)) => {
+                first = Some(done);
+                break;
+            }
+            AgentEvent::Completed(Err(e)) => panic!("turn 1 failed: {e}"),
+            _ => {}
+        }
+    }
+    let first = first.expect("turn 1 completed");
+    assert!(
+        !first
+            .messages
+            .iter()
+            .any(|m| m.role == Role::User && m.content.contains("<subagent_completion")),
+        "a writer still running at the answer is not joined into it"
+    );
+    {
+        let entries = registry.lock().await;
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries.values().next().unwrap().status, "running");
+    }
+
+    // Let the child do its work after the answer.
+    shared.notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let done = {
+                let entries = registry.lock().await;
+                entries.values().all(|entry| entry.status != "running")
+            };
+            if done {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the outliving child finishes");
+    let report = {
+        let entries = registry.lock().await;
+        entries
+            .values()
+            .next()
+            .and_then(|entry| entry.output.clone())
+            .expect("the report is kept in the session registry")
+    };
+    assert!(report.contains("late report"), "{report}");
+    assert_eq!(
+        std::fs::read_to_string(root.join("late.txt")).unwrap(),
+        "late-bytes"
+    );
+
+    // The write carries the spawner turn even though it landed later.
+    let records =
+        crate::agent::events::EventLog::records_for(&root, "bg-outlive").unwrap();
+    let stamped = records
+        .iter()
+        .find(|record| {
+            record.kind == "file_diff"
+                && record.fields.get("path").and_then(|v| v.as_str()) == Some("late.txt")
+        })
+        .expect("the child's write is recorded in the parent log");
+    assert_eq!(stamped.turn, Some(1));
+    let checkpoints =
+        crate::agent::events::EventLog::checkpoints_in_turn(&root, "bg-outlive", 1).unwrap();
+    assert!(
+        checkpoints
+            .iter()
+            .any(|(sha, _)| Some(sha.as_str())
+                == stamped.fields.get("checkpoint").and_then(|v| v.as_str())),
+        "{checkpoints:?}"
+    );
+
+    // The next turn receives the undelivered report as a host note.
+    let mut messages = first.messages.clone();
+    messages.push(Message::new(Role::User, "next"));
+    let mut handle = spawn_agent(spawn_input(messages, 2));
+    let mut second = None;
+    while let Some(ev) = handle.rx.recv().await {
+        match ev {
+            AgentEvent::Completed(Ok(done)) => {
+                second = Some(done);
+                break;
+            }
+            AgentEvent::Completed(Err(e)) => panic!("turn 2 failed: {e}"),
+            _ => {}
+        }
+    }
+    let second = second.expect("turn 2 completed");
+    assert!(
+        second.messages.iter().any(|m| {
+            m.role == Role::User
+                && m.content.contains("<subagent_completion")
+                && m.content.contains("late report")
+        }),
+        "the next turn drains the completed child: {:#?}",
+        second.messages
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// A hung child must not stall the parent turn forever: the timeout
 /// cancels cooperatively, waits out the grace, aborts, and reports.
 #[tokio::test]
@@ -2139,7 +2387,8 @@ async fn hung_subagent_times_out_and_aborts() {
     let outcome = run_subagent(
         &call,
         "parent-sess",
-        &parent_tx,
+        0,
+        &crate::agent::loop_task::EventSink::bounded(parent_tx.clone()),
         &std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         &provider,
         "m",
@@ -2208,7 +2457,8 @@ async fn esc_stops_a_subagent_wait_without_the_timeout() {
     let outcome = run_subagent(
         &call,
         "parent-sess",
-        &parent_tx,
+        0,
+        &crate::agent::loop_task::EventSink::bounded(parent_tx.clone()),
         &cancel,
         &provider,
         "m",
@@ -2297,6 +2547,7 @@ async fn same_turn_subagent_calls_overlap() {
         messages: vec![Message::new(Role::User, "go")],
         root: temp_dir.clone(),
         session_id: "test-subbatch-sess".into(),
+        turn: 0,
         blocked_patterns: vec![],
         approval_mode: Default::default(),
         approval_switch: None,
@@ -2324,6 +2575,8 @@ async fn same_turn_subagent_calls_overlap() {
         shadow_store: crate::config::ShadowStore::Off,
         subagent_depth: 0,
         background_subagents: false,
+        background_registry: None,
+        background_events: None,
         parent_step: None,
         parent_session: None,
         fallback_chain: vec![],
@@ -2415,6 +2668,7 @@ async fn parallel_read_only_batch_merges_read_state_before_following_mutation() 
         messages: vec![Message::new(Role::User, "read both and overwrite a.txt")],
         root: root.clone(),
         session_id: "test-parallel-ro".into(),
+        turn: 0,
         blocked_patterns: vec![],
         approval_mode: Default::default(),
         approval_switch: None,
@@ -2442,6 +2696,8 @@ async fn parallel_read_only_batch_merges_read_state_before_following_mutation() 
         shadow_store: crate::config::ShadowStore::Off,
         subagent_depth: 0,
         background_subagents: false,
+        background_registry: None,
+        background_events: None,
         parent_step: None,
         parent_session: None,
         fallback_chain: vec![],
@@ -2526,6 +2782,7 @@ async fn closing_a_plan_does_not_end_the_run_by_itself() {
         messages: vec![Message::new(Role::User, "build the thing")],
         root: root.clone(),
         session_id: session_id.into(),
+        turn: 0,
         blocked_patterns: vec![],
         approval_mode: Default::default(),
         approval_switch: None,
@@ -2553,6 +2810,8 @@ async fn closing_a_plan_does_not_end_the_run_by_itself() {
         shadow_store: crate::config::ShadowStore::Off,
         subagent_depth: 0,
         background_subagents: false,
+        background_registry: None,
+        background_events: None,
         parent_step: None,
         parent_session: None,
         fallback_chain: vec![],
@@ -2714,6 +2973,7 @@ async fn shifting_the_mode_mid_run_reaches_the_next_tool_call() {
         messages: vec![Message::new(Role::User, "go")],
         root: temp_dir.clone(),
         session_id: session.into(),
+        turn: 0,
         blocked_patterns: vec![],
         approval_mode: ApprovalMode::Auto,
         approval_switch: Some(switch.clone()),
@@ -2741,6 +3001,8 @@ async fn shifting_the_mode_mid_run_reaches_the_next_tool_call() {
         shadow_store: crate::config::ShadowStore::Off,
         subagent_depth: 0,
         background_subagents: false,
+        background_registry: None,
+        background_events: None,
         parent_step: None,
         parent_session: None,
         fallback_chain: vec![],

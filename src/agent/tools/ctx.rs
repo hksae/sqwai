@@ -41,6 +41,10 @@ pub struct ToolCtx {
     /// Session that owns the host event log. Children write into the parent's
     /// log so evidence and undo remain reachable after the child exits.
     pub events_session: String,
+    /// User turn this context belongs to. Inherited unchanged by children, so
+    /// a write that lands after its turn ended is still stamped with the
+    /// spawner turn and stays attributable to it in the event log.
+    pub turn: u64,
     /// Override for the checkpoint chain only: a child session's
     /// snapshots land on its parent's chain, so the parent's `/undo` sees
     /// the child's step boundaries and bash mutations. `None` means the own
@@ -178,6 +182,7 @@ impl ToolCtx {
             outside_granted: Vec::new(),
             session_id: "shared".into(),
             events_session: "shared".into(),
+            turn: 0,
             checkpoint_session: None,
             files_read: HashMap::new(),
             read_windows: HashMap::new(),

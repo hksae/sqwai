@@ -547,6 +547,9 @@ impl App {
         if let MenuAction::DeleteSession(id) = &inner {
             match Session::delete(id) {
                 Ok(()) => {
+                    if let Some(bg) = self.background.remove(id) {
+                        crate::agent::loop_task::abort_background_children(&bg.registry);
+                    }
                     self.sessions.retain(|s| s.id.to_string() != *id);
                     self.status("session deleted", StatusKind::Ok);
                 }

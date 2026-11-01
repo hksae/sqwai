@@ -1430,6 +1430,7 @@ fn undo_reopens_only_done_steps_with_reverted_recorded_evidence() {
         plan: Some(active.id.clone()),
         agent: "main".into(),
         epoch: None,
+        turn: None,
         kind: "file_diff".into(),
         fields: serde_json::from_value(serde_json::json!({"path": path})).unwrap(),
     };
@@ -1475,6 +1476,7 @@ fn undo_reopens_step_on_any_partial_revert() {
         plan: Some(active.id.clone()),
         agent: "main".into(),
         epoch: None,
+        turn: None,
         kind: "file_diff".into(),
         fields: serde_json::from_value(serde_json::json!({"path": path})).unwrap(),
     };
@@ -1515,6 +1517,7 @@ fn undo_reopened_step_ids_matches_across_path_separators() {
         plan: Some(active.id.clone()),
         agent: "main".into(),
         epoch: None,
+        turn: None,
         kind: "file_diff".into(),
         fields: serde_json::from_value(serde_json::json!({"path": "src\\changed.rs"})).unwrap(),
     };

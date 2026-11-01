@@ -793,7 +793,7 @@ fn a_turn_with_nothing_visible_yet_still_shows_the_working_line() {
 }
 
 #[test]
-fn finish_retires_unfinished_tool_and_subagent_rows() {
+fn finish_retires_unfinished_tool_rows_and_keeps_running_writers() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.push_segment(Segment::User("go".into()));
     app.push_segment(Segment::Tool {
@@ -823,10 +823,13 @@ fn finish_retires_unfinished_tool_and_subagent_rows() {
             ..
         }
     ));
-    assert!(matches!(
-        app.segments[2],
-        Segment::Subagent { ref status, .. } if status == "failed"
-    ));
+    assert!(
+        matches!(
+            app.segments[2],
+            Segment::Subagent { ref status, .. } if status == "running"
+        ),
+        "a background writer outlives the turn and must not be retired as failed"
+    );
     // settled rows are done: a second pass changes nothing
     let revs: Vec<u64> = app.seg_meta.iter().map(|m| m.rev).collect();
     app.retire_unfinished_rows();

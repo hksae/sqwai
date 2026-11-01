@@ -229,6 +229,15 @@ pub(super) struct TestApproval {
     pub(super) allow_always: bool,
 }
 
+/// Background children of one session and the channel their events arrive
+/// on. Both outlive a turn: the TUI keeps draining the channel while idle so
+/// late text, checkpoints and completions still reach the screen.
+pub(super) struct BackgroundSession {
+    pub(super) registry: crate::agent::loop_task::BackgroundRegistry,
+    pub(super) events_tx: tokio::sync::mpsc::UnboundedSender<AgentEvent>,
+    pub(super) events_rx: tokio::sync::mpsc::UnboundedReceiver<AgentEvent>,
+}
+
 pub struct App {
     cfg: Config,
     model_cfg: ModelConfig,
@@ -276,6 +285,15 @@ pub struct App {
     streaming: bool,
     aborted: bool,
     agent: Option<AgentHandle>,
+    /// Background children and their live event stream, per session. The
+    /// registry outlives the turn, so a writer may finish after the answer;
+    /// the receiver is drained even while the TUI is idle.
+    pub(super) background: std::collections::HashMap<String, BackgroundSession>,
+    /// Deferred merge of the live events tail while a background writer is
+    /// still running. The child's `done` event can reach the UI before its
+    /// runner flips the registry status; retrying a few milliseconds later
+    /// keeps the completion record from being dropped on the floor.
+    pub(super) background_merge_at: Option<Instant>,
     /// derived visible steps from the active structured plan
     todos: Vec<String>,
     /// tracked child agents shown in the overview
@@ -775,6 +793,8 @@ impl App {
             streaming: false,
             aborted: false,
             agent: None,
+            background: std::collections::HashMap::new(),
+            background_merge_at: None,
             test_churn: None,
             test_approvals: std::collections::VecDeque::new(),
             test_approval_total: 0,
@@ -1075,6 +1095,11 @@ impl App {
         {
             consider(now + Duration::from_millis(50));
         }
+        // 8. Deferred merge while a background writer may still be flipping
+        //    its registry status.
+        if let Some(at) = self.background_merge_at {
+            consider(at);
+        }
 
         earliest
     }
@@ -1127,7 +1152,10 @@ impl App {
             //   no timer runs at all (0% CPU wakeups).
             let deadline = self.next_wake_deadline(last_build);
             let has_agent = self.agent.is_some();
+            let active_sid = self.session.id.to_string();
+            let has_background = self.background.contains_key(&active_sid);
             let mut woke_agent_ev: Option<AgentEvent> = None;
+            let mut woke_bg_ev: Option<AgentEvent> = None;
             tokio::select! {
                 _ = input_notify.notified() => {},
                 maybe_ev = async {
@@ -1137,6 +1165,14 @@ impl App {
                     }
                 }, if has_agent => {
                     woke_agent_ev = maybe_ev;
+                },
+                maybe_bg = async {
+                    match self.background.get_mut(&active_sid) {
+                        Some(bg) => bg.events_rx.recv().await,
+                        None => std::future::pending().await,
+                    }
+                }, if has_background => {
+                    woke_bg_ev = maybe_bg;
                 },
                 _ = async {
                     match deadline {
@@ -1161,6 +1197,21 @@ impl App {
             } else {
                 self.poll_agent();
             }
+            if let Some(ev) = woke_bg_ev {
+                // A background child outlives its turn: these events arrive
+                // with no agent handle attached. They still update rows,
+                // history and approvals, and a completion becomes durable
+                // immediately rather than waiting for the next turn.
+                self.handle_agent_event(ev);
+                if self.agent.is_none() {
+                    // Merge only once every writer has stopped: the live tail
+                    // is still being appended to while one runs.
+                    self.note_background_event();
+                    self.session.save().ok();
+                    self.dirty = true;
+                }
+            }
+            self.poll_background_merge();
             self.poll_provider_check();
             self.poll_search_test();
             self.poll_builtin_update();

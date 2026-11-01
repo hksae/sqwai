@@ -364,7 +364,8 @@ impl App {
                 }
                 let entry = (sha, label.clone());
                 if self.session.checkpoints.last() != Some(&entry) {
-                    self.session.checkpoints.push(entry);
+                    let turn = self.session.turn_seq;
+                    self.session.push_checkpoint(entry.0, entry.1, turn);
                 }
                 self.last_checkpoint = Some(label);
                 self.dirty = true;
@@ -504,19 +505,15 @@ impl App {
 
     pub(super) fn retire_unfinished_rows(&mut self) {
         for i in 0..self.segments.len() {
-            let orphaned = matches!(&self.segments[i], Segment::Tool { ok: None, .. })
-                || matches!(
-                    &self.segments[i],
-                    Segment::Subagent { status, .. }
-                        if status.as_str() != "completed" && status.as_str() != "failed"
-                );
+            // A subagent row is not orphaned by the turn ending: background
+            // writers may outlive the answer and report later. Only a tool
+            // row without a result is genuinely unfinished.
+            let orphaned = matches!(&self.segments[i], Segment::Tool { ok: None, .. });
             if !orphaned {
                 continue;
             }
-            match self.segments.get_mut(i) {
-                Some(Segment::Tool { ok, .. }) => *ok = Some(false),
-                Some(Segment::Subagent { status, .. }) => *status = "failed".into(),
-                _ => {}
+            if let Some(Segment::Tool { ok, .. }) = self.segments.get_mut(i) {
+                *ok = Some(false);
             }
             self.touch_segment(i);
         }
@@ -790,6 +787,42 @@ impl App {
         self.dirty = true;
     }
 
+    /// Live background writers of this session. The registry is locked only
+    /// momentarily by runners, so `try_lock` answers without blocking the UI.
+    pub(super) fn running_background_writers(&self) -> usize {
+        self.background
+            .get(&self.session.id.to_string())
+            .map(|bg| crate::agent::loop_task::running_background(&bg.registry))
+            .unwrap_or(0)
+    }
+
+    /// Merge the live events tail once no background writer of this session
+    /// can append to it. A child's `done` event can arrive before its runner
+    /// has flipped the registry status, so a still-running rail retries once
+    /// on a short deadline instead of merging mid-write.
+    pub(super) fn note_background_event(&mut self) {
+        if self.running_background_writers() == 0 {
+            self.merge_host_events();
+            self.background_merge_at = None;
+        } else if self.background_merge_at.is_none() {
+            self.background_merge_at =
+                Some(Instant::now() + std::time::Duration::from_millis(50));
+        }
+    }
+
+    /// The one deferred retry: if the runner has flipped by now the tail is
+    /// merged; otherwise the child still runs and its next event will ask
+    /// again. Never reschedules on its own.
+    pub(super) fn poll_background_merge(&mut self) {
+        if self.background_merge_at.is_none() {
+            return;
+        }
+        self.background_merge_at = None;
+        if self.agent.is_none() && self.running_background_writers() == 0 {
+            self.merge_host_events();
+        }
+    }
+
     pub(super) fn finish_turn_ok(&mut self, outcome: AgentOutcome) {
         // Grants earned this turn belong to the session, not the run: keep
         // them for the next submit ("always allow this session").
@@ -828,9 +861,10 @@ impl App {
             .session
             .turn_checkpoint_start
             .min(self.session.checkpoints.len());
+        let turn = self.session.turn_seq;
         for entry in outcome.checkpoints {
             if !self.session.checkpoints[start..].contains(&entry) {
-                self.session.checkpoints.push(entry);
+                self.session.push_checkpoint(entry.0, entry.1, turn);
             }
         }
         self.finish_turn_inner(Ok(()), advanced);
@@ -1166,9 +1200,17 @@ impl App {
             self.context_bootstrap_pending = true;
         }
         let aborted_turn = matches!(&res, Err(e) if e == "aborted");
+        let writing_children = self.running_background_writers();
         if aborted_turn || res.is_ok() {
             self.session.prev_turn_aborted = aborted_turn;
-            self.merge_host_events();
+            // A still-running child appends to the same live events tail.
+            // Taking it now would delete records its open handle is about to
+            // write (and on Unix orphan those writes entirely). Leave the
+            // tail in place until no background writer of this session runs.
+            if writing_children == 0 {
+                self.merge_host_events();
+                self.background_merge_at = None;
+            }
             self.session.save().ok();
         }
         let turn_note = match &res {
@@ -1193,6 +1235,18 @@ impl App {
         if res.is_ok() {
             self.retract_transient_status();
             self.retry_notified = false;
+            let running = self.running_background_writers();
+            if running > 0 {
+                self.push_segment(Segment::Status {
+                    text: format!(
+                        "{running} background writer(s) still running — reports arrive on a later \
+                         turn; /undo turn stops and reverts them"
+                    ),
+                    kind: StatusKind::Info,
+                    expanded: false,
+                    transient: false,
+                });
+            }
         }
         self.finalize_activity_group();
         if let Some((text, is_error)) = turn_note

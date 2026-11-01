@@ -29,22 +29,115 @@ use loop_subagent::{
 };
 use loop_turn::{request_messages, run_turn_with_prefetch, turn_transport};
 
-/// One background child batch owned by the current turn. The report is
-/// delivered either through `subagents output` or as a host note at turn end,
+/// One background child batch owned by a session. The report is delivered
+/// either through `subagents output` or as a host note at a turn boundary,
 /// never both.
-struct BackgroundChild {
+pub(crate) struct BackgroundChild {
     label: String,
     status: &'static str,
     started: Instant,
     output: Option<String>,
     delivered: bool,
     abort: Option<tokio::task::AbortHandle>,
-    join: Option<tokio::task::JoinHandle<()>>,
     notify: std::sync::Arc<tokio::sync::Notify>,
     steer: SteerControls,
 }
 
-type BackgroundRegistry = std::sync::Arc<tokio::sync::Mutex<std::collections::HashMap<u64, BackgroundChild>>>;
+/// Background children of one session, kept alive across turns: a writer is
+/// allowed to finish after the answer that spawned it, and its report is
+/// picked up by a later turn of the same session.
+pub(crate) type BackgroundRegistry =
+    std::sync::Arc<tokio::sync::Mutex<std::collections::HashMap<u64, BackgroundChild>>>;
+
+pub(crate) fn new_background_registry() -> BackgroundRegistry {
+    std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Where a child runner forwards its events. A foreground child sends into
+/// its parent turn's bounded channel; a background child sends into the
+/// per-session channel the TUI keeps draining even when no turn is running,
+/// so it never blocks on a full turn buffer after that turn ended.
+#[derive(Clone)]
+pub(crate) struct EventSink {
+    bounded: Option<mpsc::Sender<AgentEvent>>,
+    unbounded: Option<std::sync::Arc<mpsc::UnboundedSender<AgentEvent>>>,
+}
+
+impl EventSink {
+    pub(crate) fn bounded(tx: mpsc::Sender<AgentEvent>) -> Self {
+        Self {
+            bounded: Some(tx),
+            unbounded: None,
+        }
+    }
+
+    pub(crate) fn unbounded(tx: mpsc::UnboundedSender<AgentEvent>) -> Self {
+        Self {
+            bounded: None,
+            unbounded: Some(std::sync::Arc::new(tx)),
+        }
+    }
+
+    pub(crate) async fn send(&self, event: AgentEvent) {
+        if let Some(tx) = &self.bounded {
+            let _ = tx.send(event).await;
+        } else if let Some(tx) = &self.unbounded {
+            let _ = tx.send(event);
+        }
+    }
+}
+
+/// Stop every background child of a registry. Used when the owning session
+/// is deleted: nobody could read or undo its writers any more.
+pub(crate) fn abort_background_children(registry: &BackgroundRegistry) {
+    if let Ok(entries) = registry.try_lock() {
+        for entry in entries.values() {
+            if let Some(abort) = &entry.abort {
+                abort.abort();
+            }
+        }
+        return;
+    }
+    let registry = registry.clone();
+    tokio::spawn(async move {
+        let entries = registry.lock().await;
+        for entry in entries.values() {
+            if let Some(abort) = &entry.abort {
+                abort.abort();
+            }
+        }
+    });
+}
+
+/// Mark still-running reports as read before undo stops their children. The
+/// stopped child's salvage describes work the user just reverted; it must not
+/// come back as a completion note on a later turn. `subagents output` can
+/// still retrieve it explicitly.
+pub(crate) fn suppress_running_reports(registry: &BackgroundRegistry) {
+    if let Ok(mut entries) = registry.try_lock() {
+        for entry in entries.values_mut() {
+            if entry.status == "running" {
+                entry.delivered = true;
+            }
+        }
+    }
+}
+
+/// How many background children a session still runs. The registry outlives
+/// a turn, so this is what the end-of-turn notice counts.
+pub(crate) fn running_background(registry: &BackgroundRegistry) -> usize {
+    // `try_lock` because the TUI asks this synchronously while idle; a busy
+    // registry means a spawn is mid-flight, and the answer is still true.
+    registry
+        .try_lock()
+        .map(|entries| {
+            entries
+                .values()
+                .filter(|entry| entry.status == "running")
+                .count()
+        })
+        .unwrap_or(0)
+}
 /// Child control senders of one background batch, plus messages that arrived
 /// before the child registered its channel.
 #[derive(Default)]
@@ -348,8 +441,17 @@ impl AgentHandle {
     /// The stop half of this handle for the S1 child registry
     ///: undo cancels whatever is still registered before it
     /// reverts the tree. Cloned, never moved — the event stream stays here.
-    pub fn child_control(&self) -> super::undo_guard::ChildControl {
-        super::undo_guard::ChildControl::new(self.abort.clone(), self.cancel.clone())
+    pub fn child_control(
+        &self,
+        session: &str,
+        turn: u64,
+    ) -> super::undo_guard::ChildControl {
+        super::undo_guard::ChildControl::new(
+            self.abort.clone(),
+            self.cancel.clone(),
+            session,
+            turn,
+        )
     }
 }
 
@@ -581,6 +683,10 @@ pub struct AgentInput {
     pub root: PathBuf,
     /// session id used for the host-owned events file
     pub session_id: String,
+    /// User turn this run belongs to. Children inherit their spawner's turn,
+    /// so a writer that outlives the answer still stamps its writes with the
+    /// turn that started it and `/undo turn` can roll them back later.
+    pub turn: u64,
     /// hard-blocked command patterns from [safety].blocked_patterns
     pub blocked_patterns: Vec<String>,
     /// when tool calls need a confirmation dialog ([safety].approval_mode);
@@ -651,6 +757,15 @@ pub struct AgentInput {
     pub subagent_depth: u8,
     /// Treat `subagent` calls as background unless the call says otherwise.
     pub background_subagents: bool,
+    /// Session-lifetime registry for background children. The TUI passes the
+    /// same one on every turn so a writer outliving its turn still appears in
+    /// `subagents` and its report reaches a later turn. `None` creates a
+    /// turn-local registry (tests, headless runs).
+    pub(crate) background_registry: Option<BackgroundRegistry>,
+    /// Where background children send their live events. The TUI owns the
+    /// receiver for the session and drains it while idle; `None` sends into
+    /// this turn's channel, which is how foreground children work.
+    pub(crate) background_events: Option<mpsc::UnboundedSender<AgentEvent>>,
     /// Immutable step context inherited from the spawning session.
     /// `None` for main agents. The child stamps it on its event records
     /// and refuses mutations once the step moves to a newer epoch.
@@ -1128,6 +1243,7 @@ async fn run_agent(
         enable_tools,
         background_baselines,
         read_only,
+        turn: user_turn,
         mut previous_response_id,
         mut summary,
         compact_only,
@@ -1139,6 +1255,8 @@ async fn run_agent(
         shadow_store,
         subagent_depth,
         background_subagents,
+        background_registry,
+        background_events,
         parent_step,
         parent_session,
         mut fallback_chain,
@@ -1357,6 +1475,7 @@ async fn run_agent(
     // event records and gates their mutations against reopen races.
     ctx.subagent_step = parent_step.clone();
     ctx.subagent_depth = subagent_depth;
+    ctx.turn = user_turn;
     // ...and their parent's trust state: a fresh child events reads
     // clean, and the task text itself may be shaped by what the parent
     // consumed (audit H1).
@@ -1396,6 +1515,7 @@ async fn run_agent(
             .flatten()
             .map(|p| p.id);
         writer.set_attribution(None, plan_id, &events_agent);
+        writer.set_turn(Some(user_turn));
         // once per process+session: run_agent is spawned per turn, so an
         // unguarded write here recorded session_start + resume every turn
         if mark_agent_run_started(&session_id) {
@@ -1527,14 +1647,12 @@ async fn run_agent(
     let mut turn_system = build_turn_system(&system, &root, &session_id);
     let mut turn_tokens_used: u64 = 0;
     let mut tool_calls_used: usize = 0;
-    // Background spawns live inside the turn: the parent keeps working, the
-    // host joins them before the final answer, so no write outlives the
-    // checkpoint window undo relies on. Dropping the task handles (hard abort)
-    // cancels them. The id is local to this turn and starts at 1.
-    let background_registry: BackgroundRegistry = std::sync::Arc::new(
-        tokio::sync::Mutex::new(std::collections::HashMap::new()),
-    );
-    let mut next_background_id: u64 = 1;
+    // Background spawns may outlive the turn: the parent keeps working and
+    // the TUI holds the same registry across turns, so a writer finishing
+    // after the answer still lands in `subagents` and its report reaches a
+    // later turn. Undo of the spawner turn cancels whatever is still running.
+    let background_registry = background_registry.unwrap_or_else(new_background_registry);
+    let background_sink = background_events.map(EventSink::unbounded);
 
     loop {
         // Parent messages reach a child at its next request boundary. The
@@ -2088,10 +2206,11 @@ async fn run_agent(
                 interrupted = run_subagent_batch(
                     &turn.calls,
                     &session_id,
+                    user_turn,
                     &root,
                     &ctx.cancel,
                     &mut events,
-                    &tx,
+                    &EventSink::bounded(tx.clone()),
                     ctx.current_step.clone(),
                     &provider,
                     &model_id,
@@ -2452,7 +2571,9 @@ async fn run_agent(
                             if background {
                                 let call = call.clone();
                                 let parent_session = ctx.session_id.clone();
-                                let parent_tx = tx.clone();
+                                let parent_tx = background_sink
+                                    .clone()
+                                    .unwrap_or_else(|| EventSink::bounded(tx.clone()));
                                 let parent_cancel = ctx.cancel.clone();
                                 let provider = provider.clone();
                                 let model_id = model_id.clone();
@@ -2470,9 +2591,14 @@ async fn run_agent(
                                 let fallback_chain = fallback_chain.clone();
                                 let label =
                                     crate::agent::tools::call_summary(&call.name, &call.args);
-                                let batch_id = next_background_id;
-                                next_background_id += 1;
                                 let registry = background_registry.clone();
+                                // Ids are per session, not per turn: a
+                                // finished child stays listed for `subagents
+                                // output`, and a new turn must not reuse it.
+                                let batch_id = {
+                                    let entries = registry.lock().await;
+                                    entries.keys().max().copied().unwrap_or(0) + 1
+                                };
                                 let task_registry = registry.clone();
                                 let notify = std::sync::Arc::new(tokio::sync::Notify::new());
                                 let steer: SteerControls = std::sync::Arc::new(
@@ -2487,7 +2613,6 @@ async fn run_agent(
                                         output: None,
                                         delivered: false,
                                         abort: None,
-                                        join: None,
                                         notify: notify.clone(),
                                         steer: steer.clone(),
                                     },
@@ -2496,6 +2621,7 @@ async fn run_agent(
                                     let outcome = run_subagent(
                                         &call,
                                         &parent_session,
+                                        user_turn,
                                         &parent_tx,
                                         &parent_cancel,
                                         &provider,
@@ -2537,19 +2663,23 @@ async fn run_agent(
                                     notify.notify_waiters();
                                 });
                                 let abort = task.abort_handle();
+                                // Detach: a writer may finish after the answer
+                                // that spawned it. Its result reaches a later
+                                // turn; the abort handle stays for `kill`.
+                                drop(task);
                                 let mut entries = registry.lock().await;
                                 if let Some(entry) = entries.get_mut(&batch_id) {
                                     entry.abort = Some(abort);
-                                    entry.join = Some(task);
                                 }
                                 tools::Outcome::ok(format!(
-                                    "started background subagent {batch_id} ({label}); use subagents output id={batch_id} to wait, or let the report join before this turn ends"
+                                    "started background subagent {batch_id} ({label}); use subagents output id={batch_id} to wait, or let its report arrive on a later turn"
                                 ))
                             } else {
                             let outcome = run_subagent(
                                 call,
                                 &ctx.session_id,
-                                &tx,
+                                user_turn,
+                                &EventSink::bounded(tx.clone()),
                                 &ctx.cancel,
                                 &provider,
                                 &model_id,
@@ -3024,25 +3154,10 @@ async fn run_agent(
         }
     }
 
-    // Background children finish before the turn does: the parent got to work
-    // meanwhile, and every write still lands inside the checkpoint window undo
-    // knows. Their reports join the transcript as host notes (a user-role
-    // message the next request sees, rendered as a status row by the TUI).
-    // Background children finish before the turn does: the parent got to work
-    // meanwhile, and every write still lands inside the checkpoint window undo
-    // knows. Reports already read through `subagents output` are not repeated;
-    // the rest join the transcript as host notes.
-    let joins: Vec<tokio::task::JoinHandle<()>> = {
-        background_registry
-            .lock()
-            .await
-            .values_mut()
-            .filter_map(|entry| entry.join.take())
-            .collect()
-    };
-    for join in joins {
-        let _ = join.await;
-    }
+    // A child that finished before the answer joins the transcript now; one
+    // still running is not waited for. Its writes carry the spawner turn, so
+    // undo can roll them back after the fact, and the report is delivered by
+    // the next turn that drains the session registry.
     drain_background_reports(&background_registry, &mut messages, &tx).await;
 
     let _ = tx

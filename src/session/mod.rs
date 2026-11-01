@@ -96,6 +96,10 @@ pub struct RedoEntry {
     pub label: String,
     #[serde(default)]
     pub checkpoints: Vec<(String, String)>,
+    /// Spawner turn of each checkpoint, parallel to `checkpoints`. Restored
+    /// with them so a redo does not strip a later turn's attribution.
+    #[serde(default)]
+    pub checkpoint_turns: Vec<u64>,
     pub files: Vec<crate::agent::events::PreImage>,
     #[serde(default)]
     pub reopened_steps: Vec<String>,
@@ -185,8 +189,18 @@ pub struct Session {
     /// (sha, label) undo events: one entry per mutating agent action
     #[serde(default)]
     pub checkpoints: Vec<(String, String)>,
+    /// User turn that produced each checkpoint, parallel to `checkpoints`.
+    /// A child may write after its spawner turn ended, so turn membership is
+    /// not the same as position in the list; `/undo turn` selects by tag.
+    #[serde(default)]
+    pub checkpoint_turns: Vec<u64>,
+    /// Counter of submitted user turns. Incremented by the host before each
+    /// agent run; children stamp their writes with the turn that spawned them.
+    #[serde(default)]
+    pub turn_seq: u64,
     /// Index in `checkpoints` where the latest agent turn started, used by
     /// `/undo turn` to roll back all mutations of the last turn at once.
+    /// Kept as the fallback for saves written before checkpoint tags existed.
     #[serde(default)]
     pub turn_checkpoint_start: usize,
     /// Stack of undone operations that `/redo` can re-apply; cleared whenever
@@ -280,6 +294,8 @@ impl Session {
             last_response_model: None,
             events: Vec::new(),
             checkpoints: Vec::new(),
+            checkpoint_turns: Vec::new(),
+            turn_seq: 0,
             turn_checkpoint_start: 0,
             redo_stack: Vec::new(),
             activity: Vec::new(),
@@ -315,6 +331,81 @@ impl Session {
     #[cfg_attr(test, allow(dead_code))]
     pub fn max_event_seq(&self) -> u64 {
         self.events.last().map(|record| record.seq).unwrap_or(0)
+    }
+
+    /// Append a checkpoint together with the turn that produced it.
+    pub fn push_checkpoint(&mut self, sha: String, label: String, turn: u64) {
+        self.align_checkpoint_turns();
+        self.checkpoints.push((sha, label));
+        self.checkpoint_turns.push(turn);
+    }
+
+    /// Saves written before checkpoint tags existed carry fewer tags than
+    /// checkpoints. Treat the unnamed prefix as turn 0 before appending, or
+    /// every following tag would shift onto the wrong checkpoint.
+    fn align_checkpoint_turns(&mut self) {
+        if self.checkpoint_turns.len() < self.checkpoints.len() {
+            self.checkpoint_turns
+                .resize(self.checkpoints.len(), 0);
+        } else {
+            self.checkpoint_turns.truncate(self.checkpoints.len());
+        }
+    }
+
+    /// Spawner turn of one checkpoint. Saves written before tags existed
+    /// read as turn 0, which is also where legacy `/undo turn` looks.
+    pub fn checkpoint_turn(&self, index: usize) -> u64 {
+        self.checkpoint_turns.get(index).copied().unwrap_or(0)
+    }
+
+    /// Positions of the checkpoints a turn produced, wherever they sit in
+    /// the list: a child may append after later turns have added their own.
+    pub fn checkpoint_indices_of_turn(&self, turn: u64) -> Vec<usize> {
+        (0..self.checkpoints.len())
+            .filter(|&i| self.checkpoint_turn(i) == turn)
+            .collect()
+    }
+
+    /// Drop checkpoints by position, keeping the turn tags aligned. Undo
+    /// removes exactly the entries it reverted instead of truncating a tail
+    /// that may contain another turn's late child writes.
+    pub fn remove_checkpoints(&mut self, indices: &[usize]) {
+        if indices.is_empty() {
+            return;
+        }
+        self.align_checkpoint_turns();
+        let mut keep = vec![true; self.checkpoints.len()];
+        for &i in indices {
+            if let Some(slot) = keep.get_mut(i) {
+                *slot = false;
+            }
+        }
+        let mut ci = 0;
+        self.checkpoints.retain(|_| {
+            let keep_it = keep.get(ci).copied().unwrap_or(false);
+            ci += 1;
+            keep_it
+        });
+        self.checkpoint_turns = self
+            .checkpoint_turns
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| keep.get(*i).copied().unwrap_or(false))
+            .map(|(_, turn)| *turn)
+            .collect();
+        self.turn_checkpoint_start = self.turn_checkpoint_start.min(self.checkpoints.len());
+    }
+
+    /// Re-append checkpoints a redo brings back, with their original tags.
+    pub fn restore_checkpoints(&mut self, pairs: Vec<(String, String)>, turns: Vec<u64>) {
+        self.align_checkpoint_turns();
+        self.checkpoint_turns.extend(
+            pairs
+                .iter()
+                .enumerate()
+                .map(|(i, _)| turns.get(i).copied().unwrap_or(0)),
+        );
+        self.checkpoints.extend(pairs);
     }
 
     /// pinned sessions first, then by latest activity
@@ -887,6 +978,30 @@ mod tests {
         assert_eq!(title_from(&long).chars().count(), 41); // 40 + ellipsis
     }
 
+    /// A save from before checkpoint tags existed carries checkpoints without
+    /// turns. Appending a tagged checkpoint must not shift its tag onto an
+    /// older entry: the unnamed prefix belongs to turn 0.
+    #[test]
+    fn checkpoint_tags_stay_aligned_with_legacy_entries() {
+        let mut s = Session::new("m".into(), 1000);
+        s.checkpoints
+            .push(("blob:old".into(), "write old.txt".into()));
+        s.push_checkpoint("blob:new".into(), "write new.txt".into(), 7);
+        assert_eq!(s.checkpoint_turns, vec![0, 7]);
+        assert_eq!(s.checkpoint_indices_of_turn(7), vec![1]);
+        assert_eq!(s.checkpoint_indices_of_turn(0), vec![0]);
+
+        s.remove_checkpoints(&[1]);
+        assert_eq!(s.checkpoints.len(), 1);
+        assert_eq!(s.checkpoint_turns, vec![0]);
+
+        s.restore_checkpoints(
+            vec![("blob:new".into(), "write new.txt".into())],
+            vec![7],
+        );
+        assert_eq!(s.checkpoint_turns, vec![0, 7]);
+    }
+
     /// Persistence without the global dir: save, overwrite, load, delete.
     /// The second save to the same path pins rename-over-existing (the
     /// Windows half of the worry); the load pins the system-strip rule.
@@ -1039,6 +1154,7 @@ mod tests {
             plan: Some("plan-1".into()),
             agent: "main".into(),
             epoch: None,
+            turn: None,
             kind: "file_diff".into(),
             fields: serde_json::json!({"path": "src/main.rs", "added": 2, "removed": 0})
                 .as_object()

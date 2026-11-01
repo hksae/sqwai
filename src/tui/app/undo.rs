@@ -121,6 +121,20 @@ pub(super) struct UndoCoverage {
     transition: Option<String>,
 }
 
+/// What a rollback is scoped to: the checkpoint window or one user turn.
+/// The two differ only in wording and in how checkpoints are selected.
+struct UndoScope {
+    /// phrase for the pending-turn note ("the user reverted N files by …")
+    note: String,
+    /// phrase inside the toast ("reverted …")
+    display: String,
+    /// label stored on the redo entry
+    redo_label: String,
+    /// Spawner turn whose live children must stop before the restore. `None`
+    /// cancels every registered child (a window that is not turn-scoped).
+    cancel_turn: Option<u64>,
+}
+
 impl App {
     /// Retention for both checkpoint layers. Reports only when it did
     /// something: a maintenance pass that announces "nothing to do" on every
@@ -185,8 +199,22 @@ impl App {
     /// dispatch, not an already-running process), and take the restore
     /// lock. `None` means blocked — the caller returns without touching
     /// the tree.
-    pub(super) fn undo_preflight(&mut self) -> Option<crate::agent::undo_guard::RestoreGuard> {
-        let cancelled = crate::agent::undo_guard::cancel_running_children();
+    pub(super) fn undo_preflight(
+        &mut self,
+        cancel_turn: Option<u64>,
+    ) -> Option<crate::agent::undo_guard::RestoreGuard> {
+        let cancelled = match cancel_turn {
+            Some(turn) => {
+                if let Some(bg) = self.background.get(&self.session.id.to_string()) {
+                    crate::agent::loop_task::suppress_running_reports(&bg.registry);
+                }
+                crate::agent::undo_guard::cancel_running_children_of(
+                    &self.session.id.to_string(),
+                    turn,
+                )
+            }
+            None => crate::agent::undo_guard::cancel_running_children(),
+        };
         if cancelled > 0 {
             self.status(
                 &format!("cancelled {cancelled} running subagent(s) before undo"),
@@ -304,23 +332,62 @@ impl App {
     }
 
     pub(super) fn undo_turn(&mut self) {
-        if self.session.checkpoints.is_empty() {
-            self.status("nothing to undo", StatusKind::Info);
+        let turn = self.session.turn_seq;
+        // A save written before checkpoint tags existed has no turn
+        // attribution at all: fall back to the positional window once, which
+        // is exactly what `/undo turn` meant then.
+        if turn == 0 {
+            if self.session.checkpoints.is_empty() {
+                self.status("nothing to undo", StatusKind::Info);
+                return;
+            }
+            let start = self
+                .session
+                .turn_checkpoint_start
+                .min(self.session.checkpoints.len());
+            let count = self.session.checkpoints.len().saturating_sub(start);
+            if count == 0 {
+                self.status(
+                    "undo turn: no checkpoints recorded in the latest turn (use /undo <n> or /undo list)",
+                    StatusKind::Info,
+                );
+                return;
+            }
+            self.undo(count);
             return;
         }
-        let start = self
-            .session
-            .turn_checkpoint_start
-            .min(self.session.checkpoints.len());
-        let count = self.session.checkpoints.len().saturating_sub(start);
-        if count == 0 {
+        // Child writers may have landed after the turn ended, so their
+        // checkpoints never went through the turn's outcome. The parent's
+        // event log has them with the spawner turn stamped; fold them into
+        // the list so both the restore and the redo stack see them.
+        let root = self.project_root.clone();
+        let session = self.session.id.to_string();
+        let derived = crate::agent::events::EventLog::checkpoints_in_turn(&root, &session, turn)
+            .unwrap_or_default();
+        for (sha, label) in derived {
+            if !self.session.checkpoints.iter().any(|(known, _)| known == &sha) {
+                self.session.push_checkpoint(sha, label, turn);
+            }
+        }
+        let indices = self.session.checkpoint_indices_of_turn(turn);
+        if indices.is_empty() {
             self.status(
-                "undo turn: no checkpoints recorded in the latest turn (use /undo <n> or /undo list)",
+                &format!(
+                    "undo turn: no checkpoints recorded in turn {turn} (use /undo <n> or /undo list)"
+                ),
                 StatusKind::Info,
             );
             return;
         }
-        self.undo(count);
+        self.undo_indices(
+            indices,
+            UndoScope {
+                note: format!("undo to turn {turn}"),
+                display: format!("turn {turn}"),
+                redo_label: format!("turn {turn}"),
+                cancel_turn: Some(turn),
+            },
+        );
     }
 
     pub(super) fn undo(&mut self, n: usize) {
@@ -330,7 +397,28 @@ impl App {
             return;
         }
         let idx = self.session.checkpoints.len().saturating_sub(n);
-        let (sha, label) = self.session.checkpoints[idx].clone();
+        let label = self.session.checkpoints[idx].1.clone();
+        let indices: Vec<usize> = (idx..self.session.checkpoints.len()).collect();
+        self.undo_indices(
+            indices,
+            UndoScope {
+                note: format!("undo to '{label}'"),
+                display: format!("'{label}'"),
+                redo_label: label,
+                cancel_turn: None,
+            },
+        );
+    }
+
+    /// Revert exactly the checkpoints at `indices`, wherever they sit in the
+    /// session list. A turn's window can contain late child checkpoints with
+    /// earlier turns' entries around them, so removal is by position, never
+    /// by truncating the tail.
+    fn undo_indices(&mut self, indices: Vec<usize>, scope: UndoScope) {
+        if indices.is_empty() {
+            self.status("nothing to undo", StatusKind::Info);
+            return;
+        }
         let root = self.project_root.clone();
         let git_snapshots = crate::agent::checkpoints::available_in(&root, self.cfg.undo.shadow);
         // Coverage header + transition note for the toasts below. Computed
@@ -341,8 +429,15 @@ impl App {
         // the checkpoints being undone. Without this, undo reverts the whole
         // tree to the snapshot and silently discards anything the user edited
         // in their own editor while the agent was working.
-        let undone_pairs: Vec<(String, String)> = self.session.checkpoints[idx..].to_vec();
+        let undone_pairs: Vec<(String, String)> = indices
+            .iter()
+            .map(|&i| self.session.checkpoints[i].clone())
+            .collect();
         let undone: Vec<String> = undone_pairs.iter().map(|(sha, _)| sha.clone()).collect();
+        // The oldest checkpoint of the window is the state the undo returns
+        // the tree to; a turn's derived child checkpoints are appended after
+        // the parent's, so this stays the turn's starting snapshot.
+        let sha = undone.first().cloned().unwrap_or_default();
         let recorded =
             crate::agent::events::EventLog::recorded_writes(&root, &undone).unwrap_or_default();
         let scoped = !recorded.is_empty();
@@ -384,7 +479,7 @@ impl App {
         // S1: nothing mutates under the restore below — not dispatch
         // (writer lock), not running children (cancelled), not live
         // shells (refused above while any survive).
-        let _restore = match self.undo_preflight() {
+        let _restore = match self.undo_preflight(scope.cancel_turn) {
             Some(guard) => guard,
             None => return,
         };
@@ -394,8 +489,8 @@ impl App {
         if !git_snapshots || is_blob_only_sha || (scoped && covered && unrecorded == 0) {
             self.undo_from_blobs(
                 &root,
-                idx,
-                &label,
+                &indices,
+                &scope,
                 &pre_images,
                 unrecorded,
                 UndoCoverage {
@@ -452,7 +547,7 @@ impl App {
         ) {
             Ok(report) => {
                 if report.failed.is_some() {
-                    self.report_partial_undo(&format!("undo to '{label}'"), &report);
+                    self.report_partial_undo(&scope.note, &report);
                     return;
                 }
                 let touched = report.touched();
@@ -470,18 +565,19 @@ impl App {
                     &undone,
                     &redo_blobs,
                 );
+                let turns: Vec<u64> = indices
+                    .iter()
+                    .map(|&i| self.session.checkpoint_turn(i))
+                    .collect();
                 self.session.redo_stack.push(crate::session::RedoEntry {
-                    label: label.clone(),
+                    label: scope.redo_label.clone(),
                     checkpoints: undone_pairs,
+                    checkpoint_turns: turns,
                     files: redo_files,
                     reopened_steps: reopened_steps.clone(),
                 });
-                self.session.checkpoints.truncate(idx);
-                self.session.turn_checkpoint_start = self
-                    .session
-                    .turn_checkpoint_start
-                    .min(self.session.checkpoints.len());
-                self.arm_undo_note(&format!("undo to '{label}'"), &touched);
+                self.session.remove_checkpoints(&indices);
+                self.arm_undo_note(&scope.note, &touched);
                 // The provider's copy of the conversation still contains the
                 // work that was just reverted, and a continuation reference
                 // would carry the model straight back to it. The next request
@@ -490,7 +586,11 @@ impl App {
                 self.merge_host_events();
                 self.session.save().ok();
 
-                let mut note = format!("undo{cov}: reverted '{label}' ({} file(s)", touched.len());
+                let mut note = format!(
+                    "undo{cov}: reverted {} ({} file(s)",
+                    scope.display,
+                    touched.len()
+                );
                 if !report.deleted.is_empty() {
                     note.push_str(&format!(", {} removed", report.deleted.len()));
                 }
@@ -578,7 +678,7 @@ impl App {
         }
         // S1: same preflight as the full undo — the blob restore below is
         // a tree mutation like any other.
-        let _restore = match self.undo_preflight() {
+        let _restore = match self.undo_preflight(None) {
             Some(guard) => guard,
             None => return,
         };
@@ -637,6 +737,7 @@ impl App {
                 self.session.redo_stack.push(crate::session::RedoEntry {
                     label: format!("step {step}"),
                     checkpoints: Vec::new(),
+                    checkpoint_turns: Vec::new(),
                     files: redo_files,
                     reopened_steps: reopened.clone(),
                 });
@@ -686,11 +787,11 @@ impl App {
 
     /// Undo through layer 1: write back the pre-images the host stored, remove
     /// what the window created, and leave anything edited outside sqwai alone.
-    pub(super) fn undo_from_blobs(
+    fn undo_from_blobs(
         &mut self,
         root: &std::path::Path,
-        idx: usize,
-        label: &str,
+        indices: &[usize],
+        scope: &UndoScope,
         pre_images: &[crate::agent::events::PreImage],
         unrecorded: usize,
         coverage: UndoCoverage,
@@ -701,7 +802,7 @@ impl App {
         } = coverage;
         // Called from `undo` after its own preflight; re-checking is cheap
         // and keeps this entry safe on its own.
-        let _restore = match self.undo_preflight() {
+        let _restore = match self.undo_preflight(scope.cancel_turn) {
             Some(guard) => guard,
             None => return,
         };
@@ -710,11 +811,14 @@ impl App {
         match crate::agent::checkpoints::restore_from_blobs(root, pre_images) {
             Ok(report) => {
                 if report.failed.is_some() {
-                    self.report_partial_undo(&format!("undo to '{label}'"), &report);
+                    self.report_partial_undo(&scope.note, &report);
                     return;
                 }
                 let touched = report.touched();
-                let undone_pairs: Vec<(String, String)> = self.session.checkpoints[idx..].to_vec();
+                let undone_pairs: Vec<(String, String)> = indices
+                    .iter()
+                    .map(|&i| self.session.checkpoints[i].clone())
+                    .collect();
                 let undone_shas: Vec<String> =
                     undone_pairs.iter().map(|(sha, _)| sha.clone()).collect();
                 let sha = undone_shas.first().cloned().unwrap_or_default();
@@ -732,24 +836,26 @@ impl App {
                     &undone_shas,
                     &redo_blobs,
                 );
+                let turns: Vec<u64> = indices
+                    .iter()
+                    .map(|&i| self.session.checkpoint_turn(i))
+                    .collect();
                 self.session.redo_stack.push(crate::session::RedoEntry {
-                    label: label.to_string(),
+                    label: scope.redo_label.clone(),
                     checkpoints: undone_pairs,
+                    checkpoint_turns: turns,
                     files: redo_files,
                     reopened_steps: reopened_steps.clone(),
                 });
-                self.session.checkpoints.truncate(idx);
-                self.session.turn_checkpoint_start = self
-                    .session
-                    .turn_checkpoint_start
-                    .min(self.session.checkpoints.len());
-                self.arm_undo_note(&format!("undo to '{label}'"), &touched);
+                self.session.remove_checkpoints(indices);
+                self.arm_undo_note(&scope.note, &touched);
                 self.context_bootstrap_pending = true;
                 self.merge_host_events();
                 self.session.save().ok();
 
                 let mut note = format!(
-                    "undo{cov}: reverted '{label}' from stored pre-images ({} file(s)",
+                    "undo{cov}: reverted {} from stored pre-images ({} file(s)",
+                    scope.display,
                     touched.len()
                 );
                 if !report.deleted.is_empty() {
@@ -802,7 +908,7 @@ impl App {
             self.status("nothing to redo", StatusKind::Info);
             return;
         }
-        let _restore = match self.undo_preflight() {
+        let _restore = match self.undo_preflight(None) {
             Some(guard) => guard,
             None => return,
         };
@@ -845,7 +951,8 @@ impl App {
                     }
                     let cp_shas: Vec<String> =
                         entry.checkpoints.iter().map(|(s, _)| s.clone()).collect();
-                    self.session.checkpoints.extend(entry.checkpoints);
+                    self.session
+                        .restore_checkpoints(entry.checkpoints, entry.checkpoint_turns);
                     if !touched.is_empty() || entry.files.is_empty() {
                         let restored = restore_redone_steps(
                             root,

@@ -2090,6 +2090,121 @@ fn undo_turn_reverts_only_latest_turn_and_keeps_aborted_turn_checkpoints() {
     assert_eq!(app.session.checkpoints[0].0, "blob:turn1");
 }
 
+/// A child writer may land after the turn that spawned it ended. Its
+/// checkpoint never reached the turn's outcome, but the event log stamped it
+/// with the spawner turn, so `/undo turn` still reverts it in the same window
+/// as the parent's own writes and leaves earlier turns alone.
+#[test]
+fn undo_turn_reverts_late_child_writes_by_their_spawner_turn() {
+    use crate::agent::events::EventLog;
+    use serde_json::json;
+    use sha2::Digest;
+
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.startup = false;
+    app.cfg.undo.shadow = crate::config::ShadowStore::Off;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    app.project_root = root.to_path_buf();
+
+    let own = root.join("own.txt");
+    let child = root.join("child.txt");
+    let early = root.join("early.txt");
+    let old_late = root.join("oldlate.txt");
+    std::fs::write(&own, b"own-after").unwrap();
+    std::fs::write(&child, b"child-after").unwrap();
+    std::fs::write(&early, b"early-after").unwrap();
+    std::fs::write(&old_late, b"oldlate-after").unwrap();
+    let own_before = crate::agent::blobs::put(root, b"own-before").unwrap();
+    let child_before = crate::agent::blobs::put(root, b"child-before").unwrap();
+    let old_late_before = crate::agent::blobs::put(root, b"oldlate-before").unwrap();
+
+    let hash = |bytes: &[u8]| {
+        let mut h = sha2::Sha256::new();
+        h.update(bytes);
+        format!("sha256:{:x}", h.finalize())
+    };
+
+    let sid = app.session.id.to_string();
+    let mut events = EventLog::open(root, &sid).unwrap();
+    // A child of turn 1 that writes after turn 2 has already started: its
+    // record belongs to turn 1 and must not enter turn 2's rollback.
+    events.set_turn(Some(1));
+    events
+        .append(
+            "file_diff",
+            json!({
+                "path": "oldlate.txt",
+                "hash_before": "sha256:0",
+                "hash_after": hash(b"oldlate-after"),
+                "blob_before": old_late_before,
+                "checkpoint": "blob:oldlate",
+            }),
+        )
+        .unwrap();
+    events.set_turn(Some(2));
+    events
+        .append(
+            "file_diff",
+            json!({
+                "path": "own.txt",
+                "hash_before": "sha256:0",
+                "hash_after": hash(b"own-after"),
+                "blob_before": own_before,
+                "checkpoint": "blob:own",
+            }),
+        )
+        .unwrap();
+    events
+        .append(
+            "file_diff",
+            json!({
+                "path": "child.txt",
+                "hash_before": "sha256:0",
+                "hash_after": hash(b"child-after"),
+                "blob_before": child_before,
+                "checkpoint": "blob:child",
+            }),
+        )
+        .unwrap();
+    drop(events);
+
+    // An earlier turn's checkpoint must survive the rollback.
+    app.session.turn_seq = 1;
+    app.session
+        .push_checkpoint("blob:early".into(), "write early.txt".into(), 1);
+    // Turn 2: the parent's own write is in the session list; the child's late
+    // write is only in the event log.
+    app.session.turn_seq = 2;
+    app.session.push_checkpoint(
+        "blob:own".into(),
+        "write own.txt".into(),
+        2,
+    );
+
+    app.undo_turn();
+
+    assert_eq!(std::fs::read(&own).unwrap(), b"own-before");
+    assert_eq!(
+        std::fs::read(&child).unwrap(),
+        b"child-before",
+        "the late child write belongs to the turn and must be reverted"
+    );
+    assert_eq!(
+        std::fs::read(&early).unwrap(),
+        b"early-after",
+        "an earlier turn's file must remain untouched"
+    );
+    assert_eq!(
+        std::fs::read(&old_late).unwrap(),
+        b"oldlate-after",
+        "a late write stamped with an older turn is not this turn's to revert"
+    );
+    assert_eq!(app.session.checkpoints.len(), 1);
+    assert_eq!(app.session.checkpoints[0].0, "blob:early");
+    assert_eq!(app.session.checkpoint_turns, vec![1]);
+}
+
 fn stored_plan(
     root: &std::path::Path,
     goal: &str,

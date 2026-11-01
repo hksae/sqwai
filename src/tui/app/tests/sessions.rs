@@ -542,6 +542,7 @@ fn history_restores_every_child_of_a_batched_delegation() {
         plan: None,
         agent: "main".into(),
         epoch: None,
+        turn: None,
         kind: kind.into(),
         fields: serde_json::json!({
             "call_id": "c1",

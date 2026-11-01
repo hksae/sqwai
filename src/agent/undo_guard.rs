@@ -73,11 +73,23 @@ impl Drop for RestoreGuard {
 pub struct ChildControl {
     abort: tokio::task::AbortHandle,
     cancel: Arc<AtomicBool>,
+    /// Parent session and the user turn that spawned this child. An undo of
+    /// that turn stops only the writers it owns; other sessions keep working.
+    owner: (String, u64),
 }
 
 impl ChildControl {
-    pub(crate) fn new(abort: tokio::task::AbortHandle, cancel: Arc<AtomicBool>) -> Self {
-        Self { abort, cancel }
+    pub(crate) fn new(
+        abort: tokio::task::AbortHandle,
+        cancel: Arc<AtomicBool>,
+        session: impl Into<String>,
+        turn: u64,
+    ) -> Self {
+        Self {
+            abort,
+            cancel,
+            owner: (session.into(), turn),
+        }
     }
 
     /// Cooperative stop first (a `bash` child kills its own tree on this),
@@ -124,6 +136,22 @@ pub fn cancel_running_children() -> usize {
     n
 }
 
+/// Cancel only the children spawned by one user turn of one session. This is
+/// what `/undo turn` uses: its restore must not race writers it owns, but a
+/// writer from another session is not this undo's to kill.
+pub fn cancel_running_children_of(session: &str, turn: u64) -> usize {
+    let mut n = 0;
+    if let Ok(map) = children().lock() {
+        for control in map.values() {
+            if control.owner.0 == session && control.owner.1 == turn {
+                control.cancel();
+                n += 1;
+            }
+        }
+    }
+    n
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -151,8 +179,13 @@ mod tests {
         let probe = tokio::spawn(async {
             tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
         });
-        let reg = track_child(4242, ChildControl::new(probe.abort_handle(), flag.clone()));
-        assert_eq!(cancel_running_children(), 1);
+        let reg = track_child(
+            4242,
+            ChildControl::new(probe.abort_handle(), flag.clone(), "s", 7),
+        );
+        assert_eq!(cancel_running_children_of("s", 6), 0);
+        assert!(!flag.load(Ordering::Relaxed));
+        assert_eq!(cancel_running_children_of("s", 7), 1);
         assert!(flag.load(Ordering::Relaxed));
         // abort is scheduled, not synchronous: joining proves the teardown
         assert!(probe.await.unwrap_err().is_cancelled());

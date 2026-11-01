@@ -45,6 +45,26 @@ pub(super) fn adopt_plan_pointer(
 }
 
 impl App {
+    /// The per-session background channel and registry, created on first use.
+    /// Reused on every turn of the session so a child outliving one answer is
+    /// still listable and reportable in the next.
+    pub(super) fn ensure_background_session(
+        &mut self,
+    ) -> (
+        crate::agent::loop_task::BackgroundRegistry,
+        tokio::sync::mpsc::UnboundedSender<crate::agent::loop_task::AgentEvent>,
+    ) {
+        let sid = self.session.id.to_string();
+        let entry = self.background.entry(sid).or_insert_with(|| {
+            let (events_tx, events_rx) = tokio::sync::mpsc::unbounded_channel();
+            BackgroundSession {
+                registry: crate::agent::loop_task::new_background_registry(),
+                events_tx,
+                events_rx,
+            }
+        });
+        (entry.registry.clone(), entry.events_tx.clone())
+    }
     /// Write the in-memory pinned skill names back to the session record.
     pub(super) fn sync_active_skills_to_session(&mut self) {
         self.session.active_skills = self
@@ -315,6 +335,9 @@ impl App {
                 })
             })
             .collect();
+        self.session.turn_seq = self.session.turn_seq.saturating_add(1);
+        self.background_merge_at = None;
+        let (background_registry, background_events) = self.ensure_background_session();
         let input = crate::agent::loop_task::AgentInput {
             provider: self.provider.clone(),
             model_id: self.model_cfg.id.clone(),
@@ -330,6 +353,7 @@ impl App {
             messages: msgs,
             root,
             session_id: self.session.id.to_string(),
+            turn: self.session.turn_seq,
             blocked_patterns: self.cfg.safety.blocked_patterns.clone(),
             approval_mode: self.approval_mode,
             approval_switch: Some(self.approval_switch.clone()),
@@ -362,6 +386,8 @@ impl App {
             shadow_store: self.cfg.undo.shadow,
             subagent_depth: 0,
             background_subagents: true,
+            background_registry: Some(background_registry),
+            background_events: Some(background_events),
             parent_step: None,
             parent_session: None,
             fallback_chain,
@@ -482,6 +508,7 @@ impl App {
             messages: self.session.messages.clone(),
             root: self.project_root.clone(),
             session_id: self.session.id.to_string(),
+            turn: self.session.turn_seq,
             blocked_patterns: Vec::new(),
             approval_mode: self.approval_mode,
             approval_switch: Some(self.approval_switch.clone()),
@@ -509,6 +536,8 @@ impl App {
             shadow_store: self.cfg.undo.shadow,
             subagent_depth: 0,
             background_subagents: false,
+            background_registry: None,
+            background_events: None,
             parent_step: None,
             parent_session: None,
             fallback_chain: Vec::new(),

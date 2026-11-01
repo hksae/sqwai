@@ -681,6 +681,7 @@ fn rebuild_corrupt(root: &Path, id: &str) -> Option<Plan> {
             plan: None,
             agent: String::new(),
             epoch: None,
+            turn: None,
             kind: "plan".to_string(),
             fields: fields.clone(),
         };
