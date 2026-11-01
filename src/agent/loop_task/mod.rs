@@ -129,6 +129,8 @@ pub enum AgentEvent {
     SubagentStart {
         id: u64,
         task: String,
+        /// child event-session id, used to load its hidden transcript
+        session: String,
     },
     /// a reasoning delta from a delegated child
     SubagentThinking {
@@ -1273,18 +1275,16 @@ async fn run_agent(
     let mut tool_calls_used: usize = 0;
 
     loop {
-        // Transcript sync for hard-abort survival (main agent only — a
-        // child's transcript must never overwrite its parent's): every
-        // iteration persists the conversation so far, so killing the task
-        // loses at most the in-flight request.
-        if subagent_depth == 0 {
-            let _ = tx
-                .send(AgentEvent::TranscriptSync {
-                    messages: messages.clone(),
-                    summary: summary.clone(),
-                })
-                .await;
-        }
+        // Transcript sync for hard-abort survival: every iteration persists
+        // the conversation so far, so killing the task loses at most the
+        // in-flight request. Children emit it too — their runner writes it to
+        // a hidden session instead of the parent transcript.
+        let _ = tx
+            .send(AgentEvent::TranscriptSync {
+                messages: messages.clone(),
+                summary: summary.clone(),
+            })
+            .await;
         // the plan nudge rides at most one mutating result per model
         // request: every result carrying it waters the next one down
         plan_nudged = false;

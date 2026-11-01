@@ -1086,8 +1086,8 @@ fn subagent_rows_land_at_call_site_not_after_answer() {
         text: String::new(),
         live: true,
     });
-    app.handle_subagent_start(1, "t1".into());
-    app.handle_subagent_start(2, "t2".into());
+    app.handle_subagent_start(1, "t1".into(), "sub-1".into());
+    app.handle_subagent_start(2, "t2".into(), "sub-2".into());
     // the answer streams into the live slot afterwards
     let live = app
         .segments

@@ -37,6 +37,10 @@ pub struct SessionHeader {
     pub context_tokens: u64,
     pub calls: usize,
     pub errors: usize,
+    /// A child session owned by another agent. Written so its transcript can
+    /// be opened from the parent row, never listed as a user session.
+    #[serde(default)]
+    pub hidden: bool,
     /// project root this session belongs to; `None` marks a legacy save
     /// (shown everywhere, never filtered out)
     #[serde(default)]
@@ -70,6 +74,7 @@ impl SessionHeader {
             context_tokens: s.context_tokens_used(),
             calls: s.activity.iter().map(|a| a.calls).sum(),
             errors: s.activity.iter().map(|a| a.errors).sum(),
+            hidden: s.hidden,
             project: s.project.clone(),
         }
     }
@@ -220,6 +225,20 @@ pub struct Session {
     /// `None` marks a legacy save: shown everywhere, never filtered out.
     #[serde(default)]
     pub project: Option<std::path::PathBuf>,
+    /// Hidden child session: the transcript exists for the parent's history
+    /// screen, but the sessions menu never lists it.
+    #[serde(default)]
+    pub hidden: bool,
+    /// Parent session and the tool call that spawned this child.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_session: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_tool_call: Option<String>,
+    /// Task label and numeric child id as shown on the parent row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_task: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_child_id: Option<u64>,
     /// Names of skills pinned into this session. Bodies are re-resolved from
     /// the current skill catalog on load; names that no longer exist are
     /// dropped by the app.
@@ -269,6 +288,11 @@ impl Session {
             pending_undo_note: None,
             undo_layer2: None,
             project: None,
+            hidden: false,
+            parent_session: None,
+            parent_tool_call: None,
+            subagent_task: None,
+            subagent_child_id: None,
             active_skills: Vec::new(),
             read_ledger: Default::default(),
         }
@@ -573,6 +597,11 @@ impl Session {
     }
 
     pub fn save(&self) -> Result<()> {
+        // A hidden child is saved by its runner under the child session name;
+        // the ordinary session save must never make it visible.
+        if self.hidden {
+            return Ok(());
+        }
         // unit tests must never write real session files (the TUI suite
         // reaches save/delete through full app flows); persistence logic
         // itself is tested through save_to/load_from/delete_at below
@@ -582,6 +611,23 @@ impl Session {
         {
             let path = Self::sessions_dir()?.join(format!("{}.json", self.id));
             self.save_to(&path)
+        }
+    }
+
+    /// Persist a hidden child under its event-session name. The file is a
+    /// normal session on disk, filtered out of the menu by `hidden`; its name
+    /// is the child session id the parent's events carry.
+    pub fn save_hidden(&self, name: &str) -> Result<()> {
+        #[cfg(test)]
+        {
+            let _ = name;
+            return Ok(());
+        }
+        #[allow(unreachable_code)]
+        {
+            let dir = Self::sessions_dir()?;
+            std::fs::create_dir_all(&dir).ok();
+            self.save_to(&dir.join(format!("{name}.json")))
         }
     }
 
@@ -760,6 +806,7 @@ impl Session {
             }
         }
         SessionHeader::sort_sessions(&mut headers);
+        headers.retain(|header| !header.hidden);
         headers.truncate(limit.max(1));
         Ok(headers)
     }
@@ -869,6 +916,32 @@ mod tests {
         assert!(!path.exists());
         assert!(Session::load_from(&path).is_err());
         assert!(Session::delete_at(&path).is_err());
+    }
+
+    /// Hidden child sessions carry the parent link and stay out of the menu.
+    #[test]
+    fn hidden_child_session_round_trips_its_parent_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sub-test.json");
+        let mut s = Session::new("m".into(), 1000);
+        s.hidden = true;
+        s.parent_session = Some("parent-id".into());
+        s.parent_tool_call = Some("call-1".into());
+        s.subagent_task = Some("inspect".into());
+        s.subagent_child_id = Some(7);
+        s.push(Role::User, "inspect");
+        s.push(Role::Assistant, "done");
+        s.save_to(&path).unwrap();
+
+        let back = Session::load_from(&path).unwrap();
+        assert!(back.hidden);
+        assert_eq!(back.parent_session.as_deref(), Some("parent-id"));
+        assert_eq!(back.parent_tool_call.as_deref(), Some("call-1"));
+        assert_eq!(back.subagent_task.as_deref(), Some("inspect"));
+        assert_eq!(back.subagent_child_id, Some(7));
+        assert_eq!(back.messages.len(), 2);
+        let header = SessionHeader::from_session(&back);
+        assert!(header.hidden, "the menu filter can see it");
     }
 
     /// The approval axis is remembered with the session: a reopened session

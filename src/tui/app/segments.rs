@@ -169,6 +169,119 @@ impl App {
         }
     }
 
+    /// Load a restored child's hidden session into the row's transcript.
+    /// Live children already have `subagent_chats`; restored ones are loaded
+    /// lazily on the first click so opening a session with many children does
+    /// not parse every hidden file.
+    pub(super) fn ensure_subagent_chat(&mut self, id: u64) -> bool {
+        if self.subagent_chats.contains_key(&id) {
+            return true;
+        }
+        let Some(session_id) = self.subagent_sessions.get(&id).cloned() else {
+            return false;
+        };
+        let Ok(session) = crate::session::Session::load(&session_id) else {
+            return false;
+        };
+        let (chat, meta) = self.chat_from_session(&session);
+        self.subagent_chats.insert(id, chat);
+        self.subagent_meta.insert(id, meta);
+        true
+    }
+
+    /// Rebuild a child transcript from its hidden session. The live path
+    /// builds richer rows (activity, asks), but history is read-only: user,
+    /// commentary, thinking, assistant text and tool calls/results are the
+    /// rows a restored child needs.
+    pub(super) fn chat_from_session(
+        &mut self,
+        session: &crate::session::Session,
+    ) -> (Vec<Segment>, Vec<SegMeta>) {
+        let mut chat: Vec<Segment> = Vec::new();
+        let mut tools = std::collections::HashMap::<String, usize>::new();
+        for message in &session.messages {
+            match message.role {
+                Role::User => {
+                    if !message.content.is_empty() {
+                        chat.push(Segment::User(message.content.clone()));
+                    }
+                }
+                Role::Assistant => {
+                    if !message.thinking.is_empty() {
+                        chat.push(Segment::Thinking {
+                            text: message.thinking.clone(),
+                            expanded: false,
+                            started: None,
+                            duration_ms: message.thinking_ms,
+                            live: false,
+                        });
+                    }
+                    let commentary = message.content.trim();
+                    if !message.tool_calls.is_empty() {
+                        if !commentary.is_empty() {
+                            chat.push(Segment::Commentary(commentary.to_string()));
+                        }
+                        for call in &message.tool_calls {
+                            let idx = chat.len();
+                            chat.push(Segment::Tool {
+                                name: call.name.clone(),
+                                args: crate::agent::tools::call_summary(&call.name, &call.args),
+                                call_id: Some(call.id.clone()),
+                                ok: None,
+                                output: String::new(),
+                                diff: None,
+                                preview: Vec::new(),
+                                preview_total: 0,
+                                expanded: false,
+                                ask: None,
+                            });
+                            tools.insert(call.id.clone(), idx);
+                        }
+                    } else if !message.content.is_empty() {
+                        chat.push(Segment::Assistant {
+                            text: message.content.clone(),
+                            live: false,
+                        });
+                    }
+                    for provider in &message.provider_tools {
+                        chat.push(Segment::Tool {
+                            name: provider.name.clone(),
+                            args: provider.summary.clone(),
+                            call_id: None,
+                            ok: Some(true),
+                            output: String::new(),
+                            diff: None,
+                            preview: Vec::new(),
+                            preview_total: 0,
+                            expanded: false,
+                            ask: None,
+                        });
+                    }
+                }
+                Role::Tool => {
+                    let Some(call_id) = message.tool_call_id.as_ref() else {
+                        continue;
+                    };
+                    if let Some(idx) = tools.get(call_id).copied()
+                        && let Some(Segment::Tool { ok, output, .. }) = chat.get_mut(idx)
+                    {
+                        *ok = Some(!message.is_error);
+                        *output = message.content.clone();
+                    }
+                }
+                Role::System => {}
+            }
+        }
+        let meta = chat
+            .iter()
+            .map(|_| SegMeta {
+                id: self.alloc_seg_id(),
+                rev: 0,
+            })
+            .collect();
+        (chat, meta)
+    }
+
     pub(super) fn load_history_segments(&mut self) {
         // Tool calls and their results are part of the durable provider
         // transcript. Keep the rendered row keyed by call id so batched calls
@@ -186,7 +299,7 @@ impl App {
         // `subagent_start` / `subagent_done` pair per child into the parent
         // event log; use them so a reload keeps every row, not one per call.
         let mut restored_children =
-            std::collections::HashMap::<String, Vec<(u64, String, String)>>::new();
+            std::collections::HashMap::<String, Vec<(u64, String, String, String)>>::new();
         let mut max_child_id = 0u64;
         for record in &self.session.events {
             let Some(call_id) = record.fields.get("call_id").and_then(|v| v.as_str()) else {
@@ -204,9 +317,15 @@ impl App {
                         .and_then(|v| v.as_str())
                         .unwrap_or("subagent")
                         .to_string();
+                    let session = record
+                        .fields
+                        .get("child_session")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string();
                     let rows = restored_children.entry(call_id.to_string()).or_default();
-                    if !rows.iter().any(|(known, _, _)| *known == child_id) {
-                        rows.push((child_id, task, "interrupted".to_string()));
+                    if !rows.iter().any(|(known, _, _, _)| *known == child_id) {
+                        rows.push((child_id, task, "interrupted".to_string(), session));
                     }
                 }
                 "subagent_done" => {
@@ -216,10 +335,9 @@ impl App {
                         .and_then(|v| v.as_str())
                         .unwrap_or("failed")
                         .to_string();
-                    if let Some(row) = restored_children
-                        .get_mut(call_id)
-                        .and_then(|rows| rows.iter_mut().find(|(known, _, _)| *known == child_id))
-                    {
+                    if let Some(row) = restored_children.get_mut(call_id).and_then(|rows| {
+                        rows.iter_mut().find(|(known, _, _, _)| *known == child_id)
+                    }) {
                         row.2 = status;
                     }
                 }
@@ -307,7 +425,8 @@ impl App {
                     for call in &m.tool_calls {
                         if call.name == "subagent" {
                             if let Some(children) = restored_children.get(&call.id).cloned() {
-                                for (child_id, task, status) in children {
+                                for (child_id, task, status, session) in children {
+                                    self.subagent_sessions.insert(child_id, session);
                                     self.push_segment(Segment::Subagent {
                                         id: child_id,
                                         task,

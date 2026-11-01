@@ -492,7 +492,7 @@ fn delegated_call_paints_one_row_and_folds_with_the_turn() {
     app.startup = false;
     app.push_segment(Segment::User("go".into()));
     app.handle_tool_start("subagent".into(), "task: look".into(), Some("c1".into()));
-    app.handle_subagent_start(1, "look".into());
+    app.handle_subagent_start(1, "look".into(), "sub-1".into());
     app.handle_tool_notice(
         "subagent".into(),
         "child done".into(),

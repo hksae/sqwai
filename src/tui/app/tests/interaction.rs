@@ -709,6 +709,7 @@ fn subagent_multiline_task_and_blank_deltas_render_without_empty_gaps() {
         3,
         "Исследуй файл src/tui/presenter.rs. Найди и опиши:\n1. Как работает дифф\n2. Как работает coalesce"
             .into(),
+        "sub-3".into(),
     );
     // Expand while running before any tools arrive -> shows "thinking…" without blank gaps.
     if let Some(Segment::Subagent { expanded, .. }) = app.segments.first_mut() {
@@ -911,7 +912,7 @@ fn clicking_a_subagent_row_opens_its_history() {
     use ratatui::{buffer::Buffer, layout::Rect};
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.startup = false;
-    app.handle_subagent_start(3, "inspect the renderer".into());
+    app.handle_subagent_start(3, "inspect the renderer".into(), "sub-3".into());
     let area = Rect::new(0, 0, 60, 16);
     let mut buf = Buffer::empty(area);
     app.render_into(&mut buf, area);

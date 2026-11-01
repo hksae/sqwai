@@ -607,6 +607,58 @@ fn history_restores_every_child_of_a_batched_delegation() {
             .any(|s| matches!(s, Segment::Tool { name, .. } if name == "subagent")),
         "no generic tool row for a delegation"
     );
+    assert_eq!(
+        app.subagent_sessions.get(&1).map(String::as_str),
+        Some("sub-1"),
+        "the restored row remembers which hidden session to open"
+    );
+}
+
+/// A hidden child session is a normal transcript: user task, thinking,
+/// commentary, tool calls with results, final answer.
+#[test]
+fn a_hidden_child_session_rebuilds_its_transcript() {
+    use crate::providers::{Message, ToolCallReq};
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    let mut child = crate::session::Session::new("p/m".into(), 10_000);
+    child.hidden = true;
+    child.messages = vec![
+        Message::new(Role::User, "inspect"),
+        {
+            let mut m = Message::new(Role::Assistant, "checking");
+            m.thinking = "plan".into();
+            m.thinking_ms = 1200;
+            m.tool_calls = vec![ToolCallReq::new(
+                "c1",
+                "read",
+                serde_json::json!({"file_path": "src/a.rs"}),
+            )];
+            m
+        },
+        Message::tool_result("c1", "file body", false),
+        Message::new(Role::Assistant, "done"),
+    ];
+    let (chat, meta) = app.chat_from_session(&child);
+    assert_eq!(chat.len(), meta.len(), "identity per row");
+    assert!(matches!(&chat[0], Segment::User(t) if t == "inspect"));
+    assert!(matches!(&chat[1], Segment::Thinking { text, .. } if text == "plan"));
+    assert!(matches!(&chat[2], Segment::Commentary(t) if t == "checking"));
+    match &chat[3] {
+        Segment::Tool {
+            name,
+            ok,
+            output,
+            call_id,
+            ..
+        } => {
+            assert_eq!(name, "read");
+            assert_eq!(*ok, Some(true));
+            assert_eq!(output, "file body");
+            assert_eq!(call_id.as_deref(), Some("c1"));
+        }
+        other => panic!("expected a tool row, got {other:?}"),
+    }
+    assert!(matches!(&chat[4], Segment::Assistant { text, .. } if text == "done"));
 }
 
 #[test]
@@ -1049,6 +1101,7 @@ fn sessions_menu_groups_rows_by_day_sections() {
         context_tokens: 0,
         calls: 0,
         errors: 0,
+        hidden: false,
         project: Some(app.project_root.clone()),
     };
     app.sessions = vec![
@@ -1093,6 +1146,7 @@ fn session_day_sections_wear_h2_brand_flush_left() {
         context_tokens: 0,
         calls: 0,
         errors: 0,
+        hidden: false,
         project: Some(app.project_root.clone()),
     };
     app.sessions = vec![header_at("today one", now)];

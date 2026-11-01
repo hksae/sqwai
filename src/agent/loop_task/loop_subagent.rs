@@ -586,6 +586,7 @@ pub(crate) async fn run_subagent(
         .send(AgentEvent::SubagentStart {
             id,
             task: task.label.clone(),
+            session: child_session.clone(),
         })
         .await;
     log_subagent_event(
@@ -699,6 +700,20 @@ pub(crate) async fn run_subagent(
     // S1: visible to undo's cancellation signal until it joins. The guard
     // leaves the map on every exit path below, including early returns.
     let _child_slot = crate::agent::undo_guard::track_child(id, child.child_control());
+    // Hidden session for the parent's history screen. The child's transcript
+    // is written under its event-session name so the row restored from the
+    // event log can open it later; `hidden` keeps it out of the sessions menu.
+    let mut child_doc = crate::session::Session::new(model_id.to_string(), context_limit);
+    child_doc.title = task.label.chars().take(80).collect();
+    child_doc.hidden = true;
+    child_doc.parent_session = Some(parent_session.to_string());
+    child_doc.parent_tool_call = Some(call.id.clone());
+    child_doc.subagent_task = Some(task.label.clone());
+    child_doc.subagent_child_id = Some(id);
+    child_doc.project = Some(root.to_path_buf());
+    child_doc.approval = Some(approval_mode);
+    child_doc.messages = vec![Message::new(Role::User, build_subagent_user_prompt(&task))];
+    child_doc.refresh_estimate();
     let mut output = String::new();
     let mut trail = SubagentTrail::default();
     let deadline = tokio::time::Instant::now() + timeout;
@@ -788,6 +803,16 @@ pub(crate) async fn run_subagent(
             }
         };
         match event {
+            AgentEvent::TranscriptSync { messages, summary } => {
+                child_doc.messages = messages;
+                child_doc.summary = summary;
+                child_doc.last_message_at = Some(chrono::Utc::now());
+                child_doc.refresh_estimate();
+                let _ = child_doc.save_hidden(&child_session);
+            }
+            AgentEvent::Usage(usage) => {
+                child_doc.add_usage(&usage);
+            }
             AgentEvent::TextDelta(text) => {
                 output.push_str(&text);
                 let _ = parent_tx.send(AgentEvent::SubagentText { id, text }).await;
@@ -838,6 +863,11 @@ pub(crate) async fn run_subagent(
                                 .map(|m| m.content.clone())
                                 .unwrap_or_default();
                         }
+                        child_doc.messages = outcome.messages;
+                        child_doc.summary = outcome.summary;
+                        child_doc.last_message_at = Some(chrono::Utc::now());
+                        child_doc.refresh_estimate();
+                        let _ = child_doc.save_hidden(&child_session);
                         let final_text = trail.attach_receipt(&output, true);
                         tools::Outcome::ok(final_text)
                     }

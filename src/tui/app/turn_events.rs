@@ -91,8 +91,8 @@ impl App {
                     fixed,
                 ));
             }
-            AgentEvent::SubagentStart { id, task } => {
-                self.handle_subagent_start(id, task);
+            AgentEvent::SubagentStart { id, task, session } => {
+                self.handle_subagent_start(id, task, session);
                 self.dirty = true;
             }
             AgentEvent::SubagentThinking { id, text } => {
@@ -614,12 +614,13 @@ impl App {
         self.dirty = true;
     }
 
-    pub(super) fn handle_subagent_start(&mut self, id: u64, task: String) {
+    pub(super) fn handle_subagent_start(&mut self, id: u64, task: String, session: String) {
         let task = task.split_whitespace().collect::<Vec<_>>().join(" ");
         crate::tui::event_log::log(
             "SUBAGENT",
             format!("start id={id} task_len={}", task.chars().count()),
         );
+        self.subagent_sessions.insert(id, session);
         self.subagent_started
             .insert(id, std::time::Instant::now());
         self.subagent_elapsed.remove(&id);

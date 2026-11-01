@@ -1050,10 +1050,9 @@ impl App {
                 // composer). Tool/thinking rows keep their fold behavior.
                 if let Some(Segment::Subagent { id, .. }) = self.segments.get(idx) {
                     let id = *id;
-                    // Restored children have no in-memory transcript until
-                    // their hidden session is loaded; opening a blank screen
-                    // is worse than a no-op.
-                    if self.subagent_chats.contains_key(&id) {
+                    // Live children already have their transcript; restored
+                    // ones load their hidden session on the first click.
+                    if self.ensure_subagent_chat(id) {
                         self.open_subagent_view(id);
                     }
                     return;

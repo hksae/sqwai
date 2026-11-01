@@ -282,6 +282,8 @@ pub struct App {
     subagents: Vec<(u64, String, String, String, bool)>,
     /// full read-only transcripts for each child agent
     subagent_chats: std::collections::BTreeMap<u64, Vec<Segment>>,
+    /// child id -> hidden session id, for loading a restored transcript
+    subagent_sessions: std::collections::BTreeMap<u64, String>,
     /// when each live child started; drives the row's elapsed label
     subagent_started: std::collections::BTreeMap<u64, std::time::Instant>,
     /// frozen elapsed time of finished children (start map drops on done)
@@ -781,6 +783,7 @@ impl App {
             todos: Vec::new(),
             subagents: Vec::new(),
             subagent_chats: std::collections::BTreeMap::new(),
+            subagent_sessions: std::collections::BTreeMap::new(),
             subagent_started: std::collections::BTreeMap::new(),
             subagent_elapsed: std::collections::BTreeMap::new(),
             active_subagent: None,
