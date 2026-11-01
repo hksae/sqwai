@@ -176,7 +176,7 @@ impl crate::providers::Provider for BackgroundRoutingProvider {
                     crate::providers::ToolCallReq::new(
                         "call-send",
                         "subagents",
-                        serde_json::json!({"action": "send", "id": 1, "message": "focus on the lexer"}),
+                        serde_json::json!({"action": "send", "id": 1, "message": "focus on the lexer", "interrupt": true}),
                     ),
                 ))],
                 2 => vec![Ok(crate::providers::StreamEvent::ToolCall(

@@ -50,7 +50,7 @@ type BackgroundRegistry = std::sync::Arc<tokio::sync::Mutex<std::collections::Ha
 #[derive(Default)]
 pub(crate) struct SteerMailbox {
     pub(crate) controls: Vec<mpsc::Sender<ControlMsg>>,
-    pub(crate) pending: Vec<String>,
+    pub(crate) pending: Vec<(String, bool)>,
 }
 type SteerControls = std::sync::Arc<tokio::sync::Mutex<SteerMailbox>>;
 
@@ -306,7 +306,7 @@ pub enum ControlMsg {
     AskAnswer { id: u64, text: String },
     ApprovalAnswer { id: u64, decision: ApprovalDecision },
     /// a parent message for a running child, delivered at its next request
-    Steer { text: String },
+    Steer { text: String, interrupt: bool },
 }
 
 pub struct AgentHandle {
@@ -452,6 +452,7 @@ async fn subagents_control(
         let Some(message) = args["message"].as_str().filter(|m| !m.trim().is_empty()) else {
             return tools::Outcome::err("subagents: send needs a message");
         };
+        let interrupt = args["interrupt"].as_bool().unwrap_or(false);
         let controls = {
             let entries = registry.lock().await;
             let Some(entry) = entries.get(&id) else {
@@ -465,6 +466,7 @@ async fn subagents_control(
             if control
                 .try_send(ControlMsg::Steer {
                     text: message.to_string(),
+                    interrupt,
                 })
                 .is_ok()
             {
@@ -481,7 +483,7 @@ async fn subagents_control(
                     .is_some_and(|entry| entry.status == "running")
             };
             if running {
-                mailbox.pending.push(message.to_string());
+                mailbox.pending.push((message.to_string(), interrupt));
                 return tools::Outcome::ok(format!(
                     "message queued for background subagent {id}; its child will read it at the next request"
                 ));
@@ -539,6 +541,25 @@ async fn subagents_control(
             status = entry.status
         ))
     }
+}
+
+fn take_steer(ctl: &mut mpsc::Receiver<ControlMsg>) -> (Vec<String>, bool) {
+    let mut texts = Vec::new();
+    let mut interrupt = false;
+    while let Ok(msg) = ctl.try_recv() {
+        if let ControlMsg::Steer { text, interrupt: i } = msg {
+            texts.push(text);
+            interrupt |= i;
+        }
+    }
+    (texts, interrupt)
+}
+
+fn parent_message_message(text: &str) -> Message {
+    Message::new(
+        Role::User,
+        format!("<parent_message>\n{}\n</parent_message>", text.trim()),
+    )
 }
 
 pub struct AgentInput {
@@ -1516,11 +1537,9 @@ async fn run_agent(
         // Parent messages reach a child at its next request boundary. The
         // main agent never receives steer: sends are addressed to child ids.
         if subagent_depth > 0 {
-            while let Ok(ControlMsg::Steer { text }) = ctl.try_recv() {
-                messages.push(Message::new(
-                    Role::User,
-                    format!("<parent_message>\n{}\n</parent_message>", text.trim()),
-                ));
+            let (texts, _) = take_steer(&mut ctl);
+            for text in texts {
+                messages.push(parent_message_message(&text));
             }
         }
         // A finished background child joins the next request, not only the
@@ -1937,6 +1956,28 @@ async fn run_agent(
         // empty check means a turn whose every call was a replay ends as the
         // final answer it is, rather than re-asking in a loop.
         normalize_call_ids(&mut turn.calls, &history_call_ids(&messages));
+        if subagent_depth > 0 {
+            let (texts, interrupt) = take_steer(&mut ctl);
+            if interrupt {
+                // Soft parent interrupt: keep what the model streamed, drop
+                // the calls it had started, and answer the parent message on
+                // the next request instead of executing them.
+                for (_, handle) in turn.prefetched.drain() {
+                    handle.abort();
+                }
+                messages.push(
+                    Message::new(Role::Assistant, turn.text)
+                        .with_thinking(turn.reasoning_text, turn.reasoning_ms),
+                );
+                for text in texts {
+                    messages.push(parent_message_message(&text));
+                }
+                continue;
+            }
+            for text in texts {
+                messages.push(parent_message_message(&text));
+            }
+        }
         if turn.calls.is_empty() {
             // final answer
             let text = turn.text.clone();

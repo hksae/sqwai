@@ -397,6 +397,7 @@ transcript before the turn ends.",
                     },
                     "id": {"type": "integer", "description": "id printed by the background spawn"},
                     "message": {"type": "string", "description": "send: text delivered to the child at its next request boundary"},
+                    "interrupt": {"type": "boolean", "description": "send: drop the child's pending tool calls and answer this message on its next request"},
                     "wait_secs": {
                         "type": "integer",
                         "minimum": 0,

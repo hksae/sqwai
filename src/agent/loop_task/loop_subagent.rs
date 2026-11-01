@@ -678,8 +678,8 @@ pub(crate) async fn run_subagent(
         mailbox.controls.push(child.control.clone());
         let pending = std::mem::take(&mut mailbox.pending);
         drop(mailbox);
-        for text in pending {
-            let _ = child.control.try_send(ControlMsg::Steer { text });
+        for (text, interrupt) in pending {
+            let _ = child.control.try_send(ControlMsg::Steer { text, interrupt });
         }
     }
     // Hidden session for the parent's history screen. The child's transcript
