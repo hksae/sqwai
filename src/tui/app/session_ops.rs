@@ -577,6 +577,7 @@ impl App {
             self.model_cfg = mc;
         }
         self.context_bootstrap_pending = true;
+        self.background_merge_at = None;
         self.session = s;
         // The session's own mode, not this window's: a reopened session picks
         // up where it left off. A save from before the field existed keeps
@@ -677,6 +678,7 @@ impl App {
         }
         self.run_undo_maintenance();
         let ctx = self.session.context_limit;
+        self.background_merge_at = None;
         self.session = Session::new(self.cfg.last_model.clone(), ctx);
         // A new session inherits the mode this window is in: the config
         // default set the tone for the launch, not for every new chat.
