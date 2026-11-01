@@ -25,7 +25,7 @@ pub(super) fn view(ctx: &mut ToolCtx, args: &Value) -> Outcome {
         .unwrap_or_default()
         .trim();
     if raw.is_empty() {
-        return Outcome::err("view_document needs a `path` to a PDF inside the project");
+        return Outcome::err("view_document needs a `path` to a PDF file");
     }
     let path = match ctx.resolve(raw) {
         Ok(path) => path,

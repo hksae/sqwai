@@ -2539,8 +2539,10 @@ async fn run_agent(
                     // approval opens the directory (run-only or session),
                     // full access never asks (`outside_all`). A denied read
                     // is precomputed into the batch outcomes so execution
-                    // skips it cleanly.
-                    if subagent_depth == 0 && approval_mode != ApprovalMode::Full {
+                    // skips it cleanly. Children ask through the same path:
+                    // their approval event is forwarded to the main dialog
+                    // and the answer comes back on their control channel.
+                    if approval_mode != ApprovalMode::Full {
                         for idx in call_index..batch_end.max(call_index + 1) {
                             let peer = &turn.calls[idx];
                             if approval_mode == ApprovalMode::Ask

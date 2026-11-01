@@ -23,7 +23,7 @@ pub(super) fn view(ctx: &mut ToolCtx, args: &Value) -> Outcome {
         .unwrap_or_default()
         .trim();
     if raw.is_empty() {
-        return Outcome::err("view_image needs a `path` to an image inside the project");
+        return Outcome::err("view_image needs a `path` to an image file");
     }
     let path = match ctx.resolve(raw) {
         Ok(path) => path,

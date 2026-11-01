@@ -845,13 +845,16 @@ fn short_bytes(n: usize) -> String {
 }
 
 /// Every path a read-only call points at: `read` takes one `file_path` or up to
-/// sixteen fused `paths`, `ls`/`outline`/`grep` take a `path`. `glob` patterns
-/// are not paths and stay out.
+/// sixteen fused `paths`; `ls`/`outline`/`grep`/`glob` take a `path`;
+/// `view_image`/`view_document` take `path` or `file_path`. Glob *patterns* are
+/// not paths and stay out.
 ///
 /// The plural is the whole point. `call_path` answers for `file_path` only, so a
 /// fused read had no path for the outside gate to look at: the call skipped the
 /// dialog and the handler refused its outside targets — a refusal where the mode
-/// promises a question.
+/// promises a question. The same hole hid `view_image` and `view_document`:
+/// they resolved through `ctx.resolve` and refused an outside file without ever
+/// offering the approval.
 pub(crate) fn read_call_paths(name: &str, args: &serde_json::Value) -> Vec<String> {
     let mut out = Vec::new();
     let mut push = |value: Option<&str>| {
@@ -868,7 +871,11 @@ pub(crate) fn read_call_paths(name: &str, args: &serde_json::Value) -> Vec<Strin
                 }
             }
         }
-        "ls" | "outline" | "grep" => push(args["path"].as_str()),
+        "ls" | "outline" | "grep" | "glob" => push(args["path"].as_str()),
+        "view_image" | "view_document" => {
+            push(args["path"].as_str());
+            push(args["file_path"].as_str());
+        }
         _ => {}
     }
     out
@@ -1216,6 +1223,21 @@ mod tests {
             !reads_outside(&ctx, "glob", &json!({"pattern": "**/*.rs"})),
             "a pattern is not a path"
         );
+        // The media viewers and the glob base dir take real paths too; they
+        // used to skip the gate and refuse an outside file in the one mode
+        // that promises a question.
+        let far_str = far.to_string_lossy().to_string();
+        assert!(reads_outside(&ctx, "view_image", &json!({"path": far_str})));
+        assert!(reads_outside(
+            &ctx,
+            "view_document",
+            &json!({"file_path": far_str})
+        ));
+        assert!(reads_outside(
+            &ctx,
+            "glob",
+            &json!({"pattern": "*.rs", "path": outside.path().to_string_lossy()})
+        ));
     }
 
     /// The dialog for an outside write names its grant `dir/**`. Until the grant

@@ -3463,3 +3463,230 @@ async fn a_paused_child_does_not_spend_its_task_timeout() {
     assert!(outcome.output.contains("done 1"), "{}", outcome.output);
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// An image outside the project asks for the directory instead of being
+/// refused: `view_image` is a read tool, so the same outside gate as `read`
+/// applies and a RunOnce answer opens the parent directory for this call.
+#[tokio::test]
+async fn an_outside_image_asks_then_views_instead_of_refusing() {
+    let root = std::env::temp_dir().join(format!("sqwai-view-in-{}", std::process::id()));
+    let outside = std::env::temp_dir().join(format!("sqwai-view-out-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(&outside);
+    let _ = std::fs::create_dir_all(&root);
+    let _ = std::fs::create_dir_all(&outside);
+    let image = outside.join("shot.png");
+    std::fs::write(&image, crate::media::test_png(120, 80)).unwrap();
+    let image_arg = image.to_string_lossy().to_string();
+    let provider = std::sync::Arc::new(MockTestProvider {
+        events: std::sync::Mutex::new(vec![
+            vec![Ok(crate::providers::StreamEvent::ToolCall(
+                crate::providers::ToolCallReq::new(
+                    "img",
+                    "view_image",
+                    serde_json::json!({"path": image_arg}),
+                ),
+            ))],
+            vec![Ok(crate::providers::StreamEvent::Text("seen".into()))],
+        ]),
+    });
+    let input = AgentInput {
+        provider,
+        model_id: "m".into(),
+        model_key: "p/m".into(),
+        effort: None,
+        effort_support: crate::config::EffortSupport::default(),
+        max_tokens: None,
+        system: vec![],
+        messages: vec![Message::new(Role::User, "look at the photo")],
+        root: root.clone(),
+        session_id: "outside-view-sess".into(),
+        turn: 1,
+        blocked_patterns: vec![],
+        approval_mode: crate::config::ApprovalMode::Auto,
+        approval_switch: None,
+        approval_grants: Default::default(),
+        web_allow_hosts: vec![],
+        context_limit: 20_000,
+        vision: true,
+        pdf: true,
+        tools: Default::default(),
+        search: Default::default(),
+        limits: Default::default(),
+        active_skills: vec![],
+        read_ledger: Default::default(),
+        enable_tools: true,
+        background_baselines: false,
+        read_only: false,
+        previous_response_id: None,
+        summary: None,
+        mcp: Default::default(),
+        skills: Default::default(),
+        compact_only: false,
+        compact_focus: String::new(),
+        compaction: Default::default(),
+        plan_limits: Default::default(),
+        shadow_store: crate::config::ShadowStore::Off,
+        subagent_depth: 0,
+        background_subagents: false,
+        background_registry: None,
+        background_events: None,
+        parent_step: None,
+        parent_session: None,
+        fallback_chain: vec![],
+    };
+    let mut handle = spawn_agent(input);
+    let mut asked = false;
+    let mut outcome = None;
+    while let Some(ev) = handle.rx.recv().await {
+        match ev {
+            AgentEvent::Approval { id, subject, .. } => {
+                assert!(subject.contains("view_image"), "{subject}");
+                asked = true;
+                handle
+                    .control
+                    .send(ControlMsg::ApprovalAnswer {
+                        id,
+                        decision: ApprovalDecision::RunOnce,
+                    })
+                    .await
+                    .unwrap();
+            }
+            AgentEvent::Completed(Ok(done)) => {
+                outcome = Some(done);
+                break;
+            }
+            AgentEvent::Completed(Err(e)) => panic!("turn failed: {e}"),
+            _ => {}
+        }
+    }
+    assert!(asked, "an outside image must ask, not refuse");
+    let outcome = outcome.expect("turn completed");
+    let viewed = outcome.messages.iter().find(|m| {
+        m.role == Role::Tool && m.tool_call_id.as_deref() == Some("img")
+    });
+    let viewed = viewed.expect("the tool result is in the transcript");
+    assert!(
+        !viewed.is_error,
+        "the outside image was refused: {}",
+        viewed.content
+    );
+    assert_eq!(viewed.images.len(), 1, "the pixels are attached");
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(&outside);
+}
+
+/// A child hits the same outside boundary as its parent: the approval is
+/// forwarded to the main dialog, the answer travels back on the child's
+/// control channel, and the outside image is viewed instead of refused.
+#[tokio::test]
+async fn a_child_outside_image_asks_the_parent_and_views() {
+    use std::sync::Arc;
+    let root = std::env::temp_dir().join(format!("sqwai-child-view-in-{}", std::process::id()));
+    let outside = std::env::temp_dir().join(format!("sqwai-child-view-out-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(&outside);
+    let _ = std::fs::create_dir_all(&root);
+    let _ = std::fs::create_dir_all(&outside);
+    let image = outside.join("shot.png");
+    std::fs::write(&image, crate::media::test_png(120, 80)).unwrap();
+    let provider_impl = std::sync::Arc::new(RecordingTestProvider {
+        // pop() serves the last batch first
+        events: std::sync::Mutex::new(vec![
+            vec![Ok(crate::providers::StreamEvent::Text("done".into()))],
+            vec![Ok(crate::providers::StreamEvent::ToolCall(
+                crate::providers::ToolCallReq::new(
+                    "child-img",
+                    "view_image",
+                    serde_json::json!({"path": image.to_string_lossy()}),
+                ),
+            ))],
+        ]),
+        requests: std::sync::Mutex::new(Vec::new()),
+    });
+    let provider: SharedProvider = provider_impl.clone();
+    let (parent_tx, mut parent_rx) = mpsc::channel(64);
+    let sink = crate::agent::loop_task::EventSink::bounded(parent_tx.clone());
+    let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let call = crate::providers::ToolCallReq::new(
+        "child-call",
+        "subagent",
+        serde_json::json!({"tasks": ["look at the photo"]}),
+    );
+    let tools = Default::default();
+    let search = Default::default();
+    let limits = Default::default();
+    let mcp = Default::default();
+    let skills = Default::default();
+    let compaction = Default::default();
+    let plan_limits = Default::default();
+    let future = super::loop_subagent::run_subagent(
+        &call,
+        "child-view-parent",
+        1,
+        &sink,
+        &cancel,
+        &provider,
+        "m",
+        &root,
+        &[],
+        &[],
+        crate::config::ApprovalMode::Auto,
+        10_000,
+        true,
+        true,
+        &tools,
+        &search,
+        &limits,
+        &[],
+        None,
+        crate::config::EffortSupport::default(),
+        None,
+        Vec::new(),
+        mcp,
+        skills,
+        false,
+        crate::config::ShadowStore::Off,
+        compaction,
+        plan_limits,
+        Vec::new(),
+        std::time::Duration::from_secs(10),
+        None,
+    );
+    tokio::pin!(future);
+    let mut asked = false;
+    let outcome = loop {
+        tokio::select! {
+            ev = parent_rx.recv() => match ev {
+                Some(AgentEvent::SubagentApproval { child, id, subject, .. }) => {
+                    assert!(subject.contains("view_image"), "{subject}");
+                    asked = true;
+                    assert!(
+                        super::loop_subagent::answer_subagent_approval(
+                            child,
+                            id,
+                            ApprovalDecision::RunOnce,
+                        ),
+                        "the child control slot must be live"
+                    );
+                }
+                Some(_) => {}
+                None => panic!("parent channel closed"),
+            },
+            res = &mut future => break res,
+        }
+    };
+    assert!(asked, "a child's outside image must ask, not refuse");
+    assert!(outcome.ok, "{}", outcome.output);
+    let requests = provider_impl.requests.lock().unwrap();
+    let result = requests
+        .iter()
+        .flat_map(|req| req.messages.iter())
+        .find(|m| m.role == Role::Tool && m.tool_call_id.as_deref() == Some("child-img"))
+        .expect("the child's tool result is in its transcript");
+    assert!(!result.is_error, "{}", result.content);
+    assert_eq!(result.images.len(), 1, "the pixels reached the child");
+    drop(requests);
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(&outside);
+}
