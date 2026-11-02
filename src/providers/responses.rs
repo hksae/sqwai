@@ -54,7 +54,7 @@ fn input_items(req: &ChatRequest) -> Vec<Value> {
             // legacy: a persisted system message would still map correctly
             Role::System => input.push(json!({"role": "system", "content": m.content})),
             Role::User => {
-                if m.images.iter().any(|image| image.marker.is_some()) {
+                if !m.images.is_empty() {
                     let mut content = Vec::new();
                     for part in super::user_parts(m) {
                         match part {

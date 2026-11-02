@@ -73,7 +73,7 @@ fn content_blocks(m: &super::Message, thinking_on: bool) -> Vec<Value> {
     let mut blocks = thinking_blocks(m, thinking_on);
     // a tool result's payload lives inside the tool_result block itself;
     // user turns with image markers interleave text and images at the markers
-    if m.role == Role::User && m.images.iter().any(|image| image.marker.is_some()) {
+    if m.role == Role::User && !m.images.is_empty() {
         for part in super::user_parts(m) {
             match part {
                 super::UserPart::Text(text) => {

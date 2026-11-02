@@ -98,7 +98,7 @@ impl OpenAiProvider {
         match m.role {
             Role::System => json!({"role": "system", "content": m.content}),
             Role::User => {
-                if m.images.iter().any(|image| image.marker.is_some()) {
+                if !m.images.is_empty() {
                     let mut content = Vec::new();
                     for part in super::user_parts(m) {
                         match part {

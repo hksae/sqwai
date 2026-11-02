@@ -1220,6 +1220,37 @@ fn user_parts_bind_markers_once_and_drop_orphans() {
 }
 
 #[test]
+fn path_user_images_without_markers_reach_the_openai_body() {
+    let mut image = crate::media::test_image(8, 8, "shot.png");
+    image.marker = None;
+    let req = ChatRequest {
+        model_id: "m".into(),
+        system: vec![],
+        messages: vec![
+            Message::new(
+                crate::providers::Role::User,
+                "use C:/Users/me/Downloads/shot.png in the clip",
+            )
+            .with_images(vec![image]),
+        ],
+        effort: None,
+        effort_support: Default::default(),
+        max_tokens: None,
+        tools: vec![],
+        previous_response_id: None,
+        context_transport: crate::providers::ContextTransport::Stateless,
+        hosted_web_search: false,
+    };
+    let body = OpenAiProvider::build_body(&req);
+    let messages = body["messages"].as_array().unwrap();
+    let user = messages.iter().find(|m| m["role"] == "user").unwrap();
+    let parts = user["content"].as_array().expect("user content parts");
+    assert!(parts.iter().any(|part| part["type"] == "text"
+        && part["text"].as_str().unwrap().contains("shot.png")));
+    assert!(parts.iter().any(|part| part["type"] == "image_url"));
+}
+
+#[test]
 fn user_parts_keep_path_images_without_markers() {
     let mut image = crate::media::test_image(8, 8, "shot.png");
     image.marker = None;
