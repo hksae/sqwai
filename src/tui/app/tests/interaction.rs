@@ -2376,8 +2376,28 @@ fn context_menu_shows_parts_legend_and_honest_gaps() {
     );
     assert!(!t.contains('@'), "no endpoint suffix on this panel:\n{t}");
     assert!(
-        t.contains("◍ cache") && t.contains("6k   6.0%"),
-        "the cached share is its own row:\n{t}"
+        !t.contains("◍ cache"),
+        "cache is not a legend row:\n{t}"
+    );
+    let bar_row = &app.menu_rows[2].0;
+    let cache_row = &app.menu_rows[3].0;
+    let row_text = |line: &ratatui::text::Line<'_>| -> String {
+        line.spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect()
+    };
+    let bar_text = row_text(bar_row);
+    let cache_text = row_text(cache_row);
+    assert_eq!(
+        cache_text.trim(),
+        "cache 75.0%",
+        "cache is the hit rate of the last prompt, right under the scale:\n{t}"
+    );
+    assert_eq!(
+        cache_text.chars().count(),
+        bar_text.chars().count(),
+        "cache sits flush with the scale's right edge:\n{t}"
     );
     assert!(t.contains("unaccounted"), "the gap is its own row: {t}");
     assert!(t.contains("free"), "free space is a legend row: {t}");

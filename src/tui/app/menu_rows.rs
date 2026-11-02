@@ -1060,8 +1060,32 @@ impl App {
         }
         self.menu_rows
             .push(row(Line::from(meter), MenuAction::None));
-        self.menu_rows
-            .push(row(super::view::blank(), MenuAction::None));
+        // Right-aligned under the scale, outside the legend: cache is a share
+        // of the last prompt (the hit rate), not of the window, so it must not
+        // join the parts whose percents sum to the window's fill.
+        let (cache_name, cache_value) = session
+            .last_usage
+            .as_ref()
+            .filter(|u| u.prompt_tokens > 0)
+            .map(|u| {
+                (
+                    "cache ".to_string(),
+                    format!(
+                        "{:.1}%",
+                        100.0 * u.cached_tokens.unwrap_or(0) as f64 / u.prompt_tokens as f64
+                    ),
+                )
+            })
+            .unwrap_or_else(|| ("cache ".to_string(), "—".to_string()));
+        let pad = width.saturating_sub(cache_name.chars().count() + cache_value.chars().count());
+        self.menu_rows.push(row(
+            Line::from(vec![
+                Span::raw(" ".repeat(pad)),
+                Span::styled(cache_name, Theme::dim()),
+                Span::styled(cache_value, Theme::meta()),
+            ]),
+            MenuAction::None,
+        ));
 
         let used_pct = session.context_percent();
         let covered: u64 = parts.iter().map(|p| p.1).sum();
@@ -1080,25 +1104,6 @@ impl App {
                     Span::styled(format!("{:<11}", name), Theme::FG()),
                     Span::styled(format!("{:>7}", fmt_k(*tokens)), Theme::meta()),
                     Span::styled(format!("{:>6.1}%", part_pct(*tokens)), Theme::dim()),
-                ]),
-                MenuAction::None,
-            ));
-        }
-        // What the provider served from its own cache: a share of the prompt
-        // already counted by the parts above, so it never joins the meter — it
-        // is the one number that says how much of this window was re-read cheap.
-        let cached = session
-            .last_usage
-            .as_ref()
-            .and_then(|u| u.cached_tokens)
-            .unwrap_or(0);
-        if cached > 0 {
-            self.menu_rows.push(row(
-                Line::from(vec![
-                    Span::styled("◍ ".to_string(), Theme::dim()),
-                    Span::styled(format!("{:<11}", "cache"), Theme::FG()),
-                    Span::styled(format!("{:>7}", fmt_k(cached)), Theme::meta()),
-                    Span::styled(format!("{:>6.1}%", part_pct(cached)), Theme::dim()),
                 ]),
                 MenuAction::None,
             ));
