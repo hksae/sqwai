@@ -372,7 +372,7 @@ pub struct App {
     /// running one ends (or on abort); cleared on session switch
     pending_queue: Vec<attachments::QueuedPrompt>,
     /// images drafted in the composer, each tied to an `[image N]` marker
-    pending_images: Vec<crate::providers::ImageAttachment>,
+    pending_images: Vec<attachments::PendingImage>,
     /// last marker number handed out in the current composition
     image_marker: u32,
     /// bumped whenever the composer is cleared; late worker results from an

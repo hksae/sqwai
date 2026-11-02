@@ -318,13 +318,21 @@ pub(crate) fn user_parts(message: &Message) -> Vec<UserPart<'_>> {
     }
     let mut by_marker: std::collections::HashMap<u32, &ImageAttachment> =
         std::collections::HashMap::new();
+    // A path attachment has no marker: the path in the text is its name, and
+    // the image block rides after the text so the provider still receives it.
+    let mut markerless: Vec<&ImageAttachment> = Vec::new();
     for image in &message.images {
-        if let Some(marker) = image.marker {
-            by_marker.entry(marker).or_insert(image);
+        match image.marker {
+            Some(marker) => {
+                by_marker.entry(marker).or_insert(image);
+            }
+            None => markerless.push(image),
         }
     }
     if by_marker.is_empty() {
-        return vec![UserPart::Text(text.to_string())];
+        let mut parts = vec![UserPart::Text(text.to_string())];
+        parts.extend(markerless.into_iter().map(UserPart::Image));
+        return parts;
     }
     let mut parts = Vec::new();
     let mut used = std::collections::HashSet::new();
@@ -349,6 +357,7 @@ pub(crate) fn user_parts(message: &Message) -> Vec<UserPart<'_>> {
     if start < text.len() {
         parts.push(UserPart::Text(text[start..].to_string()));
     }
+    parts.extend(markerless.into_iter().map(UserPart::Image));
     parts
 }
 

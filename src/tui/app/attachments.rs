@@ -1,10 +1,12 @@
-//! User image attachments: paste/drop entry, `[image N]` markers, and
-//! background normalization.
+//! User image attachments: paste/drop entry, draft tokens, and background
+//! normalization.
 //!
-//! The composer holds plain text. Markers name attachments in the draft; the
-//! attachment list is separate. At submit only attachments whose marker is
-//! still in the text survive. Decoding and resizing run on a worker thread so
-//! a large screenshot never blocks input; a failure removes the token again.
+//! The composer holds plain text. A clipboard bitmap has no path, so it gets
+//! an `[image N]` marker; an image attached by path keeps the path itself as
+//! its token. The attachment list is separate. At submit only attachments
+//! whose token is still in the text survive. Decoding and resizing run on a
+//! worker thread so a large screenshot never blocks input; a failed marker
+//! is removed again, while a path stays useful as text.
 
 use super::*;
 use crate::providers::ImageAttachment;
@@ -13,10 +15,14 @@ use std::path::{Path, PathBuf};
 /// Per-message attachment cap.
 pub(super) const MAX_IMAGES: usize = 20;
 
+/// A trailing drop run: its byte range and the `(unquoted token, path)` pairs
+/// in text order.
+type DroppedPaths = (usize, usize, Vec<(String, PathBuf)>);
+
 #[derive(Debug)]
 pub(super) struct QueuedPrompt {
     pub text: String,
-    pub images: Vec<ImageAttachment>,
+    pub images: Vec<PendingImage>,
 }
 
 #[cfg(test)]
@@ -55,11 +61,41 @@ struct MarkerSpan {
     marker: u32,
 }
 
+/// A drafted image and the token that names it in the composer. A clipboard
+/// bitmap has no path, so it gets `[image N]`; an image attached by path keeps
+/// the path itself as ordinary editable text and is never renumbered.
+#[derive(Clone, Debug)]
+pub(super) struct PendingImage {
+    pub(super) image: ImageAttachment,
+    pub(super) token: String,
+    pub(super) marker: Option<u32>,
+}
+
+impl PendingImage {
+    pub(super) fn from_marker(mut image: ImageAttachment, marker: u32) -> Self {
+        image.marker = Some(marker);
+        Self {
+            image,
+            token: format!("[image {marker}]"),
+            marker: Some(marker),
+        }
+    }
+
+    pub(super) fn from_path(mut image: ImageAttachment, token: String) -> Self {
+        image.marker = None;
+        Self {
+            image,
+            token,
+            marker: None,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct PendingImageJob {
     id: u64,
     epoch: u64,
-    marker: u32,
+    marker: Option<u32>,
     token: String,
 }
 
@@ -181,8 +217,8 @@ impl App {
     }
 
     /// Paste into the main composer. Text that is entirely one or more image
-    /// paths (a terminal drag&drop, usually quoted) becomes markers; anything
-    /// else is ordinary text.
+    /// paths (a terminal drag&drop, usually quoted) attaches the images and
+    /// keeps the paths in the text; anything else is ordinary text.
     pub(super) fn paste_input_text(&mut self, text: &str) {
         self.expand_marker_selection();
         if self.image_entry_allowed()
@@ -213,7 +249,7 @@ impl App {
         let token = format!("[image {marker}]");
         self.input.insert_str(&token);
         self.track_job(
-            marker,
+            Some(marker),
             token,
             ImageSource::Clipboard {
                 width,
@@ -227,9 +263,10 @@ impl App {
     }
 
     /// Many terminals deliver a file drop as ordinary characters. When the
-    /// composer's trailing token is an absolute, existing image path, turn it
-    /// into markers. Absolute-only is deliberate: a manually typed relative
-    /// path must stay text.
+    /// composer's trailing token is an absolute, existing image path, attach
+    /// the image but leave the path in the text: the model gets the pixels and
+    /// the file it can copy or reference. Absolute-only is deliberate: a
+    /// manually typed relative path must stay text.
     pub(super) fn maybe_attach_dropped_path(&mut self) {
         if !self.image_entry_allowed() {
             return;
@@ -239,7 +276,7 @@ impl App {
             return;
         }
         self.last_drop_text = text.clone();
-        let Some((start, end, paths)) = self.trailing_dropped_paths(&text) else {
+        let Some((_start, _end, paths)) = self.trailing_dropped_paths(&text) else {
             return;
         };
         if self.model_cfg.vision == Some(false) {
@@ -249,37 +286,27 @@ impl App {
         let free =
             MAX_IMAGES.saturating_sub(self.pending_images.len() + self.pending_image_jobs.len());
         let total = paths.len();
-        let accepted: Vec<PathBuf> = paths.into_iter().take(free).collect();
+        let mut accepted = Vec::new();
+        for (token, path) in paths {
+            if accepted.len() >= free {
+                break;
+            }
+            if self.has_path_token(&token) {
+                continue;
+            }
+            accepted.push((token, path));
+        }
         if accepted.is_empty() {
-            self.status(
-                &format!("image limit is {MAX_IMAGES} per message"),
-                StatusKind::Warn,
-            );
+            if free == 0 && total > 0 {
+                self.status(
+                    &format!("image limit is {MAX_IMAGES} per message"),
+                    StatusKind::Warn,
+                );
+            }
             return;
         }
-        let mut tokens = Vec::with_capacity(accepted.len());
-        let mut jobs = Vec::with_capacity(accepted.len());
-        for path in accepted {
-            self.image_marker += 1;
-            let marker = self.image_marker;
-            tokens.push(format!("[image {marker}]"));
-            jobs.push((marker, path));
-        }
-        let replacement = tokens.join(" ");
-        let before = &text[..start];
-        let row = before.matches('\n').count() as u16;
-        let col = before.rsplit('\n').next().unwrap_or("").chars().count() as u16
-            + replacement.chars().count() as u16;
-        let mut rebuilt = String::with_capacity(text.len() + replacement.len());
-        rebuilt.push_str(before);
-        rebuilt.push_str(&replacement);
-        rebuilt.push_str(&text[end..]);
-        self.input = Self::fresh_input(rebuilt);
-        self.input
-            .move_cursor(tui_textarea::CursorMove::Jump(row, col));
-        for (marker, path) in jobs {
-            let token = format!("[image {marker}]");
-            self.track_job(marker, token, ImageSource::File(path));
+        for (token, path) in accepted {
+            self.track_job(None, token, ImageSource::File(path));
         }
         if total > free {
             self.status(
@@ -287,7 +314,6 @@ impl App {
                 StatusKind::Warn,
             );
         }
-        self.renumber_markers();
         self.dirty = true;
     }
 
@@ -309,13 +335,18 @@ impl App {
                     self.pending_image_jobs
                         .retain(|pending| pending.id != job.id);
                     match job.result {
-                        Ok(mut image) => {
+                        Ok(image) => {
                             if self.input_text().contains(&pending.token) {
-                                image.marker = Some(pending.marker);
+                                let image = match pending.marker {
+                                    Some(marker) => PendingImage::from_marker(image, marker),
+                                    None => {
+                                        PendingImage::from_path(image, pending.token.clone())
+                                    }
+                                };
                                 self.status(
                                     &format!(
                                         "attached {} · {}×{}",
-                                        image.name, image.width, image.height
+                                        image.image.name, image.image.width, image.image.height
                                     ),
                                     StatusKind::Ok,
                                 );
@@ -323,7 +354,11 @@ impl App {
                             }
                         }
                         Err(error) => {
-                            if self.remove_input_token(&pending.token) {
+                            // A failed marker token is removed like any other
+                            // attachment; a path stays useful as text.
+                            if pending.marker.is_some()
+                                && self.remove_input_token(&pending.token)
+                            {
                                 self.dirty = true;
                             }
                             self.status(&error, StatusKind::Err);
@@ -345,7 +380,11 @@ impl App {
                 .iter()
                 .filter_map(|image| image.marker),
         );
-        live.extend(self.pending_image_jobs.iter().map(|job| job.marker));
+        live.extend(
+            self.pending_image_jobs
+                .iter()
+                .filter_map(|job| job.marker),
+        );
         live
     }
 
@@ -387,7 +426,7 @@ impl App {
         self.pending_images
             .retain(|image| image.marker.is_none_or(|marker| !set.contains(&marker)));
         self.pending_image_jobs
-            .retain(|job| !set.contains(&job.marker));
+            .retain(|job| job.marker.is_none_or(|marker| !set.contains(&marker)));
     }
 
     /// Any edit that would touch a live marker deletes the whole token.
@@ -473,10 +512,14 @@ impl App {
             .map(|span| span.marker)
             .collect();
         let before = self.pending_images.len() + self.pending_image_jobs.len();
-        self.pending_images
-            .retain(|image| image.marker.is_some_and(|marker| present.contains(&marker)));
-        self.pending_image_jobs
-            .retain(|job| present.contains(&job.marker));
+        self.pending_images.retain(|image| match image.marker {
+            Some(marker) => present.contains(&marker),
+            None => text.contains(&image.token),
+        });
+        self.pending_image_jobs.retain(|job| match job.marker {
+            Some(marker) => present.contains(&marker),
+            None => text.contains(&job.token),
+        });
         if self.pending_images.len() + self.pending_image_jobs.len() != before {
             self.renumber_markers();
         }
@@ -488,6 +531,10 @@ impl App {
         let text = self.input_text();
         let live = self.live_markers();
         if live.is_empty() {
+            // Path attachments have no `[image N]` token; they are ordinary
+            // text and survive while their path survives.
+            self.pending_images.retain(|image| image.marker.is_none());
+            self.pending_image_jobs.retain(|job| job.marker.is_none());
             self.image_marker = 0;
             return;
         }
@@ -503,8 +550,8 @@ impl App {
             }
         }
         if order.is_empty() {
-            self.pending_images.clear();
-            self.pending_image_jobs.clear();
+            self.pending_images.retain(|image| image.marker.is_none());
+            self.pending_image_jobs.retain(|job| job.marker.is_none());
             self.image_marker = 0;
             return;
         }
@@ -516,20 +563,23 @@ impl App {
         self.pending_images.retain(|image| {
             image
                 .marker
-                .is_some_and(|marker| mapping.contains_key(&marker))
+                .is_none_or(|marker| mapping.contains_key(&marker))
         });
         self.pending_image_jobs
-            .retain(|job| mapping.contains_key(&job.marker));
+            .retain(|job| job.marker.is_none_or(|marker| mapping.contains_key(&marker)));
         for image in &mut self.pending_images {
             if let Some(marker) = image.marker
                 && let Some(&new) = mapping.get(&marker)
             {
                 image.marker = Some(new);
+                image.image.marker = Some(new);
             }
         }
         for job in &mut self.pending_image_jobs {
-            if let Some(&new) = mapping.get(&job.marker) {
-                job.marker = new;
+            if let Some(marker) = job.marker
+                && let Some(&new) = mapping.get(&marker)
+            {
+                job.marker = Some(new);
                 job.token = format!("[image {new}]");
             }
         }
@@ -587,28 +637,35 @@ impl App {
             .any(|job| job.epoch == self.image_epoch && text.contains(&job.token))
     }
 
-    /// Attachments whose markers survived editing, for the message about to
-    /// be stored. Drains the draft; call after the vision gate.
-    pub(super) fn take_submitted_images(&mut self, text: &str) -> Vec<ImageAttachment> {
-        let mut out = Vec::new();
-        for image in self.pending_images.drain(..) {
-            let Some(marker) = image.marker else {
-                continue;
-            };
-            if text.contains(&format!("[image {marker}]")) {
-                out.push(image);
+    /// Drafts whose token — `[image N]` or a path — survived editing, in
+    /// text order. Used when a turn is queued: the queue keeps the token so
+    /// the draft can be rebuilt on the next submit.
+    pub(super) fn take_submitted_drafts(&mut self, text: &str) -> Vec<PendingImage> {
+        let mut out: Vec<(usize, PendingImage)> = Vec::new();
+        for pending in self.pending_images.drain(..) {
+            if let Some(pos) = text.find(&pending.token) {
+                out.push((pos, pending));
             }
         }
-        out
+        out.sort_by_key(|(pos, _)| *pos);
+        out.into_iter().map(|(_, pending)| pending).collect()
     }
 
-    /// Whether at least one drafted image still has its marker in `text`.
-    pub(super) fn has_marked_images(&self, text: &str) -> bool {
-        self.pending_images.iter().any(|image| {
-            image
-                .marker
-                .is_some_and(|marker| text.contains(&format!("[image {marker}]")))
-        })
+    /// Attachments whose token survived editing. Tests use this shorthand;
+    /// the submit path keeps the richer drafts for the queue.
+    #[cfg(test)]
+    pub(super) fn take_submitted_images(&mut self, text: &str) -> Vec<ImageAttachment> {
+        self.take_submitted_drafts(text)
+            .into_iter()
+            .map(|pending| pending.image)
+            .collect()
+    }
+
+    /// Whether at least one drafted image still has its token in `text`.
+    pub(super) fn has_attached_images(&self, text: &str) -> bool {
+        self.pending_images
+            .iter()
+            .any(|pending| text.contains(&pending.token))
     }
 
     /// A new composition: markers restart at 1, and late worker results from
@@ -618,6 +675,7 @@ impl App {
         self.image_marker = 0;
         self.pending_images.clear();
         self.pending_image_jobs.clear();
+        self.last_drop_text.clear();
     }
 
     fn new_image_marker(&mut self) -> Option<u32> {
@@ -643,39 +701,56 @@ impl App {
         }
         let free = MAX_IMAGES.saturating_sub(self.pending_images.len() + self.pending_image_jobs.len());
         let total = paths.len();
-        let accepted: Vec<PathBuf> = paths.into_iter().take(free).collect();
-        if accepted.is_empty() {
-            self.status(
-                &format!("image limit is {MAX_IMAGES} per message"),
-                StatusKind::Warn,
-            );
+        let mut jobs = Vec::new();
+        for path in paths {
+            if jobs.len() >= free {
+                break;
+            }
+            let token = path.to_string_lossy().to_string();
+            if self.has_path_token(&token) {
+                continue;
+            }
+            jobs.push((token, path));
+        }
+        if jobs.is_empty() {
+            if free == 0 && total > 0 {
+                self.status(
+                    &format!("image limit is {MAX_IMAGES} per message"),
+                    StatusKind::Warn,
+                );
+            }
             return;
         }
-        let mut tokens = Vec::with_capacity(accepted.len());
-        let mut jobs = Vec::with_capacity(accepted.len());
-        for path in accepted {
-            self.image_marker += 1;
-            let marker = self.image_marker;
-            tokens.push(format!("[image {marker}]"));
-            jobs.push((marker, path));
-        }
+        let tokens: Vec<String> = jobs
+            .iter()
+            .map(|(token, _)| quoted_path(token))
+            .collect();
         self.expand_marker_selection();
         self.input.insert_str(tokens.join(" "));
-        for (marker, path) in jobs {
-            let token = format!("[image {marker}]");
-            self.track_job(marker, token, ImageSource::File(path));
+        let attached = jobs.len();
+        for (token, path) in jobs {
+            self.track_job(None, token, ImageSource::File(path));
         }
-        if total > free {
+        if total > attached && attached >= free {
             self.status(
-                &format!("attached {free} of {total} images — limit is {MAX_IMAGES}"),
+                &format!("attached {attached} of {total} images — limit is {MAX_IMAGES}"),
                 StatusKind::Warn,
             );
         }
-        self.renumber_markers();
         self.dirty = true;
     }
 
-    fn track_job(&mut self, marker: u32, token: String, source: ImageSource) {
+    fn has_path_token(&self, token: &str) -> bool {
+        self.pending_images
+            .iter()
+            .any(|pending| pending.marker.is_none() && pending.token == token)
+            || self
+                .pending_image_jobs
+                .iter()
+                .any(|job| job.marker.is_none() && job.token == token)
+    }
+
+    fn track_job(&mut self, marker: Option<u32>, token: String, source: ImageSource) {
         let epoch = self.image_epoch;
         let id = self.next_image_job;
         self.next_image_job = self.next_image_job.wrapping_add(1);
@@ -711,7 +786,7 @@ impl App {
 
     /// The trailing run of absolute image paths in the composer, with the byte
     /// range they occupy. Used for drops delivered as typed characters.
-    fn trailing_dropped_paths(&self, text: &str) -> Option<(usize, usize, Vec<PathBuf>)> {
+    fn trailing_dropped_paths(&self, text: &str) -> Option<DroppedPaths> {
         let trimmed = text.trim_end();
         if trimmed.is_empty() {
             return None;
@@ -726,7 +801,7 @@ impl App {
             if !path.is_absolute() || !is_image_path(&path) || !path.is_file() {
                 break;
             }
-            paths.push(path);
+            paths.push((token, path));
             cursor = token_start;
         }
         if paths.is_empty() {
@@ -770,7 +845,7 @@ impl App {
     }
 }
 
-fn prepare_source(source: ImageSource, marker: u32) -> Result<ImageAttachment, String> {
+fn prepare_source(source: ImageSource, marker: Option<u32>) -> Result<ImageAttachment, String> {
     let (bytes, name) = match source {
         ImageSource::File(path) => {
             let name = path
@@ -790,7 +865,7 @@ fn prepare_source(source: ImageSource, marker: u32) -> Result<ImageAttachment, S
     let prepared = crate::media::prepare(&bytes, &name)?;
     crate::media::store(&prepared)?;
     let mut image = prepared.attachment;
-    image.marker = Some(marker);
+    image.marker = marker;
     Ok(image)
 }
 
@@ -869,6 +944,17 @@ fn trailing_token(text: &str) -> Option<(usize, String)> {
         return None;
     }
     (!token.is_empty()).then(|| (start, token.to_string()))
+}
+
+/// A path token as it is inserted into the composer. Quotes only when the
+/// path contains whitespace; the stored job token stays unquoted so a quoted
+/// and an unquoted spelling of the same file dedupe together.
+fn quoted_path(token: &str) -> String {
+    if token.chars().any(char::is_whitespace) {
+        format!("\"{token}\"")
+    } else {
+        token.to_string()
+    }
 }
 
 /// Strip one pair of matching surrounding quotes, if present.

@@ -159,7 +159,7 @@ impl App {
         // Final numbering is by text order, regardless of insert/delete history.
         self.renumber_markers();
         let mut text = self.input_text().trim().to_string();
-        let mut queued_images: Option<Vec<crate::providers::ImageAttachment>> = None;
+        let mut queued_images: Option<Vec<super::attachments::PendingImage>> = None;
         if text.is_empty() {
             if self.startup {
                 let active = self.session_plan();
@@ -194,7 +194,7 @@ impl App {
             if !text.starts_with('/') {
                 let images = match queued_images {
                     Some(images) => images,
-                    None => self.take_submitted_images(&text),
+                    None => self.take_submitted_drafts(&text),
                 };
                 self.pending_queue
                     .push(super::attachments::QueuedPrompt { text, images });
@@ -238,25 +238,34 @@ impl App {
             return;
         }
         let from_queue = queued_images.is_some();
-        let images = match queued_images {
-            Some(images) => images,
-            None => {
-                if self.model_cfg.vision == Some(false) && self.has_marked_images(&text) {
-                    self.status("this model does not accept images", StatusKind::Err);
-                    return;
-                }
-                self.take_submitted_images(&text)
-            }
+        if queued_images.is_none()
+            && self.model_cfg.vision == Some(false)
+            && self.has_attached_images(&text)
+        {
+            self.status("this model does not accept images", StatusKind::Err);
+            return;
+        }
+        let drafts = match queued_images {
+            Some(drafts) => drafts,
+            None => self.take_submitted_drafts(&text),
         };
-        if !images.is_empty() && self.model_cfg.vision == Some(false) {
-            let failure = "this model does not accept images";
-            self.status(failure, StatusKind::Err);
+        if !drafts.is_empty() && self.model_cfg.vision == Some(false) {
+            self.status("this model does not accept images", StatusKind::Err);
             if from_queue {
-                self.pending_queue
-                    .insert(0, super::attachments::QueuedPrompt { text, images });
+                self.pending_queue.insert(
+                    0,
+                    super::attachments::QueuedPrompt {
+                        text,
+                        images: drafts,
+                    },
+                );
             }
             return;
         }
+        let images: Vec<crate::providers::ImageAttachment> = drafts
+            .into_iter()
+            .map(|pending| pending.image)
+            .collect();
         self.input = Self::fresh_input(String::new());
         self.popup_dismiss = false;
         self.hover = None;

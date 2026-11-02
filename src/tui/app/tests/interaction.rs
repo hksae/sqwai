@@ -44,6 +44,13 @@ fn a_missing_blob_is_reported_not_opened() {
     assert!(error.contains("missing"), "{error}");
 }
 
+fn pending_marker(
+    image: crate::providers::ImageAttachment,
+    marker: u32,
+) -> crate::tui::app::attachments::PendingImage {
+    crate::tui::app::attachments::PendingImage::from_marker(image, marker)
+}
+
 #[test]
 fn markers_renumber_in_text_order() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
@@ -53,7 +60,11 @@ fn markers_renumber_in_text_order() {
     two.marker = Some(2);
     let mut three = crate::media::test_image(10, 10, "three.png");
     three.marker = Some(3);
-    app.pending_images = vec![one, two, three];
+    app.pending_images = vec![
+        pending_marker(one, 1),
+        pending_marker(two, 2),
+        pending_marker(three, 3),
+    ];
     app.input = App::fresh_input("[image 3] x [image 1] y [image 2]".to_string());
 
     app.renumber_markers();
@@ -62,7 +73,7 @@ fn markers_renumber_in_text_order() {
     let marker = |name: &str| {
         app.pending_images
             .iter()
-            .find(|image| image.name == name)
+            .find(|image| image.image.name == name)
             .unwrap()
             .marker
     };
@@ -73,7 +84,12 @@ fn markers_renumber_in_text_order() {
 
     // Every live marker binds an image block, in the same text order.
     let message = crate::providers::Message::new(crate::providers::Role::User, app.input_text())
-        .with_images(app.pending_images.clone());
+        .with_images(
+            app.pending_images
+                .iter()
+                .map(|pending| pending.image.clone())
+                .collect(),
+        );
     let bound: Vec<String> = crate::providers::user_parts(&message)
         .into_iter()
         .filter_map(|part| match part {
@@ -91,7 +107,7 @@ fn backspace_removes_a_marker_as_one_token_and_renumbers() {
     one.marker = Some(1);
     let mut two = crate::media::test_image(9, 9, "two.png");
     two.marker = Some(2);
-    app.pending_images = vec![one, two];
+    app.pending_images = vec![pending_marker(one, 1), pending_marker(two, 2)];
     app.input = App::fresh_input("A [image 1] B [image 2] C".to_string());
     app.input.move_cursor(tui_textarea::CursorMove::Jump(0, 11));
 
@@ -99,7 +115,7 @@ fn backspace_removes_a_marker_as_one_token_and_renumbers() {
 
     assert_eq!(app.input_text(), "A  B [image 1] C");
     assert_eq!(app.pending_images.len(), 1);
-    assert_eq!(app.pending_images[0].name, "two.png");
+    assert_eq!(app.pending_images[0].image.name, "two.png");
     assert_eq!(app.pending_images[0].marker, Some(1));
 }
 
@@ -108,7 +124,7 @@ fn a_selection_over_a_marker_deletes_the_whole_token() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     let mut one = crate::media::test_image(8, 8, "one.png");
     one.marker = Some(1);
-    app.pending_images = vec![one];
+    app.pending_images = vec![pending_marker(one, 1)];
     app.input = App::fresh_input("[image 1]".to_string());
     app.input.move_cursor(tui_textarea::CursorMove::Jump(0, 2));
     app.input.start_selection();
@@ -139,17 +155,17 @@ fn drafted_images_follow_their_markers() {
     one.marker = Some(1);
     let mut two = crate::media::test_image(9, 9, "two.png");
     two.marker = Some(2);
-    app.pending_images = vec![one, two];
+    app.pending_images = vec![pending_marker(one, 1), pending_marker(two, 2)];
 
-    assert!(app.has_marked_images("keep [image 2] only"));
+    assert!(app.has_attached_images("keep [image 2] only"));
     let images = app.take_submitted_images("keep [image 2] only");
     assert_eq!(images.len(), 1, "the deleted marker drops its image");
     assert_eq!(images[0].marker, Some(2));
-    assert!(!app.has_marked_images("[image 3]"));
+    assert!(!app.has_attached_images("[image 3]"));
 }
 
 #[test]
-fn a_dropped_absolute_path_typed_as_text_becomes_a_marker() {
+fn a_dropped_absolute_path_keeps_the_path_and_attaches() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("dropped.png");
@@ -159,24 +175,62 @@ fn a_dropped_absolute_path_typed_as_text_becomes_a_marker() {
     // character, usually quoted.
     app.input = App::fresh_input(format!("\"{}\"", path.display()));
     app.maybe_attach_dropped_path();
-    assert_eq!(app.input_text(), "[image 1]");
+    assert!(
+        app.input_text().contains("dropped.png"),
+        "the dropped path stays in the text: {}",
+        app.input_text()
+    );
+    assert!(
+        !app.input_text().contains("[image "),
+        "a path attachment has no marker token"
+    );
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while app.pending_images.is_empty() && std::time::Instant::now() < deadline {
         app.poll_image_jobs();
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
     assert_eq!(app.pending_images.len(), 1);
-    assert_eq!(app.pending_images[0].name, "dropped.png");
+    assert_eq!(app.pending_images[0].image.name, "dropped.png");
+    assert_eq!(app.pending_images[0].marker, None);
+    assert_eq!(
+        app.take_submitted_images(&app.input_text()).len(),
+        1,
+        "the path token carries the attachment"
+    );
 }
 
 #[test]
-fn a_pasted_path_becomes_a_marker_and_then_an_attachment() {
+fn a_pasted_path_keeps_the_path_and_attaches() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     let dir = tempfile::tempdir().unwrap();
     app.project_root = dir.path().to_path_buf();
     std::fs::write(dir.path().join("shot.png"), crate::media::test_png(20, 10)).unwrap();
 
     app.paste_input_text("\"shot.png\"");
+    assert!(
+        app.input_text().contains("shot.png"),
+        "the pasted path stays in the text: {}",
+        app.input_text()
+    );
+    assert!(
+        !app.input_text().contains("[image "),
+        "a path attachment has no marker token"
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while app.pending_images.is_empty() && std::time::Instant::now() < deadline {
+        app.poll_image_jobs();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(app.pending_images.len(), 1);
+    assert_eq!(app.pending_images[0].marker, None);
+    assert_eq!(app.pending_images[0].image.name, "shot.png");
+    assert_eq!(app.take_submitted_images(&app.input_text()).len(), 1);
+}
+
+#[test]
+fn a_clipboard_image_still_gets_a_marker() {
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    assert!(app.attach_clipboard_image(8, 8, vec![255u8; 8 * 8 * 4]));
     assert_eq!(app.input_text(), "[image 1]");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while app.pending_images.is_empty() && std::time::Instant::now() < deadline {
@@ -185,7 +239,29 @@ fn a_pasted_path_becomes_a_marker_and_then_an_attachment() {
     }
     assert_eq!(app.pending_images.len(), 1);
     assert_eq!(app.pending_images[0].marker, Some(1));
-    assert_eq!(app.pending_images[0].name, "shot.png");
+    assert_eq!(app.pending_images[0].image.marker, Some(1));
+}
+
+#[test]
+fn editing_away_a_path_drops_its_attachment() {
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    let dir = tempfile::tempdir().unwrap();
+    app.project_root = dir.path().to_path_buf();
+    std::fs::write(dir.path().join("shot.png"), crate::media::test_png(20, 10)).unwrap();
+    app.paste_input_text("\"shot.png\"");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while app.pending_images.is_empty() && std::time::Instant::now() < deadline {
+        app.poll_image_jobs();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(app.pending_images.len(), 1);
+
+    app.input = App::fresh_input("no image here".into());
+    app.repair_markers_after_edit();
+    assert!(
+        app.pending_images.is_empty(),
+        "the dropped image goes when its path does"
+    );
 }
 
 #[test]

@@ -1220,6 +1220,28 @@ fn user_parts_bind_markers_once_and_drop_orphans() {
 }
 
 #[test]
+fn user_parts_keep_path_images_without_markers() {
+    let mut image = crate::media::test_image(8, 8, "shot.png");
+    image.marker = None;
+    let message = Message::new(
+        crate::providers::Role::User,
+        "use C:/Users/me/Downloads/shot.png in the clip",
+    )
+    .with_images(vec![image]);
+    let parts = crate::providers::user_parts(&message);
+    let mut texts = Vec::new();
+    let mut images = Vec::new();
+    for part in parts {
+        match part {
+            crate::providers::UserPart::Text(text) => texts.push(text),
+            crate::providers::UserPart::Image(image) => images.push(image.name.clone()),
+        }
+    }
+    assert!(texts.concat().contains("shot.png"));
+    assert_eq!(images, ["shot.png"], "a path image still reaches the wire");
+}
+
+#[test]
 fn a_missing_blob_becomes_a_text_marker_not_a_broken_turn() {
     let image = crate::providers::ImageAttachment {
         id: "0".repeat(64),
