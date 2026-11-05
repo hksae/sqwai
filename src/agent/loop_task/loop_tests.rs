@@ -1712,6 +1712,49 @@ async fn subagent_does_not_join_its_parent_plan() {
 /// The parent event log carries one start/done pair per child, which is what
 /// the reload uses to rebuild every row of a batched call.
 #[tokio::test]
+async fn send_to_a_paused_child_is_queued_and_recorded() {
+    use std::sync::Arc;
+    let root = std::env::temp_dir().join(format!("sqwai-send-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&root);
+    let _ = crate::agent::events::EventLog::take(&root, "send-parent");
+    let registry = super::new_background_registry();
+    let steer: super::SteerControls = Arc::new(tokio::sync::Mutex::new(SteerMailbox {
+        child_ids: vec![7],
+        ..Default::default()
+    }));
+    registry.lock().await.insert(
+        1,
+        super::BackgroundChild {
+            label: "paused".into(),
+            status: "paused",
+            turn: 1,
+            started: Instant::now(),
+            output: None,
+            delivered: false,
+            abort: None,
+            notify: Arc::new(tokio::sync::Notify::new()),
+            steer: steer.clone(),
+        },
+    );
+    let outcome = super::subagents_control(
+        &registry,
+        &serde_json::json!({"action":"send","id":1,"message":"focus on lexer"}),
+        &root,
+        "send-parent",
+    )
+    .await;
+    assert!(outcome.ok, "{}", outcome.output);
+    assert_eq!(steer.lock().await.pending.len(), 1);
+    let records = crate::agent::events::EventLog::records_for(&root, "send-parent").unwrap();
+    assert!(records.iter().any(|r| {
+        r.kind == "subagent_message"
+            && r.fields.get("child_id").and_then(|v| v.as_u64()) == Some(7)
+            && r.fields.get("text").and_then(|v| v.as_str()) == Some("focus on lexer")
+    }));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
 async fn subagents_list_reports_live_tool_tokens_and_plan_step() {
     use std::sync::Arc;
     let registry = super::new_background_registry();
@@ -1854,6 +1897,7 @@ async fn resumed_child_continues_its_dangling_transcript() {
                 )]),
         ],
         summary: Some("old summary".into()),
+        pending: vec![("from parent while paused".into(), true)],
     };
     let outcome = run_subagent(
         &call,
@@ -1908,6 +1952,13 @@ async fn resumed_child_continues_its_dangling_transcript() {
             .collect::<Vec<_>>()
     );
     assert!(req.messages.iter().any(|m| m.content.contains("<subagent_resume>")));
+    assert!(
+        req.messages
+            .iter()
+            .any(|m| m.content.contains("from parent while paused")),
+        "queued parent messages are replayed on resume: {:#?}",
+        req.messages
+    );
     drop(requests);
 
     let records = crate::agent::events::EventLog::records_for(&root, "parent-resume").unwrap();

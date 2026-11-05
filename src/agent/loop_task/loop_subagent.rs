@@ -54,6 +54,9 @@ pub(crate) struct SubagentResume {
     pub(crate) approval: ApprovalMode,
     pub(crate) messages: Vec<Message>,
     pub(crate) summary: Option<String>,
+    /// Steers that were sent while the child was parked and are not already
+    /// in the hidden transcript. Delivered after the resume note.
+    pub(crate) pending: Vec<(String, bool)>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -741,6 +744,9 @@ pub(crate) async fn run_subagent(
                  Continue this task from the transcript above; do not repeat completed work.\
                  </subagent_resume>",
             ));
+            for (text, _) in &resume.pending {
+                messages.push(super::parent_message_message(text));
+            }
             doc.messages = messages.clone();
             doc.summary = resume.summary.clone();
             doc.refresh_estimate();

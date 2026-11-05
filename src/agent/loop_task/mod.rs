@@ -283,6 +283,8 @@ async fn resume_paused_background(ctx: &BackgroundSpawnCtx) {
     let mut starts: std::collections::HashMap<u64, serde_json::Map<String, serde_json::Value>> =
         std::collections::HashMap::new();
     let mut state: std::collections::HashMap<u64, &'static str> = std::collections::HashMap::new();
+    let mut messages: std::collections::HashMap<u64, Vec<(String, bool)>> =
+        std::collections::HashMap::new();
     let mut max_id = 0u64;
     for record in records {
         let Some(id) = record.fields.get("child_id").and_then(|v| v.as_u64()) else {
@@ -302,6 +304,19 @@ async fn resume_paused_background(ctx: &BackgroundSpawnCtx) {
             }
             "subagent_done" => {
                 state.insert(id, "done");
+            }
+            "subagent_message" => {
+                if let Some(text) = record.fields.get("text").and_then(|v| v.as_str()) {
+                    let interrupt = record
+                        .fields
+                        .get("interrupt")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    messages
+                        .entry(id)
+                        .or_default()
+                        .push((text.to_string(), interrupt));
+                }
             }
             _ => {}
         }
@@ -355,6 +370,18 @@ async fn resume_paused_background(ctx: &BackgroundSpawnCtx) {
             args,
             extra_content: None,
         };
+        let pending: Vec<(String, bool)> = messages
+            .remove(&id)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(text, _)| {
+                !text.trim().is_empty()
+                    && !doc
+                        .messages
+                        .iter()
+                        .any(|m| m.role == Role::User && m.content.contains(text.trim()))
+            })
+            .collect();
         let resume = SubagentResume {
             id,
             child_session: child_session.to_string(),
@@ -362,6 +389,7 @@ async fn resume_paused_background(ctx: &BackgroundSpawnCtx) {
             approval,
             messages: doc.messages.clone(),
             summary: doc.summary.clone(),
+            pending,
         };
         if let Err(error) =
             spawn_background_child(ctx, call, parent_turn, label.clone(), Some(resume)).await
@@ -938,6 +966,28 @@ async fn drain_background_reports(
 }
 
 
+fn log_subagent_message(
+    root: &std::path::Path,
+    session_id: &str,
+    child_ids: &[u64],
+    text: &str,
+    interrupt: bool,
+) {
+    let Ok(mut log) = crate::agent::events::EventLog::open(root, session_id) else {
+        return;
+    };
+    for child_id in child_ids {
+        let _ = log.append(
+            "subagent_message",
+            serde_json::json!({
+                "child_id": child_id,
+                "text": text,
+                "interrupt": interrupt,
+            }),
+        );
+    }
+}
+
 fn fmt_tokens(tokens: u64) -> String {
     if tokens >= 1_000 {
         format!("{:.1}k", tokens as f64 / 1_000.0)
@@ -1049,6 +1099,10 @@ async fn subagents_control(
             entry.steer.clone()
         };
         let mut mailbox = controls.lock().await;
+        let mut child_ids = mailbox.child_ids.clone();
+        if child_ids.is_empty() {
+            child_ids.push(id);
+        }
         let mut sent = 0usize;
         for control in mailbox.controls.iter() {
             if control
@@ -1072,6 +1126,8 @@ async fn subagents_control(
             };
             if live {
                 mailbox.pending.push((message.to_string(), interrupt));
+                drop(mailbox);
+                log_subagent_message(root, session_id, &child_ids, message, interrupt);
                 return tools::Outcome::ok(format!(
                     "message queued for background subagent {id}; its child will read it at the next request"
                 ));
@@ -1080,6 +1136,8 @@ async fn subagents_control(
                 "background subagent {id} has no running or paused child to receive the message"
             ));
         }
+        drop(mailbox);
+        log_subagent_message(root, session_id, &child_ids, message, interrupt);
         return tools::Outcome::ok(format!(
             "message queued for {sent} child(ren) of background subagent {id}"
         ));
