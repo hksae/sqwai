@@ -345,8 +345,7 @@ impl Session {
     /// every following tag would shift onto the wrong checkpoint.
     fn align_checkpoint_turns(&mut self) {
         if self.checkpoint_turns.len() < self.checkpoints.len() {
-            self.checkpoint_turns
-                .resize(self.checkpoints.len(), 0);
+            self.checkpoint_turns.resize(self.checkpoints.len(), 0);
         } else {
             self.checkpoint_turns.truncate(self.checkpoints.len());
         }
@@ -995,10 +994,7 @@ mod tests {
         assert_eq!(s.checkpoints.len(), 1);
         assert_eq!(s.checkpoint_turns, vec![0]);
 
-        s.restore_checkpoints(
-            vec![("blob:new".into(), "write new.txt".into())],
-            vec![7],
-        );
+        s.restore_checkpoints(vec![("blob:new".into(), "write new.txt".into())], vec![7]);
         assert_eq!(s.checkpoint_turns, vec![0, 7]);
     }
 
@@ -1399,7 +1395,10 @@ mod tests {
             ..Default::default()
         });
         let b = s.last_breakdown.expect("the pair lands together");
-        assert!(s.pending_breakdown.is_none(), "and the pending one is spent");
+        assert!(
+            s.pending_breakdown.is_none(),
+            "and the pending one is spent"
+        );
         assert_eq!(
             b.history_tokens + b.reasoning_tokens,
             500,

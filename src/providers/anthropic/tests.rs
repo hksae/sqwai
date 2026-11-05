@@ -482,10 +482,9 @@ fn sse_server(body: String) -> (String, std::thread::JoinHandle<()>) {
     let addr = listener.local_addr().unwrap();
     listener.set_nonblocking(true).unwrap();
     let h = std::thread::spawn(move || {
-        let Some(stream) = crate::providers::accept_bounded(
-            &listener,
-            std::time::Duration::from_secs(20),
-        ) else {
+        let Some(stream) =
+            crate::providers::accept_bounded(&listener, std::time::Duration::from_secs(20))
+        else {
             return;
         };
         let mut reader = BufReader::new(stream.try_clone().unwrap());
@@ -938,8 +937,12 @@ fn tool_documents_use_document_blocks_inside_the_tool_result() {
                     serde_json::json!({"path": "report.pdf"}),
                 ),
             ]),
-            Message::tool_result("c1", "3 pages · application/pdf · 1 KB · ~7.5k tokens", false)
-                .with_documents(vec![document]),
+            Message::tool_result(
+                "c1",
+                "3 pages · application/pdf · 1 KB · ~7.5k tokens",
+                false,
+            )
+            .with_documents(vec![document]),
         ],
         effort: None,
         effort_support: Default::default(),

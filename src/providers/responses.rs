@@ -63,19 +63,17 @@ fn input_items(req: &ChatRequest) -> Vec<Value> {
                                     content.push(json!({"type": "input_text", "text": text}));
                                 }
                             }
-                            super::UserPart::Image(image) => {
-                                match crate::media::data_uri(image) {
-                                    Ok(uri) => content.push(json!({
-                                        "type": "input_image",
-                                        "image_url": uri,
-                                        "detail": "auto",
-                                    })),
-                                    Err(_) => content.push(json!({
-                                        "type": "input_text",
-                                        "text": format!("[image unavailable: {}]", image.name),
-                                    })),
-                                }
-                            }
+                            super::UserPart::Image(image) => match crate::media::data_uri(image) {
+                                Ok(uri) => content.push(json!({
+                                    "type": "input_image",
+                                    "image_url": uri,
+                                    "detail": "auto",
+                                })),
+                                Err(_) => content.push(json!({
+                                    "type": "input_text",
+                                    "text": format!("[image unavailable: {}]", image.name),
+                                })),
+                            },
                         }
                     }
                     input.push(json!({"role": "user", "content": content}));

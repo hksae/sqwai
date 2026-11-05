@@ -4,7 +4,7 @@
 //! captcha or a 429, and both are indistinguishable from "no results" to the
 //! model, which then rephrases forever.
 
-use super::mcp_search;
+use super::keyless_search;
 use super::meta_search::RawSearchHit;
 use crate::config::{SearchConfig, SearchProvider};
 use serde_json::Value;
@@ -79,9 +79,11 @@ async fn search_fixed(
             let text = post(&client, &url, key, &body).await?;
             parse_tavily(&text)
         }
-        SearchProvider::Exa => mcp_search::exa(query, count, timeout, cfg.base_url.as_deref()).await,
+        SearchProvider::Exa => {
+            keyless_search::exa(query, count, timeout, cfg.base_url.as_deref()).await
+        }
         SearchProvider::Parallel => {
-            mcp_search::parallel(query, count, timeout, cfg.base_url.as_deref()).await
+            keyless_search::parallel(query, count, timeout, cfg.base_url.as_deref()).await
         }
         SearchProvider::Firecrawl => {
             let url = endpoint(cfg.base_url.as_deref(), FIRECRAWL_BASE, "/v2/search");
@@ -313,7 +315,10 @@ pub fn parse_tavily(body: &str) -> Result<Vec<RawSearchHit>, String> {
                 .map(str::trim)
                 .filter(|title| !title.is_empty())
                 .unwrap_or(url);
-            let snippet = result["content"].as_str().map(str::trim).unwrap_or_default();
+            let snippet = result["content"]
+                .as_str()
+                .map(str::trim)
+                .unwrap_or_default();
             Some(RawSearchHit {
                 title: title.to_string(),
                 url: url.to_string(),
@@ -396,10 +401,11 @@ mod tests {
             .collect();
         assert_eq!(order, vec![SearchProvider::Exa, SearchProvider::Firecrawl]);
 
-        let order: Vec<SearchProvider> = order_candidates(&alternatives, Some(SearchProvider::Firecrawl))
-            .into_iter()
-            .map(|alt| alt.provider)
-            .collect();
+        let order: Vec<SearchProvider> =
+            order_candidates(&alternatives, Some(SearchProvider::Firecrawl))
+                .into_iter()
+                .map(|alt| alt.provider)
+                .collect();
         assert_eq!(order, vec![SearchProvider::Firecrawl, SearchProvider::Exa]);
     }
 
@@ -410,11 +416,19 @@ mod tests {
             "https://api.deepseek.com/v1/tools/search"
         );
         assert_eq!(
-            endpoint(Some("https://gw.example/deepseek/"), DEEPSEEK_BASE, "/v1/tools/search"),
+            endpoint(
+                Some("https://gw.example/deepseek/"),
+                DEEPSEEK_BASE,
+                "/v1/tools/search"
+            ),
             "https://gw.example/deepseek/v1/tools/search"
         );
         assert_eq!(
-            endpoint(Some("https://gw.example/v1"), DEEPSEEK_BASE, "/v1/tools/search"),
+            endpoint(
+                Some("https://gw.example/v1"),
+                DEEPSEEK_BASE,
+                "/v1/tools/search"
+            ),
             "https://gw.example/v1/tools/search"
         );
     }

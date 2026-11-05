@@ -220,7 +220,9 @@ pub(super) enum Menu {
     /// picker for `[web].search_provider`
     SearchProvider,
     /// settings of one search backend (key, base url)
-    EditSearchProvider { provider: crate::config::SearchProvider },
+    EditSearchProvider {
+        provider: crate::config::SearchProvider,
+    },
     /// `/undo list`: interactive checkpoint & redo history picker
     UndoList,
     /// single-field form to rename a session
@@ -938,7 +940,10 @@ impl App {
             self.session_search = Self::fresh_input(String::new());
             self.session_focus = false;
         }
-        if matches!(self.cur_menu(), Some(Menu::Providers | Menu::SearchProvider)) {
+        if matches!(
+            self.cur_menu(),
+            Some(Menu::Providers | Menu::SearchProvider)
+        ) {
             self.prov_search = Self::fresh_input(String::new());
             self.prov_focus = false;
         }

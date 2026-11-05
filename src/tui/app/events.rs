@@ -677,8 +677,7 @@ impl App {
                         // encodings are matched: most terminals send
                         // BackTab, some report Tab with a SHIFT modifier.
                         // Held repeats are suppressed like Tab's.
-                        KeyCode::BackTab
-                        | KeyCode::Tab
+                        KeyCode::BackTab | KeyCode::Tab
                             if shift
                                 && self.menu_stack.is_empty()
                                 && self.active_ask_seg().is_none() =>
@@ -690,9 +689,7 @@ impl App {
                         }
                         // BackTab mirrors Shift+Tab inside menus and the
                         // inline ask, where Tab+SHIFT is already handled.
-                        KeyCode::BackTab if !self.menu_stack.is_empty() => {
-                            self.menu_nav(-1)
-                        }
+                        KeyCode::BackTab if !self.menu_stack.is_empty() => self.menu_nav(-1),
                         KeyCode::Tab if matches!(self.cur_menu(), Some(Menu::AskUser { .. })) => {
                             if let Some(Menu::AskUser { questions, .. }) = self.cur_menu() {
                                 let n = questions.len().max(1);

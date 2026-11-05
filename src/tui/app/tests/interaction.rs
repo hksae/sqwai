@@ -472,12 +472,16 @@ fn status_bar_ignores_subagents_and_stop_keeps_child_rows() {
     // for the next message, and its history stays one click away.
     app.retire_unfinished_rows();
     assert_eq!(app.subagents.len(), 2);
-    assert!(app.segments.iter().any(|segment| {
-        matches!(segment, Segment::Subagent { .. })
-    }));
-    assert!(app.segments.iter().any(|segment| {
-        matches!(segment, Segment::Tool { name, .. } if name == "subagent")
-    }));
+    assert!(
+        app.segments
+            .iter()
+            .any(|segment| { matches!(segment, Segment::Subagent { .. }) })
+    );
+    assert!(
+        app.segments
+            .iter()
+            .any(|segment| { matches!(segment, Segment::Tool { name, .. } if name == "subagent") })
+    );
 }
 
 #[test]
@@ -2370,13 +2374,16 @@ fn restored_paused_child_stays_paused_until_a_resume_marker_arrives() {
     app.load_history_segments();
     let status = |app: &App| {
         app.segments.iter().find_map(|s| match s {
-            Segment::Subagent {
-                id: 1, status, ..
-            } => Some(status.clone()),
+            Segment::Subagent { id: 1, status, .. } => Some(status.clone()),
             _ => None,
         })
     };
-    assert_eq!(status(&app).as_deref(), Some("paused"), "{:?}", app.segments);
+    assert_eq!(
+        status(&app).as_deref(),
+        Some("paused"),
+        "{:?}",
+        app.segments
+    );
     assert!(app.subagent_background.contains(&1));
 
     // A later resume marker means the child was running when the process
@@ -2449,17 +2456,11 @@ fn context_menu_shows_parts_legend_and_honest_gaps() {
         "the header names the model bare and prints the window it fills:\n{t}"
     );
     assert!(!t.contains('@'), "no endpoint suffix on this panel:\n{t}");
-    assert!(
-        !t.contains("◍ cache"),
-        "cache is not a legend row:\n{t}"
-    );
+    assert!(!t.contains("◍ cache"), "cache is not a legend row:\n{t}");
     let bar_row = &app.menu_rows[2].0;
     let cache_row = &app.menu_rows[3].0;
     let row_text = |line: &ratatui::text::Line<'_>| -> String {
-        line.spans
-            .iter()
-            .map(|s| s.content.as_ref())
-            .collect()
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
     };
     let bar_text = row_text(bar_row);
     let cache_text = row_text(cache_row);
@@ -2569,7 +2570,7 @@ fn context_prices_the_request_that_has_not_left_yet() {
         ..Default::default()
     });
     app.session
-        .push(crate::providers::Role::User, &"x".repeat(400_000));
+        .push(crate::providers::Role::User, "x".repeat(400_000));
     app.build_menu_rows();
     let t: String = app
         .menu_rows

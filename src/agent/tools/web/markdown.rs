@@ -34,8 +34,8 @@ pub fn html_to_markdown(html: &str, base_url: Option<&Url>) -> ExtractedDoc {
     let mut markdown = conv.finish();
 
     // Prepend document title as H1 only if the body does not already contain a top-level H1 near the start.
-    let has_leading_h1 = markdown.starts_with("# ")
-        || markdown.lines().take(8).any(|l| l.starts_with("# "));
+    let has_leading_h1 =
+        markdown.starts_with("# ") || markdown.lines().take(8).any(|l| l.starts_with("# "));
     if let Some(ref t) = title
         && !t.is_empty()
         && !has_leading_h1
@@ -177,7 +177,12 @@ fn media_src(value: &scraper::node::Element, base_url: Option<&Url>) -> Option<S
         .or_else(|| attr("data-lazy-src"))
         .or_else(|| attr("srcset"))
         .or_else(|| attr("data-srcset"))?;
-    let first = raw.split(',').next().unwrap_or(raw).split_whitespace().next()?;
+    let first = raw
+        .split(',')
+        .next()
+        .unwrap_or(raw)
+        .split_whitespace()
+        .next()?;
     if first.starts_with("data:") || first.is_empty() {
         return None;
     }
@@ -290,7 +295,11 @@ fn select_content_root(doc: &Html) -> Option<ElementRef<'_>> {
             }
             let score = readability_score(candidate)
                 + ((CONTENT_SELECTORS.len() - priority_idx) as i64 * 120);
-            if score > 150 && best.as_ref().is_none_or(|(_, best_score)| score > *best_score) {
+            if score > 150
+                && best
+                    .as_ref()
+                    .is_none_or(|(_, best_score)| score > *best_score)
+            {
                 best = Some((candidate, score));
             }
         }
@@ -440,7 +449,8 @@ fn is_noise_element(el: ElementRef<'_>) -> bool {
     if matches!(tag, "html" | "body" | "main" | "article")
         || v.attr("role")
             .is_some_and(|r| r.eq_ignore_ascii_case("main"))
-        || v.id().is_some_and(|id| id == "main-content" || id == "content")
+        || v.id()
+            .is_some_and(|id| id == "main-content" || id == "content")
     {
         return false;
     }
@@ -768,10 +778,7 @@ impl<'a> DomConverter<'a> {
 
         let label = self.collect_inline_clean(el);
         if label.is_empty()
-            || matches!(
-                label.as_str(),
-                "¶" | "#" | "§" | "source" | "[src]" | "src"
-            )
+            || matches!(label.as_str(), "¶" | "#" | "§" | "source" | "[src]" | "src")
         {
             return;
         }
@@ -838,7 +845,8 @@ impl<'a> DomConverter<'a> {
                 if c > 0 {
                     self.out.push_str(" | ");
                 }
-                self.out.push_str(row.get(c).map(String::as_str).unwrap_or(""));
+                self.out
+                    .push_str(row.get(c).map(String::as_str).unwrap_or(""));
             }
             self.out.push_str(" |\n");
             if idx == 0 {
@@ -1020,7 +1028,10 @@ fn detect_code_language(pre: ElementRef<'_>) -> Option<String> {
     if let Some(c) = pre.value().attr("class") {
         classes.push(c);
     }
-    if let Some(lang) = pre.value().attr("data-lang").or_else(|| pre.value().attr("data-language"))
+    if let Some(lang) = pre
+        .value()
+        .attr("data-lang")
+        .or_else(|| pre.value().attr("data-language"))
     {
         let cleaned = sanitize_lang(lang);
         if !cleaned.is_empty() {

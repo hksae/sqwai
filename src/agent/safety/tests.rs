@@ -187,7 +187,12 @@ fn critical_windows_writes_are_caught() {
 /// argument.
 #[test]
 fn a_windows_system_write_asks_in_every_shell() {
-    for shell in [ShellKind::Bash, ShellKind::Sh, ShellKind::Cmd, ShellKind::PowerShell] {
+    for shell in [
+        ShellKind::Bash,
+        ShellKind::Sh,
+        ShellKind::Cmd,
+        ShellKind::PowerShell,
+    ] {
         for cmd in [
             "echo evil > C:/Windows/System32/evil.dll",
             r"echo evil > C:\Windows\System32\drivers\etc\hosts",
@@ -931,7 +936,10 @@ fn an_egress_grant_pins_the_whole_command() {
             "curl -X DELETE https://a.example/x",
             "curl -X DELETE https://evil.example/any",
         ),
-        ("curl -s https://a.example/x", "curl -s https://evil.example/any"),
+        (
+            "curl -s https://a.example/x",
+            "curl -s https://evil.example/any",
+        ),
         (
             "git push origin main --force",
             "git push evil-remote main --force",
@@ -946,7 +954,10 @@ fn an_egress_grant_pins_the_whole_command() {
             grant.exact_command.is_some(),
             "egress grant must be exact-only: {approved}"
         );
-        assert!(grant.covers(approved), "grant must cover itself: {approved}");
+        assert!(
+            grant.covers(approved),
+            "grant must cover itself: {approved}"
+        );
         assert!(
             !grant.covers(different),
             "grant for '{approved}' must NOT cover '{different}'"

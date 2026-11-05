@@ -98,9 +98,7 @@ async fn cap_provider<F>(fut: F, budget: Duration) -> Vec<RawSearchHit>
 where
     F: Future<Output = Vec<RawSearchHit>>,
 {
-    tokio::time::timeout(budget, fut)
-        .await
-        .unwrap_or_default()
+    tokio::time::timeout(budget, fut).await.unwrap_or_default()
 }
 
 pub async fn run_meta_search(
@@ -241,13 +239,7 @@ async fn gather(
                 cap_provider(search_hackernews(api_client, query, 6), per_provider),
                 cap_provider(search_stackoverflow(api_client, query, 6), per_provider),
                 cap_provider(
-                    search_github_issues_with_fallback(
-                        api_client,
-                        search,
-                        query,
-                        5,
-                        per_provider
-                    ),
+                    search_github_issues_with_fallback(api_client, search, query, 5, per_provider),
                     per_provider
                 ),
             );
@@ -397,7 +389,8 @@ pub fn fuse_and_rank(
     // if both `crates.io/crates/foo` (with `repo_url = github.com/org/foo`) and
     // `github.com/org/foo` were found, fold the package's RRF/version badge into the repo
     // and vice versa so the shared project gets the combined multi-source RRF boost!
-    let repo_links: Vec<(String, String, Vec<&'static str>, Vec<String>, f64)> = map
+    type RepoLink = (String, String, Vec<&'static str>, Vec<String>, f64);
+    let repo_links: Vec<RepoLink> = map
         .iter()
         .filter_map(|(canon_key, item)| {
             let repo_canon = item.linked_repo.as_ref()?;
@@ -470,7 +463,11 @@ pub fn fuse_and_rank(
             unmatched.push(item);
         }
     }
-    let mut results = if matched.is_empty() { unmatched } else { matched };
+    let mut results = if matched.is_empty() {
+        unmatched
+    } else {
+        matched
+    };
 
     results.sort_by(|a, b| {
         b.score
@@ -798,7 +795,11 @@ pub fn sanitize_package_query(query: &str) -> String {
     ];
     let kept: Vec<&str> = query
         .split_whitespace()
-        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric() && c != '-' && c != '_' && c != '@' && c != '/' && c != '.'))
+        .map(|w| {
+            w.trim_matches(|c: char| {
+                !c.is_alphanumeric() && c != '-' && c != '_' && c != '@' && c != '/' && c != '.'
+            })
+        })
         .filter(|w| !w.is_empty() && !META_NOISE.contains(&w.to_ascii_lowercase().as_str()))
         .collect();
     if kept.is_empty() {
@@ -1131,7 +1132,12 @@ mod tests {
                 "deepseek",
             ),
         ];
-        let merged = fuse_and_rank(vec![relevant, junk], "серость кот мем", SearchCategory::Auto, 10);
+        let merged = fuse_and_rank(
+            vec![relevant, junk],
+            "серость кот мем",
+            SearchCategory::Auto,
+            10,
+        );
         assert_eq!(merged.len(), 1, "{merged:#?}");
         assert!(merged[0].url.contains("serost"), "{merged:#?}");
     }
@@ -1144,7 +1150,10 @@ mod tests {
             without_quotes("\"серость\" \"кот\" мем").as_deref(),
             Some("серость кот мем")
         );
-        assert_eq!(without_quotes("мем «серость» кот").as_deref(), Some("мем серость кот"));
+        assert_eq!(
+            without_quotes("мем «серость» кот").as_deref(),
+            Some("мем серость кот")
+        );
         assert_eq!(without_quotes("серость кот мем"), None);
         assert_eq!(without_quotes("\"\""), None, "nothing left to search");
     }

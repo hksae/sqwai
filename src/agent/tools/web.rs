@@ -2,12 +2,12 @@
 //! smart domain adapters, LLM-native Markdown negotiation (`llms.txt` v2),
 //! DOM Readability HTML-to-Markdown conversion, and section-cached BM25 navigation.
 
+pub mod keyless_search;
 pub mod markdown;
-pub mod mcp_search;
 pub mod meta_search;
-pub mod search_api;
 pub mod ranker;
 pub mod router;
+pub mod search_api;
 
 use super::Outcome;
 use reqwest::{Client, Url};
@@ -485,12 +485,24 @@ mod tests {
         let base = reqwest::Url::parse("https://site.example/article").unwrap();
 
         let out = select_fragments(html, "img", Some(&base)).unwrap();
-        assert!(out.contains("![grey cat](https://site.example/img/cat.png)"), "{out}");
-        assert!(out.contains("![image](https://cdn.example/direct.jpg)"), "{out}");
-        assert!(out.contains("![image](https://site.example/thumb.png)"), "{out}");
+        assert!(
+            out.contains("![grey cat](https://site.example/img/cat.png)"),
+            "{out}"
+        );
+        assert!(
+            out.contains("![image](https://cdn.example/direct.jpg)"),
+            "{out}"
+        );
+        assert!(
+            out.contains("![image](https://site.example/thumb.png)"),
+            "{out}"
+        );
 
         let out = select_fragments(html, "meta[property='og:image']", Some(&base)).unwrap();
-        assert!(out.contains("og:image: https://cdn.example/pic.png"), "{out}");
+        assert!(
+            out.contains("og:image: https://cdn.example/pic.png"),
+            "{out}"
+        );
 
         // a wrapper that holds media reports the caption and the images
         let out = select_fragments(html, "figure", Some(&base)).unwrap();
@@ -498,7 +510,10 @@ mod tests {
         assert!(out.contains("https://site.example/img/cat.png"), "{out}");
 
         let out = select_fragments(html, "source", Some(&base)).unwrap();
-        assert!(out.contains("source: https://site.example/clip.mp4"), "{out}");
+        assert!(
+            out.contains("source: https://site.example/clip.mp4"),
+            "{out}"
+        );
 
         // image-wrapped anchors keep their target
         let out = select_fragments(html, "a", Some(&base)).unwrap();
@@ -557,7 +572,10 @@ async fn main() {
         );
         assert!(doc.markdown.contains("# Spawning Tasks"));
         assert!(doc.markdown.contains("`tokio::spawn`"));
-        assert!(doc.markdown.contains("[Task API](https://tokio.rs/api/task)"));
+        assert!(
+            doc.markdown
+                .contains("[Task API](https://tokio.rs/api/task)")
+        );
         assert!(doc.markdown.contains("```rust\n#[tokio::main]\nasync fn main() {\n    let handle = tokio::spawn(async {\n        // indented comment inside code"));
         assert!(doc.markdown.contains("| Function | Pool |"));
         assert!(doc.markdown.contains("| spawn_blocking | Blocking pool |"));
@@ -594,7 +612,10 @@ Configure connection and request timeouts with `Duration::from_secs`.
         // Ensure `#` inside code blocks never creates fake sections.
         let ranked = ranker::rank_sections(&sections, "bearer_auth header");
         assert!(!ranked.is_empty());
-        assert_eq!(sections[ranked[0].0].heading, "Authentication & Bearer Headers");
+        assert_eq!(
+            sections[ranked[0].0].heading,
+            "Authentication & Bearer Headers"
+        );
 
         let page = ranker::put_cached_page(
             "https://example.com/docs/reqwest?utm_source=test#top",
@@ -604,7 +625,13 @@ Configure connection and request timeouts with `Duration::from_secs`.
         let cached = ranker::get_cached_page("https://www.example.com/docs/reqwest/").unwrap();
         assert_eq!(cached.canonical_url, "https://example.com/docs/reqwest");
 
-        let sec_proj = ranker::project_page_seen(&page, None, Some("Timeouts"), &std::collections::HashSet::new()).text;
+        let sec_proj = ranker::project_page_seen(
+            &page,
+            None,
+            Some("Timeouts"),
+            &std::collections::HashSet::new(),
+        )
+        .text;
         assert!(sec_proj.contains("Duration::from_secs"));
         assert!(!sec_proj.contains("Cargo.toml"));
     }
@@ -652,7 +679,8 @@ Configure connection and request timeouts with `Duration::from_secs`.
 
     #[test]
     fn router_classifies_developer_urls_accurately() {
-        let gh_blob = Url::parse("https://github.com/tokio-rs/tokio/blob/master/tokio/src/lib.rs").unwrap();
+        let gh_blob =
+            Url::parse("https://github.com/tokio-rs/tokio/blob/master/tokio/src/lib.rs").unwrap();
         assert_eq!(
             router::classify_url(&gh_blob),
             router::DomainRoute::GitHubBlob {
@@ -681,7 +709,8 @@ Configure connection and request timeouts with `Duration::from_secs`.
             }
         );
 
-        let so_url = Url::parse("https://stackoverflow.com/questions/123456/how-to-spawn-in-tokio").unwrap();
+        let so_url =
+            Url::parse("https://stackoverflow.com/questions/123456/how-to-spawn-in-tokio").unwrap();
         assert_eq!(
             router::classify_url(&so_url),
             router::DomainRoute::StackExchangeQuestion {
@@ -743,16 +772,26 @@ let y = 2;</pre></td>
         </main>
         "#;
         let doc = markdown::html_to_markdown(html, None);
-        assert!(doc.markdown.contains("**`pub fn spawn<F>(future: F) -> JoinHandle<F::Output>`**"));
+        assert!(
+            doc.markdown
+                .contains("**`pub fn spawn<F>(future: F) -> JoinHandle<F::Output>`**")
+        );
         assert!(doc.markdown.contains(": Spawns a new asynchronous task"));
-        assert!(doc.markdown.contains("```rust\nlet x = 1;\nlet y = 2;\n```"));
-        assert!(!doc.markdown.contains("| 1"), "line-number table should render as fenced code, not pipe table");
+        assert!(
+            doc.markdown
+                .contains("```rust\nlet x = 1;\nlet y = 2;\n```")
+        );
+        assert!(
+            !doc.markdown.contains("| 1"),
+            "line-number table should render as fenced code, not pipe table"
+        );
     }
 
     #[test]
     fn pre_nested_spans_table_multiline_cells_and_slashed_branches() {
         // 1. Slashed branch names in GitHub blob URLs map 1:1.
-        let slashed = Url::parse("https://github.com/org/vm/blob/feature/gc-opt/src/vm.rs").unwrap();
+        let slashed =
+            Url::parse("https://github.com/org/vm/blob/feature/gc-opt/src/vm.rs").unwrap();
         assert_eq!(
             router::classify_url(&slashed),
             router::DomainRoute::GitHubBlob {
@@ -782,12 +821,15 @@ let y = 2;</pre></td>
         "#;
         let doc = markdown::html_to_markdown(html, None);
         assert!(
-            doc.markdown.contains("pub fn main() {\n    ImmixAllocator::alloc_frame();\n}"),
+            doc.markdown
+                .contains("pub fn main() {\n    ImmixAllocator::alloc_frame();\n}"),
             "nested spans must not add spaces and gutter numbers must be stripped:\n{}",
             doc.markdown
         );
         assert!(
-            doc.markdown.contains("| `alloc_frame` | First line of cell. <br> Second line with `a \\| b` pipe. |"),
+            doc.markdown.contains(
+                "| `alloc_frame` | First line of cell. <br> Second line with `a \\| b` pipe. |"
+            ),
             "table cell newlines must become <br> and pipes must be escaped:\n{}",
             doc.markdown
         );
@@ -809,7 +851,9 @@ let y = 2;</pre></td>
 
         // 2. Deep URL canonicalization (old.reddit.com, www., .git, #fragment).
         assert_eq!(
-            ranker::canonicalize_url("https://old.reddit.com/r/rust/comments/abc/title/?utm_source=share#t1"),
+            ranker::canonicalize_url(
+                "https://old.reddit.com/r/rust/comments/abc/title/?utm_source=share#t1"
+            ),
             "https://reddit.com/r/rust/comments/abc/title"
         );
         assert_eq!(
@@ -861,7 +905,13 @@ let y = 2;</pre></td>
             "https://crates.io/crates/tokio-util",
             "# Crate tokio-util\n\nOverview.\n\n## Cargo Features\n\n- `rt`\n- `codec`\n\n## README\n\nSome readme.".into(),
         );
-        let feat_proj = ranker::project_page_seen(&crate_page, None, Some("Feature flags"), &std::collections::HashSet::new()).text;
+        let feat_proj = ranker::project_page_seen(
+            &crate_page,
+            None,
+            Some("Feature flags"),
+            &std::collections::HashSet::new(),
+        )
+        .text;
         assert!(
             feat_proj.contains("> [Section match: 'Feature flags']"),
             "Feature flags should fuzzy-match Cargo Features:\n{feat_proj}"
@@ -885,14 +935,18 @@ let y = 2;</pre></td>
         )
         .await;
         assert!(!out.ok, "{}", out.output);
-        assert!(out.output.contains("unknown category 'images'"), "{}", out.output);
+        assert!(
+            out.output.contains("unknown category 'images'"),
+            "{}",
+            out.output
+        );
         assert!(out.output.contains("papers"), "{}", out.output);
     }
 
     #[tokio::test]
-    #[ignore = "hits the public MCP endpoints; run with --ignored"]
+    #[ignore = "hits the public search endpoints; run with --ignored"]
     async fn live_keyless_exa_and_parallel_smoke() {
-        let exa = mcp_search::exa(
+        let exa = keyless_search::exa(
             "Rust async runtimes Tokio",
             5,
             std::time::Duration::from_secs(20),
@@ -901,7 +955,7 @@ let y = 2;</pre></td>
         .await;
         println!("exa: {exa:?}");
         assert!(exa.is_ok(), "exa failed: {exa:?}");
-        let parallel = mcp_search::parallel(
+        let parallel = keyless_search::parallel(
             "Rust async runtimes Tokio",
             5,
             std::time::Duration::from_secs(20),
@@ -926,7 +980,11 @@ let y = 2;</pre></td>
         )
         .await;
         assert!(out.ok, "{}", out.output);
-        assert!(out.output.contains("hosted by the model provider"), "{}", out.output);
+        assert!(
+            out.output.contains("hosted by the model provider"),
+            "{}",
+            out.output
+        );
         assert!(out.output.contains("web_search"), "{}", out.output);
     }
 
@@ -970,7 +1028,10 @@ let y = 2;</pre></td>
         )
         .await;
         assert!(fetch_out.ok, "fetch failed: {}", fetch_out.output);
-        println!("=== LIVE WEBFETCH CACHED QUERY OUTPUT ===\n{}\n", fetch_out.output);
+        println!(
+            "=== LIVE WEBFETCH CACHED QUERY OUTPUT ===\n{}\n",
+            fetch_out.output
+        );
         assert!(fetch_out.output.contains("JoinHandle"));
     }
 }

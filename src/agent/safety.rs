@@ -74,10 +74,7 @@ pub fn egress_kind(cmd: &str) -> Option<&'static str> {
     // values; the first bare token decides. (Narrated "echo git push" is
     // not a push: the head must be the git binary itself. `sudo git push`
     // stays the classifier's problem, not this gate's.)
-    if tokens
-        .first()
-        .is_some_and(|t| command_basename(t) == "git")
-    {
+    if tokens.first().is_some_and(|t| command_basename(t) == "git") {
         // flags taking a separate value (matched lowercase: tokens are
         // already folded; single-token `--opt=value` forms skip as flags
         // without consuming the next token). Residual: `-c a.b=c push`
@@ -500,9 +497,8 @@ fn scan_protected_tokens(lower: &str) -> Verdict {
                 || rest_norm == "/skills/"
                 || rest_norm.starts_with("/skills/");
             let is_config = rest_norm == "/config.toml";
-            let is_spill = rest_norm == "/spill"
-                || rest_norm == "/spill/"
-                || rest_norm.starts_with("/spill/");
+            let is_spill =
+                rest_norm == "/spill" || rest_norm == "/spill/" || rest_norm.starts_with("/spill/");
 
             let has_traversal = rest_norm.contains("..");
 
@@ -1296,8 +1292,8 @@ fn critical_write_operand(lower: &str) -> bool {
         "c:/boot",
     ];
     const WRITERS: &[&str] = &[
-        "cp", "mv", "copy", "move", "install", "rsync", "tee", "dd", "truncate", "chmod",
-        "chown", "rm", "del", "rmdir", "rd", "format",
+        "cp", "mv", "copy", "move", "install", "rsync", "tee", "dd", "truncate", "chmod", "chown",
+        "rm", "del", "rmdir", "rd", "format",
     ];
     for segment in lower.split([';', '|', '&', '\n']) {
         let words: Vec<&str> = segment.split_whitespace().collect();
@@ -1309,10 +1305,11 @@ fn critical_write_operand(lower: &str) -> bool {
         if !WRITERS.contains(&head) {
             continue;
         }
-        if words
-            .iter()
-            .any(|w| SYSTEM.iter().any(|path| w.to_ascii_lowercase().contains(path)))
-        {
+        if words.iter().any(|w| {
+            SYSTEM
+                .iter()
+                .any(|path| w.to_ascii_lowercase().contains(path))
+        }) {
             return true;
         }
     }
@@ -1363,8 +1360,10 @@ fn has_dynamic_code(lower: &str) -> bool {
         {
             return true;
         }
-        if matches!(head_clean, "node" | "bun" | "deno" | "perl" | "ruby" | "lua")
-            && (rest.contains(&"-e") || rest.contains(&"--eval"))
+        if matches!(
+            head_clean,
+            "node" | "bun" | "deno" | "perl" | "ruby" | "lua"
+        ) && (rest.contains(&"-e") || rest.contains(&"--eval"))
         {
             return true;
         }
@@ -1984,10 +1983,7 @@ pub fn split_compound_commands(cmd: &str) -> Result<Vec<String>, &'static str> {
                     out.push(seg.to_string());
                     cur.clear();
                     dangling_op = true;
-                } else if chars.peek() == Some(&'>')
-                    || cur.ends_with('>')
-                    || cur.ends_with('<')
-                {
+                } else if chars.peek() == Some(&'>') || cur.ends_with('>') || cur.ends_with('<') {
                     // Redirection descriptor (`&>`, `2>&1`, `<&0`), not a command separator
                     cur.push(c);
                 } else {
@@ -2261,7 +2257,9 @@ impl SubcommandGrant {
         let arity_words = head.split_whitespace().count();
         let flags: std::collections::BTreeSet<String> = words[1..]
             .iter()
-            .filter(|t| t.len() > 1 && (t.starts_with('-') || (bin_base == "cmd" && t.starts_with('/'))))
+            .filter(|t| {
+                t.len() > 1 && (t.starts_with('-') || (bin_base == "cmd" && t.starts_with('/')))
+            })
             .map(|t| (*t).to_string())
             .collect();
 
@@ -2269,7 +2267,12 @@ impl SubcommandGrant {
             let positional: std::collections::BTreeSet<String> = words
                 .iter()
                 .skip(arity_words)
-                .filter(|t| !t.starts_with('-') && !(bin_base == "del" && t.starts_with('/')) && !(bin_base == "rd" && t.starts_with('/')) && !(bin_base == "rmdir" && t.starts_with('/')))
+                .filter(|t| {
+                    !t.starts_with('-')
+                        && !(bin_base == "del" && t.starts_with('/'))
+                        && !(bin_base == "rd" && t.starts_with('/'))
+                        && !(bin_base == "rmdir" && t.starts_with('/'))
+                })
                 .map(|t| t.trim_matches(['"', '\'']).to_string())
                 .filter(|t| !t.is_empty())
                 .collect();
@@ -2289,7 +2292,10 @@ impl SubcommandGrant {
     pub fn covers(&self, candidate_sub: &str) -> bool {
         let cand = Self::from_subcommand(candidate_sub);
         if let Some(exact) = &self.exact_command {
-            let cand_norm = candidate_sub.split_whitespace().collect::<Vec<_>>().join(" ");
+            let cand_norm = candidate_sub
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
             return *exact == cand_norm;
         }
         if cand.exact_command.is_some() {
@@ -2436,8 +2442,8 @@ pub fn session_grant_preview(command: &str) -> String {
     let shell = ShellKind::detect();
     let mut labels: Vec<String> = Vec::new();
     for sub in &subs {
-        let is_risky = !matches!(classify_for(shell, sub), Verdict::Safe)
-            || egress_kind(sub).is_some();
+        let is_risky =
+            !matches!(classify_for(shell, sub), Verdict::Safe) || egress_kind(sub).is_some();
         if is_risky {
             let lbl = SubcommandGrant::from_subcommand(sub).pattern_label();
             if !labels.contains(&lbl) {

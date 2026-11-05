@@ -257,7 +257,6 @@ pub(crate) async fn run_subagent_batch(
     effort_support: crate::config::EffortSupport,
     max_tokens: Option<u32>,
     system: &[SystemPart],
-    mcp: &crate::config::McpConfig,
     skills: &crate::config::SkillsConfig,
     read_only: bool,
     shadow_store: crate::config::ShadowStore,
@@ -317,7 +316,6 @@ pub(crate) async fn run_subagent_batch(
                 let blocked_patterns = blocked_patterns.to_vec();
                 let web_allow_hosts = web_allow_hosts.to_vec();
                 let system = system.to_vec();
-                let mcp = mcp.clone();
                 let skills = skills.clone();
                 let compaction = compaction.clone();
                 let fallback_chain = fallback_chain.clone();
@@ -349,7 +347,6 @@ pub(crate) async fn run_subagent_batch(
                         effort_support,
                         max_tokens,
                         system,
-                        mcp,
                         skills,
                         read_only,
                         shadow_store,
@@ -500,7 +497,6 @@ pub(crate) async fn run_subagent(
     effort_support: crate::config::EffortSupport,
     max_tokens: Option<u32>,
     system: Vec<SystemPart>,
-    mcp: crate::config::McpConfig,
     skills: crate::config::SkillsConfig,
     read_only: bool,
     shadow_store: crate::config::ShadowStore,
@@ -535,7 +531,6 @@ pub(crate) async fn run_subagent(
                     }],
                 });
                 let system = system.clone();
-                let mcp = mcp.clone();
                 let skills = skills.clone();
                 let compaction = compaction.clone();
                 let fallback_chain = fallback_chain.clone();
@@ -566,7 +561,6 @@ pub(crate) async fn run_subagent(
                         effort_support,
                         max_tokens,
                         system,
-                        mcp,
                         skills,
                         read_only,
                         shadow_store,
@@ -611,7 +605,12 @@ pub(crate) async fn run_subagent(
             resume.approval,
         )
     } else {
-        (next_subagent_id(), next_subagent_session(), parent_turn, approval_mode)
+        (
+            next_subagent_id(),
+            next_subagent_session(),
+            parent_turn,
+            approval_mode,
+        )
     };
     let background = steer_controls.is_some();
     if let Some(controls) = steer_controls.as_ref() {
@@ -666,7 +665,11 @@ pub(crate) async fn run_subagent(
     log_subagent_event(
         root,
         parent_session,
-        if resumed { "subagent_resumed" } else { "subagent_start" },
+        if resumed {
+            "subagent_resumed"
+        } else {
+            "subagent_start"
+        },
         &call.id,
         id,
         &child_session,
@@ -721,52 +724,51 @@ pub(crate) async fn run_subagent(
     // Hidden session for the parent's history screen. On resume it is the
     // durable transcript the child parked with; a fresh child starts with
     // just its task prompt.
-    let (mut child_doc, initial_messages, initial_summary) =
-        if let Some(resume) = resume.as_ref() {
-            let mut doc = crate::session::Session::load(&child_session)
-                .unwrap_or_else(|_| crate::session::Session::new(model_id.to_string(), context_limit));
-            if doc.title.is_empty() {
-                doc.title = task.label.chars().take(80).collect();
-            }
-            doc.hidden = true;
-            doc.parent_session = Some(parent_session.to_string());
-            doc.parent_tool_call = Some(call.id.clone());
-            doc.subagent_task = Some(task.label.clone());
-            doc.subagent_child_id = Some(id);
-            doc.project = Some(root.to_path_buf());
-            doc.approval = Some(approval_mode);
-            doc.model_key = model_id.to_string();
-            let mut messages = resume.messages.clone();
-            repair_dangling_tool_calls(&mut messages);
-            messages.push(Message::new(
-                Role::User,
-                "<subagent_resume>You were paused when the application restarted. \
+    let (mut child_doc, initial_messages, initial_summary) = if let Some(resume) = resume.as_ref() {
+        let mut doc = crate::session::Session::load(&child_session)
+            .unwrap_or_else(|_| crate::session::Session::new(model_id.to_string(), context_limit));
+        if doc.title.is_empty() {
+            doc.title = task.label.chars().take(80).collect();
+        }
+        doc.hidden = true;
+        doc.parent_session = Some(parent_session.to_string());
+        doc.parent_tool_call = Some(call.id.clone());
+        doc.subagent_task = Some(task.label.clone());
+        doc.subagent_child_id = Some(id);
+        doc.project = Some(root.to_path_buf());
+        doc.approval = Some(approval_mode);
+        doc.model_key = model_id.to_string();
+        let mut messages = resume.messages.clone();
+        repair_dangling_tool_calls(&mut messages);
+        messages.push(Message::new(
+            Role::User,
+            "<subagent_resume>You were paused when the application restarted. \
                  Continue this task from the transcript above; do not repeat completed work.\
                  </subagent_resume>",
-            ));
-            for (text, _) in &resume.pending {
-                messages.push(super::parent_message_message(text));
-            }
-            doc.messages = messages.clone();
-            doc.summary = resume.summary.clone();
-            doc.refresh_estimate();
-            let summary = doc.summary.clone();
-            (doc, messages, summary)
-        } else {
-            let mut doc = crate::session::Session::new(model_id.to_string(), context_limit);
-            doc.title = task.label.chars().take(80).collect();
-            doc.hidden = true;
-            doc.parent_session = Some(parent_session.to_string());
-            doc.parent_tool_call = Some(call.id.clone());
-            doc.subagent_task = Some(task.label.clone());
-            doc.subagent_child_id = Some(id);
-            doc.project = Some(root.to_path_buf());
-            doc.approval = Some(approval_mode);
-            doc.messages = vec![Message::new(Role::User, user_prompt)];
-            doc.refresh_estimate();
-            let messages = doc.messages.clone();
-            (doc, messages, None)
-        };
+        ));
+        for (text, _) in &resume.pending {
+            messages.push(super::parent_message_message(text));
+        }
+        doc.messages = messages.clone();
+        doc.summary = resume.summary.clone();
+        doc.refresh_estimate();
+        let summary = doc.summary.clone();
+        (doc, messages, summary)
+    } else {
+        let mut doc = crate::session::Session::new(model_id.to_string(), context_limit);
+        doc.title = task.label.chars().take(80).collect();
+        doc.hidden = true;
+        doc.parent_session = Some(parent_session.to_string());
+        doc.parent_tool_call = Some(call.id.clone());
+        doc.subagent_task = Some(task.label.clone());
+        doc.subagent_child_id = Some(id);
+        doc.project = Some(root.to_path_buf());
+        doc.approval = Some(approval_mode);
+        doc.messages = vec![Message::new(Role::User, user_prompt)];
+        doc.refresh_estimate();
+        let messages = doc.messages.clone();
+        (doc, messages, None)
+    };
     let _ = child_doc.save_hidden(&child_session);
     let child = spawn_agent(AgentInput {
         provider: provider.clone(),
@@ -811,7 +813,6 @@ pub(crate) async fn run_subagent(
         read_only: child_read_only,
         previous_response_id: None,
         summary: initial_summary,
-        mcp,
         skills,
         compact_only: false,
         compact_focus: String::new(),
@@ -829,10 +830,8 @@ pub(crate) async fn run_subagent(
     let mut child = child;
     // S1: visible to undo's cancellation signal until it joins. The guard
     // leaves the map on every exit path below, including early returns.
-    let _child_slot = crate::agent::undo_guard::track_child(
-        id,
-        child.child_control(parent_session, parent_turn),
-    );
+    let _child_slot =
+        crate::agent::undo_guard::track_child(id, child.child_control(parent_session, parent_turn));
     let _control_slot = ControlSlot::register(id, child.control.clone());
     if let Some(controls) = &steer_controls {
         let mut mailbox = controls.lock().await;
@@ -845,12 +844,16 @@ pub(crate) async fn run_subagent(
         if pending_pause {
             // The user paused before this child got a channel: cancel any
             // running tool and park it at its first boundary.
-            child.paused_flag().store(true, std::sync::atomic::Ordering::Relaxed);
+            child
+                .paused_flag()
+                .store(true, std::sync::atomic::Ordering::Relaxed);
             child.request_tool_cancel();
             let _ = child.control.try_send(ControlMsg::Pause);
         }
         for (text, interrupt) in pending {
-            let _ = child.control.try_send(ControlMsg::Steer { text, interrupt });
+            let _ = child
+                .control
+                .try_send(ControlMsg::Steer { text, interrupt });
         }
     }
     let mut output = String::new();
@@ -1296,9 +1299,7 @@ impl SubagentTrail {
             };
             format!("{}{extra}", shown.join(", "))
         };
-        let tokens = self
-            .prompt_tokens
-            .saturating_add(self.completion_tokens);
+        let tokens = self.prompt_tokens.saturating_add(self.completion_tokens);
         let token_field = if tokens > 0 {
             format!(" | {} tok", token_label(tokens))
         } else {
@@ -1569,11 +1570,7 @@ pub(crate) fn register_subagent_control_for_test(id: u64, control: mpsc::Sender<
 
 /// Answer an approval raised by a child. Returns false when the child is gone
 /// (its runner dropped the slot), so the UI need not retry.
-pub(crate) fn answer_subagent_approval(
-    child: u64,
-    id: u64,
-    decision: ApprovalDecision,
-) -> bool {
+pub(crate) fn answer_subagent_approval(child: u64, id: u64, decision: ApprovalDecision) -> bool {
     let Ok(controls) = subagent_controls().lock() else {
         return false;
     };

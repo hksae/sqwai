@@ -550,4 +550,3 @@ pub(crate) fn rejects_continuation(err: &str) -> bool {
         || (lower.contains("previous_response") && !lower.contains("not supported"))
         || lower.contains("previous response not found")
 }
-

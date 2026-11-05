@@ -327,7 +327,7 @@ impl App {
                 String,
                 Vec<(u64, String, String, String)>,
             >,
-                            status: &str| {
+                              status: &str| {
                 for row in rows.values_mut().flat_map(|r| r.iter_mut()) {
                     if row.0 == child_id {
                         row.2 = status.to_string();

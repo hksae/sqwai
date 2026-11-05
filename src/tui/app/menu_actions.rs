@@ -426,9 +426,7 @@ impl App {
                             hits.len(),
                             started.elapsed().as_millis()
                         )),
-                        Err(reason) => {
-                            Err(format!("{}: {reason}", provider.as_str()))
-                        }
+                        Err(reason) => Err(format!("{}: {reason}", provider.as_str())),
                     }
                 }),
                 Err(e) => Err(format!("{}: runtime: {e}", provider.as_str())),

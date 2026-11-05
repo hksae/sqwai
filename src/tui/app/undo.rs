@@ -365,7 +365,12 @@ impl App {
         let derived = crate::agent::events::EventLog::checkpoints_in_turn(&root, &session, turn)
             .unwrap_or_default();
         for (sha, label) in derived {
-            if !self.session.checkpoints.iter().any(|(known, _)| known == &sha) {
+            if !self
+                .session
+                .checkpoints
+                .iter()
+                .any(|(known, _)| known == &sha)
+            {
                 self.session.push_checkpoint(sha, label, turn);
             }
         }

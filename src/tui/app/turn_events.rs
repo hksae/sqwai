@@ -670,8 +670,7 @@ impl App {
         if background {
             self.subagent_background.insert(id);
         }
-        self.subagent_started
-            .insert(id, std::time::Instant::now());
+        self.subagent_started.insert(id, std::time::Instant::now());
         self.subagent_elapsed.remove(&id);
         self.subagents
             .push((id, task.clone(), "running".into(), String::new(), false));
@@ -734,8 +733,7 @@ impl App {
         } else {
             self.handle_subagent_start(id, task, session, background);
         }
-        self.subagent_started
-            .insert(id, std::time::Instant::now());
+        self.subagent_started.insert(id, std::time::Instant::now());
         self.subagent_elapsed.remove(&id);
         // The old chat was a frozen view of the hidden transcript. Drop it so
         // the next open reloads the resumed transcript from disk instead of
@@ -890,18 +888,13 @@ impl App {
         if ids.is_empty() {
             return;
         }
-        let Ok(mut log) = crate::agent::events::EventLog::open(
-            &self.project_root,
-            &self.session.id.to_string(),
-        ) else {
+        let Ok(mut log) =
+            crate::agent::events::EventLog::open(&self.project_root, &self.session.id.to_string())
+        else {
             return;
         };
         for id in ids {
-            let child_session = self
-                .subagent_sessions
-                .get(id)
-                .cloned()
-                .unwrap_or_default();
+            let child_session = self.subagent_sessions.get(id).cloned().unwrap_or_default();
             let _ = log.append(
                 kind,
                 serde_json::json!({
@@ -1032,8 +1025,7 @@ impl App {
             self.merge_host_events();
             self.background_merge_at = None;
         } else if self.background_merge_at.is_none() {
-            self.background_merge_at =
-                Some(Instant::now() + std::time::Duration::from_millis(50));
+            self.background_merge_at = Some(Instant::now() + std::time::Duration::from_millis(50));
         }
     }
 
@@ -1220,7 +1212,7 @@ impl App {
                 }
                 Segment::Tool { .. } | Segment::Subagent { .. } => calls += 1,
                 Segment::Thinking { .. } => thinking += 1,
-                Segment::Commentary(_) | _ => {}
+                _ => {}
             }
         }
         (calls, thinking, errors)

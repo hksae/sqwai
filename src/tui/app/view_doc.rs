@@ -280,10 +280,7 @@ impl App {
                             Theme::dim()
                         },
                     ),
-                    Span::styled(
-                        text,
-                        if locked { Theme::dim() } else { Theme::base() },
-                    ),
+                    Span::styled(text, if locked { Theme::dim() } else { Theme::base() }),
                 ]);
             }
             if q.allow_free {
@@ -504,9 +501,12 @@ impl App {
                         let shown = &non_empty[..total.min(40)];
                         for l in shown {
                             let expanded_l = expand_tool_row_controls(l, 2);
-                            let st = if expanded_l.starts_with('+') && !expanded_l.starts_with("+++") {
+                            let st = if expanded_l.starts_with('+')
+                                && !expanded_l.starts_with("+++")
+                            {
                                 Theme::ok()
-                            } else if expanded_l.starts_with('-') && !expanded_l.starts_with("---") {
+                            } else if expanded_l.starts_with('-') && !expanded_l.starts_with("---")
+                            {
                                 Theme::err()
                             } else if expanded_l.starts_with("@@")
                                 || expanded_l.starts_with("[Subagent receipt:")
@@ -528,7 +528,10 @@ impl App {
                             out.push((
                                 Line::from(vec![
                                     Span::styled("  ".to_string(), Theme::base()),
-                                    Span::styled(truncate_display_width(&more, width), Theme::dim()),
+                                    Span::styled(
+                                        truncate_display_width(&more, width),
+                                        Theme::dim(),
+                                    ),
                                 ]),
                                 Some(idx),
                             ));
@@ -861,7 +864,10 @@ impl App {
             self.live_md.retain(|id| {
                 let in_main = seg_meta.iter().enumerate().any(|(idx, m)| {
                     m.id == id
-                        && matches!(segments.get(idx), Some(Segment::Assistant { live: true, .. }))
+                        && matches!(
+                            segments.get(idx),
+                            Some(Segment::Assistant { live: true, .. })
+                        )
                 });
                 if in_main {
                     return true;
@@ -1081,10 +1087,11 @@ impl App {
         if self.active_subagent.is_some() {
             return;
         }
-        if self.segments.is_empty() && self.cache_lines.len() >= 2 {
-            if let Some(first_mark) = self.empty_mark_lines().into_iter().next() {
-                self.cache_lines[1] = first_mark;
-            }
+        if self.segments.is_empty()
+            && self.cache_lines.len() >= 2
+            && let Some(first_mark) = self.empty_mark_lines().into_iter().next()
+        {
+            self.cache_lines[1] = first_mark;
         }
         if self.streaming && !self.cache_lines.is_empty() {
             let w = width.saturating_sub(2).max(10);

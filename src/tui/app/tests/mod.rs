@@ -68,7 +68,7 @@ fn test_app(url: String) -> App {
     );
     let mut models = BTreeMap::new();
     models.insert(
-"p/m".to_string(),
+        "p/m".to_string(),
         ModelConfig {
             provider: "p".into(),
             id: "test-model".into(),
@@ -94,7 +94,6 @@ fn test_app(url: String) -> App {
         ui: Default::default(),
         tools: Default::default(),
         limits: Default::default(),
-        mcp: Default::default(),
         skills: Default::default(),
         compaction: Default::default(),
         plan: Default::default(),
@@ -185,7 +184,7 @@ async fn real_zen_smoke() {
     );
     let mut models = BTreeMap::new();
     models.insert(
-"p/m".to_string(),
+        "p/m".to_string(),
         ModelConfig {
             provider: "zen".into(),
             id: "x-preview-f-free".into(),
@@ -211,7 +210,6 @@ async fn real_zen_smoke() {
         ui: Default::default(),
         tools: Default::default(),
         limits: Default::default(),
-        mcp: Default::default(),
         skills: Default::default(),
         compaction: Default::default(),
         plan: Default::default(),

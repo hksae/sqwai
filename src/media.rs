@@ -257,8 +257,7 @@ pub fn load(attachment: &ImageAttachment) -> Result<Vec<u8>, String> {
 /// Open a stored rendition in the system image viewer. Used by transcript
 /// clicks; the blob is host-owned, so no user path is launched here.
 pub fn open_blob(id: &str, media_type: &str, name: &str) -> Result<(), String> {
-    let path = blob_path(id, media_type)
-        .map_err(|_| format!("invalid media id for {name}"))?;
+    let path = blob_path(id, media_type).map_err(|_| format!("invalid media id for {name}"))?;
     if !path.exists() {
         return Err(format!("image '{name}' is missing from the media store"));
     }
@@ -276,10 +275,7 @@ fn open_path(path: &std::path::Path) -> Result<(), String> {
         .encode_wide()
         .chain(std::iter::once(0))
         .collect();
-    let verb: Vec<u16> = "open"
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
+    let verb: Vec<u16> = "open".encode_utf16().chain(std::iter::once(0)).collect();
     let result = unsafe {
         ShellExecuteW(
             std::ptr::null_mut(),
@@ -580,8 +576,14 @@ mod tests {
     fn prepare_at_lowers_the_cap_and_never_raises_it() {
         let bytes = png(2000, 1000);
         let small = prepare_at(&bytes, "wide.png", 400).unwrap();
-        assert_eq!((small.attachment.width, small.attachment.height), (400, 200));
-        assert_ne!(small.attachment.id, prepare(&bytes, "wide.png").unwrap().attachment.id);
+        assert_eq!(
+            (small.attachment.width, small.attachment.height),
+            (400, 200)
+        );
+        assert_ne!(
+            small.attachment.id,
+            prepare(&bytes, "wide.png").unwrap().attachment.id
+        );
         assert!(small.bytes.len() < prepare(&bytes, "wide.png").unwrap().bytes.len());
 
         let over = prepare_at(&bytes, "wide.png", 9000).unwrap();

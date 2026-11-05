@@ -116,7 +116,6 @@ pub(crate) struct BackgroundSpawnCtx {
     pub(crate) effort_support: crate::config::EffortSupport,
     pub(crate) max_tokens: Option<u32>,
     pub(crate) system: Vec<SystemPart>,
-    pub(crate) mcp: crate::config::McpConfig,
     pub(crate) skills: crate::config::SkillsConfig,
     pub(crate) read_only: bool,
     pub(crate) shadow_store: crate::config::ShadowStore,
@@ -200,7 +199,6 @@ async fn spawn_background_child(
     let limits = ctx.limits.clone();
     let skills_active = ctx.active_skills.clone();
     let system = ctx.system.clone();
-    let mcp = ctx.mcp.clone();
     let skills = ctx.skills.clone();
     let compaction = ctx.compaction.clone();
     let fallback_chain = ctx.fallback_chain.clone();
@@ -228,7 +226,6 @@ async fn spawn_background_child(
             ctx.effort_support,
             ctx.max_tokens,
             system,
-            mcp,
             skills,
             ctx.read_only,
             ctx.shadow_store,
@@ -841,10 +838,19 @@ pub struct FallbackCandidate {
 #[derive(Debug)]
 #[allow(clippy::enum_variant_names)] // the "Answer" suffix reads better at the call sites than a forced rename
 pub enum ControlMsg {
-    AskAnswer { id: u64, text: String },
-    ApprovalAnswer { id: u64, decision: ApprovalDecision },
+    AskAnswer {
+        id: u64,
+        text: String,
+    },
+    ApprovalAnswer {
+        id: u64,
+        decision: ApprovalDecision,
+    },
     /// a parent message for a running child, delivered at its next request
-    Steer { text: String, interrupt: bool },
+    Steer {
+        text: String,
+        interrupt: bool,
+    },
     /// stop issuing work at the next boundary and park until resumed; a
     /// running tool is cancelled first so no process survives the pause
     Pause,
@@ -907,17 +913,8 @@ impl AgentHandle {
     /// The stop half of this handle for the S1 child registry
     ///: undo cancels whatever is still registered before it
     /// reverts the tree. Cloned, never moved — the event stream stays here.
-    pub fn child_control(
-        &self,
-        session: &str,
-        turn: u64,
-    ) -> super::undo_guard::ChildControl {
-        super::undo_guard::ChildControl::new(
-            self.abort.clone(),
-            self.cancel.clone(),
-            session,
-            turn,
-        )
+    pub fn child_control(&self, session: &str, turn: u64) -> super::undo_guard::ChildControl {
+        super::undo_guard::ChildControl::new(self.abort.clone(), self.cancel.clone(), session, turn)
     }
 }
 
@@ -964,7 +961,6 @@ async fn drain_background_reports(
             .await;
     }
 }
-
 
 fn log_subagent_message(
     root: &std::path::Path,
@@ -1032,9 +1028,7 @@ async fn subagents_control(
             if stats.tool_count > 0 {
                 out.push_str(&format!(" — {} tool(s)", stats.tool_count));
             }
-            let tokens = stats
-                .prompt_tokens
-                .saturating_add(stats.completion_tokens);
+            let tokens = stats.prompt_tokens.saturating_add(stats.completion_tokens);
             if tokens > 0 {
                 out.push_str(&format!(" — {} tok", fmt_tokens(tokens)));
             }
@@ -1168,11 +1162,7 @@ async fn subagents_control(
         Some(entry.notify.clone().notified_owned())
     };
     if let Some(notified) = notified {
-        let _ = tokio::time::timeout(
-            std::time::Duration::from_secs(wait),
-            notified,
-        )
-        .await;
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(wait), notified).await;
     }
     let mut entries = registry.lock().await;
     let Some(entry) = entries.get_mut(&id) else {
@@ -1326,8 +1316,6 @@ pub struct AgentInput {
     pub previous_response_id: Option<String>,
     /// Summary of everything already compacted out of `messages`.
     pub summary: Option<String>,
-    /// MCP servers available to this agent turn.
-    pub mcp: crate::config::McpConfig,
     /// Skill discovery configuration (`[skills]`): the directories the `skill`
     /// tool searches. Without it the tool would only ever see the project
     /// skills and silently miss every configured global directory.
@@ -1378,14 +1366,8 @@ pub fn spawn_agent(input: AgentInput) -> AgentHandle {
     let (ctl_tx, ctl_rx) = mpsc::channel::<ControlMsg>(32);
     let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let pause = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let abort = tokio::spawn(run_agent(
-        input,
-        tx,
-        ctl_rx,
-        cancel.clone(),
-        pause.clone(),
-    ))
-    .abort_handle();
+    let abort =
+        tokio::spawn(run_agent(input, tx, ctl_rx, cancel.clone(), pause.clone())).abort_handle();
     AgentHandle {
         rx,
         control: ctl_tx,
@@ -1854,7 +1836,6 @@ async fn run_agent(
         compact_focus,
         compaction,
         plan_limits,
-        mcp,
         skills,
         shadow_store,
         subagent_depth,
@@ -1867,8 +1848,8 @@ async fn run_agent(
     } = input;
     // The approval axis is live when the caller handed a switch: the TUI
     // flips it on Shift+Tab and every tool call re-reads it below.
-    let approval_live = approval_switch
-        .unwrap_or_else(|| crate::config::ApprovalSwitch::new(approval_mode));
+    let approval_live =
+        approval_switch.unwrap_or_else(|| crate::config::ApprovalSwitch::new(approval_mode));
     let mut approval_mode = approval_mode;
     let events_session = parent_session.clone().unwrap_or_else(|| session_id.clone());
     let events_agent = if parent_session.is_some() {
@@ -1897,22 +1878,6 @@ async fn run_agent(
         }
     }
 
-    let mut mcp_registry = if enable_tools {
-        match crate::mcp::Registry::from_config(&mcp).await {
-            Ok(registry) => Some(registry),
-            Err(e) => {
-                let _ = tx
-                    .send(AgentEvent::Completed(Err(format!(
-                        "MCP startup failed: {e:#}"
-                    ))))
-                    .await;
-                return;
-            }
-        }
-    } else {
-        None
-    };
-
     let mut caps = provider.capabilities();
     let mut policy = context::Policy::with_compaction(
         context_limit,
@@ -1924,7 +1889,7 @@ async fn run_agent(
     // and omitted entirely for requests that cannot call them. A child is
     // not offered the tools its runtime refuses: nested spawning and the
     // user-facing question tool stay with the main agent.
-    let mut tools: Vec<crate::providers::ToolSpec> = if enable_tools {
+    let tools: Vec<crate::providers::ToolSpec> = if enable_tools {
         let base: Vec<crate::providers::ToolSpec> = tools::tool_specs()
             .into_iter()
             .filter(|spec| {
@@ -1932,11 +1897,7 @@ async fn run_agent(
                     || !matches!(spec.name.as_str(), "subagent" | "subagents" | "ask_user")
             })
             .collect();
-        if let Some(registry) = &mcp_registry {
-            tools::merge_specs(base, registry.specs())
-        } else {
-            base
-        }
+        base
     } else {
         Vec::new()
     };
@@ -2281,7 +2242,6 @@ async fn run_agent(
         effort_support,
         max_tokens,
         system: system.clone(),
-        mcp: mcp.clone(),
         skills: skills.clone(),
         read_only,
         shadow_store,
@@ -2375,8 +2335,7 @@ async fn run_agent(
                     !(part.section == crate::providers::PrefixSection::Skills && !part.cacheable)
                 });
                 turn_system.push(
-                    SystemPart::volatile(text)
-                        .in_section(crate::providers::PrefixSection::Skills),
+                    SystemPart::volatile(text).in_section(crate::providers::PrefixSection::Skills),
                 );
             }
             // Neither is the request the provider billed, so its token count
@@ -2746,9 +2705,7 @@ async fn run_agent(
             for text in texts {
                 messages.push(parent_message_message(&text));
             }
-            if pause_signal.load(std::sync::atomic::Ordering::Relaxed)
-                && !turn.calls.is_empty()
-            {
+            if pause_signal.load(std::sync::atomic::Ordering::Relaxed) && !turn.calls.is_empty() {
                 // The stream finished while the pause request was in flight.
                 // Do not execute what it asked for: record the assistant
                 // message and a cancelled result per call, then park. On
@@ -2859,17 +2816,14 @@ async fn run_agent(
         let pure_subagents = subagent_depth == 0
             && !background_subagents
             && !turn.calls.is_empty()
-            && turn
-                .calls
-                .iter()
-                .all(|call| {
-                    call.name == "subagent"
-                        && !call
-                            .args
-                            .get("background")
-                            .and_then(|v| v.as_bool())
-                            .unwrap_or(false)
-                });
+            && turn.calls.iter().all(|call| {
+                call.name == "subagent"
+                    && !call
+                        .args
+                        .get("background")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false)
+            });
         if pure_subagents {
             let remaining = limits
                 .max_tool_calls_per_turn
@@ -2913,7 +2867,6 @@ async fn run_agent(
                     effort_support,
                     max_tokens,
                     &system,
-                    &mcp,
                     &skills,
                     read_only,
                     shadow_store,
@@ -3005,10 +2958,11 @@ async fn run_agent(
                                 }
                                 continue;
                             }
-                            let outside: Vec<String> = loop_ask::read_call_paths(&peer.name, &peer.args)
-                                .into_iter()
-                                .filter(|path| ctx.outside_uncovered(path))
-                                .collect();
+                            let outside: Vec<String> =
+                                loop_ask::read_call_paths(&peer.name, &peer.args)
+                                    .into_iter()
+                                    .filter(|path| ctx.outside_uncovered(path))
+                                    .collect();
                             let Some(path) = outside.first() else {
                                 continue;
                             };
@@ -3247,13 +3201,8 @@ async fn run_agent(
                             outcome
                         }
                         "subagents" if subagent_depth == 0 => {
-                            subagents_control(
-                                &background_registry,
-                                &call.args,
-                                &root,
-                                &session_id,
-                            )
-                            .await
+                            subagents_control(&background_registry, &call.args, &root, &session_id)
+                                .await
                         }
                         "subagent" if subagent_depth == 0 => {
                             let background = call
@@ -3279,61 +3228,61 @@ async fn run_agent(
                                     Err(error) => tools::Outcome::err(error),
                                 }
                             } else {
-                            let outcome = run_subagent(
-                                call,
-                                &ctx.session_id,
-                                user_turn,
-                                &EventSink::bounded(tx.clone()),
-                                &ctx.cancel,
-                                &provider,
-                                &model_id,
-                                &root,
-                                &blocked_patterns,
-                                &web_allow_hosts,
-                                approval_mode,
-                                context_limit,
-                                vision,
-                                pdf,
-                                &tool_caps,
-                                &ctx.search,
-                                &limits,
-                                &active_skills,
-                                effort,
-                                effort_support,
-                                max_tokens,
-                                system.clone(),
-                                mcp.clone(),
-                                skills.clone(),
-                                read_only,
-                                shadow_store,
-                                compaction.clone(),
-                                plan_limits,
-                                fallback_chain.clone(),
-                                std::time::Duration::from_secs(SUBAGENT_TIMEOUT_SECS),
-                                None,
-                                None,
-                            )
-                            .await;
-                            // The child shares this plan: a `plan finish`
-                            // (or `start`) inside it retires (or moves) the
-                            // step this session holds, and the next `plan
-                            // start` in the same turn would be refused
-                            // against the stale hold. Re-adopt.
-                            let held_before = ctx.current_step.clone();
-                            ctx.current_step = adopt_in_progress_step(&root, &ctx.session_id);
-                            if ctx.current_step != held_before {
-                                let plan_id = plan::open_active_for_session(&root, Some(&ctx.session_id))
-                                    .ok()
-                                    .flatten()
-                                    .map(|p| p.id);
-                                let _ = tx
-                                    .send(AgentEvent::StepCurrent {
-                                        step: ctx.current_step.clone(),
-                                        plan: plan_id,
-                                    })
-                                    .await;
-                            }
-                            outcome
+                                let outcome = run_subagent(
+                                    call,
+                                    &ctx.session_id,
+                                    user_turn,
+                                    &EventSink::bounded(tx.clone()),
+                                    &ctx.cancel,
+                                    &provider,
+                                    &model_id,
+                                    &root,
+                                    &blocked_patterns,
+                                    &web_allow_hosts,
+                                    approval_mode,
+                                    context_limit,
+                                    vision,
+                                    pdf,
+                                    &tool_caps,
+                                    &ctx.search,
+                                    &limits,
+                                    &active_skills,
+                                    effort,
+                                    effort_support,
+                                    max_tokens,
+                                    system.clone(),
+                                    skills.clone(),
+                                    read_only,
+                                    shadow_store,
+                                    compaction.clone(),
+                                    plan_limits,
+                                    fallback_chain.clone(),
+                                    std::time::Duration::from_secs(SUBAGENT_TIMEOUT_SECS),
+                                    None,
+                                    None,
+                                )
+                                .await;
+                                // The child shares this plan: a `plan finish`
+                                // (or `start`) inside it retires (or moves) the
+                                // step this session holds, and the next `plan
+                                // start` in the same turn would be refused
+                                // against the stale hold. Re-adopt.
+                                let held_before = ctx.current_step.clone();
+                                ctx.current_step = adopt_in_progress_step(&root, &ctx.session_id);
+                                if ctx.current_step != held_before {
+                                    let plan_id =
+                                        plan::open_active_for_session(&root, Some(&ctx.session_id))
+                                            .ok()
+                                            .flatten()
+                                            .map(|p| p.id);
+                                    let _ = tx
+                                        .send(AgentEvent::StepCurrent {
+                                            step: ctx.current_step.clone(),
+                                            plan: plan_id,
+                                        })
+                                        .await;
+                                }
+                                outcome
                             }
                         }
                         "subagent" => tools::Outcome::err("nested subagents are not allowed"),
@@ -3355,46 +3304,6 @@ async fn run_agent(
                                 let _ = tx.send(AgentEvent::Todos(plan_todos.clone())).await;
                             }
                             outcome
-                        }
-                        other
-                            if mcp_registry
-                                .as_ref()
-                                .is_some_and(|registry| registry.contains(other)) =>
-                        {
-                            match mcp_registry
-                                .as_mut()
-                                .unwrap()
-                                .call(other, call.args.clone())
-                                .await
-                            {
-                                // R banner: server-authored bytes are
-                                // untrusted content even when the server
-                                // labels them an error (audit H11) — unlike
-                                // webfetch failures, which the host
-                                // generates. Only the transport Err below
-                                // stays bare.
-                                Ok((output, is_error)) => {
-                                    crate::mcp::result_outcome(output, is_error)
-                                }
-                                Err(e) => {
-                                    // A dead server's tools are gone from the
-                                    // registry (audit M13); the request schema
-                                    // holds its own copy, so drop them there
-                                    // too or the model keeps calling a tool
-                                    // nothing can answer.
-                                    if !e.dropped.is_empty() {
-                                        tools.retain(|spec| !e.dropped.contains(&spec.name));
-                                        crate::providers::log_http(&format!(
-                                            "MCP: dropped {} after its server went away",
-                                            e.dropped.join(", ")
-                                        ));
-                                    }
-                                    tools::Outcome::err(format!(
-                                        "MCP call failed: {}",
-                                        e.message
-                                    ))
-                                }
-                            }
                         }
                         other => {
                             if other == "read" {
@@ -3467,13 +3376,7 @@ async fn run_agent(
                         // R taint: every content-bearing result carries
                         // its class; the trust flag goes low with it. Plan ops
                         // above stay high — host observations, not content.
-                        let taint = crate::agent::trust::call_taint(
-                            &call.name,
-                            &call.args,
-                            mcp_registry
-                                .as_ref()
-                                .is_some_and(|registry| registry.contains(&call.name)),
-                        );
+                        let taint = crate::agent::trust::call_taint(&call.name, &call.args);
                         writer
                         .append_evidence(
                             "observation",
@@ -3557,12 +3460,7 @@ async fn run_agent(
                 if outcome.cancelled {
                     interrupted = true;
                 }
-                if outcome.ok
-                    && matches!(
-                        call.name.as_str(),
-                        "edit" | "write"
-                    )
-                {
+                if outcome.ok && matches!(call.name.as_str(), "edit" | "write") {
                     edited_since_green_bash = true;
                 }
                 if call.name == "bash" {
@@ -3708,8 +3606,7 @@ async fn run_agent(
                 // exempt: their attachment is the delivery, and a cleared
                 // earlier copy makes the duplicate check meaningless.
                 if outcome.ok && outcome.images.is_empty() && outcome.documents.is_empty() {
-                    match repeat_verdict_with_limit(&messages, call, &outcome.output)
-                    {
+                    match repeat_verdict_with_limit(&messages, call, &outcome.output) {
                         RepeatVerdict::Fresh => {}
                         RepeatVerdict::Note(note) => outcome.output.push_str(&note),
                         RepeatVerdict::Withheld(stub) => outcome.output = stub,

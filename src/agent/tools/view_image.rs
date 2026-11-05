@@ -115,7 +115,10 @@ mod tests {
         let mut ctx = ToolCtx::new(dir.path());
         let overview = view(&mut ctx, &json!({"path": "big.png", "max_edge": 400}));
         assert!(overview.ok, "{}", overview.output);
-        assert_eq!((overview.images[0].width, overview.images[0].height), (400, 225));
+        assert_eq!(
+            (overview.images[0].width, overview.images[0].height),
+            (400, 225)
+        );
         ctx.note_visible_image(&overview.images[0].id);
 
         let full = view(&mut ctx, &json!({"path": "big.png"}));

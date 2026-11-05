@@ -264,10 +264,7 @@ fn working_line_names_phase_and_carries_no_hint() {
     let work_text: String = work.spans.iter().map(|s| s.content.as_ref()).collect();
     assert_eq!(
         work_text,
-        format!(
-            "{} working · 27s",
-            crate::tui::anim::working_mark(0)
-        ),
+        format!("{} working · 27s", crate::tui::anim::working_mark(0)),
         "the tail row says the phase and the clock, nothing else"
     );
     assert_eq!(
@@ -282,7 +279,10 @@ fn working_line_names_phase_and_carries_no_hint() {
         think_text,
         format!("{} thinking", crate::tui::anim::working_mark(1))
     );
-    assert!(!think_text.contains("esc"), "no intervention hint: {think_text}");
+    assert!(
+        !think_text.contains("esc"),
+        "no intervention hint: {think_text}"
+    );
 }
 
 /// The running signal lives only at the tail of the transcript: while streaming
@@ -1847,7 +1847,7 @@ fn session_recovery_with_deleted_or_broken_plan_id() {
     );
     let mut models = BTreeMap::new();
     models.insert(
-"p/m".to_string(),
+        "p/m".to_string(),
         ModelConfig {
             provider: "p".into(),
             id: "test-model".into(),
@@ -1873,7 +1873,6 @@ fn session_recovery_with_deleted_or_broken_plan_id() {
         ui: Default::default(),
         tools: Default::default(),
         limits: Default::default(),
-        mcp: Default::default(),
         skills: Default::default(),
         compaction: Default::default(),
         plan: Default::default(),
@@ -2176,11 +2175,8 @@ fn undo_turn_reverts_late_child_writes_by_their_spawner_turn() {
     // Turn 2: the parent's own write is in the session list; the child's late
     // write is only in the event log.
     app.session.turn_seq = 2;
-    app.session.push_checkpoint(
-        "blob:own".into(),
-        "write own.txt".into(),
-        2,
-    );
+    app.session
+        .push_checkpoint("blob:own".into(), "write own.txt".into(), 2);
 
     app.undo_turn();
 

@@ -132,14 +132,10 @@ async fn safe_mutating_bash_on_clean_tree_skips_snapshot_but_stays_revertible() 
     std::fs::create_dir_all(&dir).unwrap();
     let session = "probe-gap";
     // clean tree, established head
-    let head = crate::agent::checkpoints::snapshot_session(
-        &dir,
-        ShadowStore::User,
-        session,
-        "probe base",
-    )
-    .unwrap()
-    .expect("first snapshot commits");
+    let head =
+        crate::agent::checkpoints::snapshot_session(&dir, ShadowStore::User, session, "probe base")
+            .unwrap()
+            .expect("first snapshot commits");
     assert!(
         !crate::agent::checkpoints::tree_changed(&dir, ShadowStore::User, session),
         "tree is clean against its head"

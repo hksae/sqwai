@@ -316,5 +316,4 @@ mod tests {
         let text: String = mid.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(text, "Working");
     }
-
 }

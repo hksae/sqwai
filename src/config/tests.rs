@@ -1149,14 +1149,14 @@ fn bare_model_names_resolve_only_when_unambiguous() {
         .insert("pateway/luna".into(), model("pateway", "luna", 1));
     cfg.models
         .insert("openrouter/luna".into(), model("openrouter", "luna", 2));
-    cfg.models
-        .insert("openrouter/gpt-6-luna".into(), model("openrouter", "gpt-6", 3));
-    cfg.models.insert("solo".into(), model("pateway", "solo", 4));
-
-    assert_eq!(
-        cfg.resolve_model_key("pateway/luna"),
-        Some("pateway/luna")
+    cfg.models.insert(
+        "openrouter/gpt-6-luna".into(),
+        model("openrouter", "gpt-6", 3),
     );
+    cfg.models
+        .insert("solo".into(), model("pateway", "solo", 4));
+
+    assert_eq!(cfg.resolve_model_key("pateway/luna"), Some("pateway/luna"));
     // unique name, stored before nesting
     assert_eq!(
         cfg.resolve_model_key("gpt-6-luna"),
@@ -1212,7 +1212,10 @@ fn nested_save_shape_round_trips() {
         "model must nest under its provider:\n{text}"
     );
     // the ghost provider holds no table, so its model keeps the flat section
-    assert!(text.contains(r#"[models."ghost/model"]"#), "orphan lost:\n{text}");
+    assert!(
+        text.contains(r#"[models."ghost/model"]"#),
+        "orphan lost:\n{text}"
+    );
 
     let mut back: Config = toml::from_str(&text).unwrap();
     back.fold_models();
@@ -1222,9 +1225,12 @@ fn nested_save_shape_round_trips() {
 #[test]
 fn provider_rename_moves_model_identity() {
     let mut cfg = Config::default();
-    cfg.models.insert("old/luna".into(), model("old", "luna", 1));
-    cfg.models.insert("old/other".into(), model("old", "other", 2));
-    cfg.models.insert("new/other".into(), model("new", "other", 3));
+    cfg.models
+        .insert("old/luna".into(), model("old", "luna", 1));
+    cfg.models
+        .insert("old/other".into(), model("old", "other", 2));
+    cfg.models
+        .insert("new/other".into(), model("new", "other", 3));
     cfg.last_model = "old/luna".into();
 
     let skipped = cfg.rename_provider_models("old", "new");
@@ -1252,11 +1258,7 @@ fn nested_catalog_keeps_its_declaration_order() {
     .unwrap();
     assert_eq!(
         catalog.models.keys().collect::<Vec<_>>(),
-        vec![
-            "deepinfra/zai-org/GLM-5.3",
-            "zai/glm-5.2",
-            "zai/glm-5.3",
-        ]
+        vec!["deepinfra/zai-org/GLM-5.3", "zai/glm-5.2", "zai/glm-5.3",]
     );
     // file order, not BTreeMap order: newest release first is what the menu shows
     assert_eq!(
@@ -1292,7 +1294,10 @@ fn builtin_catalog_keys_are_qualified() {
     // menu order follows the file, in qualified keys
     assert_eq!(
         catalog.model_order,
-        vec!["zai/glm-5.2".to_string(), "deepinfra/zai-org/GLM-5.3".to_string()]
+        vec![
+            "zai/glm-5.2".to_string(),
+            "deepinfra/zai-org/GLM-5.3".to_string()
+        ]
     );
     // the shipped catalog is qualified too, and no two of its keys collide
     let shipped = BuiltinCatalog::current();
@@ -1376,7 +1381,10 @@ fn the_key_store_wins_and_survives_partial_edits() {
     loaded.save_to_dir(dir.path()).unwrap();
     let store = std::fs::read_to_string(dir.path().join("keys.toml")).unwrap();
     assert!(!store.contains("pateway"), "{store}");
-    assert!(store.contains("sk-keep"), "a hand-kept entry must survive: {store}");
+    assert!(
+        store.contains("sk-keep"),
+        "a hand-kept entry must survive: {store}"
+    );
 
     let config_raw = std::fs::read_to_string(dir.path().join("config.toml")).unwrap();
     assert!(!config_raw.contains("sk-store"), "{config_raw}");
@@ -1422,7 +1430,8 @@ fn search_config_picks_the_provider_key_in_order() {
         .insert("deepseek".to_string(), keyed_provider(Some("sk-chat")));
     assert_eq!(cfg.search_config().api_key.as_deref(), Some("sk-chat"));
     // a search-specific key shadows the chat key without changing it
-    cfg.keys.insert("deepseek-search".into(), "sk-search".into());
+    cfg.keys
+        .insert("deepseek-search".into(), "sk-search".into());
     assert_eq!(cfg.search_config().api_key.as_deref(), Some("sk-search"));
     assert_eq!(
         cfg.providers["deepseek"].api_key.as_deref(),
@@ -1450,15 +1459,15 @@ fn a_search_key_round_trips_through_the_store() {
     assert!(store.contains("sk-chat"), "{store}");
 
     let mut loaded = load_dir(dir.path());
-    assert_eq!(
-        loaded.search_config().api_key.as_deref(),
-        Some("tvly-live")
-    );
+    assert_eq!(loaded.search_config().api_key.as_deref(), Some("tvly-live"));
     loaded.keys.remove("tavily");
     loaded.save_to_dir(dir.path()).unwrap();
     let store = std::fs::read_to_string(dir.path().join("keys.toml")).unwrap();
     assert!(!store.contains("tvly-live"), "{store}");
-    assert!(store.contains("sk-chat"), "the chat key must survive: {store}");
+    assert!(
+        store.contains("sk-chat"),
+        "the chat key must survive: {store}"
+    );
 }
 
 /// Hosted search needs no key: the provider runs it inside the request.

@@ -58,7 +58,8 @@ pub fn stream_http_client() -> reqwest::Client {
 /// allocating multi-hundred-KB temporary `String`s on every turn just to
 /// measure `provider_state`, `extra_content`, `call.args`, and tool schemas.
 #[inline]
-pub(crate) fn json_byte_len(val: &serde_json::Value) -> u64 {    struct ByteCounter(u64);
+pub(crate) fn json_byte_len(val: &serde_json::Value) -> u64 {
+    struct ByteCounter(u64);
     impl std::io::Write for ByteCounter {
         #[inline]
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
@@ -598,8 +599,10 @@ pub struct RequestBreakdown {
 
 impl RequestBreakdown {
     pub fn from_request(req: &ChatRequest) -> Self {
-        let mut out = Self::default();
-        out.whole_transcript = req.context_transport == ContextTransport::Stateless;
+        let mut out = Self {
+            whole_transcript: req.context_transport == ContextTransport::Stateless,
+            ..Default::default()
+        };
         for part in &req.system {
             let bytes = effective_text_bytes(&part.text);
             match part.section {
@@ -797,7 +800,10 @@ pub enum StreamEvent {
     /// A tool the provider ran itself (hosted web search): display only —
     /// the host neither dispatches it nor answers it, and the results are
     /// already inside the model's response.
-    ProviderTool { name: String, summary: String },
+    ProviderTool {
+        name: String,
+        summary: String,
+    },
     /// Opaque provider-owned state attached to this turn (reasoning items, phase).
     ProviderState(serde_json::Value),
 }

@@ -714,7 +714,12 @@ fn open_quarantines_when_rebuild_diverges_or_lacks_intent() {
     std::fs::create_dir_all(plans_dir(&dir)).unwrap();
     std::fs::write(plans_dir(&dir).join(format!("{id}.json")), "garbage{").unwrap();
     assert!(open(&dir, id).is_err());
-    assert!(plans_dir(&dir).join("corrupt").join(format!("{id}.json")).exists());
+    assert!(
+        plans_dir(&dir)
+            .join("corrupt")
+            .join(format!("{id}.json"))
+            .exists()
+    );
 
     let dir2 = std::env::temp_dir().join(format!("sqwai-plan-del-{}", new_id()));
     let mut j2 = crate::agent::events::EventLog::open(&dir2, "aaa").unwrap();

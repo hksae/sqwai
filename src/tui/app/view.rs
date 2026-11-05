@@ -353,14 +353,8 @@ pub(super) struct AskState {
 
 impl AskState {
     pub(super) fn is_answered(&self, q: usize) -> bool {
-        let has_pick = self
-            .picked
-            .get(q)
-            .is_some_and(|v| v.iter().any(|p| *p));
-        let has_custom = self
-            .custom
-            .get(q)
-            .is_some_and(|s| !s.trim().is_empty());
+        let has_pick = self.picked.get(q).is_some_and(|v| v.iter().any(|p| *p));
+        let has_custom = self.custom.get(q).is_some_and(|s| !s.trim().is_empty());
         has_pick || has_custom
     }
 
@@ -443,7 +437,10 @@ pub(super) fn user_box(text: &str, w: u16, hl: &Highlighter) -> Vec<Line<'static
 }
 
 fn char_slice(text: &str, start: usize, end: usize) -> String {
-    text.chars().skip(start).take(end.saturating_sub(start)).collect()
+    text.chars()
+        .skip(start)
+        .take(end.saturating_sub(start))
+        .collect()
 }
 
 /// Color `[image N]` in the already-rendered composer. Scanning the painted
@@ -859,16 +856,17 @@ impl App {
     /// `cache_rowseg` directly without `asm_tags`.
     pub(super) fn seg_row_range(&self, seg_idx: usize) -> Option<(usize, usize)> {
         let (_, meta) = self.view_transcript();
-        if self.asm_tags.len() == self.asm_lens.len() && !self.asm_tags.is_empty() {
-            if let Some(m) = meta.get(seg_idx) {
-                let target = AsmTag::Seg(m.id);
-                let mut offset = 0usize;
-                for (tag, &len) in self.asm_tags.iter().zip(self.asm_lens.iter()) {
-                    if *tag == target {
-                        return (len > 0).then_some((offset, offset + len));
-                    }
-                    offset += len;
+        if self.asm_tags.len() == self.asm_lens.len()
+            && !self.asm_tags.is_empty()
+            && let Some(m) = meta.get(seg_idx)
+        {
+            let target = AsmTag::Seg(m.id);
+            let mut offset = 0usize;
+            for (tag, &len) in self.asm_tags.iter().zip(self.asm_lens.iter()) {
+                if *tag == target {
+                    return (len > 0).then_some((offset, offset + len));
                 }
+                offset += len;
             }
         }
         let start = self.cache_rowseg.iter().position(|t| *t == Some(seg_idx))?;
@@ -1006,9 +1004,7 @@ impl App {
                 match row {
                     AskRow::Option { q, opt } => {
                         let (allowed, multiple) = match self.segments.get(idx) {
-                            Some(Segment::Tool {
-                                ask: Some(ask), ..
-                            }) => (
+                            Some(Segment::Tool { ask: Some(ask), .. }) => (
                                 q <= ask.focus && ask.can_reach(q),
                                 ask.questions.get(q).is_some_and(|qq| qq.multiple),
                             ),
@@ -2257,7 +2253,12 @@ mod frame_tests {
 /// wrap pass — segment chunks are wrapped at cache time instead.
 /// Wrap one structural row (blank spacer, group header) as its own assembly
 /// chunk, so the merge step can splice it independently of segment rows.
-pub(super) fn struct_chunk(ord: u64, line: Line<'static>, tag: Option<usize>, width: u16) -> RowChunk {
+pub(super) fn struct_chunk(
+    ord: u64,
+    line: Line<'static>,
+    tag: Option<usize>,
+    width: u16,
+) -> RowChunk {
     let (rows, tags) = wrap_tagged(vec![(line, tag)], width);
     (AsmTag::Struct(ord), rows.into_iter().zip(tags).collect())
 }
@@ -2373,18 +2374,9 @@ mod paint_tests {
                 "row 0 cell {x}"
             );
         }
-        assert_eq!(
-            buf.cell((0, 1)).unwrap().style().fg,
-            Some(Theme::ACCENT())
-        );
-        assert_eq!(
-            buf.cell((1, 1)).unwrap().style().fg,
-            Some(Theme::ACCENT())
-        );
-        assert_ne!(
-            buf.cell((2, 1)).unwrap().style().fg,
-            Some(Theme::ACCENT())
-        );
+        assert_eq!(buf.cell((0, 1)).unwrap().style().fg, Some(Theme::ACCENT()));
+        assert_eq!(buf.cell((1, 1)).unwrap().style().fg, Some(Theme::ACCENT()));
+        assert_ne!(buf.cell((2, 1)).unwrap().style().fg, Some(Theme::ACCENT()));
     }
 
     #[test]

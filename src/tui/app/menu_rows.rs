@@ -880,21 +880,21 @@ impl App {
             .map(key_name)
             .unwrap_or(&self.model_draft.key)
             .to_string();
-        let (k_val, id_val, ctx_val, ef_val) = match key.as_ref().and_then(|k| self.cfg.models.get(k))
-        {
-            Some(mc) => (
-                name_val,
-                mc.id.clone(),
-                mc.context.to_string(),
-                mc.effort.as_str().to_string(),
-            ),
-            None => (
-                name_val,
-                self.model_draft.id.clone(),
-                self.model_draft.context.to_string(),
-                self.model_draft.effort.as_str().to_string(),
-            ),
-        };
+        let (k_val, id_val, ctx_val, ef_val) =
+            match key.as_ref().and_then(|k| self.cfg.models.get(k)) {
+                Some(mc) => (
+                    name_val,
+                    mc.id.clone(),
+                    mc.context.to_string(),
+                    mc.effort.as_str().to_string(),
+                ),
+                None => (
+                    name_val,
+                    self.model_draft.id.clone(),
+                    self.model_draft.context.to_string(),
+                    self.model_draft.effort.as_str().to_string(),
+                ),
+            };
         let field_row = |label: &'static str, val: String, action: MenuAction| {
             let mut spans = vec![Span::styled(label, Style::new().fg(Theme::FG()))];
             if !val.is_empty() {

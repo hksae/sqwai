@@ -138,10 +138,8 @@ fn secrets_are_screened_out_of_summaries_and_text() {
         )
         .unwrap();
 
-    let raw = fs::read_to_string(
-        crate::agent::state::events_dir(&root).join("session.jsonl"),
-    )
-    .unwrap();
+    let raw =
+        fs::read_to_string(crate::agent::state::events_dir(&root).join("session.jsonl")).unwrap();
     assert!(
         !raw.contains("sk-ant-api03"),
         "the key reached the event log"

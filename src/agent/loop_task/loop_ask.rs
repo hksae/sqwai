@@ -376,24 +376,23 @@ pub(crate) async fn bash_call(
     // be answered from the journal — the same hole that made every context bug
     // this week take three passes to find. `approval` records the question and
     // the answer; this records the host's own opinion, before escalation.
-    let record_verdict = |events: &mut Option<crate::agent::events::EventLog>,
-                          verdict: &str,
-                          reason: &str| {
-        let Some(writer) = events.as_mut() else {
-            return;
+    let record_verdict =
+        |events: &mut Option<crate::agent::events::EventLog>, verdict: &str, reason: &str| {
+            let Some(writer) = events.as_mut() else {
+                return;
+            };
+            let _ = writer.append_evidence(
+                "verdict",
+                serde_json::json!({
+                    "tool": "bash",
+                    "call_id": call.id,
+                    "mode": approval.as_str(),
+                    "verdict": verdict,
+                    "reason": reason,
+                    "command": command.chars().take(200).collect::<String>(),
+                }),
+            );
         };
-        let _ = writer.append_evidence(
-            "verdict",
-            serde_json::json!({
-                "tool": "bash",
-                "call_id": call.id,
-                "mode": approval.as_str(),
-                "verdict": verdict,
-                "reason": reason,
-                "command": command.chars().take(200).collect::<String>(),
-            }),
-        );
-    };
 
     // 0. hard block from config — no questions. The regexes arrive compiled by
     // the run that owns this call; an invalid pattern is refused at startup,
@@ -1330,8 +1329,8 @@ mod tests {
         use crate::config::ApprovalMode;
 
         let dir = tempfile::tempdir().unwrap();
-        let mut ctx = crate::agent::tools::ToolCtx::new(dir.path())
-            .in_session("verdict-record".to_string());
+        let mut ctx =
+            crate::agent::tools::ToolCtx::new(dir.path()).in_session("verdict-record".to_string());
         let call = ToolCallReq::new("c1", "bash", json!({"command": "echo classifier-floor"}));
         let (tx, _rx) = mpsc::channel(8);
         let (_ctl_tx, mut ctl_rx) = mpsc::channel(8);

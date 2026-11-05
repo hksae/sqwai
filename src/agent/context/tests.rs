@@ -17,7 +17,8 @@ fn image_tokens_count_toward_estimated_and_wire_pressure() {
     let stored = estimated_tokens(std::slice::from_ref(&with_image))
         - estimated_tokens(std::slice::from_ref(&plain));
     assert_eq!(stored, expected);
-    let wire = wire_estimated_tokens(&[with_image], &crate::agent::tool_output::Wire::default()) - wire_estimated_tokens(&[plain], &crate::agent::tool_output::Wire::default());
+    let wire = wire_estimated_tokens(&[with_image], &crate::agent::tool_output::Wire::default())
+        - wire_estimated_tokens(&[plain], &crate::agent::tool_output::Wire::default());
     assert_eq!(wire, expected);
 }
 
@@ -30,7 +31,10 @@ fn document_pages_count_toward_estimated_and_wire_pressure() {
     let stored = estimated_tokens(std::slice::from_ref(&with_document))
         - estimated_tokens(std::slice::from_ref(&plain));
     assert_eq!(stored, expected);
-    let wire = wire_estimated_tokens(&[with_document], &crate::agent::tool_output::Wire::default()) - wire_estimated_tokens(&[plain], &crate::agent::tool_output::Wire::default());
+    let wire = wire_estimated_tokens(
+        &[with_document],
+        &crate::agent::tool_output::Wire::default(),
+    ) - wire_estimated_tokens(&[plain], &crate::agent::tool_output::Wire::default());
     assert_eq!(wire, expected);
 }
 
@@ -40,8 +44,8 @@ fn provider_owned_state_counts_toward_estimated_and_wire_pressure() {
     let state = serde_json::json!({"blob": "x".repeat(400)});
     let bytes = crate::providers::json_byte_len(&state);
     let with_state = plain.clone().with_provider_state(Some(state));
-    let stored =
-        estimated_tokens(std::slice::from_ref(&with_state)) - estimated_tokens(std::slice::from_ref(&plain));
+    let stored = estimated_tokens(std::slice::from_ref(&with_state))
+        - estimated_tokens(std::slice::from_ref(&plain));
     assert_eq!(stored, bytes.div_ceil(4));
     let wire = wire_estimated_tokens(&[with_state], &crate::agent::tool_output::Wire::default())
         - wire_estimated_tokens(&[plain], &crate::agent::tool_output::Wire::default());
@@ -105,7 +109,10 @@ fn anchor_keeps_event_facts_not_plan_state() {
     assert!(!rendered.contains("implement anchor"), "{rendered}");
     // events facts stay
     assert!(rendered.contains("files changed this session: src/main.rs"));
-    assert!(rendered.contains("last successful exec: bash j#2"), "{rendered}");
+    assert!(
+        rendered.contains("last successful exec: bash j#2"),
+        "{rendered}"
+    );
     std::fs::remove_dir_all(root).ok();
 }
 
@@ -489,7 +496,7 @@ fn a_tail_larger_than_its_budget_is_still_kept() {
         messages.push(Message::new(Role::Assistant, "done"));
     }
     messages.push(user("read the whole project"));
-    messages.push(Message::new(Role::Assistant, &"x".repeat(200_000)));
+    messages.push(Message::new(Role::Assistant, "x".repeat(200_000)));
 
     let (older, keep) = split_for_summary_adaptive(&messages, 4, false, 1_000);
     assert!(
@@ -554,7 +561,6 @@ fn the_anchored_gate_grows_with_the_transcript() {
         context_limit: policy.context_limit,
         bytes_per_token: 4,
         measured: Some(anchor),
-        ..Default::default()
     };
     let at_anchor = vec![user(&"y".repeat(200_000))];
     assert_eq!(wire_estimated_tokens(&at_anchor, &metered), 70_000);
@@ -1074,9 +1080,15 @@ fn anchor_says_when_the_session_was_idle() {
                 record.to_string()
             })
             .collect();
-        std::fs::write(&path, lines.join("
-") + "
-").unwrap();
+        std::fs::write(
+            &path,
+            lines.join(
+                "
+",
+            ) + "
+",
+        )
+        .unwrap();
     };
 
     stamp_session("idle-session", 30);
@@ -1093,7 +1105,6 @@ fn anchor_says_when_the_session_was_idle() {
     );
     std::fs::remove_dir_all(root).ok();
 }
-
 
 /// A `file_diff` with zero added and removed lines is a touch, not a change:
 /// a shell command that rewrote identical bytes must not claim the file. And
@@ -1187,7 +1198,11 @@ fn a_fat_tail_is_cut_by_tokens_not_only_by_turns() {
         for step in 0..30 {
             let id = format!("c{turn}_{step}");
             messages.push(Message::new(Role::Assistant, "work").with_tool_calls(vec![
-                ToolCallReq::new(id.clone(), "bash", serde_json::json!({"command": "echo hi"})),
+                ToolCallReq::new(
+                    id.clone(),
+                    "bash",
+                    serde_json::json!({"command": "echo hi"}),
+                ),
             ]));
             messages.push(Message::tool_result(id, "x".repeat(2_000), false));
         }

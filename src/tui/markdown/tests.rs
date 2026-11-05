@@ -22,10 +22,7 @@ fn assert_incremental_matches_full(doc: &str) {
             text.len()
         );
         let inc_wrapped = live_wrapped.wrapped_lines(7, 2, &text, 60, &hl);
-        let (full_w, full_t) = wrap_tagged(
-            full.into_iter().map(|l| (l, Some(2))).collect(),
-            60,
-        );
+        let (full_w, full_t) = wrap_tagged(full.into_iter().map(|l| (l, Some(2))).collect(), 60);
         let full_wrapped: Vec<_> = full_w.into_iter().zip(full_t).collect();
         assert_eq!(
             inc_wrapped,
@@ -1206,7 +1203,10 @@ fn a_true_carriage_return_still_overwrites() {
 #[test]
 fn tmp_diag_python_keyword_colors() {
     let hl = crate::tui::markdown::Highlighter::new();
-    let lines = hl.highlight_code("class Foo:\n    def bar(self):\n        pass\n", Some("python"));
+    let lines = hl.highlight_code(
+        "class Foo:\n    def bar(self):\n        pass\n",
+        Some("python"),
+    );
     for l in &lines {
         for s in &l.spans {
             println!("SPANCHUNK {:?} fg={:?}", s.content, s.style.fg);

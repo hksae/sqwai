@@ -140,7 +140,16 @@ fn extract_ts(src: &str, lang: Lang, max_depth: usize) -> Vec<OutlineItem> {
     };
 
     let mut items = Vec::new();
-    walk_node(tree.root_node(), src, lang, 1, max_depth, 0, None, &mut items);
+    walk_node(
+        tree.root_node(),
+        src,
+        lang,
+        1,
+        max_depth,
+        0,
+        None,
+        &mut items,
+    );
     items
 }
 
@@ -172,7 +181,16 @@ fn walk_node(
     if is_transparent_container(kind, lang) {
         let mut cursor = node.walk();
         for c in node.children(&mut cursor) {
-            walk_node(c, src, lang, depth, max_depth, raw_depth + 1, parent_sig, out);
+            walk_node(
+                c,
+                src,
+                lang,
+                depth,
+                max_depth,
+                raw_depth + 1,
+                parent_sig,
+                out,
+            );
         }
         return;
     }
@@ -223,7 +241,16 @@ fn walk_node(
     // Default: visit children at same depth (e.g. wrapper expressions, blocks at root)
     let mut cursor = node.walk();
     for c in node.children(&mut cursor) {
-        walk_node(c, src, lang, depth, max_depth, raw_depth + 1, parent_sig, out);
+        walk_node(
+            c,
+            src,
+            lang,
+            depth,
+            max_depth,
+            raw_depth + 1,
+            parent_sig,
+            out,
+        );
     }
 }
 
@@ -995,7 +1022,7 @@ fn extract_file_imports(src: &str, ext: &str) -> Vec<String> {
 
 /// Fast on-demand scan for project files that import/reference `target_path` by
 /// its module/file stem (`use ...::stem`, `mod stem`, `import ... stem`, `#include "...stem..."`).
-fn find_importers(root: & std::path::Path, target_path: &std::path::Path) -> Vec<String> {
+fn find_importers(root: &std::path::Path, target_path: &std::path::Path) -> Vec<String> {
     let raw_stem = target_path
         .file_stem()
         .and_then(|s| s.to_str())

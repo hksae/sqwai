@@ -1,12 +1,12 @@
-//! Keyless search through the vendors' public MCP endpoints.
+//! Keyless search through the vendors' public endpoints.
 //!
 //! Exa (`mcp.exa.ai/mcp`) and Parallel (`search.parallel.ai/mcp`) answer the
-//! standard streamable-HTTP MCP handshake without a key: initialize, then
-//! `tools/call`. The host owns a tiny client instead of a general MCP layer —
+//! standard streamable-HTTP handshake without a key: initialize, then
+//! `tools/call`. The host owns a tiny client instead of a general protocol layer —
 //! two endpoints, one tool each, no reason to build a protocol surface.
 
 use super::meta_search::RawSearchHit;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::time::Duration;
 
 const EXA_URL: &str = "https://mcp.exa.ai/mcp";
@@ -67,7 +67,12 @@ fn client(timeout: Duration) -> Result<reqwest::Client, String> {
 /// initialize → notifications/initialized → tools/call, returning the call's
 /// `result` object. The session id comes from the initialize response header
 /// and must ride every later request.
-async fn call(client: &reqwest::Client, url: &str, tool: &str, args: Value) -> Result<Value, String> {
+async fn call(
+    client: &reqwest::Client,
+    url: &str,
+    tool: &str,
+    args: Value,
+) -> Result<Value, String> {
     let mut session: Option<String> = None;
     let _ = post(
         client,
@@ -105,7 +110,7 @@ async fn call(client: &reqwest::Client, url: &str, tool: &str, args: Value) -> R
     )
     .await?;
     if let Some(error) = response.get("error") {
-        return Err(format!("mcp {tool}: {error}"));
+        return Err(format!("search {tool}: {error}"));
     }
     Ok(response
         .get_mut("result")
@@ -121,7 +126,10 @@ async fn post(
 ) -> Result<(Option<String>, Value), String> {
     let mut req = client
         .post(url)
-        .header(reqwest::header::ACCEPT, "application/json, text/event-stream")
+        .header(
+            reqwest::header::ACCEPT,
+            "application/json, text/event-stream",
+        )
         .header(reqwest::header::CONTENT_TYPE, "application/json");
     if let Some(id) = session.as_deref() {
         req = req.header("Mcp-Session-Id", id);
@@ -130,7 +138,7 @@ async fn post(
         .json(&body)
         .send()
         .await
-        .map_err(|e| format!("mcp request failed: {e}"))?;
+        .map_err(|e| format!("search request failed: {e}"))?;
     let status = response.status();
     if let Some(id) = response
         .headers()
@@ -147,25 +155,24 @@ async fn post(
     let text = response
         .text()
         .await
-        .map_err(|e| format!("mcp body: {e}"))?;
+        .map_err(|e| format!("search body: {e}"))?;
     if !status.is_success() {
         let detail = text.trim().chars().take(200).collect::<String>();
         return Err(if detail.is_empty() {
-            format!("mcp HTTP {status}")
+            format!("search HTTP {status}")
         } else {
-            format!("mcp HTTP {status}: {detail}")
+            format!("search HTTP {status}: {detail}")
         });
     }
     let value = parse_body(&text, is_stream)?;
     Ok((session.clone(), value))
 }
 
-/// A streamable-HTTP MCP response is either one JSON document or an SSE
+/// A streamable-HTTP search response is either one JSON document or an SSE
 /// stream whose `data:` lines carry JSON-RPC messages.
 fn parse_body(text: &str, is_stream: bool) -> Result<Value, String> {
     if !is_stream {
-        return serde_json::from_str(text)
-            .map_err(|e| format!("mcp response is not JSON: {e}"));
+        return serde_json::from_str(text).map_err(|e| format!("search response is not JSON: {e}"));
     }
     let mut found: Option<Value> = None;
     for line in text.lines() {
@@ -179,7 +186,7 @@ fn parse_body(text: &str, is_stream: bool) -> Result<Value, String> {
             found = Some(value);
         }
     }
-    found.ok_or_else(|| "mcp stream carried no response".to_string())
+    found.ok_or_else(|| "search stream carried no response".to_string())
 }
 
 /// Exa answers with one text block of `Title: / URL: / Highlights:` records
@@ -204,8 +211,7 @@ fn exa_hits(result: &Value) -> Vec<RawSearchHit> {
                 in_highlights = false;
             } else if line.starts_with("Highlights:") {
                 in_highlights = true;
-            } else if in_highlights && !line.trim().is_empty() && highlights.chars().count() < 600
-            {
+            } else if in_highlights && !line.trim().is_empty() && highlights.chars().count() < 600 {
                 if !highlights.is_empty() {
                     highlights.push(' ');
                 }
@@ -291,7 +297,8 @@ mod tests {
 
     #[test]
     fn an_sse_body_yields_the_rpc_response() {
-        let body = "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true}}\n\n";
+        let body =
+            "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true}}\n\n";
         let value = parse_body(body, true).unwrap();
         assert_eq!(value["result"]["ok"], true);
         assert!(parse_body("event: ping\n", true).is_err());

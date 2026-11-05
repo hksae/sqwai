@@ -19,7 +19,9 @@ mod ops;
 mod render;
 pub(crate) mod store;
 pub(crate) use ops::auto_advance;
-pub use ops::{Applied, Limits, NewStep, Op, Rejection, abandon, apply, create, validate_surrender_reason};
+pub use ops::{
+    Applied, Limits, NewStep, Op, Rejection, abandon, apply, create, validate_surrender_reason,
+};
 pub use render::{render, render_goal, render_status};
 #[cfg(test)]
 pub use store::list;

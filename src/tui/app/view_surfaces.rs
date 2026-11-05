@@ -395,11 +395,7 @@ impl App {
             );
         } else if matches!(
             self.cur_menu(),
-            Some(
-                Menu::EditModel { .. }
-                    | Menu::EditSessionTitle { .. }
-                    | Menu::EditScalar(..)
-            )
+            Some(Menu::EditModel { .. } | Menu::EditSessionTitle { .. } | Menu::EditScalar(..))
         ) {
             block = block.title_bottom(
                 Theme::hints(&[("enter", "save"), ("esc", "cancel")]).right_aligned(),
@@ -435,13 +431,22 @@ impl App {
                 let bx = rect.right().saturating_sub(2);
                 let top = rect.y + 2 + usize::from(self.menu_table_header.is_some()) as u16;
                 for i in 0..shown {
-                    if let Some(cell) = buf
-                        .cell_mut(ratatui::layout::Position::new(bx, top + i as u16))
+                    if let Some(cell) =
+                        buf.cell_mut(ratatui::layout::Position::new(bx, top + i as u16))
                         && i >= pos
                         && i < pos + thumb
                         && !matches!(
                             cell.symbol(),
-                            "│" | "─" | "┌" | "┐" | "└" | "┘" | "├" | "┤" | "┬" | "┴" | "┼"
+                            "│" | "─"
+                                | "┌"
+                                | "┐"
+                                | "└"
+                                | "┘"
+                                | "├"
+                                | "┤"
+                                | "┬"
+                                | "┴"
+                                | "┼"
                         )
                     {
                         cell.set_symbol("▐")
@@ -542,7 +547,7 @@ impl App {
             );
             if rect.width >= 40 {
                 Paragraph::new(
-                    Line::from(Span::styled(format!("{}", committed.as_str()), Theme::dim()))
+                    Line::from(Span::styled(committed.as_str().to_string(), Theme::dim()))
                         .right_aligned(),
                 )
                 .render(
@@ -796,14 +801,10 @@ impl App {
 
     pub(super) fn list_hints(&self) -> Vec<(&'static str, String)> {
         match self.cur_menu() {
-            Some(Menu::Settings) => vec![
-                ("enter", "change".to_string()),
-                ("esc", "back".to_string()),
-            ],
-            Some(Menu::Debug) => vec![
-                ("enter", "run".to_string()),
-                ("esc", "back".to_string()),
-            ],
+            Some(Menu::Settings) => {
+                vec![("enter", "change".to_string()), ("esc", "back".to_string())]
+            }
+            Some(Menu::Debug) => vec![("enter", "run".to_string()), ("esc", "back".to_string())],
             Some(Menu::Plan | Menu::Help) => vec![("esc", "close".to_string())],
             Some(
                 Menu::ContextView
@@ -828,10 +829,9 @@ impl App {
                 ("enter", "use".to_string()),
                 ("esc", "back".to_string()),
             ],
-            Some(Menu::EditSearchProvider { .. }) => vec![
-                ("enter", "edit".to_string()),
-                ("esc", "back".to_string()),
-            ],
+            Some(Menu::EditSearchProvider { .. }) => {
+                vec![("enter", "edit".to_string()), ("esc", "back".to_string())]
+            }
             Some(Menu::Providers) => vec![
                 ("ctrl+n", "add".to_string()),
                 ("ctrl+u", "update".to_string()),
@@ -855,18 +855,12 @@ impl App {
                 ("enter", "open".to_string()),
                 ("esc", "back".to_string()),
             ],
-            Some(Menu::EditProvider { .. } | Menu::EditModel { .. }) => vec![
-                ("enter", "edit".to_string()),
-                ("esc", "back".to_string()),
-            ],
-            Some(
-                Menu::ProviderFormat { .. }
-                | Menu::UndoShadow
-                | Menu::UndoList,
-            ) => vec![
-                ("enter", "use".to_string()),
-                ("esc", "back".to_string()),
-            ],
+            Some(Menu::EditProvider { .. } | Menu::EditModel { .. }) => {
+                vec![("enter", "edit".to_string()), ("esc", "back".to_string())]
+            }
+            Some(Menu::ProviderFormat { .. } | Menu::UndoShadow | Menu::UndoList) => {
+                vec![("enter", "use".to_string()), ("esc", "back".to_string())]
+            }
             Some(Menu::ConfirmDelete { .. }) => vec![
                 ("enter", "confirm".to_string()),
                 ("esc", "cancel".to_string()),
@@ -884,10 +878,7 @@ impl App {
                 | Menu::EditProviderField { .. }
                 | Menu::EditSessionTitle { .. }
                 | Menu::EditScalar(..),
-            ) => vec![
-                ("enter", "save".to_string()),
-                ("esc", "back".to_string()),
-            ],
+            ) => vec![("enter", "save".to_string()), ("esc", "back".to_string())],
             _ => vec![],
         }
     }

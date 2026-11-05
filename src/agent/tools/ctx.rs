@@ -778,11 +778,12 @@ impl ReadLedger {
             .files
             .get(&ledger_key(p))
             .expect("own_write_matches checked the entry");
-        let base = entry.base.as_ref().expect("own_write_matches checked the base");
+        let base = entry
+            .base
+            .as_ref()
+            .expect("own_write_matches checked the base");
         if let Some(visible) = visible {
-            let shown = |id: &Option<String>| {
-                id.as_ref().is_some_and(|id| visible.contains(id))
-            };
+            let shown = |id: &Option<String>| id.as_ref().is_some_and(|id| visible.contains(id));
             if !shown(&base.call_id) || !entry.edits.iter().all(|edit| shown(&edit.call_id)) {
                 return false;
             }
@@ -1143,10 +1144,7 @@ mod outside_jail_tests {
         );
         assert!(resolved.to_string_lossy().contains("Users"), "{resolved:?}");
         // ...including when the target is the project itself
-        let root_unix = format!(
-            "/{}",
-            root.to_string_lossy().replace('\\', "/").replace(':', "/")
-        );
+        let root_unix = format!("/{}", root.to_string_lossy().replace(['\\', ':'], "/"));
         let proj_unix = format!("{root_unix}/src/main.rs");
         assert!(!ctx.write_escapes(&proj_unix), "{proj_unix}");
     }

@@ -51,7 +51,10 @@ pub fn anchor(root: &std::path::Path, session_id: &str) -> String {
             let untouched = matches!(
                 (
                     record.fields.get("added").and_then(|value| value.as_u64()),
-                    record.fields.get("removed").and_then(|value| value.as_u64()),
+                    record
+                        .fields
+                        .get("removed")
+                        .and_then(|value| value.as_u64()),
                 ),
                 (Some(0), Some(0))
             );
@@ -683,11 +686,7 @@ pub fn split_for_summary_adaptive(
 /// Pull the verbatim tail under `budget` by advancing the cut to the next safe
 /// boundary. `None` means the tail already fits (or the cut could not move),
 /// and the caller keeps the turn-count choice.
-fn fit_tail(
-    messages: &[Message],
-    start: usize,
-    budget: u64,
-) -> Option<(&[Message], &[Message])> {
+fn fit_tail(messages: &[Message], start: usize, budget: u64) -> Option<(&[Message], &[Message])> {
     if start == 0 || estimated_tokens(&messages[start..]) <= budget {
         return None;
     }
@@ -1218,7 +1217,7 @@ fn idle_since(records: &[crate::agent::events::Record]) -> Option<String> {
 /// their own rung so a 1M window never reads as `1000k`.
 fn k_thousands(tokens: u64) -> String {
     if tokens >= 1_000_000 {
-        if tokens % 1_000_000 == 0 {
+        if tokens.is_multiple_of(1_000_000) {
             format!("{}m", tokens / 1_000_000)
         } else {
             format!("{:.1}m", tokens as f64 / 1_000_000.0)

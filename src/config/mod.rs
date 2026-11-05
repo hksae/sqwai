@@ -1079,7 +1079,7 @@ pub enum SearchProvider {
     Off,
     Deepseek,
     Tavily,
-    /// Keyless public MCP endpoints hosted by the search vendor.
+    /// Keyless public search endpoints hosted by the search vendor.
     Exa,
     Parallel,
     Firecrawl,
@@ -1152,13 +1152,10 @@ impl SearchConfig {
         match self.provider {
             SearchProvider::Off => false,
             // keyless: hosted runs on the model account, Exa/Parallel on
-            // their public MCP endpoints
+            // their public keyless endpoints
             SearchProvider::Hosted | SearchProvider::Exa | SearchProvider::Parallel => true,
             // a selection, not an engine: readiness is per alternative
-            SearchProvider::Random => self
-                .alternatives
-                .iter()
-                .any(SearchConfig::is_ready),
+            SearchProvider::Random => self.alternatives.iter().any(SearchConfig::is_ready),
             _ => self
                 .api_key
                 .as_deref()
@@ -1175,38 +1172,6 @@ impl SearchConfig {
     pub fn is_hosted(&self) -> bool {
         self.provider == SearchProvider::Hosted
     }
-}
-
-/// MCP server transport configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
-pub enum McpTransport {
-    Stdio {
-        command: String,
-        #[serde(default)]
-        args: Vec<String>,
-        #[serde(default)]
-        env: BTreeMap<String, String>,
-    },
-    Http {
-        url: String,
-        #[serde(default)]
-        headers: BTreeMap<String, String>,
-    },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct McpServerDef {
-    pub name: String,
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-    pub transport: McpTransport,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct McpConfig {
-    #[serde(default)]
-    pub servers: Vec<McpServerDef>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1535,7 +1500,7 @@ impl Default for CompactionConfig {
 /// Project-level overrides (`.sqwai/config.toml`).
 ///
 /// A cloned repo must never be able to reconfigure trust: providers, models,
-/// keys, safety, plan gates, MCP servers, and skills-dirs are NOT
+/// keys, safety, plan gates, and skills-dirs are NOT
 /// allowlisted and are ignored with a warning. Only display- and
 /// budget-class keys are accepted; everything else in the file is reported
 /// back so a silently-ignored setting cannot confuse. The whole file is
@@ -1678,8 +1643,6 @@ pub struct Config {
     #[serde(default)]
     pub limits: LimitsConfig,
     #[serde(default)]
-    pub mcp: McpConfig,
-    #[serde(default)]
     pub skills: SkillsConfig,
     #[serde(default)]
     pub compaction: CompactionConfig,
@@ -1748,7 +1711,6 @@ impl Default for Config {
             ui: UiConfig::default(),
             tools: ToolsConfig::default(),
             limits: LimitsConfig::default(),
-            mcp: McpConfig::default(),
             skills: SkillsConfig::default(),
             compaction: CompactionConfig::default(),
             plan: PlanConfig::default(),
@@ -2007,9 +1969,7 @@ impl Config {
                         .and_then(|p| p.effective_api_key("deepseek"))
                 })
                 .or_else(|| env_nonempty("DEEPSEEK_API_KEY")),
-            SearchProvider::Tavily => {
-                stored("tavily").or_else(|| env_nonempty("TAVILY_API_KEY"))
-            }
+            SearchProvider::Tavily => stored("tavily").or_else(|| env_nonempty("TAVILY_API_KEY")),
             SearchProvider::Firecrawl => {
                 stored("firecrawl").or_else(|| env_nonempty("FIRECRAWL_API_KEY"))
             }
@@ -2057,9 +2017,9 @@ impl Config {
                 .map(|provider| self.search_config_for(provider))
                 .collect(),
             ),
-            SearchProvider::Deepseek
-            | SearchProvider::Tavily
-            | SearchProvider::Firecrawl => (self.search_key_for(provider), Vec::new()),
+            SearchProvider::Deepseek | SearchProvider::Tavily | SearchProvider::Firecrawl => {
+                (self.search_key_for(provider), Vec::new())
+            }
         };
         SearchConfig {
             provider,
@@ -2455,7 +2415,10 @@ impl Config {
         let mut current_key = model_key.to_string();
         while let Some(mc) = self.models.get(&current_key) {
             // A stored fallback may predate nesting and name its model bare.
-            let Some(next_key) = mc.fallback.as_deref().and_then(|k| self.resolve_model_key(k))
+            let Some(next_key) = mc
+                .fallback
+                .as_deref()
+                .and_then(|k| self.resolve_model_key(k))
             else {
                 break;
             };
@@ -2591,8 +2554,8 @@ fn write_keys(dir: &Path, keys: &BTreeMap<String, String>) -> Result<()> {
         }
         return Ok(());
     }
-    let body = toml::to_string_pretty(&KeysFile { keys: keys.clone() })
-        .context("serializing keys")?;
+    let body =
+        toml::to_string_pretty(&KeysFile { keys: keys.clone() }).context("serializing keys")?;
     atomic_write_private(&path, &body)
 }
 

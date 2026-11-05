@@ -275,9 +275,7 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
     // A child may keep its own plan even when its task is read-only; the
     // project lock still refuses plan writes from the main agent.
     let plan_blocked = name == "plan" && ctx.subagent_depth == 0;
-    if ctx.read_only
-        && (matches!(name, "write" | "edit" | "bash") || plan_blocked)
-    {
+    if ctx.read_only && (matches!(name, "write" | "edit" | "bash") || plan_blocked) {
         return Outcome::err(if ctx.subagent_depth > 0 {
             "this subagent is read-only; mutating tools are refused"
         } else {
@@ -287,9 +285,7 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, args: &Value) -> Outcome {
     // S1 writer lock: an undo restore is reverting the tree right now.
     // In-process dispatch must not add writes under it (a second sqwai
     // instance is already covered by the read-only guard above).
-    if crate::agent::undo_guard::restore_active()
-        && matches!(name, "write" | "edit" | "bash")
-    {
+    if crate::agent::undo_guard::restore_active() && matches!(name, "write" | "edit" | "bash") {
         return Outcome::err(
             serde_json::json!({
                 "ok": false,

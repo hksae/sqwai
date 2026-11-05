@@ -272,10 +272,7 @@ mod tests {
             WIRE_REASONING_TURNS,
             "one turn's ciphertext survives, the rest is dropped"
         );
-        let survivor = carried[0]
-            .provider_state
-            .as_ref()
-            .expect("carried turn");
+        let survivor = carried[0].provider_state.as_ref().expect("carried turn");
         assert_eq!(
             survivor.get("phase").and_then(|v| v.as_str()),
             Some("commentary"),

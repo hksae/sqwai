@@ -107,18 +107,16 @@ impl OpenAiProvider {
                                     content.push(json!({"type": "text", "text": text}));
                                 }
                             }
-                            super::UserPart::Image(image) => {
-                                match crate::media::data_uri(image) {
-                                    Ok(uri) => content.push(json!({
-                                        "type": "image_url",
-                                        "image_url": {"url": uri, "detail": "auto"},
-                                    })),
-                                    Err(_) => content.push(json!({
-                                        "type": "text",
-                                        "text": format!("[image unavailable: {}]", image.name),
-                                    })),
-                                }
-                            }
+                            super::UserPart::Image(image) => match crate::media::data_uri(image) {
+                                Ok(uri) => content.push(json!({
+                                    "type": "image_url",
+                                    "image_url": {"url": uri, "detail": "auto"},
+                                })),
+                                Err(_) => content.push(json!({
+                                    "type": "text",
+                                    "text": format!("[image unavailable: {}]", image.name),
+                                })),
+                            },
                         }
                     }
                     json!({"role": "user", "content": content})
@@ -322,7 +320,10 @@ impl OpenAiProvider {
             matches!(role, "user" | "tool" | "assistant")
                 && !content.is_empty()
                 && !content.starts_with(super::HOST_STATE_LABEL)
-        }) && let Some(text) = last.get("content").and_then(|c| c.as_str()).map(str::to_string)
+        }) && let Some(text) = last
+            .get("content")
+            .and_then(|c| c.as_str())
+            .map(str::to_string)
         {
             last["content"] = json!([{
                 "type": "text",
@@ -343,9 +344,7 @@ pub fn uses_max_completion_tokens(model: &str, has_reasoning: bool) -> bool {
         || name.starts_with("o3")
         || name.starts_with("o4")
         || name.starts_with("o-")
-        || (name.starts_with("gpt-")
-            && !name.starts_with("gpt-3")
-            && !name.starts_with("gpt-4"))
+        || (name.starts_with("gpt-") && !name.starts_with("gpt-3") && !name.starts_with("gpt-4"))
 }
 
 /// accumulated partial tool call keyed by the streaming index

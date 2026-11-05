@@ -217,7 +217,8 @@ pub fn status(ctx: &ToolCtx, args: &Value) -> Outcome {
     // `--branch` always prints a header, so a quiet tree arrives as 36 bytes of
     // branch line and nothing else. The model cannot tell that from "my files
     // are hidden here", and re-asks; say which of the two it is.
-    let note = "no tracked changes and no untracked files; gitignored paths never appear in this list";
+    let note =
+        "no tracked changes and no untracked files; gitignored paths never appear in this list";
     Outcome::ok(if outcome.output.trim().is_empty() {
         note.to_string()
     } else {
@@ -244,7 +245,8 @@ pub fn diff(ctx: &ToolCtx, args: &Value) -> Outcome {
     // An empty diff is the answer git gives for three different situations, and
     // `ok` claims none of them. Name the one that applies.
     let why = if target.is_empty() {
-        "no unstaged changes in tracked files; untracked and gitignored paths have no diff to show".to_string()
+        "no unstaged changes in tracked files; untracked and gitignored paths have no diff to show"
+            .to_string()
     } else {
         path_state(ctx, target)
     };
@@ -265,21 +267,32 @@ fn path_state(ctx: &ToolCtx, target: &str) -> String {
         ],
     );
     if !probe.ok {
-        return format!("no diff for {target}, and git could not say why: {}", probe.output.trim());
+        return format!(
+            "no diff for {target}, and git could not say why: {}",
+            probe.output.trim()
+        );
     }
     let line = probe.output.trim().to_string();
     if let Some(rest) = line.strip_prefix("!! ") {
-        return format!("{rest} is gitignored: git holds no version of it, so there is nothing to diff — `read` shows the file");
+        return format!(
+            "{rest} is gitignored: git holds no version of it, so there is nothing to diff — `read` shows the file"
+        );
     }
     if let Some(rest) = line.strip_prefix("?? ") {
-        return format!("{rest} is untracked: git has no stored version to diff against — `read` shows the file");
+        return format!(
+            "{rest} is untracked: git has no stored version to diff against — `read` shows the file"
+        );
     }
     if line.is_empty() {
         let tracked = git_text(ctx, &["ls-files", "--error-unmatch", "--", target]);
         return if tracked.ok {
-            format!("{target} is tracked and identical to its committed version: no unstaged change")
+            format!(
+                "{target} is tracked and identical to its committed version: no unstaged change"
+            )
         } else {
-            format!("git has no entry for {target}: not tracked, not untracked, not ignored — check the path")
+            format!(
+                "git has no entry for {target}: not tracked, not untracked, not ignored — check the path"
+            )
         };
     }
     format!("git reports `{line}` for {target}")
@@ -456,5 +469,4 @@ mod tests {
             dirty.output
         );
     }
-
 }

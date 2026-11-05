@@ -413,7 +413,15 @@ fn rebuild_created(
 /// floor of a crash between the intent record and the stored plan, which is why
 /// a test pins the list against the op enum.
 pub const REPLAYABLE_OPS: &[&str] = &[
-    "finish", "cancel", "add", "amend", "join", "close", "abandon", "propose_reset", "block_plan",
+    "finish",
+    "cancel",
+    "add",
+    "amend",
+    "join",
+    "close",
+    "abandon",
+    "propose_reset",
+    "block_plan",
 ];
 
 /// Apply one recorded intent to an in-memory plan. `Ok(true)` means the op

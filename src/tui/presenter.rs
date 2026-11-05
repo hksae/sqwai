@@ -279,7 +279,10 @@ fn cells_visually_eq(a: &Cell, b: &Cell) -> bool {
 
 #[inline]
 fn rows_visually_eq(a: &[Cell], b: &[Cell]) -> bool {
-    a.len() == b.len() && a.iter().zip(b.iter()).all(|(ca, cb)| cells_visually_eq(ca, cb))
+    a.len() == b.len()
+        && a.iter()
+            .zip(b.iter())
+            .all(|(ca, cb)| cells_visually_eq(ca, cb))
 }
 
 #[inline]
@@ -955,7 +958,7 @@ impl<W: Write> Presenter<W> {
                         && rstate.cur_x == x as u16
                         && cw == 1
                         && x + 1 < scan_limit
-                        && (1..=3).any(| lookahead | {
+                        && (1..=3).any(|lookahead| {
                             let tx = x + lookahead;
                             tx < scan_limit
                                 && !cells_visually_eq(&prev_row[tx], &next_row[tx])
@@ -1200,7 +1203,10 @@ mod tests {
             .expect("present");
         let out = cap.text();
         // Erase-below between sizes, then the new content in full.
-        assert!(out.contains("\x1b[H\x1b[J"), "expected erase-below: {out:?}");
+        assert!(
+            out.contains("\x1b[H\x1b[J"),
+            "expected erase-below: {out:?}"
+        );
         assert!(out.contains("again"), "resized content missing: {out:?}");
     }
 
@@ -1331,7 +1337,11 @@ mod tests {
             stream_up.contains("chat line number 11") && stream_up.contains("chat line number 12"),
             "newly revealed bottom lines missing: {stream_up:?}"
         );
-        assert!(rep_up.bytes < 160, "scroll frame too large: {}B", rep_up.bytes);
+        assert!(
+            rep_up.bytes < 160,
+            "scroll frame too large: {}B",
+            rep_up.bytes
+        );
 
         // Scroll back down by 2 lines (back to frame 1): expects `\x1b[1;11r\x1b[2T\x1b[r`
         let before_down = cap.bytes().len();

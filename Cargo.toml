@@ -4,7 +4,10 @@ version = "0.1.0"
 edition = "2024"
 description = "TUI coding agent"
 license = "Apache-2.0"
+readme = "README.md"
 repository = "https://github.com/hksae/sqwai"
+keywords = ["agent", "coding", "llm", "tui"]
+categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 anyhow = "1"
@@ -27,7 +30,6 @@ tree-sitter-bash = "0.25"
 ratatui = "0.29"
 regex = "1"
 reqwest = { version = "0.12", features = ["json", "stream"] }
-rmcp = { version = "3.2.0", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"

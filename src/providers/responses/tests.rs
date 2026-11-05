@@ -10,10 +10,9 @@ fn sse_server(body: String) -> (String, std::thread::JoinHandle<()>) {
     let addr = listener.local_addr().unwrap();
     listener.set_nonblocking(true).unwrap();
     let h = std::thread::spawn(move || {
-        let Some(stream) = crate::providers::accept_bounded(
-            &listener,
-            std::time::Duration::from_secs(20),
-        ) else {
+        let Some(stream) =
+            crate::providers::accept_bounded(&listener, std::time::Duration::from_secs(20))
+        else {
             return;
         };
         let mut reader = BufReader::new(stream.try_clone().unwrap());
@@ -57,7 +56,8 @@ async fn collect(url: String) -> Vec<StreamEvent> {
         api_key: Some("k".into()),
         continuation: false,
     })
-    .unwrap();    let req = ChatRequest {
+    .unwrap();
+    let req = ChatRequest {
         model_id: "gpt-x".into(),
         system: vec![],
         messages: vec![Message::new(Role::User, "go")],
@@ -113,7 +113,10 @@ fn hosted_web_search_rides_the_request_only_when_asked() {
     req.hosted_web_search = true;
     let tools = build_body(&req)["tools"].as_array().cloned().unwrap();
     assert_eq!(tools.len(), 2, "{tools:?}");
-    assert!(tools.iter().any(|tool| tool["type"] == "web_search"), "{tools:?}");
+    assert!(
+        tools.iter().any(|tool| tool["type"] == "web_search"),
+        "{tools:?}"
+    );
     assert!(tools.iter().any(|tool| tool["name"] == "read"), "{tools:?}");
 }
 
@@ -889,8 +892,12 @@ fn tool_documents_use_the_function_call_output_array() {
                     json!({"path": "report.pdf"}),
                 ),
             ]),
-            Message::tool_result("c1", "2 pages · application/pdf · 1 KB · ~5.0k tokens", false)
-                .with_documents(vec![document]),
+            Message::tool_result(
+                "c1",
+                "2 pages · application/pdf · 1 KB · ~5.0k tokens",
+                false,
+            )
+            .with_documents(vec![document]),
         ],
         effort: None,
         effort_support: Default::default(),

@@ -59,7 +59,8 @@ pub fn session_block(root: &Path) -> String {
         std::sync::Mutex<std::collections::HashMap<PathBuf, String>>,
     > = std::sync::OnceLock::new();
     let key = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    let cache = SESSION_BLOCK_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    let cache =
+        SESSION_BLOCK_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
     if let Ok(guard) = cache.lock()
         && let Some(cached) = guard.get(&key)
     {
@@ -101,10 +102,7 @@ pub fn turn_facts(root: &Path) -> String {
 /// and lives until the run ends, so a session that outlives midnight would go
 /// on asserting yesterday's date to the model.
 pub fn refresh_date(block: &mut String) {
-    let today = format!(
-        "Date: {}",
-        chrono::Local::now().format("%Y-%m-%d (%A)")
-    );
+    let today = format!("Date: {}", chrono::Local::now().format("%Y-%m-%d (%A)"));
     let mut lines: Vec<String> = block.lines().map(str::to_string).collect();
     let mut changed = false;
     for line in lines.iter_mut() {
@@ -115,8 +113,10 @@ pub fn refresh_date(block: &mut String) {
         }
     }
     if changed {
-        *block = lines.join("
-") + "
+        *block = lines.join(
+            "
+",
+        ) + "
 ";
     }
 }
@@ -918,7 +918,8 @@ mod tests {
 Date: 2000-01-01 (Saturday)
 Git: clean
 </turn_environment>
-".to_string();
+"
+        .to_string();
         super::refresh_date(&mut block);
         let today = format!("Date: {}", chrono::Local::now().format("%Y-%m-%d (%A)"));
         assert!(block.contains(&today), "{block}");

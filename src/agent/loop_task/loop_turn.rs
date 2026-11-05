@@ -223,9 +223,7 @@ pub(crate) async fn run_turn_with_prefetch(
                     if req.tool_capable() {
                         let idx = calls.len();
                         calls.push(tc);
-                        if prefetch_open
-                            && let Some((base_ctx, allow_hosts)) = prefetch_env
-                        {
+                        if prefetch_open && let Some((base_ctx, allow_hosts)) = prefetch_env {
                             // An outside read that still needs its boundary
                             // approval must NOT execute here: the prefetch
                             // runs the call outright, and the sequential
@@ -258,10 +256,7 @@ pub(crate) async fn run_turn_with_prefetch(
                                 child_ctx.current_call_id = Some(c.id.clone());
                                 let hosts = allow_hosts.to_vec();
                                 let handle = tokio::spawn(super::execute_parallel_read_only_call(
-                                    idx,
-                                    c,
-                                    child_ctx,
-                                    hosts,
+                                    idx, c, child_ctx, hosts,
                                 ));
                                 prefetched.insert(idx, handle);
                             } else {
@@ -372,7 +367,9 @@ pub(crate) async fn run_turn_with_prefetch(
             // "retry the request" advice, and the old suffix turned the
             // line into that advice contradicting itself.
             return Err(TurnFailure::new(
-                format!("{err} — partial answer kept (a retry would duplicate it); ask to continue"),
+                format!(
+                    "{err} — partial answer kept (a retry would duplicate it); ask to continue"
+                ),
                 class,
                 attempt,
             )

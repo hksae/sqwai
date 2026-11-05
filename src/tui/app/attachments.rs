@@ -120,11 +120,7 @@ pub(super) fn marker_char_spans(text: &str) -> Vec<(usize, usize)> {
         .collect()
 }
 
-fn expanded_marker_range(
-    start: usize,
-    end: usize,
-    spans: &[MarkerSpan],
-) -> Option<(usize, usize)> {
+fn expanded_marker_range(start: usize, end: usize, spans: &[MarkerSpan]) -> Option<(usize, usize)> {
     let mut hit = false;
     let (mut start, mut end) = (start, end);
     for span in spans {
@@ -339,9 +335,7 @@ impl App {
                             if self.input_text().contains(&pending.token) {
                                 let image = match pending.marker {
                                     Some(marker) => PendingImage::from_marker(image, marker),
-                                    None => {
-                                        PendingImage::from_path(image, pending.token.clone())
-                                    }
+                                    None => PendingImage::from_path(image, pending.token.clone()),
                                 };
                                 self.status(
                                     &format!(
@@ -356,9 +350,7 @@ impl App {
                         Err(error) => {
                             // A failed marker token is removed like any other
                             // attachment; a path stays useful as text.
-                            if pending.marker.is_some()
-                                && self.remove_input_token(&pending.token)
-                            {
+                            if pending.marker.is_some() && self.remove_input_token(&pending.token) {
                                 self.dirty = true;
                             }
                             self.status(&error, StatusKind::Err);
@@ -375,16 +367,8 @@ impl App {
 
     fn live_markers(&self) -> std::collections::HashSet<u32> {
         let mut live = std::collections::HashSet::new();
-        live.extend(
-            self.pending_images
-                .iter()
-                .filter_map(|image| image.marker),
-        );
-        live.extend(
-            self.pending_image_jobs
-                .iter()
-                .filter_map(|job| job.marker),
-        );
+        live.extend(self.pending_images.iter().filter_map(|image| image.marker));
+        live.extend(self.pending_image_jobs.iter().filter_map(|job| job.marker));
         live
     }
 
@@ -397,7 +381,11 @@ impl App {
     }
 
     fn cursor_char(&self) -> usize {
-        char_offset(self.input.lines(), self.input.cursor().0, self.input.cursor().1)
+        char_offset(
+            self.input.lines(),
+            self.input.cursor().0,
+            self.input.cursor().1,
+        )
     }
 
     fn selection_chars(&self) -> Option<(usize, usize)> {
@@ -565,8 +553,10 @@ impl App {
                 .marker
                 .is_none_or(|marker| mapping.contains_key(&marker))
         });
-        self.pending_image_jobs
-            .retain(|job| job.marker.is_none_or(|marker| mapping.contains_key(&marker)));
+        self.pending_image_jobs.retain(|job| {
+            job.marker
+                .is_none_or(|marker| mapping.contains_key(&marker))
+        });
         for image in &mut self.pending_images {
             if let Some(marker) = image.marker
                 && let Some(&new) = mapping.get(&marker)
@@ -699,7 +689,8 @@ impl App {
             self.status("this model does not accept images", StatusKind::Err);
             return;
         }
-        let free = MAX_IMAGES.saturating_sub(self.pending_images.len() + self.pending_image_jobs.len());
+        let free =
+            MAX_IMAGES.saturating_sub(self.pending_images.len() + self.pending_image_jobs.len());
         let total = paths.len();
         let mut jobs = Vec::new();
         for path in paths {
@@ -721,10 +712,7 @@ impl App {
             }
             return;
         }
-        let tokens: Vec<String> = jobs
-            .iter()
-            .map(|(token, _)| quoted_path(token))
-            .collect();
+        let tokens: Vec<String> = jobs.iter().map(|(token, _)| quoted_path(token)).collect();
         self.expand_marker_selection();
         self.input.insert_str(tokens.join(" "));
         let attached = jobs.len();
@@ -852,8 +840,8 @@ fn prepare_source(source: ImageSource, marker: Option<u32>) -> Result<ImageAttac
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "image".to_string());
-            let bytes = std::fs::read(&path)
-                .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+            let bytes =
+                std::fs::read(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
             (bytes, name)
         }
         ImageSource::Clipboard {
@@ -874,10 +862,7 @@ fn rgba_to_png(width: usize, height: usize, bytes: Vec<u8>) -> Result<Vec<u8>, S
         .ok_or_else(|| "clipboard image has unexpected dimensions".to_string())?;
     let mut out = Vec::new();
     image::DynamicImage::ImageRgba8(image)
-        .write_to(
-            &mut std::io::Cursor::new(&mut out),
-            image::ImageFormat::Png,
-        )
+        .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
         .map_err(|e| format!("cannot encode clipboard image: {e}"))?;
     Ok(out)
 }
@@ -973,7 +958,12 @@ fn unquote_single(text: &str) -> &str {
 fn is_image_path(path: &Path) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| matches!(ext.to_ascii_lowercase().as_str(), "png" | "jpg" | "jpeg" | "webp" | "gif"))
+        .is_some_and(|ext| {
+            matches!(
+                ext.to_ascii_lowercase().as_str(),
+                "png" | "jpg" | "jpeg" | "webp" | "gif"
+            )
+        })
 }
 
 #[cfg(test)]

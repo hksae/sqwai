@@ -126,21 +126,18 @@ fn running_tool_row_matches_the_finished_row_except_its_dot() {
             .spans
             .clone();
         (
-            spans
-                .iter()
-                .map(|s| s.content.as_ref())
-                .collect::<String>(),
+            spans.iter().map(|s| s.content.as_ref()).collect::<String>(),
             spans[0].style,
         )
     };
     let (running, running_dot) = head(None);
     let (done, done_dot) = head(Some(true));
-    assert_eq!(running, done, "same text, only the dot changes: {running:?} vs {done:?}");
-    assert!(running.starts_with("• read"), "{running:?}");
-    assert_ne!(
-        running_dot, done_dot,
-        "a running dot must not look settled"
+    assert_eq!(
+        running, done,
+        "same text, only the dot changes: {running:?} vs {done:?}"
     );
+    assert!(running.starts_with("• read"), "{running:?}");
+    assert_ne!(running_dot, done_dot, "a running dot must not look settled");
 }
 
 #[test]
@@ -159,7 +156,10 @@ fn edit_model_surface_shows_the_stored_xhigh_effort() {
         .iter()
         .map(|s| s.content.as_ref())
         .collect();
-    assert!(row.contains("xhigh"), "effort row must show the level: {row}");
+    assert!(
+        row.contains("xhigh"),
+        "effort row must show the level: {row}"
+    );
     // editing another row must not touch the level
     app.menu_sel = 1;
     app.menu_activate();
@@ -383,7 +383,10 @@ fn provider_key_is_bullets_in_the_list_and_plain_in_its_form() {
         shown.contains("sk-secret-value-12345"),
         "revealed when opened for editing: {shown}"
     );
-    assert!(!shown.contains('•'), "no bullets inside the editor: {shown}");
+    assert!(
+        !shown.contains('•'),
+        "no bullets inside the editor: {shown}"
+    );
 }
 
 #[test]
@@ -1814,11 +1817,13 @@ fn a_live_skill_body_becomes_a_pointer_in_the_request_block() {
             )],
         ),
     );
-    app.session.messages.push(crate::providers::Message::tool_result(
-        "s1",
-        "Keep rows within width.",
-        false,
-    ));
+    app.session
+        .messages
+        .push(crate::providers::Message::tool_result(
+            "s1",
+            "Keep rows within width.",
+            false,
+        ));
     let block = skill_block(&mut app);
     assert!(block.contains("status=\"loaded\""), "{block}");
     assert!(!block.contains("Keep rows within width."), "{block}");
@@ -1875,11 +1880,7 @@ async fn skill_command_runs_once_without_pinning() {
         "the reader sees the command line, not the body"
     );
     // A body is not prose: its trigger must not append a hint to the message.
-    assert!(
-        !sent.content.contains("[skill hint:"),
-        "{}",
-        sent.content
-    );
+    assert!(!sent.content.contains("[skill hint:"), "{}", sent.content);
 
     let _ = std::fs::remove_dir_all(app.project_root.join(".sqwai"));
 }

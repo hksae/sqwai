@@ -6,7 +6,6 @@ use super::loop_subagent::{SUBAGENT_TIMEOUT_SECS, adopt_in_progress_step};
 use super::*;
 use crate::providers::StreamEvent;
 
-
 pub(crate) struct MockTestProvider {
     pub(crate) events: std::sync::Mutex<Vec<Vec<crate::providers::StreamResult>>>,
 }
@@ -91,7 +90,6 @@ async fn test_provider_fallback_chain_switch_on_failure() {
         read_only: false,
         previous_response_id: None,
         summary: None,
-        mcp: Default::default(),
         skills: Default::default(),
         compact_only: false,
         compact_focus: String::new(),
@@ -195,9 +193,10 @@ impl crate::providers::Provider for BackgroundRoutingProvider {
                 ))],
             }
         } else {
-            let saw = req.messages.iter().any(|m| {
-                m.role == Role::User && m.content.contains("<parent_message>")
-            });
+            let saw = req
+                .messages
+                .iter()
+                .any(|m| m.role == Role::User && m.content.contains("<parent_message>"));
             if saw {
                 self.child_saw_steer.store(true, Ordering::Relaxed);
                 vec![Ok(crate::providers::StreamEvent::Text(
@@ -225,12 +224,7 @@ impl crate::providers::Provider for RecordingTestProvider {
     ) -> futures::stream::BoxStream<'static, crate::providers::StreamResult> {
         use futures::StreamExt;
         self.requests.lock().unwrap().push(req);
-        let batch = self
-            .events
-            .lock()
-            .unwrap()
-            .pop()
-            .unwrap_or_default();
+        let batch = self.events.lock().unwrap().pop().unwrap_or_default();
         futures::stream::iter(batch).boxed()
     }
 }
@@ -299,7 +293,6 @@ async fn fallback_replans_effort_for_the_new_model() {
         read_only: false,
         previous_response_id: None,
         summary: None,
-        mcp: Default::default(),
         skills: Default::default(),
         compact_only: false,
         compact_focus: String::new(),
@@ -325,7 +318,11 @@ async fn fallback_replans_effort_for_the_new_model() {
     let requests = fallback_provider.requests.lock().unwrap();
     assert_eq!(requests.len(), 1, "one request to the fallback");
     let req = &requests[0];
-    assert_eq!(req.effort, Some(EffortLevel::High), "the user's level travels");
+    assert_eq!(
+        req.effort,
+        Some(EffortLevel::High),
+        "the user's level travels"
+    );
     assert_eq!(
         req.effort_support.control,
         crate::config::EffortControl::Named,
@@ -395,7 +392,6 @@ async fn partial_stream_failure_does_not_fall_back() {
         read_only: false,
         previous_response_id: None,
         summary: None,
-        mcp: Default::default(),
         skills: Default::default(),
         compact_only: false,
         compact_focus: String::new(),
@@ -1472,7 +1468,6 @@ async fn esc_between_tool_calls_stops_the_batch() {
         read_only: false,
         previous_response_id: None,
         summary: None,
-        mcp: Default::default(),
         skills: Default::default(),
         compact_only: false,
         compact_focus: String::new(),
@@ -1577,7 +1572,6 @@ async fn ask_webfetch_prompts_without_always_before_fetching() {
         read_only: false,
         previous_response_id: None,
         summary: None,
-        mcp: Default::default(),
         skills: Default::default(),
         compact_only: false,
         compact_focus: String::new(),
@@ -1686,7 +1680,6 @@ async fn subagent_does_not_join_its_parent_plan() {
         crate::config::EffortSupport::default(),
         None,
         Vec::new(),
-        crate::config::McpConfig::default(),
         crate::config::SkillsConfig::default(),
         false,
         crate::config::ShadowStore::Off,
@@ -1841,7 +1834,6 @@ async fn background_children_are_capped_at_four() {
         effort_support: Default::default(),
         max_tokens: None,
         system: Vec::new(),
-        mcp: Default::default(),
         skills: Default::default(),
         read_only: false,
         shadow_store: crate::config::ShadowStore::Off,
@@ -1889,12 +1881,13 @@ async fn resumed_child_continues_its_dangling_transcript() {
         approval: crate::config::ApprovalMode::Auto,
         messages: vec![
             crate::providers::Message::new(crate::providers::Role::User, "original task"),
-            crate::providers::Message::new(crate::providers::Role::Assistant, "")
-                .with_tool_calls(vec![crate::providers::ToolCallReq::new(
+            crate::providers::Message::new(crate::providers::Role::Assistant, "").with_tool_calls(
+                vec![crate::providers::ToolCallReq::new(
                     "read-1",
                     "read",
                     serde_json::json!({"file_path": "a.rs"}),
-                )]),
+                )],
+            ),
         ],
         summary: Some("old summary".into()),
         pending: vec![("from parent while paused".into(), true)],
@@ -1922,7 +1915,6 @@ async fn resumed_child_continues_its_dangling_transcript() {
         crate::config::EffortSupport::default(),
         None,
         Vec::new(),
-        crate::config::McpConfig::default(),
         crate::config::SkillsConfig::default(),
         false,
         crate::config::ShadowStore::Off,
@@ -1935,10 +1927,16 @@ async fn resumed_child_continues_its_dangling_transcript() {
     )
     .await;
     assert!(outcome.ok, "{}", outcome.output);
-    assert!(outcome.output.contains("resumed report"), "{}", outcome.output);
+    assert!(
+        outcome.output.contains("resumed report"),
+        "{}",
+        outcome.output
+    );
 
     let requests = recorder.requests.lock().unwrap();
-    let req = requests.first().expect("the resumed child must make a request");
+    let req = requests
+        .first()
+        .expect("the resumed child must make a request");
     assert!(
         req.messages.iter().any(|m| {
             m.role == crate::providers::Role::Tool
@@ -1951,7 +1949,11 @@ async fn resumed_child_continues_its_dangling_transcript() {
             .map(|m| (m.role, m.tool_call_id.clone(), m.content.clone()))
             .collect::<Vec<_>>()
     );
-    assert!(req.messages.iter().any(|m| m.content.contains("<subagent_resume>")));
+    assert!(
+        req.messages
+            .iter()
+            .any(|m| m.content.contains("<subagent_resume>"))
+    );
     assert!(
         req.messages
             .iter()
@@ -2011,7 +2013,6 @@ async fn subagent_lifecycle_lands_in_the_parent_event_log() {
         crate::config::EffortSupport::default(),
         None,
         Vec::new(),
-        crate::config::McpConfig::default(),
         crate::config::SkillsConfig::default(),
         false,
         crate::config::ShadowStore::Off,
@@ -2171,7 +2172,6 @@ async fn subagent_ignores_a_foreign_active_plan() {
         crate::config::EffortSupport::default(),
         None,
         Vec::new(),
-        crate::config::McpConfig::default(),
         crate::config::SkillsConfig::default(),
         false,
         crate::config::ShadowStore::Off,
@@ -2274,7 +2274,6 @@ async fn a_child_request_omits_subagent_and_ask_user_tools() {
         crate::config::EffortSupport::default(),
         None,
         Vec::new(),
-        crate::config::McpConfig::default(),
         crate::config::SkillsConfig::default(),
         false,
         crate::config::ShadowStore::Off,
@@ -2343,7 +2342,6 @@ async fn a_background_subagent_reports_before_the_turn_ends() {
         read_only: false,
         previous_response_id: None,
         summary: None,
-        mcp: Default::default(),
         skills: Default::default(),
         compact_only: false,
         compact_focus: String::new(),
@@ -2386,14 +2384,17 @@ async fn a_background_subagent_reports_before_the_turn_ends() {
         outcome.messages
     );
     assert!(
-        !outcome.messages.iter().any(|m| {
-            m.role == Role::User && m.content.contains("<subagent_completion")
-        }),
+        !outcome
+            .messages
+            .iter()
+            .any(|m| { m.role == Role::User && m.content.contains("<subagent_completion") }),
         "a report read through output is not repeated as a host note"
     );
     assert!(!note, "a delivered report needs no report note");
     assert!(
-        recorder.child_saw_steer.load(std::sync::atomic::Ordering::Relaxed),
+        recorder
+            .child_saw_steer
+            .load(std::sync::atomic::Ordering::Relaxed),
         "the child must receive the parent's message at its next request"
     );
     let _ = std::fs::remove_dir_all(&root);
@@ -2404,8 +2405,8 @@ async fn a_background_subagent_reports_before_the_turn_ends() {
 /// and reaches the event log, and its report is delivered to the next turn.
 #[tokio::test]
 async fn a_background_writer_can_outlive_the_turn_and_report_next_turn() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct OutlivingProvider {
         parent_calls: AtomicUsize,
@@ -2501,7 +2502,6 @@ async fn a_background_writer_can_outlive_the_turn_and_report_next_turn() {
         read_only: false,
         previous_response_id: None,
         summary: None,
-        mcp: Default::default(),
         skills: Default::default(),
         compact_only: false,
         compact_focus: String::new(),
@@ -2577,8 +2577,7 @@ async fn a_background_writer_can_outlive_the_turn_and_report_next_turn() {
     );
 
     // The write carries the spawner turn even though it landed later.
-    let records =
-        crate::agent::events::EventLog::records_for(&root, "bg-outlive").unwrap();
+    let records = crate::agent::events::EventLog::records_for(&root, "bg-outlive").unwrap();
     let stamped = records
         .iter()
         .find(|record| {
@@ -2590,10 +2589,8 @@ async fn a_background_writer_can_outlive_the_turn_and_report_next_turn() {
     let checkpoints =
         crate::agent::events::EventLog::checkpoints_in_turn(&root, "bg-outlive", 1).unwrap();
     assert!(
-        checkpoints
-            .iter()
-            .any(|(sha, _)| Some(sha.as_str())
-                == stamped.fields.get("checkpoint").and_then(|v| v.as_str())),
+        checkpoints.iter().any(|(sha, _)| Some(sha.as_str())
+            == stamped.fields.get("checkpoint").and_then(|v| v.as_str())),
         "{checkpoints:?}"
     );
 
@@ -2672,7 +2669,6 @@ async fn hung_subagent_times_out_and_aborts() {
         crate::config::EffortSupport::default(),
         None,
         Vec::new(),
-        crate::config::McpConfig::default(),
         crate::config::SkillsConfig::default(),
         false,
         crate::config::ShadowStore::Off,
@@ -2743,7 +2739,6 @@ async fn esc_stops_a_subagent_wait_without_the_timeout() {
         crate::config::EffortSupport::default(),
         None,
         Vec::new(),
-        crate::config::McpConfig::default(),
         crate::config::SkillsConfig::default(),
         false,
         crate::config::ShadowStore::Off,
@@ -2833,7 +2828,6 @@ async fn same_turn_subagent_calls_overlap() {
         read_only: false,
         previous_response_id: None,
         summary: None,
-        mcp: Default::default(),
         skills: Default::default(),
         compact_only: false,
         compact_focus: String::new(),
@@ -2954,7 +2948,6 @@ async fn parallel_read_only_batch_merges_read_state_before_following_mutation() 
         read_only: false,
         previous_response_id: None,
         summary: None,
-        mcp: Default::default(),
         skills: Default::default(),
         compact_only: false,
         compact_focus: String::new(),
@@ -3068,7 +3061,6 @@ async fn closing_a_plan_does_not_end_the_run_by_itself() {
         read_only: false,
         previous_response_id: None,
         summary: None,
-        mcp: Default::default(),
         skills: Default::default(),
         compact_only: false,
         compact_focus: String::new(),
@@ -3164,9 +3156,13 @@ fn an_id_already_in_history_is_renamed_not_dropped() {
 
 #[test]
 fn history_ids_are_read_from_both_sides_of_the_pair() {
-    let mut messages = vec![Message::new(Role::Assistant, "").with_tool_calls(vec![
-        ToolCallReq::new("a", "read", serde_json::json!({})),
-    ])];
+    let mut messages = vec![
+        Message::new(Role::Assistant, "").with_tool_calls(vec![ToolCallReq::new(
+            "a",
+            "read",
+            serde_json::json!({}),
+        )]),
+    ];
     messages.push(Message::tool_result("b", "x".to_string(), false));
     let ids = history_call_ids(&messages);
     assert!(ids.contains("a"), "{ids:?}");
@@ -3188,11 +3184,7 @@ impl crate::providers::Provider for FlipOnSecondRequest {
         &self,
         req: crate::providers::ChatRequest,
     ) -> futures::stream::BoxStream<'static, crate::providers::StreamResult> {
-        if self
-            .seen
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-            == 1
-        {
+        if self.seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1 {
             self.switch.set(self.to);
         }
         self.inner.stream_chat(req)
@@ -3205,16 +3197,20 @@ async fn shifting_the_mode_mid_run_reaches_the_next_tool_call() {
     let switch = ApprovalSwitch::new(ApprovalMode::Auto);
     let inner = MockTestProvider {
         events: std::sync::Mutex::new(vec![
-            vec![Ok(StreamEvent::ToolCall(crate::providers::ToolCallReq::new(
-                "c1",
-                "bash",
-                serde_json::json!({"command": "echo one"}),
-            )))],
-            vec![Ok(StreamEvent::ToolCall(crate::providers::ToolCallReq::new(
-                "c2",
-                "bash",
-                serde_json::json!({"command": "echo two"}),
-            )))],
+            vec![Ok(StreamEvent::ToolCall(
+                crate::providers::ToolCallReq::new(
+                    "c1",
+                    "bash",
+                    serde_json::json!({"command": "echo one"}),
+                ),
+            ))],
+            vec![Ok(StreamEvent::ToolCall(
+                crate::providers::ToolCallReq::new(
+                    "c2",
+                    "bash",
+                    serde_json::json!({"command": "echo two"}),
+                ),
+            ))],
             vec![Ok(StreamEvent::Text("done".into()))],
         ]),
     };
@@ -3259,7 +3255,6 @@ async fn shifting_the_mode_mid_run_reaches_the_next_tool_call() {
         read_only: false,
         previous_response_id: None,
         summary: None,
-        mcp: Default::default(),
         skills: Default::default(),
         compact_only: false,
         compact_focus: String::new(),
@@ -3368,7 +3363,6 @@ async fn a_paused_child_parks_before_its_first_request_and_resumes() {
         read_only: false,
         previous_response_id: None,
         summary: None,
-        mcp: Default::default(),
         skills: Default::default(),
         compact_only: false,
         compact_focus: String::new(),
@@ -3422,10 +3416,12 @@ async fn a_paused_child_parks_before_its_first_request_and_resumes() {
         "the steer sent while parked reaches the resumed request: {:#?}",
         requests[0].messages
     );
-    assert!(outcome
-        .messages
-        .iter()
-        .any(|m| m.role == Role::Assistant && m.content == "done"));
+    assert!(
+        outcome
+            .messages
+            .iter()
+            .any(|m| m.role == Role::Assistant && m.content == "done")
+    );
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -3483,7 +3479,6 @@ async fn pause_cancels_a_running_tool_and_resume_continues_with_the_cancelled_re
         read_only: false,
         previous_response_id: None,
         summary: None,
-        mcp: Default::default(),
         skills: Default::default(),
         compact_only: false,
         compact_focus: String::new(),
@@ -3557,14 +3552,12 @@ async fn pause_cancels_a_running_tool_and_resume_continues_with_the_cancelled_re
 /// the approval wait extension this child would be killed as timed out.
 #[tokio::test]
 async fn an_approval_wait_does_not_spend_the_child_task_timeout() {
-    use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
 
     let root = std::env::temp_dir().join(format!("sqwai-approval-wait-{}", std::process::id()));
-    let outside = std::env::temp_dir().join(format!(
-        "sqwai-approval-outside-{}.txt",
-        std::process::id()
-    ));
+    let outside =
+        std::env::temp_dir().join(format!("sqwai-approval-outside-{}.txt", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     let _ = std::fs::create_dir_all(&root);
     std::fs::write(&outside, "outside file").unwrap();
@@ -3621,7 +3614,6 @@ async fn an_approval_wait_does_not_spend_the_child_task_timeout() {
         crate::config::EffortSupport::default(),
         None,
         Vec::new(),
-        crate::config::McpConfig::default(),
         crate::config::SkillsConfig::default(),
         false,
         crate::config::ShadowStore::Off,
@@ -3664,9 +3656,16 @@ async fn an_approval_wait_does_not_spend_the_child_task_timeout() {
             out = &mut future => break out,
         }
     };
-    assert!(asked, "the command must surface an approval, or this proves nothing");
+    assert!(
+        asked,
+        "the command must surface an approval, or this proves nothing"
+    );
     assert!(outcome.ok, "{}", outcome.output);
-    assert!(outcome.output.contains("after approval"), "{}", outcome.output);
+    assert!(
+        outcome.output.contains("after approval"),
+        "{}",
+        outcome.output
+    );
     let _ = std::fs::remove_dir_all(&root);
     let _ = std::fs::remove_file(&outside);
 }
@@ -3676,8 +3675,8 @@ async fn an_approval_wait_does_not_spend_the_child_task_timeout() {
 /// the child reaches its boundary.
 #[tokio::test]
 async fn pause_resume_and_kill_reach_the_child_and_the_registry() {
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     let registry = super::new_background_registry();
     let (ctl_tx, mut ctl_rx) = mpsc::channel(8);
     let cancel = Arc::new(AtomicBool::new(false));
@@ -3728,8 +3727,8 @@ async fn pause_resume_and_kill_reach_the_child_and_the_registry() {
 /// clock stops on pause and restarts on resume.
 #[tokio::test]
 async fn a_paused_child_does_not_spend_its_task_timeout() {
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     struct GatedProvider {
         calls: AtomicUsize,
@@ -3788,7 +3787,6 @@ async fn a_paused_child_does_not_spend_its_task_timeout() {
     let tools = Default::default();
     let search = Default::default();
     let limits = Default::default();
-    let mcp = Default::default();
     let skills = Default::default();
     let compaction = Default::default();
     let plan_limits = Default::default();
@@ -3815,7 +3813,6 @@ async fn a_paused_child_does_not_spend_its_task_timeout() {
         crate::config::EffortSupport::default(),
         None,
         Vec::new(),
-        mcp,
         skills,
         false,
         crate::config::ShadowStore::Off,
@@ -3841,7 +3838,10 @@ async fn a_paused_child_does_not_spend_its_task_timeout() {
     // The child registers its own control sender in this mailbox; a
     // pre-made sender would be a different channel and never reach it.
     let controls = steer.lock().await.controls.clone();
-    assert!(!controls.is_empty(), "the child registered a control channel");
+    assert!(
+        !controls.is_empty(),
+        "the child registered a control channel"
+    );
     for control in &controls {
         control.send(ControlMsg::Resume).await.unwrap();
     }
@@ -3909,7 +3909,6 @@ async fn an_outside_image_asks_then_views_instead_of_refusing() {
         read_only: false,
         previous_response_id: None,
         summary: None,
-        mcp: Default::default(),
         skills: Default::default(),
         compact_only: false,
         compact_focus: String::new(),
@@ -3951,9 +3950,10 @@ async fn an_outside_image_asks_then_views_instead_of_refusing() {
     }
     assert!(asked, "an outside image must ask, not refuse");
     let outcome = outcome.expect("turn completed");
-    let viewed = outcome.messages.iter().find(|m| {
-        m.role == Role::Tool && m.tool_call_id.as_deref() == Some("img")
-    });
+    let viewed = outcome
+        .messages
+        .iter()
+        .find(|m| m.role == Role::Tool && m.tool_call_id.as_deref() == Some("img"));
     let viewed = viewed.expect("the tool result is in the transcript");
     assert!(
         !viewed.is_error,
@@ -4005,7 +4005,6 @@ async fn a_child_outside_image_asks_the_parent_and_views() {
     let tools = Default::default();
     let search = Default::default();
     let limits = Default::default();
-    let mcp = Default::default();
     let skills = Default::default();
     let compaction = Default::default();
     let plan_limits = Default::default();
@@ -4032,7 +4031,6 @@ async fn a_child_outside_image_asks_the_parent_and_views() {
         crate::config::EffortSupport::default(),
         None,
         Vec::new(),
-        mcp,
         skills,
         false,
         crate::config::ShadowStore::Off,

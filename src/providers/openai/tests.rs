@@ -10,10 +10,9 @@ fn sse_server(body: String) -> (String, std::thread::JoinHandle<()>) {
     let addr = listener.local_addr().unwrap();
     listener.set_nonblocking(true).unwrap();
     let h = std::thread::spawn(move || {
-        let Some(stream) = crate::providers::accept_bounded(
-            &listener,
-            std::time::Duration::from_secs(20),
-        ) else {
+        let Some(stream) =
+            crate::providers::accept_bounded(&listener, std::time::Duration::from_secs(20))
+        else {
             return;
         };
         let mut reader = BufReader::new(&stream);
@@ -64,10 +63,9 @@ fn capturing_sse_server() -> (
     let bodies: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let seen = bodies.clone();
     let h = std::thread::spawn(move || {
-        let Some(stream) = crate::providers::accept_bounded(
-            &listener,
-            std::time::Duration::from_secs(20),
-        ) else {
+        let Some(stream) =
+            crate::providers::accept_bounded(&listener, std::time::Duration::from_secs(20))
+        else {
             return;
         };
         let mut reader = BufReader::new(stream.try_clone().unwrap());
@@ -1161,11 +1159,8 @@ fn user_images_interleave_at_their_markers() {
         model_id: "m".into(),
         system: vec![],
         messages: vec![
-            Message::new(
-                crate::providers::Role::User,
-                "hi look [image 1] here",
-            )
-            .with_images(vec![image]),
+            Message::new(crate::providers::Role::User, "hi look [image 1] here")
+                .with_images(vec![image]),
         ],
         effort: None,
         effort_support: Default::default(),
@@ -1212,10 +1207,7 @@ fn user_parts_bind_markers_once_and_drop_orphans() {
             crate::providers::UserPart::Image(image) => images.push(image.name.clone()),
         }
     }
-    assert_eq!(
-        texts.concat(),
-        "[image 1] then [image 1] again [image 2]"
-    );
+    assert_eq!(texts.concat(), "[image 1] then [image 1] again [image 2]");
     assert_eq!(images, ["one.png", "two.png"]);
 }
 
@@ -1245,8 +1237,12 @@ fn path_user_images_without_markers_reach_the_openai_body() {
     let messages = body["messages"].as_array().unwrap();
     let user = messages.iter().find(|m| m["role"] == "user").unwrap();
     let parts = user["content"].as_array().expect("user content parts");
-    assert!(parts.iter().any(|part| part["type"] == "text"
-        && part["text"].as_str().unwrap().contains("shot.png")));
+    assert!(
+        parts
+            .iter()
+            .any(|part| part["type"] == "text"
+                && part["text"].as_str().unwrap().contains("shot.png"))
+    );
     assert!(parts.iter().any(|part| part["type"] == "image_url"));
 }
 
@@ -1305,8 +1301,12 @@ fn tool_documents_ride_in_a_synthetic_user_message() {
                     json!({"path": "report.pdf"}),
                 ),
             ]),
-            Message::tool_result("c1", "2 pages · application/pdf · 1 KB · ~5.0k tokens", false)
-                .with_documents(vec![document]),
+            Message::tool_result(
+                "c1",
+                "2 pages · application/pdf · 1 KB · ~5.0k tokens",
+                false,
+            )
+            .with_documents(vec![document]),
         ],
         effort: None,
         effort_support: Default::default(),

@@ -89,9 +89,7 @@ pub enum Op {
     /// plan state re-sent verbatim on every request, so a constraint that lives
     /// only in the conversation is re-summarized until it disappears.
     #[serde(alias = "add_constraint")]
-    Amend {
-        constraints: Vec<String>,
-    },
+    Amend { constraints: Vec<String> },
     Add {
         #[serde(default)]
         after: Option<String>,
@@ -109,9 +107,7 @@ pub enum Op {
     /// last step leaves the plan open, because a finished list of steps is not
     /// a finished task. `summary` must name what proves the goal done.
     #[serde(alias = "complete")]
-    Close {
-        summary: String,
-    },
+    Close { summary: String },
     /// Abandon the whole plan when the direction has changed or the
     /// specification is contradictory. `reason` must explain why (empty/thin
     /// reasons refused). The old plan stays on disk as `Abandoned` (history is
@@ -436,7 +432,10 @@ fn amend(plan: &mut Plan, constraints: &[String]) -> Result<Applied, Rejection> 
     }
     let n = added.len();
     plan.constraints.extend(added);
-    accept(plan, format!("plan {} amended: {n} constraint(s) added", plan.id))
+    accept(
+        plan,
+        format!("plan {} amended: {n} constraint(s) added", plan.id),
+    )
 }
 
 fn finish(
@@ -494,25 +493,24 @@ fn finish(
                 "only an in-progress or reopened step can be finished",
             );
         }
-        if status == StepStatus::Pending {
-            if let Some(active) = plan
+        if status == StepStatus::Pending
+            && let Some(active) = plan
                 .steps
                 .iter()
                 .find(|s| s.id != *target_id && s.status == StepStatus::InProgress)
-            {
-                return reject(
-                    plan,
-                    "step_not_in_progress",
-                    format!(
-                        "step {target_id} is pending while step {} is in progress",
-                        active.id
-                    ),
-                    format!(
-                        "finish or cancel step {} first (or pass ids: [\"{}\", \"{target_id}\"] if both are done)",
-                        active.id, active.id
-                    ),
-                );
-            }
+        {
+            return reject(
+                plan,
+                "step_not_in_progress",
+                format!(
+                    "step {target_id} is pending while step {} is in progress",
+                    active.id
+                ),
+                format!(
+                    "finish or cancel step {} first (or pass ids: [\"{}\", \"{target_id}\"] if both are done)",
+                    active.id, active.id
+                ),
+            );
         }
         let step = plan.step_mut(target_id).expect("checked above");
         step.status = StepStatus::Done;

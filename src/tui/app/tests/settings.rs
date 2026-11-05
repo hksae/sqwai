@@ -1058,7 +1058,16 @@ fn search_provider_is_chosen_from_a_list() {
         .collect();
     assert_eq!(
         labels,
-        vec!["random", "hosted", "exa", "parallel", "deepseek", "tavily", "firecrawl", "off"]
+        vec![
+            "random",
+            "hosted",
+            "exa",
+            "parallel",
+            "deepseek",
+            "tavily",
+            "firecrawl",
+            "off"
+        ]
     );
 
     app.run_action(MenuAction::SetSearchProvider(SearchProvider::Tavily));
@@ -1122,14 +1131,20 @@ fn search_provider_surface_opens_from_its_command() {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(!settings_text.contains("search provider"), "{settings_text}");
+    assert!(
+        !settings_text.contains("search provider"),
+        "{settings_text}"
+    );
     app.menu_back();
 
     app.menu_sel = app
         .menu_rows
         .iter()
         .position(|(_, action)| {
-            matches!(action, MenuAction::SetSearchProvider(SearchProvider::Tavily))
+            matches!(
+                action,
+                MenuAction::SetSearchProvider(SearchProvider::Tavily)
+            )
         })
         .expect("tavily row");
     let (tx, rx) = std::sync::mpsc::channel();
@@ -1180,8 +1195,10 @@ fn search_provider_surface_opens_from_its_command() {
                 .collect::<String>()
         })
         .collect::<Vec<_>>()
-        .join("
-");
+        .join(
+            "
+",
+        );
     assert!(rows.contains("key ••••••••••"), "{rows}");
     assert!(!rows.contains("tvly-secret"), "{rows}");
 
@@ -1193,7 +1210,10 @@ fn search_provider_surface_opens_from_its_command() {
         .menu_rows
         .iter()
         .position(|(_, action)| {
-            matches!(action, MenuAction::SetSearchProvider(SearchProvider::Tavily))
+            matches!(
+                action,
+                MenuAction::SetSearchProvider(SearchProvider::Tavily)
+            )
         })
         .expect("tavily row");
     let (tx, rx) = std::sync::mpsc::channel();
@@ -1213,7 +1233,10 @@ fn search_provider_surface_opens_from_its_command() {
                 .collect::<String>()
         })
         .collect();
-    assert!(rows.iter().any(|row| row.starts_with("base url")), "{rows:?}");
+    assert!(
+        rows.iter().any(|row| row.starts_with("base url")),
+        "{rows:?}"
+    );
 }
 
 /// ctrl+t probes the selected search backend without selecting it. Off and
@@ -1228,7 +1251,9 @@ fn search_provider_test_handles_off_and_hosted_without_network() {
     app.open_menu(Menu::SearchProvider);
     let hints = app.list_hints();
     assert!(
-        hints.iter().any(|(key, what)| *key == "ctrl+t" && what == "test"),
+        hints
+            .iter()
+            .any(|(key, what)| *key == "ctrl+t" && what == "test"),
         "{hints:?}"
     );
 

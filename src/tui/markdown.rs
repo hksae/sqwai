@@ -634,11 +634,8 @@ fn safe_split_from(text: &str, from: usize) -> Option<usize> {
         let start = offset;
         offset += line.len() + 1;
         let lead = line.trim_start();
-        let valid_here = !in_code
-            && !in_math
-            && !lead.is_empty()
-            && !prev_pipe
-            && !is_setext_underline(line);
+        let valid_here =
+            !in_code && !in_math && !lead.is_empty() && !prev_pipe && !is_setext_underline(line);
         if start == from && from > 0 && !valid_here {
             // The byte at `from` was mutated such that `from` itself is no
             // longer a valid split boundary; force a full re-establish.

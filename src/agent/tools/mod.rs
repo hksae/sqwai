@@ -24,13 +24,10 @@ pub(crate) use dispatch::{
     turn_result_bytes,
 };
 pub(crate) use git::porcelain_paths;
-pub(crate) use policy::{
-    first_host_secret_target, first_host_state_target, first_outside_target,
-};
+pub(crate) use policy::{first_host_secret_target, first_host_state_target, first_outside_target};
 pub(crate) use specs::{
     Kind, args_fingerprint, call_path, call_summary, decode_child_output, is_mutating_call,
-    merge_specs, tool_names,
-    tool_specs, trim_middle,
+    tool_names, tool_specs, trim_middle,
 };
 
 #[cfg(test)]

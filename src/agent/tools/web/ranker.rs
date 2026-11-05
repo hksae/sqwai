@@ -153,9 +153,7 @@ pub fn canonicalize_url(raw: &str) -> String {
     }
 
     let mut out = parsed.to_string();
-    if out.ends_with('/') && parsed.path() != "/" {
-        out.pop();
-    } else if out.ends_with('/') && parsed.path() == "/" && parsed.query().is_none() {
+    if out.ends_with('/') && (parsed.path() != "/" || parsed.query().is_none()) {
         out.pop();
     }
     out
@@ -426,7 +424,7 @@ pub fn project_page_seen(
         return assemble_selected_sections(
             page,
             &top_indices,
-             QUERY_PROJECTED_CHARS,
+            QUERY_PROJECTED_CHARS,
             Some(&format!(
                 "No exact heading matched '{sec_q}'; showing outline and closest sections"
             )),
@@ -490,10 +488,10 @@ pub fn project_page_seen(
     let mut selected: Vec<usize> = Vec::new();
     let mut used = 0usize;
     for (idx, sec) in page.sections.iter().enumerate() {
-        if idx == 0 || (used + sec.char_len <= MAX_PROJECTED_CHARS - 2_500) {
-            selected.push(idx);
-            used += sec.char_len;
-        } else if sec.has_code_block && used + sec.char_len <= MAX_PROJECTED_CHARS {
+        if idx == 0
+            || used + sec.char_len <= MAX_PROJECTED_CHARS - 2_500
+            || (sec.has_code_block && used + sec.char_len <= MAX_PROJECTED_CHARS)
+        {
             selected.push(idx);
             used += sec.char_len;
         }
@@ -623,7 +621,11 @@ fn assemble_selected_sections(
     // A repeat projection of a page the model is still reading must not re-emit
     // the same sections: 44 fetches of one live page cost 1.17 MB of context
     // while the page cache made them look free.
-    let fresh: Vec<usize> = indices.iter().copied().filter(|i| !seen.contains(i)).collect();
+    let fresh: Vec<usize> = indices
+        .iter()
+        .copied()
+        .filter(|i| !seen.contains(i))
+        .collect();
     let skipped: Vec<&PageSection> = indices
         .iter()
         .filter(|i| seen.contains(i))
@@ -906,12 +908,11 @@ fn split_camel_and_snake(segment: &str) -> Vec<String> {
                 let prev = chars[i - 1];
                 let next_is_lower = chars.get(i + 1).is_some_and(|c| c.is_lowercase());
                 // Split on `aB` (`camelCase`) or `ABc` (`HTTPClient` -> `HTTP` + `Client`).
-                if (ch.is_uppercase() && prev.is_lowercase())
-                    || (ch.is_uppercase() && prev.is_uppercase() && next_is_lower)
+                if ((ch.is_uppercase() && prev.is_lowercase())
+                    || (ch.is_uppercase() && prev.is_uppercase() && next_is_lower))
+                    && !cur.is_empty()
                 {
-                    if !cur.is_empty() {
-                        parts.push(std::mem::take(&mut cur));
-                    }
+                    parts.push(std::mem::take(&mut cur));
                 }
             }
             cur.push(ch);

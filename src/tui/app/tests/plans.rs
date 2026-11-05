@@ -697,7 +697,10 @@ fn closing_a_toggled_tool_above_the_tail_gives_the_bottom_band_back() {
     assert!(
         matches!(
             app.segments.get(tool_idx),
-            Some(Segment::Tool { expanded: false, .. })
+            Some(Segment::Tool {
+                expanded: false,
+                ..
+            })
         ),
         "the row closed again"
     );

@@ -39,7 +39,10 @@ pub(super) enum FormField {
     /// free text edited through a real textarea (cursor, word jumps, paste).
     /// What a field holds is always what it shows: an api key is bullets on the
     /// provider's own row, and plain text once that row's form is open.
-    Text { label: String, ta: Box<TextArea<'static>> },
+    Text {
+        label: String,
+        ta: Box<TextArea<'static>>,
+    },
 }
 
 impl FormField {
@@ -79,7 +82,8 @@ impl FormField {
     pub(super) fn trimmed(&self) -> String {
         self.current_value()
             .trim_matches(|c: char| {
-                c.is_whitespace() || matches!(c, '\u{200b}' | '\u{200c}' | '\u{200d}' | '\u{feff}' | '\0')
+                c.is_whitespace()
+                    || matches!(c, '\u{200b}' | '\u{200c}' | '\u{200d}' | '\u{feff}' | '\0')
             })
             .to_string()
     }
@@ -93,11 +97,9 @@ impl App {
                 use super::menus::ModelField;
                 let val = match key.as_ref().and_then(|k| self.cfg.models.get(k)) {
                     Some(mc) => match field {
-                        ModelField::Key => key
-                            .as_deref()
-                            .map(key_name)
-                            .unwrap_or_default()
-                            .to_string(),
+                        ModelField::Key => {
+                            key.as_deref().map(key_name).unwrap_or_default().to_string()
+                        }
                         ModelField::RequestId => mc.id.clone(),
                         ModelField::Context => mc.context.to_string(),
                     },
@@ -461,13 +463,12 @@ impl App {
                             );
                             return;
                         }
-                        if name.as_deref().is_some_and(|n| self.cfg.is_builtin_provider(n))
+                        if name
+                            .as_deref()
+                            .is_some_and(|n| self.cfg.is_builtin_provider(n))
                             && name.as_deref() != Some(raw.as_str())
                         {
-                            self.status(
-                                "built-in provider cannot be renamed",
-                                StatusKind::Err,
-                            );
+                            self.status("built-in provider cannot be renamed", StatusKind::Err);
                             return;
                         }
                         if let Some(old) = &name {

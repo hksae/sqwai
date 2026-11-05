@@ -679,7 +679,10 @@ fn call_summary_raw(name: &str, args: &Value) -> String {
         }
         "grep" => {
             let base = s("pattern");
-            match args["output_mode"].as_str().filter(|mode| *mode != "content") {
+            match args["output_mode"]
+                .as_str()
+                .filter(|mode| *mode != "content")
+            {
                 Some(mode) => format!("{base} · {mode}"),
                 None => base,
             }
@@ -767,19 +770,6 @@ pub fn tool_specs() -> Vec<crate::providers::ToolSpec> {
         .collect();
     specs.sort_by(|a, b| a.name.cmp(&b.name));
     specs
-}
-
-/// Merge external (MCP) schemas into the built-in set. The merged set is
-/// re-sorted as a whole: MCP order follows server registration and server
-/// responses, so appending them after the sorted built-ins would re-key the
-/// tool prefix (and the cache behind it) whenever servers flake or reorder.
-pub fn merge_specs(
-    mut base: Vec<crate::providers::ToolSpec>,
-    extra: &[crate::providers::ToolSpec],
-) -> Vec<crate::providers::ToolSpec> {
-    base.extend(extra.iter().cloned());
-    base.sort_by(|a, b| a.name.cmp(&b.name));
-    base
 }
 
 /// Mid-trim for tool output: keep a third of the budget at the head and the
@@ -929,10 +919,7 @@ pub fn decode_child_output(bytes: &[u8]) -> String {
 fn decode_line(line: &[u8], encoding: &'static encoding_rs::Encoding) -> String {
     match std::str::from_utf8(line) {
         Ok(text) => text.to_string(),
-        Err(_) => encoding
-            .decode_without_bom_handling(line)
-            .0
-            .into_owned(),
+        Err(_) => encoding.decode_without_bom_handling(line).0.into_owned(),
     }
 }
 
@@ -1053,11 +1040,17 @@ fn decode_child_output_reads_the_console_codepage() {
     // The page is the console's, not a hardcoded cp866: the same bytes mean
     // different text on different pages, and each page decodes its own.
     assert_eq!(
-        decode_line(&[0x8F, 0xE0, 0xA8, 0xA2, 0xA5, 0xE2], encoding_for_codepage(866)),
+        decode_line(
+            &[0x8F, 0xE0, 0xA8, 0xA2, 0xA5, 0xE2],
+            encoding_for_codepage(866)
+        ),
         "Привет"
     );
     assert_eq!(
-        decode_line(&[0xCF, 0xF0, 0xE8, 0xE2, 0xE5, 0xF2], encoding_for_codepage(1251)),
+        decode_line(
+            &[0xCF, 0xF0, 0xE8, 0xE2, 0xE5, 0xF2],
+            encoding_for_codepage(1251)
+        ),
         "Привет"
     );
     assert_eq!(
@@ -1069,10 +1062,7 @@ fn decode_child_output_reads_the_console_codepage() {
     );
     // cp1252 and unknown pages: Latin text, never Cyrillic invented from
     // bytes the page does not define.
-    assert_eq!(
-        decode_line(b"caf\xE9", encoding_for_codepage(1252)),
-        "café"
-    );
+    assert_eq!(decode_line(b"caf\xE9", encoding_for_codepage(1252)), "café");
     assert_eq!(encoding_for_codepage(850), encoding_rs::WINDOWS_1252);
     // Valid UTF-8 always wins over any page, whole output or line by line.
     assert_eq!(decode_child_output("ok 🔥 ЕС".as_bytes()), "ok 🔥 ЕС");

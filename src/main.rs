@@ -1,7 +1,6 @@
 mod agent;
 mod config;
 mod lock;
-mod mcp;
 mod media;
 mod pdf;
 mod plan;
@@ -37,9 +36,10 @@ fn main() -> Result<()> {
             "--force" => force = true,
             "--approval" => {
                 let value = it.next().context("--approval requires ask|auto|full")?;
-                approval = Some(config::ApprovalMode::from_str(value).with_context(|| {
-                    format!("--approval expects ask|auto|full, got {value}")
-                })?);
+                approval =
+                    Some(config::ApprovalMode::from_str(value).with_context(|| {
+                        format!("--approval expects ask|auto|full, got {value}")
+                    })?);
             }
             other => {
                 anyhow::bail!(

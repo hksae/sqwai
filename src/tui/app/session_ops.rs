@@ -206,7 +206,7 @@ impl App {
             let allowed = if let Some(rest) = text.strip_prefix('/') {
                 let mut parts = rest.split_whitespace();
                 match parts.next().unwrap_or("") {
-                    "settings" | "debug" | "theme" | "mcp" | "skill" | "skills" | "providers"
+                    "settings" | "debug" | "theme" | "skill" | "skills" | "providers"
                     | "models" | "sessions" | "exit" | "help" => true,
                     "plan" => parts.next().is_none(),
                     _ => false,
@@ -262,10 +262,8 @@ impl App {
             }
             return;
         }
-        let images: Vec<crate::providers::ImageAttachment> = drafts
-            .into_iter()
-            .map(|pending| pending.image)
-            .collect();
+        let images: Vec<crate::providers::ImageAttachment> =
+            drafts.into_iter().map(|pending| pending.image).collect();
         self.input = Self::fresh_input(String::new());
         self.popup_dismiss = false;
         self.hover = None;
@@ -384,7 +382,6 @@ impl App {
             enable_tools: true,
             background_baselines: true,
             read_only: self.read_only,
-            mcp: self.cfg.mcp.clone(),
             skills: self.cfg.skills.clone(),
             previous_response_id: if self.context_bootstrap_pending || !self.continuation_enabled()
             {
@@ -539,7 +536,6 @@ impl App {
             enable_tools: true,
             background_baselines: false,
             read_only: self.read_only,
-            mcp: Default::default(),
             skills: self.cfg.skills.clone(),
             previous_response_id: None,
             summary: self.session.summary.clone(),

@@ -86,10 +86,7 @@ pub enum DomainRoute {
 }
 
 pub fn classify_url(url: &Url) -> DomainRoute {
-    let host = url
-        .host_str()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
+    let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
     let host_clean = host.strip_prefix("www.").unwrap_or(&host);
     let segments: Vec<&str> = url
         .path_segments()
@@ -251,8 +248,7 @@ pub async fn fetch_smart(
                 kind,
                 number,
             } => {
-                if let Ok(doc) = fetch_github_issue(client, &owner, &repo, kind, number).await
-                {
+                if let Ok(doc) = fetch_github_issue(client, &owner, &repo, kind, number).await {
                     return Ok(doc);
                 }
             }
@@ -441,7 +437,6 @@ async fn standard_document(
     client: &Client,
     allow_hosts: &[String],
 ) -> Result<FetchedDocument, String> {
-
     // 1. Native Markdown response (Cloudflare Markdown for Agents / Mintlify / raw .md).
     if !need_raw_html
         && (content_type.contains("text/markdown") || content_type.contains("text/x-markdown"))
@@ -608,7 +603,11 @@ async fn fetch_github_blob(
         return Err("raw file too large".into());
     }
     let content = String::from_utf8_lossy(&bytes);
-    let ext = rest.rsplit('.').next().unwrap_or_default().to_ascii_lowercase();
+    let ext = rest
+        .rsplit('.')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
     let title = format!("{owner}/{repo}: {rest}");
     let markdown = if matches!(ext.as_str(), "md" | "mdx" | "markdown") {
         format!("# {title}\n\n{}", content.trim())
@@ -659,10 +658,16 @@ async fn fetch_github_issue(
     }
     let issue: Value = issue_resp.json().await.map_err(|e| e.to_string())?;
     let title_str = issue["title"].as_str().unwrap_or("Untitled");
-    let state = issue["state"].as_str().unwrap_or("open").to_ascii_uppercase();
+    let state = issue["state"]
+        .as_str()
+        .unwrap_or("open")
+        .to_ascii_uppercase();
     let author = issue["user"]["login"].as_str().unwrap_or("unknown");
     let created = issue["created_at"].as_str().unwrap_or_default();
-    let body = issue["body"].as_str().unwrap_or("*(No description)*").trim();
+    let body = issue["body"]
+        .as_str()
+        .unwrap_or("*(No description)*")
+        .trim();
     let labels: Vec<&str> = issue["labels"]
         .as_array()
         .map(|arr| arr.iter().filter_map(|l| l["name"].as_str()).collect())
@@ -772,10 +777,7 @@ async fn fetch_github_repo(
     })
 }
 
-async fn fetch_crates_io(
-    client: &Client,
-    crate_name: &str,
-) -> Result<FetchedDocument, String> {
+async fn fetch_crates_io(client: &Client, crate_name: &str) -> Result<FetchedDocument, String> {
     let api_url = format!("https://crates.io/api/v1/crates/{crate_name}");
     let resp = client
         .get(&api_url)
@@ -877,10 +879,7 @@ async fn fetch_crates_io(
     })
 }
 
-async fn fetch_npm_package(
-    client: &Client,
-    pkg_name: &str,
-) -> Result<FetchedDocument, String> {
+async fn fetch_npm_package(client: &Client, pkg_name: &str) -> Result<FetchedDocument, String> {
     let encoded = pkg_name.replace('/', "%2F");
     let api_url = format!("https://registry.npmjs.org/{encoded}");
     let resp = client
@@ -932,10 +931,7 @@ async fn fetch_npm_package(
     })
 }
 
-async fn fetch_pypi_package(
-    client: &Client,
-    pkg_name: &str,
-) -> Result<FetchedDocument, String> {
+async fn fetch_pypi_package(client: &Client, pkg_name: &str) -> Result<FetchedDocument, String> {
     let api_url = format!("https://pypi.org/pypi/{pkg_name}/json");
     let resp = client
         .get(&api_url)
@@ -989,10 +985,7 @@ async fn fetch_reddit_thread(
     fetch_old_reddit_html(client, original_url).await
 }
 
-async fn fetch_reddit_json(
-    client: &Client,
-    json_url: &str,
-) -> Result<FetchedDocument, String> {
+async fn fetch_reddit_json(client: &Client, json_url: &str) -> Result<FetchedDocument, String> {
     let resp = client
         .get(json_url)
         .header(reqwest::header::USER_AGENT, REDDIT_API_UA)
@@ -1016,7 +1009,9 @@ async fn fetch_reddit_json(
         .ok_or_else(|| "missing reddit post data".to_string())?;
 
     let title = post["title"].as_str().unwrap_or("Reddit Thread");
-    let sub = post["subreddit_name_prefixed"].as_str().unwrap_or("r/reddit");
+    let sub = post["subreddit_name_prefixed"]
+        .as_str()
+        .unwrap_or("r/reddit");
     let author = post["author"].as_str().unwrap_or("unknown");
     let score = post["score"].as_i64().unwrap_or(0);
     let selftext = post["selftext"].as_str().unwrap_or_default().trim();
@@ -1029,10 +1024,7 @@ async fn fetch_reddit_json(
         md.push_str("\n\n");
     }
 
-    if let Some(comments) = arr
-        .get(1)
-        .and_then(|v| v["data"]["children"].as_array())
-    {
+    if let Some(comments) = arr.get(1).and_then(|v| v["data"]["children"].as_array()) {
         md.push_str("## Top Comments\n\n");
         let mut count = 0usize;
         for c in comments {
@@ -1398,9 +1390,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// Serve one canned HTTP/1.1 response per connection, in order.
-    fn serve(
-        responses: Vec<String>,
-    ) -> (String, Arc<AtomicUsize>, std::thread::JoinHandle<()>) {
+    fn serve(responses: Vec<String>) -> (String, Arc<AtomicUsize>, std::thread::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -1408,10 +1398,9 @@ mod tests {
         let counter = seen.clone();
         let handle = std::thread::spawn(move || {
             for response in responses {
-                let Some(stream) = crate::providers::accept_bounded(
-                    &listener,
-                    std::time::Duration::from_secs(10),
-                ) else {
+                let Some(stream) =
+                    crate::providers::accept_bounded(&listener, std::time::Duration::from_secs(10))
+                else {
                     return;
                 };
                 let mut reader = BufReader::new(&stream);
@@ -1451,10 +1440,7 @@ mod tests {
     /// What fits is returned, with a marker saying the rest is missing.
     #[tokio::test]
     async fn an_oversized_page_returns_its_prefix_instead_of_nothing() {
-        let body = format!(
-            "<html><body><p>{}</p></body></html>",
-            "word ".repeat(2000)
-        );
+        let body = format!("<html><body><p>{}</p></body></html>", "word ".repeat(2000));
         let (base, _seen, handle) = serve(vec![http_200(&body)]);
         let url = Url::parse(&base).unwrap();
         let old = max_body_bytes();
@@ -1479,7 +1465,9 @@ mod tests {
     async fn a_429_is_retried_once() {
         let (base, seen, handle) = serve(vec![
             http_429(),
-            http_200("<html><body><p>hello there, a real page with readable text.</p></body></html>"),
+            http_200(
+                "<html><body><p>hello there, a real page with readable text.</p></body></html>",
+            ),
         ]);
         let url = Url::parse(&base).unwrap();
         let doc = fetch_smart(&test_client(), &url, &[], false).await.unwrap();
@@ -1492,8 +1480,9 @@ mod tests {
     /// document the model reads as "nothing useful here, try again".
     #[tokio::test]
     async fn a_javascript_shell_says_it_has_no_readable_text() {
-        let (base, _seen, handle) =
-            serve(vec![http_200("<html><body><div id=\"root\"></div></body></html>")]);
+        let (base, _seen, handle) = serve(vec![http_200(
+            "<html><body><div id=\"root\"></div></body></html>",
+        )]);
         let url = Url::parse(&base).unwrap();
         let doc = fetch_smart(&test_client(), &url, &[], false).await.unwrap();
         assert!(

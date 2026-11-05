@@ -111,10 +111,8 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         #[cfg(unix)]
         if let Ok(meta) = fs::metadata(path) {
             use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(
-                &tmp,
-                fs::Permissions::from_mode(meta.permissions().mode()),
-            );
+            let _ =
+                fs::set_permissions(&tmp, fs::Permissions::from_mode(meta.permissions().mode()));
         }
         fs::rename(&tmp, path)
     })();
@@ -327,9 +325,16 @@ fn read_ranges(ctx: &mut ToolCtx, raw: &str, spec: &str) -> Outcome {
     const MAX_RANGES: usize = 8;
     let window = ctx.tools.read.window.clamp(1, 10_000);
     let mut wanted: Vec<(usize, usize)> = Vec::new();
-    for part in spec.split([',', ' ', ';']).map(str::trim).filter(|s| !s.is_empty()) {
+    for part in spec
+        .split([',', ' ', ';'])
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         let parsed = match part.split_once('-') {
-            Some((a, b)) => (a.trim().parse::<usize>().ok(), b.trim().parse::<usize>().ok()),
+            Some((a, b)) => (
+                a.trim().parse::<usize>().ok(),
+                b.trim().parse::<usize>().ok(),
+            ),
             None => (part.parse::<usize>().ok(), None),
         };
         match parsed {
@@ -894,6 +899,7 @@ fn splice_line_range(
 ///    tab-vs-space normalization).
 /// 3. Outer blank-line trim retry if the model included extra leading/trailing
 ///    blank lines around `old_string`.
+///
 /// Only succeeds when the match is unambiguous (count == 1).
 fn try_whitespace_or_indent_replace(
     content: &str,
@@ -1730,10 +1736,7 @@ const GLOB_LINE_COUNT_MAX_BYTES: u64 = 8 * 1_024 * 1_024;
 fn line_count(path: &std::path::Path) -> std::io::Result<usize> {
     let meta = fs::metadata(path)?;
     if meta.len() > GLOB_LINE_COUNT_MAX_BYTES {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "file too large to count lines",
-        ));
+        return Err(std::io::Error::other("file too large to count lines"));
     }
     let bytes = fs::read(path)?;
     let mut n = 0usize;
@@ -2363,7 +2366,14 @@ mod tests {
     fn grep_invalid_include_glob_returns_error_instead_of_panicking() {
         let dir = tempfile::tempdir().unwrap();
         let mut ctx = ToolCtx::new(dir.path());
-        let outcome = grep(&mut ctx, "test", None, Some("[unclosed"), 0, &serde_json::Value::Null);
+        let outcome = grep(
+            &mut ctx,
+            "test",
+            None,
+            Some("[unclosed"),
+            0,
+            &serde_json::Value::Null,
+        );
         assert!(!outcome.ok);
         assert!(outcome.output.contains("bad include glob pattern"));
     }
@@ -2402,7 +2412,14 @@ mod tests {
         );
 
         // and a NUL still means binary: skipped, not scanned
-        let bin = grep(&mut ctx, "needle", None, Some("*.dat"), 0, &serde_json::Value::Null);
+        let bin = grep(
+            &mut ctx,
+            "needle",
+            None,
+            Some("*.dat"),
+            0,
+            &serde_json::Value::Null,
+        );
         assert!(
             bin.output.contains("no matches"),
             "binary content must stay out of results: {}",
@@ -2459,7 +2476,14 @@ mod tests {
         let mut ctx = ToolCtx::new(dir.path());
         // grep must not match inside host-owned state (pre-fix: leaked on
         // Windows where hidden(true) checks attributes, not dotfiles)
-        let outcome = grep(&mut ctx, "host_secret_marker_xyz", None, None, 0, &serde_json::Value::Null);
+        let outcome = grep(
+            &mut ctx,
+            "host_secret_marker_xyz",
+            None,
+            None,
+            0,
+            &serde_json::Value::Null,
+        );
         assert!(outcome.ok);
         assert!(!outcome.output.contains(".sqwai"), "{}", outcome.output);
         // glob must not list host-owned files either
@@ -2480,7 +2504,14 @@ mod tests {
         std::fs::write(spill.join("read-big.txt"), "spilled_marker_xyz\n").unwrap();
         let mut ctx = ToolCtx::new(dir.path());
 
-        let sweep = grep(&mut ctx, "spilled_marker_xyz", None, None, 0, &serde_json::Value::Null);
+        let sweep = grep(
+            &mut ctx,
+            "spilled_marker_xyz",
+            None,
+            None,
+            0,
+            &serde_json::Value::Null,
+        );
         assert!(
             sweep.output.contains("no matches"),
             "a project-wide sweep must still not see the spill dir: {}",
@@ -2528,7 +2559,11 @@ mod tests {
         std::fs::create_dir_all(dir.path().join(".sqwai").join("exports")).unwrap();
         let mut ctx = ToolCtx::new(dir.path());
 
-        let written = write_file(&mut ctx, ".sqwai/spill/read-1.txt", "the model's own scratch\n");
+        let written = write_file(
+            &mut ctx,
+            ".sqwai/spill/read-1.txt",
+            "the model's own scratch\n",
+        );
         assert!(written.ok, "{}", written.output);
         assert!(dir.path().join(".sqwai/spill/read-1.txt").exists());
 
@@ -2628,7 +2663,14 @@ mod tests {
         std::fs::write(dir.path().join("many_hits.txt"), body).unwrap();
         let mut ctx = ToolCtx::new(dir.path());
 
-        let outcome = grep(&mut ctx, "hit_line_", None, None, 0, &serde_json::Value::Null);
+        let outcome = grep(
+            &mut ctx,
+            "hit_line_",
+            None,
+            None,
+            0,
+            &serde_json::Value::Null,
+        );
         assert!(outcome.ok, "{}", outcome.output);
         assert!(
             outcome.output.contains("many_hits.txt:1: hit_line_1"),
@@ -2770,7 +2812,11 @@ mod tests {
             files.output
         );
         for name in ["a.rs", "b.rs", "keep.snap"] {
-            assert!(files.output.contains(name), "missing {name}: {}", files.output);
+            assert!(
+                files.output.contains(name),
+                "missing {name}: {}",
+                files.output
+            );
         }
 
         let counted = grep(
@@ -2815,8 +2861,7 @@ mod tests {
         let out = read(&mut ctx, "many.txt", &json!({"ranges": "10-12,200-201"}));
         assert!(out.ok, "{}", out.output);
         assert!(
-            out.output
-                .contains("=== many.txt lines 10-12 ===")
+            out.output.contains("=== many.txt lines 10-12 ===")
                 && out.output.contains("=== many.txt lines 200-201 ==="),
             "each window says where it came from: {}",
             out.output
@@ -3114,9 +3159,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut first = ToolCtx::new(dir.path());
         first.current_call_id = Some("w1".into());
-        let written = write_file(&mut first, "page.html", "one
+        let written = write_file(
+            &mut first,
+            "page.html",
+            "one
 two
-");
+",
+        );
         assert!(written.ok, "{}", written.output);
 
         let mut next = ToolCtx::new(dir.path());
@@ -3128,15 +3177,16 @@ two
 
         let mut third = ToolCtx::new(dir.path());
         third.read_ledger = next.read_ledger.clone();
-        third.visible_calls = Some(HashSet::from([
-            "w1".to_string(),
-            "e1".to_string(),
-        ]));
+        third.visible_calls = Some(HashSet::from(["w1".to_string(), "e1".to_string()]));
         third.current_call_id = Some("w2".into());
-        let rewritten = write_file(&mut third, "page.html", "one
+        let rewritten = write_file(
+            &mut third,
+            "page.html",
+            "one
 TWO
 three
-");
+",
+        );
         assert!(rewritten.ok, "{}", rewritten.output);
     }
 
@@ -3148,13 +3198,24 @@ three
 
         let mut first = ToolCtx::new(dir.path());
         first.current_call_id = Some("w1".into());
-        assert!(write_file(&mut first, "changed.txt", "one
+        assert!(
+            write_file(
+                &mut first,
+                "changed.txt",
+                "one
 two
-").ok);
-        std::fs::write(dir.path().join("changed.txt"), "one
+"
+            )
+            .ok
+        );
+        std::fs::write(
+            dir.path().join("changed.txt"),
+            "one
 TWO
 external
-").unwrap();
+",
+        )
+        .unwrap();
         let mut changed = ToolCtx::new(dir.path());
         changed.read_ledger = first.read_ledger.clone();
         changed.visible_calls = Some(HashSet::from(["w1".to_string()]));
@@ -3168,9 +3229,16 @@ external
 
         let mut second = ToolCtx::new(dir.path());
         second.current_call_id = Some("w1".into());
-        assert!(write_file(&mut second, "cleared.txt", "alpha
+        assert!(
+            write_file(
+                &mut second,
+                "cleared.txt",
+                "alpha
 beta
-").ok);
+"
+            )
+            .ok
+        );
         let mut hidden = ToolCtx::new(dir.path());
         hidden.read_ledger = second.read_ledger.clone();
         hidden.visible_calls = Some(HashSet::new());
@@ -3196,5 +3264,4 @@ beta
             denied.output
         );
     }
-
 }

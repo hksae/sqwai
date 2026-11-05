@@ -835,7 +835,15 @@ fn git_status_and_diff_work_in_project_root() {
         .unwrap();
     std::process::Command::new("git")
         .current_dir(&dir)
-        .args(["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "init"])
+        .args([
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-m",
+            "init",
+        ])
         .status()
         .unwrap();
 
@@ -869,31 +877,6 @@ fn tool_specs_are_stably_sorted() {
     assert_eq!(names, again, "the schema block must be byte-stable");
 }
 
-/// MCP servers answer in their own order: merging must re-sort the whole
-/// set, or the tool prefix (and the cache behind it) re-keys whenever a
-/// server flakes or reorders.
-#[test]
-fn merge_specs_sorts_external_tools_with_builtin_ones() {
-    let spec = |name: &str| crate::providers::ToolSpec {
-        name: name.into(),
-        description: "d".into(),
-        parameters: serde_json::json!({"type": "object"}),
-    };
-    let merged = merge_specs(
-        vec![spec("read"), spec("write")],
-        &[spec("zzz"), spec("aaa")],
-    );
-    let names: Vec<String> = merged.iter().map(|t| t.name.clone()).collect();
-    assert_eq!(names, vec!["aaa", "read", "write", "zzz"]);
-    // server order must not leak through: reversed input, same output
-    let merged = merge_specs(
-        vec![spec("read"), spec("write")],
-        &[spec("aaa"), spec("zzz")],
-    );
-    let names: Vec<String> = merged.iter().map(|t| t.name.clone()).collect();
-    assert_eq!(names, vec!["aaa", "read", "write", "zzz"]);
-}
-
 /// Mid-trim keeps head+tail around the marker, never splits a codepoint,
 /// and leaves fitting text untouched.
 #[test]
@@ -912,10 +895,7 @@ fn trim_middle_keeps_head_and_tail() {
 fn tool_schemas_advertise_mutating_tools_and_classify_them() {
     let specs = tool_specs();
     for name in ["read", "plan", "write", "edit", "bash"] {
-        assert!(
-            specs.iter().any(|t| t.name == name),
-            "{name} is advertised"
-        );
+        assert!(specs.iter().any(|t| t.name == name), "{name} is advertised");
     }
     assert!(is_mutating_call(
         "write",
@@ -1192,9 +1172,7 @@ fn plan_amend_records_a_late_constraint() {
     assert!(amended.ok, "{}", amended.output);
     let plan = plan::open_active(&dir).unwrap().unwrap();
     assert!(
-        plan.constraints
-            .iter()
-            .any(|c| c == "never touch target/"),
+        plan.constraints.iter().any(|c| c == "never touch target/"),
         "{:?}",
         plan.constraints
     );
@@ -2592,14 +2570,14 @@ fn a_write_into_the_data_dir_is_host_state() {
         "deleting the state directory must be refused, not asked"
     );
     // chained behind a cd, and with a relative tail
-    let hit = first_host_state_target(
-        &ctx,
-        &format!("cd {} && rm -rf events", spell(&state)),
-    );
+    let hit = first_host_state_target(&ctx, &format!("cd {} && rm -rf events", spell(&state)));
     assert!(hit.is_some(), "a chained relative delete must be seen too");
     // ordinary project writes are not host state
     assert_eq!(first_host_state_target(&ctx, "rm -f perf.txt"), None);
-    assert_eq!(first_host_state_target(&ctx, "cargo build > build.log"), None);
+    assert_eq!(
+        first_host_state_target(&ctx, "cargo build > build.log"),
+        None
+    );
 
     fs::remove_dir_all(&dir).ok();
     fs::remove_dir_all(&state).ok();

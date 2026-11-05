@@ -566,9 +566,11 @@ fn history_restores_every_child_of_a_batched_delegation() {
                 serde_json::json!({"tasks": ["one", "two", "three"]}),
             )]),
         );
-    app.session
-        .messages
-        .push(Message::tool_result("c1", "## one\nok\n\n## two\nfailed", false));
+    app.session.messages.push(Message::tool_result(
+        "c1",
+        "## one\nok\n\n## two\nfailed",
+        false,
+    ));
     app.session
         .messages
         .push(Message::new(Role::Assistant, "done"));
@@ -716,7 +718,7 @@ fn apply_session_from_startup_does_not_persist_empty_stub() {
 }
 
 #[test]
-fn empty_mark_lines_cover_mcp_plan_and_plain_states() {
+fn empty_mark_lines_cover_header_and_plain_states() {
     let text = |app: &crate::tui::app::App| -> Vec<String> {
         app.empty_mark_lines()
             .iter()
@@ -1572,12 +1574,16 @@ fn load_history_restores_hosted_web_search_rows() {
         .segments
         .iter()
         .find_map(|segment| match segment {
-            Segment::Tool {
-                name, args, ok, ..
-            } if name == "web_search" => Some((args.clone(), *ok)),
+            Segment::Tool { name, args, ok, .. } if name == "web_search" => {
+                Some((args.clone(), *ok))
+            }
             _ => None,
         })
         .expect("hosted search row restored");
     assert_eq!(tool.0, "эль дрифто автобус");
-    assert_eq!(tool.1, Some(true), "it already finished on the provider side");
+    assert_eq!(
+        tool.1,
+        Some(true),
+        "it already finished on the provider side"
+    );
 }
