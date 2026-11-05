@@ -790,6 +790,7 @@ fn subagent_multiline_task_and_blank_deltas_render_without_empty_gaps() {
         "Исследуй файл src/tui/presenter.rs. Найди и опиши:\n1. Как работает дифф\n2. Как работает coalesce"
             .into(),
         "sub-3".into(),
+        false,
     );
     // Expand while running before any tools arrive -> shows "thinking…" without blank gaps.
     if let Some(Segment::Subagent { expanded, .. }) = app.segments.first_mut() {
@@ -992,7 +993,7 @@ fn clicking_a_subagent_row_opens_its_history() {
     use ratatui::{buffer::Buffer, layout::Rect};
     let mut app = test_app("http://127.0.0.1:9/v1".into());
     app.startup = false;
-    app.handle_subagent_start(3, "inspect the renderer".into(), "sub-3".into());
+    app.handle_subagent_start(3, "inspect the renderer".into(), "sub-3".into(), false);
     let area = Rect::new(0, 0, 60, 16);
     let mut buf = Buffer::empty(area);
     app.render_into(&mut buf, area);
@@ -2324,6 +2325,79 @@ fn dragging_in_the_composer_selects_text() {
 /// the window: parts with their colors, free space, and the honest gaps —
 /// "no request yet" before one happens, "unaccounted" for whatever the parts
 /// do not cover of the provider's real prompt count.
+#[test]
+fn restored_paused_child_stays_paused_until_a_resume_marker_arrives() {
+    use crate::agent::events::EventLog;
+    use crate::providers::{Message, Role, ToolCallReq};
+    use serde_json::json;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app("http://127.0.0.1:9/v1".into());
+    app.startup = false;
+    app.project_root = dir.path().to_path_buf();
+    let sid = app.session.id.to_string();
+    let call_id = "call-paused";
+    {
+        let mut log = EventLog::open(dir.path(), &sid).unwrap();
+        log.append(
+            "subagent_start",
+            json!({
+                "call_id": call_id,
+                "child_id": 1,
+                "child_session": "sub-1",
+                "summary": "long task",
+                "status": "running",
+                "background": true,
+                "task_args": "{\"tasks\":[\"long task\"]}",
+                "turn": 1,
+                "model": "m",
+                "approval": "auto",
+            }),
+        )
+        .unwrap();
+        log.append("subagent_paused", json!({"child_id": 1}))
+            .unwrap();
+    }
+    app.session.messages = vec![
+        Message::new(Role::User, "go"),
+        Message::new(Role::Assistant, "").with_tool_calls(vec![ToolCallReq::new(
+            call_id,
+            "subagent",
+            json!({"tasks":["long task"]}),
+        )]),
+        Message::tool_result(call_id, "child done", false),
+    ];
+    app.load_history_segments();
+    let status = |app: &App| {
+        app.segments.iter().find_map(|s| match s {
+            Segment::Subagent {
+                id: 1, status, ..
+            } => Some(status.clone()),
+            _ => None,
+        })
+    };
+    assert_eq!(status(&app).as_deref(), Some("paused"), "{:?}", app.segments);
+    assert!(app.subagent_background.contains(&1));
+
+    // A later resume marker means the child was running when the process
+    // ended: it is interrupted, not paused, and must not be respawned.
+    {
+        let mut log = EventLog::open(dir.path(), &sid).unwrap();
+        log.append("subagent_resumed", json!({"child_id": 1}))
+            .unwrap();
+    }
+    app.segments.clear();
+    app.subagent_background.clear();
+    app.subagent_sessions.clear();
+    app.load_history_segments();
+    assert_eq!(
+        status(&app).as_deref(),
+        Some("interrupted"),
+        "{:?}",
+        app.segments
+    );
+}
+
 #[test]
 fn context_menu_shows_parts_legend_and_honest_gaps() {
     let mut app = test_app("http://127.0.0.1:9/v1".into());

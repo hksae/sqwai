@@ -305,6 +305,9 @@ pub struct App {
     subagent_chats: std::collections::BTreeMap<u64, Vec<Segment>>,
     /// child id -> hidden session id, for loading a restored transcript
     subagent_sessions: std::collections::BTreeMap<u64, String>,
+    /// children owned by the session registry; only these persist pause state
+    /// and are respawned after a restart
+    subagent_background: std::collections::BTreeSet<u64>,
     /// when each live child started; drives the row's elapsed label
     subagent_started: std::collections::BTreeMap<u64, std::time::Instant>,
     /// frozen elapsed time of finished children (start map drops on done)
@@ -808,6 +811,7 @@ impl App {
             subagents: Vec::new(),
             subagent_chats: std::collections::BTreeMap::new(),
             subagent_sessions: std::collections::BTreeMap::new(),
+            subagent_background: std::collections::BTreeSet::new(),
             subagent_started: std::collections::BTreeMap::new(),
             subagent_elapsed: std::collections::BTreeMap::new(),
             active_subagent: None,

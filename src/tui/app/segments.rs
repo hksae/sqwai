@@ -301,16 +301,45 @@ impl App {
         let mut restored_children =
             std::collections::HashMap::<String, Vec<(u64, String, String, String)>>::new();
         let mut max_child_id = 0u64;
+        // Read the persisted events plus a crash-left live tail: a pause
+        // marker may exist only in the tail and is the whole difference
+        // between "paused, will resume" and "interrupted".
+        let mut records = crate::agent::events::EventLog::records_for(
+            &self.project_root,
+            &self.session.id.to_string(),
+        )
+        .unwrap_or_default();
+        // Tests and in-memory callers can populate `session.events` without a
+        // saved file; the tail reader must not hide them.
         for record in &self.session.events {
-            let Some(call_id) = record.fields.get("call_id").and_then(|v| v.as_str()) else {
-                continue;
-            };
+            if !records.iter().any(|known| known.seq == record.seq) {
+                records.push(record.clone());
+            }
+        }
+        records.sort_by_key(|record| record.seq);
+        records.dedup_by_key(|record| record.seq);
+        for record in &records {
             let Some(child_id) = record.fields.get("child_id").and_then(|v| v.as_u64()) else {
                 continue;
             };
             max_child_id = max_child_id.max(child_id);
+            let set_status = |rows: &mut std::collections::HashMap<
+                String,
+                Vec<(u64, String, String, String)>,
+            >,
+                            status: &str| {
+                for row in rows.values_mut().flat_map(|r| r.iter_mut()) {
+                    if row.0 == child_id {
+                        row.2 = status.to_string();
+                    }
+                }
+            };
             match record.kind.as_str() {
                 "subagent_start" => {
+                    let Some(call_id) = record.fields.get("call_id").and_then(|v| v.as_str())
+                    else {
+                        continue;
+                    };
                     let task = record
                         .fields
                         .get("summary")
@@ -323,6 +352,14 @@ impl App {
                         .and_then(|v| v.as_str())
                         .unwrap_or_default()
                         .to_string();
+                    if record
+                        .fields
+                        .get("background")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false)
+                    {
+                        self.subagent_background.insert(child_id);
+                    }
                     let rows = restored_children.entry(call_id.to_string()).or_default();
                     if !rows.iter().any(|(known, _, _, _)| *known == child_id) {
                         rows.push((child_id, task, "interrupted".to_string(), session));
@@ -335,12 +372,13 @@ impl App {
                         .and_then(|v| v.as_str())
                         .unwrap_or("failed")
                         .to_string();
-                    if let Some(row) = restored_children.get_mut(call_id).and_then(|rows| {
-                        rows.iter_mut().find(|(known, _, _, _)| *known == child_id)
-                    }) {
-                        row.2 = status;
-                    }
+                    set_status(&mut restored_children, &status);
                 }
+                "subagent_paused" => set_status(&mut restored_children, "paused"),
+                // A child that was running when the process ended has no
+                // live runner after the reload: it is interrupted, not
+                // paused, and only the paused ones are respawned.
+                "subagent_resumed" => set_status(&mut restored_children, "interrupted"),
                 _ => {}
             }
         }

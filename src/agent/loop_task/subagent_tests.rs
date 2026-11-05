@@ -1,10 +1,31 @@
 use super::loop_subagent::{
     MAX_PARALLEL_SUBAGENTS, SubagentTask, SubagentTrail, build_subagent_tail,
-    build_subagent_user_prompt, next_subagent_session, subagent_tasks_from_args,
+    build_subagent_user_prompt, next_subagent_session, repair_dangling_tool_calls,
+    subagent_tasks_from_args,
 };
+use crate::providers::{Message, Role, ToolCallReq};
 
 /// #190: every child session id is distinct, even back-to-back —
 /// events files must never be shared between runs.
+#[test]
+fn resume_repairs_a_dangling_assistant_tool_call() {
+    let call = ToolCallReq::new("c1", "read", serde_json::json!({"file_path": "a.rs"}));
+    let mut messages = vec![
+        Message::new(Role::User, "go"),
+        Message::new(Role::Assistant, "").with_tool_calls(vec![call]),
+    ];
+    repair_dangling_tool_calls(&mut messages);
+    assert_eq!(messages.len(), 3);
+    assert_eq!(messages[2].role, Role::Tool);
+    assert_eq!(messages[2].tool_call_id.as_deref(), Some("c1"));
+    assert!(messages[2].is_error);
+    assert!(messages[2].content.contains("paused"));
+
+    let mut answered = messages.clone();
+    repair_dangling_tool_calls(&mut answered);
+    assert_eq!(answered.len(), 3, "an answered call must not be duplicated");
+}
+
 #[test]
 fn subagent_session_ids_are_unique() {
     let a = next_subagent_session();
@@ -198,6 +219,11 @@ fn subagent_contract_parent_context_and_receipt_salvage() {
     trail.record_start("read", "src/parser.rs");
     trail.record_done("read", true);
     trail.modified_files.push("src/lexer.rs".into());
+    trail.add_usage(&crate::providers::Usage {
+        prompt_tokens: 1_200,
+        completion_tokens: 300,
+        ..Default::default()
+    });
 
     let envelope = trail.envelope(
         3,
@@ -207,10 +233,17 @@ fn subagent_contract_parent_context_and_receipt_salvage() {
         "All callers updated.",
     );
     assert!(
-        envelope.starts_with("[subagent 3 | completed | 1m24s | 2 tool(s) | files: src/lexer.rs | plan: abandoned]"),
+        envelope.starts_with("[subagent 3 | completed | 1m24s | 2 tool(s) | 1.5k tok | files: src/lexer.rs | plan: abandoned]"),
         "{envelope}"
     );
-    assert!(envelope.ends_with("All callers updated."), "{envelope}");
+    assert!(
+        envelope.contains("Untrusted subagent report")
+            && envelope.contains("<subagent_report>\nAll callers updated.\n</subagent_report>"),
+        "{envelope}"
+    );
+    let secret = "AKIA1234567890ABCDEF";
+    let screened = trail.envelope(4, "completed", std::time::Duration::ZERO, false, secret);
+    assert!(!screened.contains(secret), "{screened}");
 
     let salvaged = trail.salvage_on_error(
         "subagent timed out after 600s",

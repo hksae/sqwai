@@ -91,8 +91,22 @@ impl App {
                     fixed,
                 ));
             }
-            AgentEvent::SubagentStart { id, task, session } => {
-                self.handle_subagent_start(id, task, session);
+            AgentEvent::SubagentStart {
+                id,
+                task,
+                session,
+                background,
+            } => {
+                self.handle_subagent_start(id, task, session, background);
+                self.dirty = true;
+            }
+            AgentEvent::SubagentResumed {
+                id,
+                task,
+                session,
+                background,
+            } => {
+                self.handle_subagent_resumed(id, task, session, background);
                 self.dirty = true;
             }
             AgentEvent::SubagentThinking { id, text } => {
@@ -640,13 +654,22 @@ impl App {
         self.dirty = true;
     }
 
-    pub(super) fn handle_subagent_start(&mut self, id: u64, task: String, session: String) {
+    pub(super) fn handle_subagent_start(
+        &mut self,
+        id: u64,
+        task: String,
+        session: String,
+        background: bool,
+    ) {
         let task = task.split_whitespace().collect::<Vec<_>>().join(" ");
         crate::tui::event_log::log(
             "SUBAGENT",
             format!("start id={id} task_len={}", task.chars().count()),
         );
         self.subagent_sessions.insert(id, session);
+        if background {
+            self.subagent_background.insert(id);
+        }
         self.subagent_started
             .insert(id, std::time::Instant::now());
         self.subagent_elapsed.remove(&id);
@@ -692,6 +715,39 @@ impl App {
                 expanded: false,
             },
         );
+    }
+
+    pub(super) fn handle_subagent_resumed(
+        &mut self,
+        id: u64,
+        task: String,
+        session: String,
+        background: bool,
+    ) {
+        crate::tui::event_log::log("SUBAGENT", format!("resumed id={id}"));
+        self.subagent_sessions.insert(id, session.clone());
+        if background {
+            self.subagent_background.insert(id);
+        }
+        if let Some(row) = self.subagents.iter_mut().find(|(sid, ..)| *sid == id) {
+            row.2 = "running".into();
+        } else {
+            self.handle_subagent_start(id, task, session, background);
+        }
+        self.subagent_started
+            .insert(id, std::time::Instant::now());
+        self.subagent_elapsed.remove(&id);
+        // The old chat was a frozen view of the hidden transcript. Drop it so
+        // the next open reloads the resumed transcript from disk instead of
+        // appending new deltas to the paused snapshot.
+        if self.active_subagent == Some(id) {
+            self.close_subagent_view();
+        }
+        self.subagent_chats.remove(&id);
+        self.subagent_meta.remove(&id);
+        self.sub_stores.remove(&id);
+        self.sub_touch_all(id);
+        self.dirty = true;
     }
 
     pub(super) fn handle_tool_notice(
@@ -827,17 +883,57 @@ impl App {
         changed
     }
 
+    /// Write a pause/resume marker into the parent event log. The start
+    /// record carries the task, args, spawner turn and approval mode; this
+    /// marker is all restart-resume needs to decide what was parked.
+    fn persist_subagent_state(&self, kind: &str, ids: &[u64], status: &str) {
+        if ids.is_empty() {
+            return;
+        }
+        let Ok(mut log) = crate::agent::events::EventLog::open(
+            &self.project_root,
+            &self.session.id.to_string(),
+        ) else {
+            return;
+        };
+        for id in ids {
+            let child_session = self
+                .subagent_sessions
+                .get(id)
+                .cloned()
+                .unwrap_or_default();
+            let _ = log.append(
+                kind,
+                serde_json::json!({
+                    "child_id": id,
+                    "child_session": child_session,
+                    "status": status,
+                }),
+            );
+        }
+    }
+
     /// Esc or an explicit stop: park the writers of this session. Tools are
     /// cancelled through the registry before the children reach a boundary.
     pub(super) fn request_pause_background(&mut self) -> usize {
         let Some(bg) = self.background.get(&self.session.id.to_string()) else {
             return 0;
         };
+        let paused_ids: Vec<u64> = self
+            .subagents
+            .iter()
+            .filter(|(id, _, status, _, _)| {
+                status == "running" && self.subagent_background.contains(id)
+            })
+            .map(|(id, ..)| *id)
+            .collect();
         let registry = bg.registry.clone();
         tokio::spawn(async move {
             let _ = crate::agent::loop_task::pause_background(&registry).await;
         });
-        self.mark_subagent_rows(&["running"], "paused")
+        let n = self.mark_subagent_rows(&["running"], "paused");
+        self.persist_subagent_state("subagent_paused", &paused_ids, "paused");
+        n
     }
 
     /// Continue parked writers, called when the user sends the next message.
@@ -845,11 +941,43 @@ impl App {
         let Some(bg) = self.background.get(&self.session.id.to_string()) else {
             return 0;
         };
+        // Only live children can be woken through the registry. A child
+        // restored from the event log has no runner yet; the parent loop
+        // respawns it at the start of this turn and logs the resume marker.
+        let live_ids: Vec<u64> = self
+            .subagents
+            .iter()
+            .filter(|(id, _, status, _, _)| {
+                status == "paused"
+                    && self.subagent_background.contains(id)
+                    && self.subagent_started.contains_key(id)
+            })
+            .map(|(id, ..)| *id)
+            .collect();
         let registry = bg.registry.clone();
         tokio::spawn(async move {
             let _ = crate::agent::loop_task::resume_background(&registry).await;
         });
-        self.mark_subagent_rows(&["paused"], "running")
+        let mut n = 0usize;
+        for (id, _, status, _, _) in self.subagents.iter_mut() {
+            if status == "paused" && live_ids.contains(id) {
+                *status = "running".into();
+                n += 1;
+            }
+        }
+        for segment in self.segments.iter_mut() {
+            if let Segment::Subagent { id, status, .. } = segment
+                && status == "paused"
+                && live_ids.contains(id)
+            {
+                *status = "running".into();
+            }
+        }
+        if n > 0 {
+            self.dirty = true;
+        }
+        self.persist_subagent_state("subagent_resumed", &live_ids, "running");
+        n
     }
 
     /// Second Esc: destroy paused/running writers instead of parking them.
@@ -857,11 +985,22 @@ impl App {
         let Some(bg) = self.background.get(&self.session.id.to_string()) else {
             return 0;
         };
+        let killed_ids: Vec<u64> = self
+            .subagents
+            .iter()
+            .filter(|(id, _, status, _, _)| {
+                matches!(status.as_str(), "running" | "paused")
+                    && self.subagent_background.contains(id)
+            })
+            .map(|(id, ..)| *id)
+            .collect();
         let registry = bg.registry.clone();
         tokio::spawn(async move {
             let _ = crate::agent::loop_task::kill_background(&registry).await;
         });
-        self.mark_subagent_rows(&["running", "paused"], "killed")
+        let n = self.mark_subagent_rows(&["running", "paused"], "killed");
+        self.persist_subagent_state("subagent_done", &killed_ids, "killed");
+        n
     }
 
     /// Status-row text for writers left behind by the turn.

@@ -25,7 +25,8 @@ use loop_compact::{
     CompactionPrefix, CompactionReason, compact_history, plan_hint_for_summary, record_compaction,
 };
 use loop_subagent::{
-    SUBAGENT_TIMEOUT_SECS, adopt_in_progress_step, run_subagent, run_subagent_batch,
+    MAX_PARALLEL_SUBAGENTS, SUBAGENT_TIMEOUT_SECS, SubagentResume, adopt_in_progress_step,
+    run_subagent, run_subagent_batch,
 };
 use loop_turn::{request_messages, run_turn_with_prefetch, turn_transport};
 
@@ -86,6 +87,286 @@ impl EventSink {
             let _ = tx.send(event).await;
         } else if let Some(tx) = &self.unbounded {
             let _ = tx.send(event);
+        }
+    }
+}
+
+/// Everything a background runner needs after the spawning turn is gone.
+/// The same context spawns a new child and respawns a paused one.
+#[derive(Clone)]
+pub(crate) struct BackgroundSpawnCtx {
+    pub(crate) provider: SharedProvider,
+    pub(crate) model_id: String,
+    pub(crate) root: PathBuf,
+    pub(crate) parent_session: String,
+    pub(crate) parent_tx: EventSink,
+    pub(crate) parent_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub(crate) registry: BackgroundRegistry,
+    pub(crate) blocked: Vec<String>,
+    pub(crate) hosts: Vec<String>,
+    pub(crate) approval_mode: ApprovalMode,
+    pub(crate) context_limit: u64,
+    pub(crate) vision: bool,
+    pub(crate) pdf: bool,
+    pub(crate) tools: crate::config::ToolsConfig,
+    pub(crate) search: crate::config::SearchConfig,
+    pub(crate) limits: crate::config::LimitsConfig,
+    pub(crate) active_skills: Vec<String>,
+    pub(crate) effort: Option<EffortLevel>,
+    pub(crate) effort_support: crate::config::EffortSupport,
+    pub(crate) max_tokens: Option<u32>,
+    pub(crate) system: Vec<SystemPart>,
+    pub(crate) mcp: crate::config::McpConfig,
+    pub(crate) skills: crate::config::SkillsConfig,
+    pub(crate) read_only: bool,
+    pub(crate) shadow_store: crate::config::ShadowStore,
+    pub(crate) compaction: crate::config::CompactionConfig,
+    pub(crate) plan_limits: crate::config::PlanConfig,
+    pub(crate) fallback_chain: Vec<FallbackCandidate>,
+    pub(crate) timeout: std::time::Duration,
+}
+
+/// Spawn one background child and register it. With `resume`, the child keeps
+/// its persisted id/session and continues the hidden transcript instead of
+/// starting from the task prompt.
+async fn spawn_background_child(
+    ctx: &BackgroundSpawnCtx,
+    call: ToolCallReq,
+    parent_turn: u64,
+    label: String,
+    resume: Option<SubagentResume>,
+) -> Result<u64, String> {
+    let ctx = ctx.clone();
+    let (batch_id, notify, steer, registry) = {
+        let mut entries = ctx.registry.lock().await;
+        let active = entries
+            .values()
+            .filter(|entry| matches!(entry.status, "running" | "paused"))
+            .count();
+        // A batched call starts several children under one registry entry;
+        // count them, or a single call could exceed the four-runner cap.
+        let requested = call
+            .args
+            .get("tasks")
+            .and_then(|v| v.as_array())
+            .map(|tasks| tasks.len())
+            .unwrap_or(1)
+            .max(1);
+        if active + requested > MAX_PARALLEL_SUBAGENTS {
+            return Err(format!(
+                "background subagent limit reached ({MAX_PARALLEL_SUBAGENTS} running or paused); \
+                 wait for one to finish or kill it first"
+            ));
+        }
+        let batch_id = if let Some(resume) = resume.as_ref() {
+            if entries.contains_key(&resume.id) {
+                return Err(format!("background subagent {} already exists", resume.id));
+            }
+            resume.id
+        } else {
+            entries.keys().max().copied().unwrap_or(0) + 1
+        };
+        let notify = std::sync::Arc::new(tokio::sync::Notify::new());
+        let steer: SteerControls =
+            std::sync::Arc::new(tokio::sync::Mutex::new(SteerMailbox::default()));
+        entries.insert(
+            batch_id,
+            BackgroundChild {
+                label: label.clone(),
+                status: "running",
+                turn: parent_turn,
+                started: Instant::now(),
+                output: None,
+                delivered: false,
+                abort: None,
+                notify: notify.clone(),
+                steer: steer.clone(),
+            },
+        );
+        (batch_id, notify, steer, ctx.registry.clone())
+    };
+    let registry = registry.clone();
+    let task_registry = registry.clone();
+    let parent_tx = ctx.parent_tx.clone();
+    let parent_session = ctx.parent_session.clone();
+    let parent_cancel = ctx.parent_cancel.clone();
+    let provider = ctx.provider.clone();
+    let model_id = ctx.model_id.clone();
+    let root = ctx.root.clone();
+    let blocked = ctx.blocked.clone();
+    let hosts = ctx.hosts.clone();
+    let tool_caps = ctx.tools.clone();
+    let search = ctx.search.clone();
+    let limits = ctx.limits.clone();
+    let skills_active = ctx.active_skills.clone();
+    let system = ctx.system.clone();
+    let mcp = ctx.mcp.clone();
+    let skills = ctx.skills.clone();
+    let compaction = ctx.compaction.clone();
+    let fallback_chain = ctx.fallback_chain.clone();
+    let task = tokio::spawn(async move {
+        let outcome = run_subagent(
+            &call,
+            &parent_session,
+            parent_turn,
+            &parent_tx,
+            &parent_cancel,
+            &provider,
+            &model_id,
+            &root,
+            &blocked,
+            &hosts,
+            ctx.approval_mode,
+            ctx.context_limit,
+            ctx.vision,
+            ctx.pdf,
+            &tool_caps,
+            &search,
+            &limits,
+            &skills_active,
+            ctx.effort,
+            ctx.effort_support,
+            ctx.max_tokens,
+            system,
+            mcp,
+            skills,
+            ctx.read_only,
+            ctx.shadow_store,
+            compaction,
+            ctx.plan_limits,
+            fallback_chain,
+            ctx.timeout,
+            Some(steer.clone()),
+            resume,
+        )
+        .await;
+        let mut entries = task_registry.lock().await;
+        if let Some(entry) = entries.get_mut(&batch_id) {
+            entry.status = if outcome.ok { "completed" } else { "failed" };
+            entry.output = Some(outcome.output.clone());
+        }
+        notify.notify_waiters();
+    });
+    let abort = task.abort_handle();
+    drop(task);
+    let mut entries = registry.lock().await;
+    if let Some(entry) = entries.get_mut(&batch_id) {
+        entry.abort = Some(abort);
+    }
+    Ok(batch_id)
+}
+
+async fn resume_failed(ctx: &BackgroundSpawnCtx, id: u64, label: &str, reason: &str) {
+    let _ = ctx
+        .parent_tx
+        .send(AgentEvent::SubagentDone {
+            id,
+            ok: false,
+            output: format!(
+                "[subagent {id} | failed | {label}] paused child could not be resumed: {reason}"
+            ),
+        })
+        .await;
+}
+
+/// Respawn children that were parked when the process ended. Only a fresh
+/// registry is eligible: live children still have a runner and resume through
+/// their control channel instead.
+async fn resume_paused_background(ctx: &BackgroundSpawnCtx) {
+    if !ctx.registry.lock().await.is_empty() {
+        return;
+    }
+    let Ok(records) = crate::agent::events::EventLog::records_for(&ctx.root, &ctx.parent_session)
+    else {
+        return;
+    };
+    let mut starts: std::collections::HashMap<u64, serde_json::Map<String, serde_json::Value>> =
+        std::collections::HashMap::new();
+    let mut state: std::collections::HashMap<u64, &'static str> = std::collections::HashMap::new();
+    let mut max_id = 0u64;
+    for record in records {
+        let Some(id) = record.fields.get("child_id").and_then(|v| v.as_u64()) else {
+            continue;
+        };
+        max_id = max_id.max(id);
+        match record.kind.as_str() {
+            "subagent_start" => {
+                starts.insert(id, record.fields.clone());
+                state.insert(id, "running");
+            }
+            "subagent_paused" => {
+                state.insert(id, "paused");
+            }
+            "subagent_resumed" => {
+                state.insert(id, "running");
+            }
+            "subagent_done" => {
+                state.insert(id, "done");
+            }
+            _ => {}
+        }
+    }
+    loop_subagent::bump_subagent_id_at_least(max_id);
+    let paused: Vec<u64> = state
+        .into_iter()
+        .filter_map(|(id, status)| (status == "paused").then_some(id))
+        .collect();
+    for id in paused {
+        let Some(fields) = starts.get(&id) else {
+            continue;
+        };
+        if !fields
+            .get("background")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        let label = fields
+            .get("summary")
+            .and_then(|v| v.as_str())
+            .unwrap_or("subagent")
+            .to_string();
+        let (Some(call_id), Some(child_session), Some(task_args)) = (
+            fields.get("call_id").and_then(|v| v.as_str()),
+            fields.get("child_session").and_then(|v| v.as_str()),
+            fields.get("task_args").and_then(|v| v.as_str()),
+        ) else {
+            resume_failed(ctx, id, &label, "no persisted task/session").await;
+            continue;
+        };
+        let Ok(args) = serde_json::from_str::<serde_json::Value>(task_args) else {
+            resume_failed(ctx, id, &label, "task arguments are unreadable").await;
+            continue;
+        };
+        let Ok(doc) = crate::session::Session::load(child_session) else {
+            resume_failed(ctx, id, &label, "hidden transcript is missing").await;
+            continue;
+        };
+        let approval = fields
+            .get("approval")
+            .and_then(|v| v.as_str())
+            .and_then(ApprovalMode::from_str)
+            .unwrap_or(ctx.approval_mode);
+        let parent_turn = fields.get("turn").and_then(|v| v.as_u64()).unwrap_or(0);
+        let call = ToolCallReq {
+            id: call_id.to_string(),
+            name: "subagent".into(),
+            args,
+            extra_content: None,
+        };
+        let resume = SubagentResume {
+            id,
+            child_session: child_session.to_string(),
+            parent_turn,
+            approval,
+            messages: doc.messages.clone(),
+            summary: doc.summary.clone(),
+        };
+        if let Err(error) =
+            spawn_background_child(ctx, call, parent_turn, label.clone(), Some(resume)).await
+        {
+            resume_failed(ctx, id, &label, &error).await;
         }
     }
 }
@@ -260,6 +541,17 @@ pub(crate) struct SteerMailbox {
     /// Pause requested before the child registered its control channel.
     /// Resume clears it; if the child never ran, there is nothing to resume.
     pub(crate) pending_pause: bool,
+    /// Live status counters for `subagents list`. Written by the runner on
+    /// tool/usage/step events; text deltas are deliberately not counted so a
+    /// long stream never blocks the pause mailbox.
+    pub(crate) last_event: Option<std::time::Instant>,
+    pub(crate) current_tool: Option<String>,
+    pub(crate) tool_count: usize,
+    pub(crate) prompt_tokens: u64,
+    pub(crate) completion_tokens: u64,
+    pub(crate) plan_step: Option<String>,
+    /// Child ids this batch registered; kill writes a done marker for each.
+    pub(crate) child_ids: Vec<u64>,
 }
 type SteerControls = std::sync::Arc<tokio::sync::Mutex<SteerMailbox>>;
 
@@ -366,6 +658,15 @@ pub enum AgentEvent {
         task: String,
         /// child event-session id, used to load its hidden transcript
         session: String,
+        /// true when the child is owned by the session registry (background)
+        background: bool,
+    },
+    /// a paused child was respawned from its hidden transcript after a restart
+    SubagentResumed {
+        id: u64,
+        task: String,
+        session: String,
+        background: bool,
     },
     /// a reasoning delta from a delegated child
     SubagentThinking {
@@ -637,9 +938,19 @@ async fn drain_background_reports(
 }
 
 
+fn fmt_tokens(tokens: u64) -> String {
+    if tokens >= 1_000 {
+        format!("{:.1}k", tokens as f64 / 1_000.0)
+    } else {
+        tokens.to_string()
+    }
+}
+
 async fn subagents_control(
     registry: &BackgroundRegistry,
     args: &serde_json::Value,
+    root: &std::path::Path,
+    session_id: &str,
 ) -> tools::Outcome {
     let action = args["action"].as_str().unwrap_or("list");
     if action == "list" {
@@ -661,6 +972,26 @@ async fn subagents_control(
                 entry.status,
                 entry.started.elapsed().as_secs()
             ));
+            let stats = entry.steer.lock().await;
+            if let Some(last) = stats.last_event {
+                out.push_str(&format!(" — last {}s ago", last.elapsed().as_secs()));
+            }
+            if let Some(tool) = stats.current_tool.as_deref() {
+                out.push_str(&format!(" — tool: {tool}"));
+            }
+            if stats.tool_count > 0 {
+                out.push_str(&format!(" — {} tool(s)", stats.tool_count));
+            }
+            let tokens = stats
+                .prompt_tokens
+                .saturating_add(stats.completion_tokens);
+            if tokens > 0 {
+                out.push_str(&format!(" — {} tok", fmt_tokens(tokens)));
+            }
+            if let Some(step) = stats.plan_step.as_deref() {
+                out.push_str(&format!(" — step {step}"));
+            }
+            drop(stats);
             if entry.output.is_some() && !entry.delivered {
                 out.push_str(" — report ready");
             }
@@ -674,17 +1005,35 @@ async fn subagents_control(
     let wait = args["wait_secs"].as_u64().unwrap_or(0).min(300);
 
     if action == "kill" {
-        let mut entries = registry.lock().await;
-        let Some(entry) = entries.get_mut(&id) else {
-            return tools::Outcome::err(format!("no background subagent {id}"));
+        let (label, child_ids) = {
+            let mut entries = registry.lock().await;
+            let Some(entry) = entries.get_mut(&id) else {
+                return tools::Outcome::err(format!("no background subagent {id}"));
+            };
+            if let Some(abort) = entry.abort.as_ref() {
+                abort.abort();
+            }
+            entry.status = "killed";
+            entry.output = Some("subagent killed by parent".into());
+            entry.delivered = true;
+            entry.notify.notify_waiters();
+            let child_ids = entry.steer.lock().await.child_ids.clone();
+            (entry.label.clone(), child_ids)
         };
-        if let Some(abort) = entry.abort.as_ref() {
-            abort.abort();
+        // A paused child is respawned from its event trail; kill must leave a
+        // done marker or the next restart would wake it again.
+        if let Ok(mut log) = crate::agent::events::EventLog::open(root, session_id) {
+            for child_id in child_ids {
+                let _ = log.append(
+                    "subagent_done",
+                    serde_json::json!({
+                        "child_id": child_id,
+                        "summary": label,
+                        "status": "killed",
+                    }),
+                );
+            }
         }
-        entry.status = "killed";
-        entry.output = Some("subagent killed by parent".into());
-        entry.delivered = true;
-        entry.notify.notify_waiters();
         return tools::Outcome::ok(format!("background subagent {id} killed"));
     }
     if action == "send" {
@@ -715,20 +1064,20 @@ async fn subagents_control(
         if sent == 0 {
             // The child may not have registered its channel yet. Queue until
             // it does; a finished batch will never read it, so refuse there.
-            let running = {
+            let live = {
                 let entries = registry.lock().await;
                 entries
                     .get(&id)
-                    .is_some_and(|entry| entry.status == "running")
+                    .is_some_and(|entry| matches!(entry.status, "running" | "paused"))
             };
-            if running {
+            if live {
                 mailbox.pending.push((message.to_string(), interrupt));
                 return tools::Outcome::ok(format!(
                     "message queued for background subagent {id}; its child will read it at the next request"
                 ));
             }
             return tools::Outcome::err(format!(
-                "background subagent {id} has no running child to receive the message"
+                "background subagent {id} has no running or paused child to receive the message"
             ));
         }
         return tools::Outcome::ok(format!(
@@ -1850,6 +2199,42 @@ async fn run_agent(
     // later turn. Undo of the spawner turn cancels whatever is still running.
     let background_registry = background_registry.unwrap_or_else(new_background_registry);
     let background_sink = background_events.map(EventSink::unbounded);
+    let background_spawn = BackgroundSpawnCtx {
+        provider: provider.clone(),
+        model_id: model_id.clone(),
+        root: root.clone(),
+        parent_session: session_id.clone(),
+        parent_tx: background_sink
+            .clone()
+            .unwrap_or_else(|| EventSink::bounded(tx.clone())),
+        parent_cancel: cancel_tool.clone(),
+        registry: background_registry.clone(),
+        blocked: blocked_patterns.clone(),
+        hosts: web_allow_hosts.clone(),
+        approval_mode,
+        context_limit,
+        vision,
+        pdf,
+        tools: tool_caps.clone(),
+        search: search.clone(),
+        limits: limits.clone(),
+        active_skills: active_skills.clone(),
+        effort,
+        effort_support,
+        max_tokens,
+        system: system.clone(),
+        mcp: mcp.clone(),
+        skills: skills.clone(),
+        read_only,
+        shadow_store,
+        compaction: compaction.clone(),
+        plan_limits,
+        fallback_chain: fallback_chain.clone(),
+        timeout: std::time::Duration::from_secs(SUBAGENT_TIMEOUT_SECS),
+    };
+    if subagent_depth == 0 && background_sink.is_some() {
+        resume_paused_background(&background_spawn).await;
+    }
 
     loop {
         // Parent messages reach a child at its next request boundary. The
@@ -2804,7 +3189,13 @@ async fn run_agent(
                             outcome
                         }
                         "subagents" if subagent_depth == 0 => {
-                            subagents_control(&background_registry, &call.args).await
+                            subagents_control(
+                                &background_registry,
+                                &call.args,
+                                &root,
+                                &session_id,
+                            )
+                            .await
                         }
                         "subagent" if subagent_depth == 0 => {
                             let background = call
@@ -2813,112 +3204,22 @@ async fn run_agent(
                                 .and_then(|v| v.as_bool())
                                 .unwrap_or(background_subagents);
                             if background {
-                                let call = call.clone();
-                                let parent_session = ctx.session_id.clone();
-                                let parent_tx = background_sink
-                                    .clone()
-                                    .unwrap_or_else(|| EventSink::bounded(tx.clone()));
-                                let parent_cancel = ctx.cancel.clone();
-                                let provider = provider.clone();
-                                let model_id = model_id.clone();
-                                let root = root.clone();
-                                let blocked = blocked_patterns.to_vec();
-                                let hosts = web_allow_hosts.to_vec();
-                                let tool_caps = tool_caps.clone();
-                                let search = ctx.search.clone();
-                                let limits = limits.clone();
-                                let skills_active = active_skills.to_vec();
-                                let system = system.clone();
-                                let mcp = mcp.clone();
-                                let skills = skills.clone();
-                                let compaction = compaction.clone();
-                                let fallback_chain = fallback_chain.clone();
                                 let label =
                                     crate::agent::tools::call_summary(&call.name, &call.args);
-                                let registry = background_registry.clone();
-                                // Ids are per session, not per turn: a
-                                // finished child stays listed for `subagents
-                                // output`, and a new turn must not reuse it.
-                                let batch_id = {
-                                    let entries = registry.lock().await;
-                                    entries.keys().max().copied().unwrap_or(0) + 1
-                                };
-                                let task_registry = registry.clone();
-                                let notify = std::sync::Arc::new(tokio::sync::Notify::new());
-                                let steer: SteerControls = std::sync::Arc::new(
-                                    tokio::sync::Mutex::new(SteerMailbox::default()),
-                                );
-                                registry.lock().await.insert(
-                                    batch_id,
-                                    BackgroundChild {
-                                        label: label.clone(),
-                                        status: "running",
-                                        turn: user_turn,
-                                        started: Instant::now(),
-                                        output: None,
-                                        delivered: false,
-                                        abort: None,
-                                        notify: notify.clone(),
-                                        steer: steer.clone(),
-                                    },
-                                );
-                                let task = tokio::spawn(async move {
-                                    let outcome = run_subagent(
-                                        &call,
-                                        &parent_session,
-                                        user_turn,
-                                        &parent_tx,
-                                        &parent_cancel,
-                                        &provider,
-                                        &model_id,
-                                        &root,
-                                        &blocked,
-                                        &hosts,
-                                        approval_mode,
-                                        context_limit,
-                                        vision,
-                                        pdf,
-                                        &tool_caps,
-                                        &search,
-                                        &limits,
-                                        &skills_active,
-                                        effort,
-                                        effort_support,
-                                        max_tokens,
-                                        system,
-                                        mcp,
-                                        skills,
-                                        read_only,
-                                        shadow_store,
-                                        compaction,
-                                        plan_limits,
-                                        fallback_chain,
-                                        std::time::Duration::from_secs(
-                                            SUBAGENT_TIMEOUT_SECS,
-                                        ),
-                                        Some(steer.clone()),
-                                    )
-                                    .await;
-                                    let mut entries = task_registry.lock().await;
-                                    if let Some(entry) = entries.get_mut(&batch_id) {
-                                        entry.status =
-                                            if outcome.ok { "completed" } else { "failed" };
-                                        entry.output = Some(outcome.output.clone());
-                                    }
-                                    notify.notify_waiters();
-                                });
-                                let abort = task.abort_handle();
-                                // Detach: a writer may finish after the answer
-                                // that spawned it. Its result reaches a later
-                                // turn; the abort handle stays for `kill`.
-                                drop(task);
-                                let mut entries = registry.lock().await;
-                                if let Some(entry) = entries.get_mut(&batch_id) {
-                                    entry.abort = Some(abort);
+                                match spawn_background_child(
+                                    &background_spawn,
+                                    call.clone(),
+                                    user_turn,
+                                    label.clone(),
+                                    None,
+                                )
+                                .await
+                                {
+                                    Ok(batch_id) => tools::Outcome::ok(format!(
+                                        "started background subagent {batch_id} ({label}); use subagents output id={batch_id} to wait, or let its report arrive on a later turn"
+                                    )),
+                                    Err(error) => tools::Outcome::err(error),
                                 }
-                                tools::Outcome::ok(format!(
-                                    "started background subagent {batch_id} ({label}); use subagents output id={batch_id} to wait, or let its report arrive on a later turn"
-                                ))
                             } else {
                             let outcome = run_subagent(
                                 call,
@@ -2951,6 +3252,7 @@ async fn run_agent(
                                 plan_limits,
                                 fallback_chain.clone(),
                                 std::time::Duration::from_secs(SUBAGENT_TIMEOUT_SECS),
+                                None,
                                 None,
                             )
                             .await;

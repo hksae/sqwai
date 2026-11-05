@@ -1695,6 +1695,7 @@ async fn subagent_does_not_join_its_parent_plan() {
         Vec::new(),
         std::time::Duration::from_secs(SUBAGENT_TIMEOUT_SECS),
         None,
+        None,
     )
     .await;
     assert!(outcome.ok, "{}", outcome.output);
@@ -1711,10 +1712,220 @@ async fn subagent_does_not_join_its_parent_plan() {
 /// The parent event log carries one start/done pair per child, which is what
 /// the reload uses to rebuild every row of a batched call.
 #[tokio::test]
+async fn subagents_list_reports_live_tool_tokens_and_plan_step() {
+    use std::sync::Arc;
+    let registry = super::new_background_registry();
+    registry.lock().await.insert(
+        9,
+        super::BackgroundChild {
+            label: "inspect".into(),
+            status: "running",
+            turn: 1,
+            started: Instant::now(),
+            output: None,
+            delivered: false,
+            abort: None,
+            notify: Arc::new(tokio::sync::Notify::new()),
+            steer: Arc::new(tokio::sync::Mutex::new(SteerMailbox {
+                last_event: Some(Instant::now()),
+                current_tool: Some("bash".into()),
+                tool_count: 3,
+                prompt_tokens: 1_200,
+                completion_tokens: 300,
+                plan_step: Some("2".into()),
+                ..Default::default()
+            })),
+        },
+    );
+    let outcome = super::subagents_control(
+        &registry,
+        &serde_json::json!({"action": "list"}),
+        std::path::Path::new("."),
+        "parent",
+    )
+    .await;
+    assert!(outcome.ok, "{}", outcome.output);
+    assert!(outcome.output.contains("tool: bash"), "{}", outcome.output);
+    assert!(outcome.output.contains("3 tool(s)"), "{}", outcome.output);
+    assert!(outcome.output.contains("1.5k tok"), "{}", outcome.output);
+    assert!(outcome.output.contains("step 2"), "{}", outcome.output);
+}
+
+#[tokio::test]
+async fn background_children_are_capped_at_four() {
+    use std::sync::Arc;
+    let root = std::env::temp_dir().join(format!("sqwai-subcap-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&root);
+    let registry = super::new_background_registry();
+    for id in 1..=4u64 {
+        registry.lock().await.insert(
+            id,
+            super::BackgroundChild {
+                label: format!("task {id}"),
+                status: "running",
+                turn: 1,
+                started: Instant::now(),
+                output: None,
+                delivered: false,
+                abort: None,
+                notify: Arc::new(tokio::sync::Notify::new()),
+                steer: Arc::new(tokio::sync::Mutex::new(SteerMailbox::default())),
+            },
+        );
+    }
+    let (tx, _rx) = mpsc::channel(8);
+    let ctx = super::BackgroundSpawnCtx {
+        provider: Arc::new(MockTestProvider {
+            events: std::sync::Mutex::new(Vec::new()),
+        }),
+        model_id: "m".into(),
+        root: root.clone(),
+        parent_session: "parent".into(),
+        parent_tx: crate::agent::loop_task::EventSink::bounded(tx),
+        parent_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        registry: registry.clone(),
+        blocked: Vec::new(),
+        hosts: Vec::new(),
+        approval_mode: crate::config::ApprovalMode::Auto,
+        context_limit: 200_000,
+        vision: true,
+        pdf: true,
+        tools: Default::default(),
+        search: Default::default(),
+        limits: Default::default(),
+        active_skills: Vec::new(),
+        effort: None,
+        effort_support: Default::default(),
+        max_tokens: None,
+        system: Vec::new(),
+        mcp: Default::default(),
+        skills: Default::default(),
+        read_only: false,
+        shadow_store: crate::config::ShadowStore::Off,
+        compaction: Default::default(),
+        plan_limits: Default::default(),
+        fallback_chain: Vec::new(),
+        timeout: std::time::Duration::from_secs(5),
+    };
+    let call = crate::providers::ToolCallReq::new(
+        "cap-call",
+        "subagent",
+        serde_json::json!({"tasks": ["extra"]}),
+    );
+    let error = super::spawn_background_child(&ctx, call, 1, "extra".into(), None)
+        .await
+        .expect_err("a fifth background child must be refused");
+    assert!(error.contains("limit"), "{error}");
+    assert_eq!(registry.lock().await.len(), 4);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn resumed_child_continues_its_dangling_transcript() {
+    let root = std::env::temp_dir().join(format!("sqwai-subresume-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::create_dir_all(&root);
+    let _ = crate::agent::events::EventLog::take(&root, "parent-resume");
+    let recorder = std::sync::Arc::new(RecordingTestProvider {
+        events: std::sync::Mutex::new(vec![vec![Ok(crate::providers::StreamEvent::Text(
+            "resumed report".into(),
+        ))]]),
+        requests: std::sync::Mutex::new(Vec::new()),
+    });
+    let provider: SharedProvider = recorder.clone();
+    let (parent_tx, _parent_rx) = mpsc::channel(64);
+    let call = crate::providers::ToolCallReq::new(
+        "call-resume",
+        "subagent",
+        serde_json::json!({"tasks": ["resume task"]}),
+    );
+    let resume = super::loop_subagent::SubagentResume {
+        id: 77,
+        child_session: "sub-resume-test".into(),
+        parent_turn: 3,
+        approval: crate::config::ApprovalMode::Auto,
+        messages: vec![
+            crate::providers::Message::new(crate::providers::Role::User, "original task"),
+            crate::providers::Message::new(crate::providers::Role::Assistant, "")
+                .with_tool_calls(vec![crate::providers::ToolCallReq::new(
+                    "read-1",
+                    "read",
+                    serde_json::json!({"file_path": "a.rs"}),
+                )]),
+        ],
+        summary: Some("old summary".into()),
+    };
+    let outcome = run_subagent(
+        &call,
+        "parent-resume",
+        0,
+        &crate::agent::loop_task::EventSink::bounded(parent_tx.clone()),
+        &std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        &provider,
+        "m",
+        &root,
+        &[],
+        &[],
+        crate::config::ApprovalMode::Auto,
+        200_000,
+        true,
+        true,
+        &Default::default(),
+        &Default::default(),
+        &Default::default(),
+        &[],
+        None,
+        crate::config::EffortSupport::default(),
+        None,
+        Vec::new(),
+        crate::config::McpConfig::default(),
+        crate::config::SkillsConfig::default(),
+        false,
+        crate::config::ShadowStore::Off,
+        crate::config::CompactionConfig::default(),
+        crate::config::PlanConfig::default(),
+        Vec::new(),
+        std::time::Duration::from_secs(5),
+        None,
+        Some(resume),
+    )
+    .await;
+    assert!(outcome.ok, "{}", outcome.output);
+    assert!(outcome.output.contains("resumed report"), "{}", outcome.output);
+
+    let requests = recorder.requests.lock().unwrap();
+    let req = requests.first().expect("the resumed child must make a request");
+    assert!(
+        req.messages.iter().any(|m| {
+            m.role == crate::providers::Role::Tool
+                && m.tool_call_id.as_deref() == Some("read-1")
+                && m.is_error
+        }),
+        "{:?}",
+        req.messages
+            .iter()
+            .map(|m| (m.role, m.tool_call_id.clone(), m.content.clone()))
+            .collect::<Vec<_>>()
+    );
+    assert!(req.messages.iter().any(|m| m.content.contains("<subagent_resume>")));
+    drop(requests);
+
+    let records = crate::agent::events::EventLog::records_for(&root, "parent-resume").unwrap();
+    assert!(records.iter().any(|r| r.kind == "subagent_resumed"));
+    assert!(records.iter().any(|r| r.kind == "subagent_done"));
+    assert!(!records.iter().any(|r| r.kind == "subagent_start"));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
 async fn subagent_lifecycle_lands_in_the_parent_event_log() {
     let root = std::env::temp_dir().join(format!("sqwai-sublog-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     let _ = std::fs::create_dir_all(&root);
+    // The state store is keyed by the project root, not by the temp
+    // directory alone; a reused test PID can otherwise inherit yesterday's
+    // records for the same session name.
+    let _ = crate::agent::events::EventLog::take(&root, "parent-events");
     let provider: SharedProvider = std::sync::Arc::new(MockTestProvider {
         events: std::sync::Mutex::new(vec![vec![Ok(crate::providers::StreamEvent::Text(
             "child done".into(),
@@ -1757,6 +1968,7 @@ async fn subagent_lifecycle_lands_in_the_parent_event_log() {
         crate::config::PlanConfig::default(),
         Vec::new(),
         std::time::Duration::from_secs(SUBAGENT_TIMEOUT_SECS),
+        None,
         None,
     )
     .await;
@@ -1917,6 +2129,7 @@ async fn subagent_ignores_a_foreign_active_plan() {
         Vec::new(),
         std::time::Duration::from_secs(SUBAGENT_TIMEOUT_SECS),
         None,
+        None,
     )
     .await;
     assert!(outcome.ok, "{}", outcome.output);
@@ -2018,6 +2231,7 @@ async fn a_child_request_omits_subagent_and_ask_user_tools() {
         crate::config::PlanConfig::default(),
         Vec::new(),
         std::time::Duration::from_secs(SUBAGENT_TIMEOUT_SECS),
+        None,
         None,
     )
     .await;
@@ -2416,6 +2630,7 @@ async fn hung_subagent_times_out_and_aborts() {
         Vec::new(),
         std::time::Duration::from_millis(150),
         None,
+        None,
     )
     .await;
     assert!(!outcome.ok, "a hung child must fail, not hang");
@@ -2485,6 +2700,7 @@ async fn esc_stops_a_subagent_wait_without_the_timeout() {
         crate::config::PlanConfig::default(),
         Vec::new(),
         std::time::Duration::from_secs(60),
+        None,
         None,
     )
     .await;
@@ -3285,6 +3501,125 @@ async fn pause_cancels_a_running_tool_and_resume_continues_with_the_cancelled_re
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// The task clock stops while the user is answering a child approval. The
+/// budget is 300 ms; the answer deliberately arrives 500 ms later. Without
+/// the approval wait extension this child would be killed as timed out.
+#[tokio::test]
+async fn an_approval_wait_does_not_spend_the_child_task_timeout() {
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
+
+    let root = std::env::temp_dir().join(format!("sqwai-approval-wait-{}", std::process::id()));
+    let outside = std::env::temp_dir().join(format!(
+        "sqwai-approval-outside-{}.txt",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::create_dir_all(&root);
+    std::fs::write(&outside, "outside file").unwrap();
+    let recorder = Arc::new(RecordingTestProvider {
+        // pop() takes the last batch first: the tool call is the first request.
+        events: std::sync::Mutex::new(vec![
+            vec![Ok(crate::providers::StreamEvent::Text(
+                "after approval".into(),
+            ))],
+            vec![Ok(crate::providers::StreamEvent::ToolCall(
+                crate::providers::ToolCallReq::new(
+                    "approval-call",
+                    "read",
+                    serde_json::json!({
+                        "file_path": outside.display().to_string(),
+                    }),
+                ),
+            ))],
+        ]),
+        requests: std::sync::Mutex::new(Vec::new()),
+    });
+    let provider: SharedProvider = recorder.clone();
+    let (parent_tx, mut parent_rx) = mpsc::channel(64);
+    let sink = crate::agent::loop_task::EventSink::bounded(parent_tx);
+    let cancel = Arc::new(AtomicBool::new(false));
+    let tools = Default::default();
+    let search = Default::default();
+    let limits = Default::default();
+    let call = crate::providers::ToolCallReq::new(
+        "approval-wait",
+        "subagent",
+        serde_json::json!({"tasks": ["work"]}),
+    );
+    let future = super::loop_subagent::run_subagent(
+        &call,
+        "approval-parent",
+        1,
+        &sink,
+        &cancel,
+        &provider,
+        "m",
+        &root,
+        &[],
+        &[],
+        crate::config::ApprovalMode::Auto,
+        200_000,
+        true,
+        true,
+        &tools,
+        &search,
+        &limits,
+        &[],
+        None,
+        crate::config::EffortSupport::default(),
+        None,
+        Vec::new(),
+        crate::config::McpConfig::default(),
+        crate::config::SkillsConfig::default(),
+        false,
+        crate::config::ShadowStore::Off,
+        crate::config::CompactionConfig::default(),
+        crate::config::PlanConfig::default(),
+        Vec::new(),
+        std::time::Duration::from_millis(300),
+        None,
+        None,
+    );
+    tokio::pin!(future);
+    let mut answer_at: Option<(u64, u64, tokio::time::Instant)> = None;
+    let mut asked = false;
+    let outcome = loop {
+        tokio::select! {
+            event = parent_rx.recv() => {
+                if let Some(AgentEvent::SubagentApproval { child, id, .. }) = event {
+                    asked = true;
+                    answer_at = Some((
+                        child,
+                        id,
+                        tokio::time::Instant::now() + std::time::Duration::from_millis(500),
+                    ));
+                }
+            }
+            _ = async {
+                if let Some((_, _, at)) = answer_at {
+                    tokio::time::sleep_until(at).await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            } => {
+                if let Some((child, id, _)) = answer_at.take() {
+                    assert!(
+                        answer_subagent_approval(child, id, ApprovalDecision::RunOnce),
+                        "the child must still be registered while it waits"
+                    );
+                }
+            }
+            out = &mut future => break out,
+        }
+    };
+    assert!(asked, "the command must surface an approval, or this proves nothing");
+    assert!(outcome.ok, "{}", outcome.output);
+    assert!(outcome.output.contains("after approval"), "{}", outcome.output);
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_file(&outside);
+}
+
 /// Pause/resume/kill flip the registry state and reach the child control
 /// channel; pause also sets the shared flags so a running tool stops before
 /// the child reaches its boundary.
@@ -3302,6 +3637,7 @@ async fn pause_resume_and_kill_reach_the_child_and_the_registry() {
         pauses: vec![pause.clone()],
         pending: Vec::new(),
         pending_pause: false,
+        ..Default::default()
     }));
     registry.lock().await.insert(
         7,
@@ -3389,6 +3725,7 @@ async fn a_paused_child_does_not_spend_its_task_timeout() {
         pauses: Vec::new(),
         pending: Vec::new(),
         pending_pause: true,
+        ..Default::default()
     }));
     let call = crate::providers::ToolCallReq::new(
         "timeout-call",
@@ -3436,6 +3773,7 @@ async fn a_paused_child_does_not_spend_its_task_timeout() {
         Vec::new(),
         std::time::Duration::from_millis(300),
         Some(steer.clone()),
+        None,
     );
     tokio::pin!(future);
     // Well past the 300ms budget. The first request is still blocked and the
@@ -3651,6 +3989,7 @@ async fn a_child_outside_image_asks_the_parent_and_views() {
         plan_limits,
         Vec::new(),
         std::time::Duration::from_secs(10),
+        None,
         None,
     );
     tokio::pin!(future);

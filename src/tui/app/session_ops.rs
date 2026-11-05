@@ -622,6 +622,7 @@ impl App {
         self.subagents.clear();
         self.subagent_chats.clear();
         self.subagent_sessions.clear();
+        self.subagent_background.clear();
         self.subagent_started.clear();
         self.subagent_elapsed.clear();
         self.subagent_meta.clear();
@@ -726,6 +727,7 @@ impl App {
         self.subagents.clear();
         self.subagent_chats.clear();
         self.subagent_sessions.clear();
+        self.subagent_background.clear();
         self.subagent_started.clear();
         self.subagent_elapsed.clear();
         self.subagent_meta.clear();
