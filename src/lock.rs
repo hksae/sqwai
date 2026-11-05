@@ -196,12 +196,17 @@ pub(crate) fn process_start(pid: u32) -> Option<u64> {
 /// `/proc/<pid>/stat` field 22 (starttime, in clock ticks since boot). Field
 /// 2 may contain spaces and parentheses, so parsing starts after the last
 /// `)` — the field this reads is index 19 in what follows.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 pub(crate) fn process_start(pid: u32) -> Option<u64> {
     let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     stat.rsplit_once(')')
         .and_then(|(_, rest)| rest.split_whitespace().nth(19))
         .and_then(|ticks| ticks.parse().ok())
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+pub(crate) fn process_start(_pid: u32) -> Option<u64> {
+    None
 }
 
 #[cfg(not(any(windows, unix)))]
@@ -289,6 +294,7 @@ mod tests {
     /// A recycled PID once kept a dead instance's project locked forever.
     /// The start identity distinguishes the process that wrote the file from
     /// whatever now wears its number.
+    #[cfg(any(windows, target_os = "linux"))]
     #[test]
     fn a_reused_pid_with_a_different_start_is_pruned() {
         let started = process_start(std::process::id()).expect("this process has a start identity");

@@ -739,8 +739,8 @@ fn open_quarantines_when_rebuild_diverges_or_lacks_intent() {
         serde_json::json!({"op": "plan_deleted", "plan_id": "gone", "by": "host", "ok": true}),
     )
     .unwrap();
-    std::fs::create_dir_all(dir2.join(".sqwai/plans")).unwrap();
-    std::fs::write(dir2.join(".sqwai/plans/gone.json"), "garbage{").unwrap();
+    std::fs::create_dir_all(plans_dir(&dir2)).unwrap();
+    std::fs::write(plans_dir(&dir2).join("gone.json"), "garbage{").unwrap();
     assert!(open(&dir2, "gone").is_err());
     assert!(plans_dir(&dir2).join("corrupt/gone.json").exists());
     std::fs::remove_dir_all(&dir).ok();

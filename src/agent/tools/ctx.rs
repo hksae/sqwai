@@ -1130,6 +1130,7 @@ mod outside_jail_tests {
         assert!(ctx.write_escapes(dir.path().join("outside.txt").to_string_lossy().as_ref()));
     }
 
+    #[cfg(windows)]
     #[test]
     fn git_bash_drive_paths_resolve_to_the_real_drive() {
         let dir = tempfile::tempdir().unwrap();
@@ -1149,6 +1150,7 @@ mod outside_jail_tests {
         assert!(!ctx.write_escapes(&proj_unix), "{proj_unix}");
     }
 
+    #[cfg(windows)]
     #[test]
     fn rooted_paths_without_a_drive_refuse_instead_of_phantom_joining() {
         let dir = tempfile::tempdir().unwrap();

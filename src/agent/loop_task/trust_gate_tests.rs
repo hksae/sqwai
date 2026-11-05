@@ -706,7 +706,14 @@ async fn outside_bash_write_asks_in_auto() {
                 ev = rx_ui.recv() => {
                     if let Some(AgentEvent::Approval { id, reason, .. }) = ev {
                         asked = true;
-                        assert_eq!(reason, "writes outside the project directory");
+                        // macOS puts the temp dir under /var, which the
+                        // critical-path classifier may name first; either
+                        // approval is the outside write this test needs.
+                        assert!(
+                            reason == "writes outside the project directory"
+                                || reason == "redirect overwrites a critical path",
+                            "{reason}"
+                        );
                         tx_ui
                             .send(ControlMsg::ApprovalAnswer {
                                 id,
